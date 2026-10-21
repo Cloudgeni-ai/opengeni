@@ -37,6 +37,7 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
@@ -167,6 +168,22 @@ function eventAttributeValue(value: unknown): AttributeValue {
   }
 }
 
+const SANDBOX_SETUP_OPERATIONS = new Set([
+  "exec",
+  "execCommand",
+  "readFile",
+  "writeFile",
+  "listDir",
+  "pathExists",
+  "materializeEntry",
+]);
+
+/** Single provider round trips are sub-second when healthy; the tail covers
+ * clone and long setup commands. */
+const SANDBOX_SETUP_OPERATION_BUCKETS = [
+  0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2.5, 5, 10, 30, 120,
+];
+
 export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
@@ -247,6 +264,27 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_workspace_capture_duration_seconds",
         help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
         labels: { backend: safeBackend, outcome },
+        value: durationSeconds,
+      });
+    },
+    onSandboxSetupOperation: ({ backend, op, purpose, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeOp = SANDBOX_SETUP_OPERATIONS.has(op) ? op : "other";
+      const safePurpose = (SANDBOX_OPERATION_PURPOSES as readonly string[]).includes(purpose)
+        ? purpose
+        : "other";
+      completedOperationSpan(observability, "worker.sandbox_setup.operation", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+        op: safeOp,
+        purpose: safePurpose,
+      });
+      observability.observeHistogram({
+        name: "opengeni_sandbox_setup_operation_duration_seconds",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips.",
+        buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
+        labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
         value: durationSeconds,
       });
     },
@@ -2309,8 +2347,15 @@ export type TurnStartupPhase =
   | "services_initialization"
   | "claim_catalog_read"
   | "claim_atomic"
+  | "claim_transaction_admission"
+  | "claim_savepoint_admission"
+  | "claim_rls_setup"
+  | "claim_scoped_callback"
+  | "claim_continued_accounts"
+  | "claim_update_authority"
   | "claim_session_read"
   | "claim_capability_settings"
+  | "claim_provider_settings"
   | "learning_policy_freeze"
   | "attachment_authority_projection"
   | "claim_and_policy"
@@ -2318,6 +2363,7 @@ export type TurnStartupPhase =
   | "credential_selection"
   | "credential_identity_read"
   | "credential_entitlements"
+  | "credential_entitlement_refresh"
   | "credential_health_recovery"
   | "credential_placement"
   | "credential_selection_receipt"
@@ -2575,6 +2621,8 @@ function completedOperationSpan(
     provider?: string;
     backend?: string;
     tool?: string;
+    op?: string;
+    purpose?: string;
     correlationId?: string | undefined;
   },
 ): void {
@@ -2892,8 +2940,10 @@ export class StreamTimingMetrics {
   }
 
   /** Producer side: the SDK entered a model request (first admission check).
-   *  Admission can be re-entered for the same request; keep the earliest. */
-  onModelRequestEntry(): void {
+   *  Keep the earliest model entry, but ignore transport rechecks: native
+   *  providers can run those after dispatch, while the response is in flight. */
+  onModelRequestEntry(point: "model_entry" | "transport" = "model_entry"): void {
+    if (point !== "model_entry") return;
     if (this.modelEntryAt === null) this.modelEntryAt = this.now();
   }
 
@@ -3409,27 +3459,27 @@ export function modelCallAccountContext(input: {
 
 export type CodeSearchCallOutcome =
   | "completed"
-  | "jev_unavailable"
-  | "jev_rejected"
+  | "decision_unavailable"
+  | "decision_rejected"
   | "workspace_unavailable"
   | "invalid_arguments"
   | "breaker_open"
   | "cancelled"
   | "failed";
 
-/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+/** One code-search call and the typed decision inference it used. */
 export function recordCodeSearchCall(
   observability: Observability,
   input: {
     outcome: CodeSearchCallOutcome;
     durationSeconds: number;
-    jevRequests: number;
-    jevCostUsd: number;
+    decisionRequests: number;
+    decisionCostUsd: number | null;
   },
 ): void {
   observability.incrementCounter({
     name: "opengeni_code_search_calls_total",
-    help: "Jev-backed code_search tool calls by outcome.",
+    help: "Decision-model-backed code_search tool calls by outcome.",
     labels: { outcome: input.outcome },
   });
   observability.observeHistogram({
@@ -3439,18 +3489,18 @@ export function recordCodeSearchCall(
     labels: { outcome: input.outcome },
     value: Math.max(0, input.durationSeconds),
   });
-  if (input.jevRequests > 0) {
+  if (input.decisionRequests > 0) {
     observability.incrementCounter({
-      name: "opengeni_code_search_jev_requests_total",
-      help: "Jev requests made by code_search.",
-      amount: input.jevRequests,
+      name: "opengeni_code_search_decision_requests_total",
+      help: "Typed decision requests made by code_search.",
+      amount: input.decisionRequests,
     });
   }
-  if (input.jevCostUsd > 0) {
+  if (input.decisionCostUsd !== null && input.decisionCostUsd > 0) {
     observability.incrementCounter({
-      name: "opengeni_code_search_jev_cost_micro_usd_total",
-      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
-      amount: Math.round(input.jevCostUsd * 1_000_000),
+      name: "opengeni_code_search_decision_cost_micro_usd_total",
+      help: "Known decision cost of code_search, in micro-USD; usage events identify estimates.",
+      amount: Math.round(input.decisionCostUsd * 1_000_000),
     });
   }
 }

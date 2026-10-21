@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createObservability } from "@opengeni/observability";
 import type { Settings } from "@opengeni/config";
 import type { AccessGrant, McpMutationReceiptType } from "@opengeni/contracts";
 import {
@@ -13,12 +14,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import {
   resolveSessionAgentConfigForCreate,
@@ -182,6 +180,98 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
+  test("create reads committed state while fanout and workflow wake are still held", async () => {
+    if (!available) throw new Error("Session-create overlap proof requires PostgreSQL");
+    const grant = await freshGrant();
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
+    const workflow = new FakeWorkflowClient();
+    const deps = buildDeps(workflow, settings);
+    const observability = createObservability(settings, { component: "api" });
+    deps.observability = observability;
+    let releaseFanout!: () => void;
+    let releaseWake!: () => void;
+    const fanoutHeld = new Promise<void>((resolve) => {
+      releaseFanout = resolve;
+    });
+    const wakeHeld = new Promise<void>((resolve) => {
+      releaseWake = resolve;
+    });
+    let fanoutSessionId: string | undefined;
+    deps.bus.publish = async (_workspaceId, sessionId) => {
+      fanoutSessionId = sessionId;
+      await fanoutHeld;
+    };
+    deps.workflowClient.wakeSessionWorkflow = async (input) => {
+      workflow.wakeups.push(input);
+      await wakeHeld;
+    };
+    let completedReload!: () => void;
+    const reloaded = new Promise<void>((resolve) => {
+      completedReload = resolve;
+    });
+    const startSpan = observability.startSpan.bind(observability);
+    observability.startSpan = (name, attributes, options) => {
+      const span = startSpan(name, attributes, options);
+      return {
+        ...span,
+        end: (input) => {
+          span.end(input);
+          if (name === "core.session_start.session_reload") completedReload();
+        },
+      };
+    };
+    const server = buildOpenGeniMcpServer(deps, grant);
+    let settled = false;
+    const creating = callMcpTool<McpMutationReceiptType>(server, "session_create", {
+      initialMessage: "Synthetic create, never invoke a model",
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    void creating.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        reloaded,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("Response read waited for transport")), 5000);
+        }),
+      ]);
+      expect(settled).toBe(false);
+      expect(workflow.wakeups).toHaveLength(1);
+      expect(fanoutSessionId).toBeDefined();
+      expect(await durableCounts(grant.workspaceId, fanoutSessionId!)).toMatchObject({
+        workspaceSessions: 1,
+        events: 4,
+        turns: 1,
+        wakeRows: 1,
+        wakeRevision: 1,
+      });
+      releaseFanout();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      releaseWake();
+      const receipt = await creating;
+      expect(receipt).toMatchObject({
+        committed: true,
+        resource: { id: fanoutSessionId, state: "queued" },
+      });
+      const session = await getSession(client.db, grant.workspaceId, receipt.resource.id);
+      expect(session).toMatchObject({ status: "queued", lastSequence: 4 });
+    } finally {
+      clearTimeout(timeout);
+      releaseFanout();
+      releaseWake();
+      await creating.catch(() => undefined);
+    }
+  }, 30_000);
+
   test("records validated Site origin on private native children and preserves keyed replay after archive and rename", async () => {
     if (!available) return;
     const userId = crypto.randomUUID();

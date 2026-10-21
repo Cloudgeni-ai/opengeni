@@ -1251,7 +1251,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -1971,7 +1971,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1989,6 +1989,7 @@ dependencies = [
  "opengeni-agent-proto",
  "opengeni-agent-stream",
  "opengeni-agent-update",
+ "opengeni-agent-windows-ffi",
  "prost",
  "rand 0.8.7",
  "reqwest",
@@ -2011,11 +2012,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "opengeni-agent-files-ffi"
-version = "0.1.97"
+version = "0.1.112"
 
 [[package]]
 name = "opengeni-agent-harness"
@@ -2040,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "libc",
  "tokio",
@@ -2048,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2067,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-pipewire-ffi"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "libc",
  "thiserror 2.0.20",
@@ -2075,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2103,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "prost",
  "prost-build",
@@ -2112,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2129,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "blake3",
  "hex",
@@ -2149,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-windows-ffi"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
@@ -2157,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2189,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.97"
+version = "0.1.112"
 dependencies = [
  "async-trait",
  "axum",
@@ -2203,6 +2205,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha2",
  "subtle",
  "thiserror 2.0.20",
@@ -2211,6 +2214,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2742,7 +2746,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
@@ -3786,14 +3790,14 @@ version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
 dependencies = [
- "webpki-roots 1.0.9",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

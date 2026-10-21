@@ -14,14 +14,14 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
-import { apiErrorFacts } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 import { ProviderTile } from "./provider-marks";
 import {
@@ -30,7 +30,7 @@ import {
   formatClock,
   vaultErrorText,
   type ExpiryState,
-} from "./vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   everListed,
   healthLabel,

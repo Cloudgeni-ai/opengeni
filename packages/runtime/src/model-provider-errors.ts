@@ -52,6 +52,24 @@ export class OrganizationOpperUnavailableError extends Error {
   }
 }
 
+export class OrganizationOpenAIUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization OpenAI model is unavailable: ask an organization admin to connect or reconnect OpenAI in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpenAIUnavailableError";
+  }
+}
+
+export class OrganizationAzureOpenAIUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Azure OpenAI model is unavailable: ask an organization admin to connect or reconnect Azure OpenAI in Organization settings, then retry.",
+    );
+    this.name = "OrganizationAzureOpenAIUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**
@@ -116,8 +134,8 @@ export class WorkspaceModelPolicyBlockedError extends Error {
   constructor(modelName: string, providerId: string, reason: "provider" | "model" | "credits") {
     super(
       reason === "credits"
-        ? `Model "${modelName}" uses Opengeni credits, which are turned off in this workspace. ` +
-            `Pick a model paid by a subscription or API key, or ask a workspace admin to turn Opengeni credits back on.`
+        ? `Model "${modelName}" uses credits, which are turned off in this workspace. ` +
+            `Pick a model paid by a subscription or API key, or ask a workspace admin to turn credits back on.`
         : reason === "provider"
           ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
             `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`

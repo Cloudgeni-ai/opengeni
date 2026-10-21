@@ -14,12 +14,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import { registerSessionRoutes } from "../src/routes/sessions";
@@ -410,82 +407,86 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     expect(first.stop?.code ?? second.stop?.code).toBe("insufficient_credits");
   });
 
-  test("a heartbeat at zero balance tells the client to stop, keeps the lease, and refuses re-mint", async () => {
-    const app = appFor(pricedSettings);
-    const value = await fixture(MINUTE);
-    const started = await begin(app, value, "opengeni-gateway/openai/gpt-realtime-2.1");
-    expect(started.response.status).toBe(201);
-    const mode = (
-      (await started.response.json()) as {
-        mode: { id: string; version: number; connectionEpoch: number; leaseExpiresAt: string };
-      }
-    ).mode;
-    const proof = started.proof;
-    const minted = await app.request(`${value.base}/gateway`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify({
-        realtimeId: mode.id,
-        operationId: crypto.randomUUID(),
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-        expectedConnectionEpoch: mode.connectionEpoch,
-        rotate: false,
-      }),
-    });
-    expect(minted.status).toBe(200);
-    expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
+  test.each(["gateway", "websocket"])(
+    "%s settles before responding; a zero-balance heartbeat stops without renewing the lease or re-minting",
+    async (route) => {
+      const app = appFor(pricedSettings);
+      const value = await fixture(MINUTE);
+      const started = await begin(app, value, "opengeni-gateway/openai/gpt-realtime-2.1");
+      expect(started.response.status).toBe(201);
+      const mode = (
+        (await started.response.json()) as {
+          mode: { id: string; version: number; connectionEpoch: number; leaseExpiresAt: string };
+        }
+      ).mode;
+      const proof = started.proof;
+      const minted = await app.request(`${value.base}/${route}`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          realtimeId: mode.id,
+          operationId: crypto.randomUUID(),
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+          expectedConnectionEpoch: mode.connectionEpoch,
+          rotate: false,
+        }),
+      });
+      expect(minted.status).toBe(200);
+      // No heartbeat or polling wait is needed to persist the first-minute debit.
+      expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
 
-    const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {
-      method: "PATCH",
-      headers: value.headers,
-      body: JSON.stringify({
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-      }),
-    });
-    expect(heartbeat.status).toBe(200);
-    const body = (await heartbeat.json()) as {
-      mode: { version: number; leaseExpiresAt: string; state: string };
-      stop?: { code: string; message: string };
-    };
-    expect(body.stop).toMatchObject({ code: "insufficient_credits" });
-    expect(body.mode.state).toBe("active");
-    expect(body.mode.version).toBe(mode.version);
-    expect(body.mode.leaseExpiresAt).toBe(mode.leaseExpiresAt);
+      const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {
+        method: "PATCH",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+        }),
+      });
+      expect(heartbeat.status).toBe(200);
+      const body = (await heartbeat.json()) as {
+        mode: { version: number; leaseExpiresAt: string; state: string };
+        stop?: { code: string; message: string };
+      };
+      expect(body.stop).toMatchObject({ code: "insufficient_credits" });
+      expect(body.mode.state).toBe("active");
+      expect(body.mode.version).toBe(mode.version);
+      expect(body.mode.leaseExpiresAt).toBe(mode.leaseExpiresAt);
 
-    const calls = providerCalls;
-    const rotated = await app.request(`${value.base}/gateway`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify({
-        realtimeId: mode.id,
-        operationId: crypto.randomUUID(),
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-        expectedConnectionEpoch: mode.connectionEpoch,
-        rotate: true,
-      }),
-    });
-    expect(rotated.status).toBe(402);
-    expect(await rotated.json()).toMatchObject({ code: "insufficient_credits" });
-    expect(providerCalls).toBe(calls);
+      const calls = providerCalls;
+      const rotated = await app.request(`${value.base}/${route}`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          realtimeId: mode.id,
+          operationId: crypto.randomUUID(),
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+          expectedConnectionEpoch: mode.connectionEpoch,
+          rotate: true,
+        }),
+      });
+      expect(rotated.status).toBe(402);
+      expect(await rotated.json()).toMatchObject({ code: "insufficient_credits" });
+      expect(providerCalls).toBe(calls);
 
-    const ended = await app.request(`${value.base}/${mode.id}`, {
-      method: "DELETE",
-      headers: value.headers,
-      body: JSON.stringify({
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-        reason: "user_stop",
-      }),
-    });
-    expect(ended.status).toBe(200);
-    // One connection, observed for under a minute: exactly one minute billed.
-    expect(await costEvents(value)).toHaveLength(1);
-  });
+      const ended = await app.request(`${value.base}/${mode.id}`, {
+        method: "DELETE",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+          reason: "user_stop",
+        }),
+      });
+      expect(ended.status).toBe(200);
+      // One connection, observed for under a minute: exactly one minute billed.
+      expect(await costEvents(value)).toHaveLength(1);
+    },
+  );
 });

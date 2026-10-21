@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { recordSkillRead } from "../src/observability-metrics";
 
 function series(metrics: string, labels: Record<string, string>): number | null {
@@ -17,13 +17,13 @@ function series(metrics: string, labels: Record<string, string>): number | null 
 test("skill reads are counted by bounded source, built-in id, kind, and caller", async () => {
   const observability = createObservability(testSettings(), { component: "worker" });
   const reads = [
-    { caller: "model", kind: "full", source: "builtin", skill: "builtin:opengeni-documents" },
-    { caller: "model", kind: "full", source: "builtin", skill: "builtin:opengeni-documents" },
+    { caller: "model", kind: "full", source: "builtin", skill: "builtin:documents" },
+    { caller: "model", kind: "full", source: "builtin", skill: "builtin:documents" },
     {
       caller: "model",
       kind: "already_in_context",
       source: "builtin",
-      skill: "builtin:opengeni-documents",
+      skill: "builtin:documents",
     },
     { caller: "codemode", kind: "files", source: "builtin", skill: "builtin:opengeni-help" },
     {
@@ -41,8 +41,8 @@ test("skill reads are counted by bounded source, built-in id, kind, and caller",
     // A same-named custom Skill is still custom.
     { caller: "model", kind: "full", source: "personal", skill: "builtin:opengeni-help" },
     // Refused before resolution: a built-in by id or plain name keeps its id.
-    { caller: "model", kind: "refused", source: null, skill: "opengeni-sites" },
-    { caller: "model", kind: "refused", source: null, skill: "builtin:opengeni-skills" },
+    { caller: "model", kind: "refused", source: null, skill: "sites" },
+    { caller: "model", kind: "refused", source: null, skill: "builtin:skill-management" },
     { caller: "model", kind: "refused", source: null, skill: "Acme payroll secrets" },
     { caller: "model", kind: "refused", source: null, skill: "builtin:not-a-built-in" },
   ] as const;
@@ -52,7 +52,7 @@ test("skill reads are counted by bounded source, built-in id, kind, and caller",
   expect(
     series(metrics, {
       source: "builtin",
-      skill: "builtin:opengeni-documents",
+      skill: "builtin:documents",
       kind: "full",
       caller: "model",
     }),
@@ -60,7 +60,7 @@ test("skill reads are counted by bounded source, built-in id, kind, and caller",
   expect(
     series(metrics, {
       source: "builtin",
-      skill: "builtin:opengeni-documents",
+      skill: "builtin:documents",
       kind: "already_in_context",
     }),
   ).toBe(1);
@@ -70,11 +70,9 @@ test("skill reads are counted by bounded source, built-in id, kind, and caller",
   expect(series(metrics, { source: "workspace", skill: "custom", kind: "list" })).toBe(1);
   expect(series(metrics, { source: "session", skill: "custom", kind: "full" })).toBe(1);
   expect(series(metrics, { source: "personal", skill: "custom", kind: "full" })).toBe(1);
+  expect(series(metrics, { source: "unknown", skill: "builtin:sites", kind: "refused" })).toBe(1);
   expect(
-    series(metrics, { source: "unknown", skill: "builtin:opengeni-sites", kind: "refused" }),
-  ).toBe(1);
-  expect(
-    series(metrics, { source: "unknown", skill: "builtin:opengeni-skills", kind: "refused" }),
+    series(metrics, { source: "unknown", skill: "builtin:skill-management", kind: "refused" }),
   ).toBe(1);
   expect(series(metrics, { source: "unknown", skill: "custom", kind: "refused" })).toBe(2);
 
@@ -90,10 +88,10 @@ test("skill reads are counted by bounded source, built-in id, kind, and caller",
     [
       "already_in_context",
       "builtin",
-      "builtin:opengeni-documents",
+      "builtin:documents",
       "builtin:opengeni-help",
-      "builtin:opengeni-sites",
-      "builtin:opengeni-skills",
+      "builtin:sites",
+      "builtin:skill-management",
       "codemode",
       "custom",
       "files",

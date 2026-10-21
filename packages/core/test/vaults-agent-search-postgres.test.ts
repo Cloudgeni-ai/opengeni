@@ -15,7 +15,7 @@ import {
   type VaultRow,
 } from "@opengeni/db";
 import { createVaultProviderRegistry } from "@opengeni/vaults";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createVaultService, isVaultError } from "../src/domain/vaults";
 
 setDefaultTimeout(180_000);

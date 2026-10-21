@@ -20,7 +20,7 @@ import {
   acquireSharedTestDatabase,
   type OwnerMigratedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const ENABLEMENT_MIGRATION = "0323_organization_private_session_enablement.sql";

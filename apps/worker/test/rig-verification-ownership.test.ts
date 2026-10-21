@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Database, LeaseSnapshot } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
 import type { EstablishedSandboxSession } from "@opengeni/runtime";

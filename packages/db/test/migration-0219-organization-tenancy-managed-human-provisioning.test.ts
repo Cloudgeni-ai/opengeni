@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createDb,
@@ -69,6 +69,7 @@ const expectedManagedPersonalWorkspacePermissions: Permission[] = [
   "enrollments:read",
   "enrollments:manage",
   "rigs:use",
+  "rigs:manage",
   "artifacts:read",
   "artifacts:publish",
 ];
@@ -148,7 +149,6 @@ describe("migration 0219 managed-human organization provisioning", () => {
     expect(managedPersonalWorkspacePermissions).not.toContain("workspace:admin");
     expect(managedPersonalWorkspacePermissions).not.toContain("members:manage");
     expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
-    expect(managedPersonalWorkspacePermissions).not.toContain("rigs:manage");
   });
 
   test("pins the rolling lifecycle capability, posture contract, and exact role grant", async () => {

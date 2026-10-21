@@ -6,7 +6,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Locator, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 let browser: Browser;
 let page: Page;
@@ -122,6 +123,16 @@ async function capture(name: string, target?: Locator) {
 
 // Every axe rule runs on every scan; there is no rule waiver.
 async function expectNoAxeViolations(include = "main") {
+  // Re-enabled controls still fade out of their disabled opacity. Audit the
+  // settled state, not a transient frame whose DOM already says "enabled".
+  await page.locator(include).evaluate(async (root) => {
+    await Promise.allSettled(
+      root
+        .getAnimations({ subtree: true })
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map((animation) => animation.finished),
+    );
+  });
   const results = await new AxeBuilder({ page }).include(include).analyze();
   expect(
     results.violations.map((violation) => ({
@@ -287,6 +298,14 @@ test("the header menu opens the editor and keyboard-only saves return focus", as
 
 test("someone else's change while editing is a conflict: draft kept, theirs shown, retry is deliberate", async () => {
   await load();
+  // Make the disabled-to-enabled fade long enough to expose an early axe
+  // sample deterministically. The audit must wait, not waive contrast rules.
+  await page.addStyleTag({
+    content: `
+      [data-usage-limit-editor] button:disabled { transition-duration: 0s !important; }
+      [data-usage-limit-editor] button:not(:disabled) { transition-duration: 2s !important; }
+    `,
+  });
   const main = scenario("main");
   await main.getByRole("button", { name: "Change" }).click();
   const input = main.getByRole("textbox", { name: "Limit in US dollars" });

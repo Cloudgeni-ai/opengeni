@@ -17,11 +17,8 @@ import {
   verifyCredentialProviderRequest,
   verifyWebhookEvent,
 } from "../../../packages/sdk/src/workspace-integrations";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerWorkspaceIntegrationRoutes } from "../src/routes/workspace-integrations";
 import { drainWorkspaceWebhookDeliveries } from "../src/workspace-webhook-dispatch";

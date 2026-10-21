@@ -34,11 +34,8 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { createObservability, type Observability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
@@ -212,8 +209,15 @@ async function finishTurn(
 /** One singleton sandbox group whose completed turn left a legacy background
  * command running (e.g. a dev server) under a non-expiring process holder. */
 async function idleFixture(
-  options: { outcome?: string; reconcileAttempts?: number; parent?: boolean } = {},
+  options: {
+    outcome?: string;
+    reconcileAttempts?: number;
+    parent?: boolean;
+    backend?: "modal" | "docker" | "local";
+  } = {},
 ) {
+  const backend = options.backend ?? "modal";
+  const sdkBackendId = { modal: "modal", docker: "docker", local: "unix_local" }[backend];
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('containment') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
@@ -225,13 +229,26 @@ async function idleFixture(
   if (parent) await finishTurn(parent);
   const attempt = await startAttempt(ids, undefined, parent?.sessionId);
   const instanceId = `box-${crypto.randomUUID()}`;
+  const resumeState =
+    backend === "modal"
+      ? { backendId: "modal", sessionState: { providerState: { sandboxId: instanceId } } }
+      : {
+          backendId: sdkBackendId,
+          opengeniProviderInstanceId: instanceId,
+          sessionState: {
+            providerState:
+              backend === "docker"
+                ? { containerId: instanceId }
+                : { workspaceRootPath: `/tmp/${instanceId}` },
+          },
+        };
   const [lease] = await admin<{ id: string }[]>`
     insert into sandbox_leases (account_id, workspace_id, sandbox_group_id, liveness, refcount,
       turn_holders, viewer_holders, instance_id, backend, lease_epoch, resume_backend_id,
       resume_state, expires_at)
     values (${ids.accountId}, ${ids.workspaceId}, ${attempt.sandboxGroupId}, 'warm', 0, 0, 0,
-      ${instanceId}, 'modal', ${EPOCH}, 'modal',
-      ${JSON.stringify({ backendId: "modal", sessionState: { providerState: { sandboxId: instanceId } } })}::text::jsonb,
+      ${instanceId}, ${backend}, ${EPOCH}, ${sdkBackendId},
+      ${JSON.stringify(resumeState)}::text::jsonb,
       now() + interval '10 minutes')
     returning id`;
   const fixture = {
@@ -263,7 +280,7 @@ async function idleFixture(
     admissionId: admission.id,
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation: "exec_command",
-    providerBinding: MODAL_PROVIDER_BINDING,
+    ...(backend === "modal" ? { providerBinding: MODAL_PROVIDER_BINDING } : {}),
     backgroundCommand: { commandId: fixture.processId, command: fixture.command },
     owner: {
       kind: "turn",
@@ -800,6 +817,44 @@ describe("idle command containment", () => {
       expect(metrics).toMatch(
         /opengeni_sandbox_command_containment_total\{[^}]*outcome="contained"[^}]*\} 1/,
       );
+      await observability.flush();
+    }, 180_000);
+  }
+
+  for (const backend of ["docker", "local"] as const) {
+    test(`a silent ${backend} background command does not keep its box warm for ever`, async () => {
+      const fixture = await idleFixture({ backend });
+      const observability = createObservability(SETTINGS, { component: "worker-test" });
+      const activities = createSandboxLeaseActivities(services(observability));
+      const sweep = async () =>
+        (await activities.prepareSandboxLeaseSweep()).drainable.find(
+          (row) => row.sandboxGroupId === fixture.sandboxGroupId,
+        );
+
+      await idleFor(fixture, 29);
+      expect(await listedForContainment(fixture)).toBe(false);
+      expect(await sweep()).toBeUndefined();
+
+      await idleFor(fixture, 31);
+      expect(await listedForContainment(fixture)).toBe(true);
+      expect(await sweep()).toEqual({
+        workspaceId: fixture.workspaceId,
+        sandboxGroupId: fixture.sandboxGroupId,
+        instanceId: fixture.instanceId,
+        leaseEpoch: EPOCH,
+      });
+      const { result } = await drain(fixture, observability);
+      expect(result.status).toBe("terminated");
+      expect((await readLease(db, fixture.workspaceId, fixture.sandboxGroupId))?.liveness).toBe(
+        "cold",
+      );
+      const record = await commandTerminalRecord(fixture);
+      expect(record.command).toEqual({
+        state: "lost",
+        exit_code: null,
+        settlement_reason: "idle_containment",
+      });
+      expect(record.updates[0]?.summary).toBe(IDLE_NOTICE);
       await observability.flush();
     }, 180_000);
   }

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { readFileSync } from "node:fs";
 import postgres from "postgres";
 
@@ -10,6 +10,7 @@ import {
   completeSelfServiceOrganizationSetup,
   createDb,
   getBillingBalance,
+  freePlanCreditEligible,
   nestedPostgresSqlState,
   readVerifiedSignupTrialSwitch,
   type DbClient,
@@ -133,7 +134,7 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(SETTER);
   });
 
-  test("seeds an enabled revision so existing behavior is unchanged", async () => {
+  test("retains the historical switch revision but new setup records eligibility without money", async () => {
     if (!owned || !appClient) return;
     const [seed] = await owned.admin<
       Array<{ grants_enabled: boolean; previous_grants_enabled: boolean | null; operator: string }>
@@ -151,17 +152,15 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     const { authUserId, setup } = await newVerifiedSetup(true);
     const result = await setup;
     expect(await trialGrantCount(authUserId)).toBe(1);
-    expect((await getBillingBalance(appClient.db, result.organizationId)).balanceMicros).toBe(
-      10_000_000,
-    );
+    expect((await getBillingBalance(appClient.db, result.organizationId)).balanceMicros).toBe(0);
 
-    // The deployment flag is still the master switch.
+    // Neither legacy money switch can disable non-monetary eligibility.
     const off = await newVerifiedSetup(false);
     await off.setup;
-    expect(await trialGrantCount(off.authUserId)).toBe(0);
+    expect(await trialGrantCount(off.authUserId)).toBe(1);
   });
 
-  test("disabling stops new grants without failing setup, and re-enabling restores them", async () => {
+  test("legacy switch edits stay audited but neither disable eligibility nor restore money", async () => {
     if (!owned || !appClient) return;
     const disabled = await setSwitch(false, "abuse response: pause signup trial");
     expect(disabled).toMatchObject({
@@ -177,7 +176,8 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     const blocked = await newVerifiedSetup(true);
     const blockedResult = await blocked.setup;
     expect(blockedResult.organizationId).toBeString();
-    expect(await trialGrantCount(blocked.authUserId)).toBe(0);
+    expect(await trialGrantCount(blocked.authUserId)).toBe(1);
+    expect(await freePlanCreditEligible(appClient.db, blockedResult.organizationId)).toBe(true);
     expect(
       (await getBillingBalance(appClient.db, blockedResult.organizationId)).balanceMicros,
     ).toBe(0);
@@ -190,36 +190,29 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     const enabled = await setSwitch(true, "abuse contained: resume signup trial");
     expect(enabled).toMatchObject({ grantsEnabled: true, previousGrantsEnabled: false });
     const allowed = await newVerifiedSetup(true);
-    await allowed.setup;
+    const allowedResult = await allowed.setup;
     expect(await trialGrantCount(allowed.authUserId)).toBe(1);
+    expect(
+      (await getBillingBalance(appClient.db, allowedResult.organizationId)).balanceMicros,
+    ).toBe(0);
 
     // Replaying the blocked setup after re-enablement never back-grants it.
-    expect(await trialGrantCount(blocked.authUserId)).toBe(0);
+    expect(await trialGrantCount(blocked.authUserId)).toBe(1);
   });
 
-  test("a disable orders against in-flight grants through the shared advisory lock", async () => {
+  test("non-monetary eligibility does not wait for the retired money switch lock", async () => {
     if (!owned || !appClient || !owner) return;
     let pending: Awaited<ReturnType<typeof newVerifiedSetup>> | null = null;
     await owner.begin(async (tx) => {
       await tx`select set_verified_signup_trial_credits_enabled(
         false, 'test-operator', 'ordering check: disable while setup waits')`;
       pending = await newVerifiedSetup(true);
-      // The setup must block on the setter's exclusive lock, not read the
-      // uncommitted-but-invisible revision and grant.
-      const deadline = Date.now() + 15_000;
-      for (;;) {
-        const [waiting] = await owned!.admin<Array<{ count: number }>>`
-          select count(*)::int as count from pg_stat_activity
-          where datname = current_database()
-            and wait_event_type = 'Lock' and wait_event = 'advisory'`;
-        if ((waiting?.count ?? 0) > 0) break;
-        if (Date.now() > deadline) throw new Error("setup never waited on the switch lock");
-        await Bun.sleep(25);
-      }
+      const result = await pending.setup;
+      expect(await freePlanCreditEligible(appClient!.db, result.organizationId)).toBe(true);
     });
     const current = pending as Awaited<ReturnType<typeof newVerifiedSetup>> | null;
     await current!.setup;
-    expect(await trialGrantCount(current!.authUserId)).toBe(0);
+    expect(await trialGrantCount(current!.authUserId)).toBe(1);
     await setSwitch(true, "ordering check complete: resume");
   }, 60_000);
 

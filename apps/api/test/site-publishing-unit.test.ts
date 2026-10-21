@@ -7,7 +7,7 @@ import {
   UNLIMITED_SITE_FLOOD_BRAKES,
   type SiteHostMapRecord,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
@@ -17,7 +17,6 @@ import {
   signSiteGatewayRequest,
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
-import { siteAgentToolRefs } from "../src/routes/site-runtime";
 import { siteAgentInstructions } from "../src/site-publishing/agent-data-tools";
 import {
   isSubscriptionBilledModel,
@@ -32,7 +31,7 @@ import {
 } from "../src/site-publishing/limits";
 import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
 import { siteClientAddressKey } from "../src/site-publishing/runtime";
-import { siteAccessNarrowed, siteAgentToolsNarrowed } from "../src/site-publishing/service";
+import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
   siteSessionEventSseTransform,
@@ -477,8 +476,8 @@ describe("Site agent instructions", () => {
     expect(guest).toContain("say plainly that you can't do it here");
     expect(guest.endsWith("\n\nBe brief.")).toBe(true);
     const member = siteAgentInstructions(host, { kind: "member" }, tools, null);
-    expect(member).toContain("a member of the workspace that owns this Site");
-    expect(member).not.toContain("only use this Site's own data");
+    expect(member).toBe("");
+    expect(siteAgentInstructions(host, { kind: "member" }, tools, "Be brief.")).toBe("Be brief.");
   });
 });
 
@@ -650,24 +649,6 @@ describe("content scanner", () => {
 });
 
 describe("Site agents", () => {
-  test("workspace tools reach only members who may use connections; guestTools is ignored", () => {
-    const tools = { tools: ["crm", "bad id!"] };
-    const crm = [{ kind: "mcp", id: "crm", optional: true }];
-    expect(siteAgentToolRefs(tools, { kind: "member" }, ["mcp_servers:attach"])).toEqual(crm);
-    expect(siteAgentToolRefs(tools, { kind: "member" }, ["workspace:admin"])).toEqual(crm);
-    // A member without permission to use connections, or with unknown permissions, gets none.
-    expect(siteAgentToolRefs(tools, { kind: "member" }, ["sessions:create"])).toEqual([]);
-    expect(siteAgentToolRefs(tools, { kind: "member" })).toEqual([]);
-    // Nobody outside the workspace gets workspace tools, whatever the retired opt-in says.
-    for (const kind of ["invited", "user", "guest"] as const)
-      expect(
-        siteAgentToolRefs({ ...tools, guestTools: true } as typeof tools, { kind }, [
-          "workspace:admin",
-        ]),
-      ).toEqual([]);
-    expect(siteAgentToolRefs({ tools: null }, { kind: "member" }, ["workspace:admin"])).toEqual([]);
-  });
-
   test("viewers stop when a Site is unpublished, its access narrows or its agent turns off", () => {
     const base = {
       status: "active" as const,
@@ -688,15 +669,6 @@ describe("Site agents", () => {
     expect(siteAccessNarrowed(base, { ...base, agent: { ...base.agent, enabled: false } })).toBe(
       "agent_disabled",
     );
-  });
-
-  test("tools narrow when one is removed", () => {
-    const tools = { tools: ["crm", "billing"] };
-    expect(siteAgentToolsNarrowed(tools, tools)).toBe(false);
-    expect(siteAgentToolsNarrowed(tools, { tools: ["crm", "billing", "docs"] })).toBe(false);
-    expect(siteAgentToolsNarrowed(tools, { tools: ["crm"] })).toBe(true);
-    expect(siteAgentToolsNarrowed(tools, { tools: null })).toBe(true);
-    expect(siteAgentToolsNarrowed({ tools: null }, { tools: null })).toBe(false);
   });
 });
 

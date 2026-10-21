@@ -10,7 +10,7 @@ import {
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
 import { inspectPersistentAgentInstructions, type BuildAgentOptions } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { promptToolAvailabilityForTurn } from "../src/activities/agent-turn/prompt-tool-availability";
 import { sessionTitleToolPlan } from "../src/activities/agent-turn/session-title";
 import { linkedTurnFirstPartyPermissions } from "../src/activities/agent-turn/tool-environment";

@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { AutomationAuthorityRevokedError, type AutomationRunExecution } from "@opengeni/db";
 import { createAutomationActivities } from "../src/activities/automations";
 import type { ActivityServices } from "../src/activities/types";

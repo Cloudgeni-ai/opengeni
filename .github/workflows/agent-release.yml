@@ -174,6 +174,9 @@ jobs:
           bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}"
+          # The compiled runtime carries Bun's own root list (see #5314).
+          bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}"
+          bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}"
           interp="$(readelf -l "opengeni-browserd-${{ matrix.target }}" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
           case "$interp" in
             /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-aarch64.so.1) ;;
@@ -253,6 +256,12 @@ jobs:
           bun build --compile --target=bun-darwin-arm64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile opengeni-browserd-arm64
+          # Distrust Bun's embedded emSign roots before any signature is made
+          # over these bytes (see #5314); x64 is re-signed after the rewrite.
+          bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem opengeni-browserd-x64 opengeni-browserd-arm64
+          bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem opengeni-browserd-x64 opengeni-browserd-arm64
+          codesign --force --sign - opengeni-browserd-x64
+          codesign --verify --strict opengeni-browserd-x64
           # Bun 1.4.0's darwin-arm64 compiler emits an invalid ad-hoc signature
           # that macOS 27 rejects at launch. Replace and verify the signature on
           # the exact thin bytes before either lipo or Cargo embeds them; signing
@@ -301,6 +310,10 @@ jobs:
 
       # The native macOS runner also executes the workspace tests before the
       # universal artifact is accepted.
+      - name: Install the native transport test broker
+        if: matrix.kind == 'macos'
+        uses: ./.github/actions/setup-agent-test-nats
+
       - name: Intel cargo test (macOS coverage)
         if: matrix.kind == 'macos'
         working-directory: agent
@@ -332,6 +345,8 @@ jobs:
           bun build --compile --target=bun-windows-x64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}.exe"
+          bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}.exe"
+          bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}.exe"
           OPENGENI_BROWSERD_TARGET_PLATFORM=win32 \
           OPENGENI_BROWSERD_TARGET_ARCH=x64 \
           OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}.exe" \
@@ -412,7 +427,7 @@ jobs:
           cargo install --locked apple-codesign
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
-            --code-signature-flags runtime "${{ matrix.asset }}"
+            --code-signature-flags runtime --binary-identifier ai.opengeni.agent "${{ matrix.asset }}"
           echo "$APPLE_ASC_KEY" > /tmp/asc.json
           # Apple's notary service accepts distribution containers, not a raw
           # Mach-O. Submit a temporary ZIP containing the exact signed binary;
@@ -759,13 +774,15 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: agent-v${{ needs.guard.outputs.version }}
+          # Manual dispatch may publish after main advances; tag the built commit.
+          target_commitish: ${{ github.sha }}
           name: opengeni-agent v${{ needs.guard.outputs.version }}
           body: |
             opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
 
             Install (read the script first — it is short, POSIX, contains no secrets):
-              Linux/macOS: `curl -fsSL https://get.opengeni.ai/install.sh | sh`
-              Windows:     `irm https://get.opengeni.ai/install.ps1 | iex`
+              Linux/macOS: `curl -fsSL https://app.opengeni.ai/install.sh | sh`
+              Windows:     `irm https://app.opengeni.ai/install.ps1 | iex`
 
             Every binary is minisign-signed (verify against the pinned key) + sha256'd.
             macOS/Windows OS-native code-signing is a creds-drop-in (see release notes

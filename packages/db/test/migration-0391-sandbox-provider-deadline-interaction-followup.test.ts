@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { createDb, readSandboxRotationBacklog, reapStaleLeaseHoldersGlobal } from "../src";

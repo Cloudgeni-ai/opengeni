@@ -1,5 +1,5 @@
 // Build-only adapter: production components are unchanged; only their data context is replaced.
-import type { AppContextValue } from "../../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import type { OpenGeniClient } from "@opengeni/sdk";
 
 export const fixtureClient = {

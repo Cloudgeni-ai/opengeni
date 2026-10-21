@@ -5,7 +5,8 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   type ConnectorToolPermissionsResponse,

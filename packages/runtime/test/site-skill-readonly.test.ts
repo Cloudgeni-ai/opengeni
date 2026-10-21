@@ -29,9 +29,9 @@ test("Site skill composition needs no writable application directory", () => {
       if (loadNativeToolSkillArtifacts({ defaults: false, editableArtifacts: false, videoGeneration: false }).length !== 0)
         throw new Error("disabled native Skills leaked");
       const defaults = loadNativeToolSkillArtifacts({ sites: false, editableArtifacts: false, videoGeneration: false }).map(skill => skill.name).sort();
-      if (JSON.stringify(defaults) !== JSON.stringify(["document-parsing", "opengeni-client", "opengeni-help", "opengeni-visualize"]))
+      if (JSON.stringify(defaults) !== JSON.stringify(["document-parsing", "opengeni-client", "opengeni-help", "visualize"]))
         throw new Error("incorrect default Skills");
-      const nativeSite = native.find(entry => entry.name === "opengeni-sites");
+      const nativeSite = native.find(entry => entry.name === "sites");
       const nativePins = nativeSite.files.find(entry => entry.path === "package-versions.json");
       if (nativePins.content !== JSON.stringify(${JSON.stringify(pins)}, null, 2))
         throw new Error("incorrect server-side package pins");
@@ -39,8 +39,8 @@ test("Site skill composition needs no writable application directory", () => {
         sites: true, editableArtifacts: false, videoGeneration: false,
       });
       const index = composition.index;
-      const site = composition.artifacts.find(entry => entry.name === "opengeni-sites");
-      if (!index.some(entry => entry.name === "opengeni-sites")) throw new Error("missing skill index");
+      const site = composition.artifacts.find(entry => entry.name === "sites");
+      if (!index.some(entry => entry.name === "sites")) throw new Error("missing skill index");
       const skillMd = site.files.find(entry => entry.path === "SKILL.md");
       if (!skillMd.content.includes("Opengeni")) throw new Error("missing skill");
       if (!site.files.find(entry => entry.path === "agents/openai.yaml")?.content) throw new Error("missing nested asset");

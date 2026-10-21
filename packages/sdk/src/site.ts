@@ -654,7 +654,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
       const timeout = setTimeout(() => {
         cleanup();
         channel.port1.close();
-        reject(new OpenGeniSiteBridgeError("host_timeout", "Opengeni Site host did not respond"));
+        reject(new OpenGeniSiteBridgeError("host_timeout", "The Site host did not respond"));
       }, timeoutMs);
       const onMessage = (event: MessageEvent<unknown>) => {
         const message = event.data;
@@ -723,7 +723,7 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
       port: async () => {
         throw new OpenGeniSiteBridgeError(
           "host_unavailable",
-          "Opengeni Site client must run inside a hosted iframe",
+          "The Site client must run inside a hosted iframe",
         );
       },
       close: () => undefined,

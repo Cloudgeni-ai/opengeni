@@ -8,9 +8,12 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import type {
   IntegrationAccessItem,
@@ -18,17 +21,17 @@ import type {
   IntegrationFooter,
   IntegrationMark,
   IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
-import { useAppContext } from "@/context";
-import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ConnectionOwnershipDialog } from "@opengeni/react/app/components/capabilities/connection-ownership-selector";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
   IntegrationDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 /**
  * The curated multi-instance ApiIntegration mechanism (Outlook Mail/Calendar/

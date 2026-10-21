@@ -1579,6 +1579,7 @@ describe("deployment contract", () => {
         "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
         "OPENGENI_MODAL_SANDBOX_CPU",
         "OPENGENI_MODAL_SANDBOX_MEMORY_MIB",
+        "OPENGENI_MODAL_REGIONS",
         "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
         "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
         "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
@@ -1854,8 +1855,12 @@ describe("deployment contract", () => {
     }
   });
 
-  test("passes Jev code search settings through only when configured", () => {
+  test("passes shared decision and legacy code search settings through only when configured", () => {
     expect(JEV_CODE_SEARCH_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_DECISION_MODEL_PROVIDER",
+      "OPENGENI_DECISION_MODEL_ID",
+      "OPENGENI_DECISION_MODEL_API_KEY",
+      "OPENGENI_DECISION_MODEL_BASE_URL",
       "OPENGENI_JEV_API_KEY",
       "OPENGENI_JEV_BASE_URL",
       "OPENGENI_JEV_MODEL",
@@ -1870,10 +1875,23 @@ describe("deployment contract", () => {
         object_storage_azure_connection_string: { value: "x", sensitive: true },
         helm_set_values: { value: {} },
       },
-      { OPENGENI_JEV_API_KEY: "jev-key", OPENGENI_CODE_SEARCH_MODE: "opt_in" },
+      {
+        OPENGENI_JEV_API_KEY: "jev-key",
+        OPENGENI_CODE_SEARCH_MODE: "opt_in",
+        OPENGENI_DECISION_MODEL_PROVIDER: "openrouter",
+        OPENGENI_DECISION_MODEL_ID: "typesafe/jev-1.13",
+        OPENGENI_DECISION_MODEL_API_KEY: "decision-key",
+        OPENGENI_DECISION_MODEL_BASE_URL: "https://openrouter.ai/api/alpha",
+      },
     );
     expect(configured.runtimeEnv).toContain("OPENGENI_JEV_API_KEY=jev-key");
     expect(configured.runtimeEnv).toContain("OPENGENI_CODE_SEARCH_MODE=opt_in");
+    expect(configured.runtimeEnv).toContain("OPENGENI_DECISION_MODEL_PROVIDER=openrouter");
+    expect(configured.runtimeEnv).toContain("OPENGENI_DECISION_MODEL_ID=typesafe/jev-1.13");
+    expect(configured.runtimeEnv).toContain("OPENGENI_DECISION_MODEL_API_KEY=decision-key");
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_DECISION_MODEL_BASE_URL=https://openrouter.ai/api/alpha",
+    );
     const absent = generateRuntimeArtifacts(
       withSandboxBackend("docker"),
       {

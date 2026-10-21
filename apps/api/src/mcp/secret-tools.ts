@@ -20,8 +20,6 @@ import {
   hasLiteralPermission,
   isVaultError,
   requireLiveAgentAttemptAuthorization,
-  siteAgentClamp,
-  siteClampedAgentMessage,
   vaultErrorCodeForProvider,
   vaultErrorFromDatabase,
   type ApiRouteDeps,
@@ -81,12 +79,8 @@ export function registerSecretTools(
 
   async function run(
     fn: (principal: AttemptPrincipal, service: VaultService) => Promise<unknown>,
-    mode: "read" | "write" = "read",
+    _mode: "read" | "write" = "read",
   ) {
-    // An agent started from a Site page uses saved secrets by reference but
-    // never saves, moves or archives them.
-    if (mode === "write" && (await siteAgentClamp(deps.db, grant))?.clamped)
-      return toolError("site_agent_clamped", siteClampedAgentMessage("secrets"));
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const principal: AttemptPrincipal = {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ConnectionMetadata, GoogleDriveConnectionMetadata } from "@/types";
+import type { ConnectionMetadata, GoogleDriveConnectionMetadata } from "@opengeni/react/app/types";
 import {
   googleDriveAccountState,
   googleDriveCanPublish,

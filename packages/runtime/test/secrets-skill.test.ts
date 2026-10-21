@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { allAgentCapabilities, type ResolvedAgentConfig } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { effectiveSkillSelectionsForAgent, buildOpenGeniAgent } from "../src/index";
 import {
   composeRuntimeSkills,
@@ -24,8 +24,8 @@ function secretsArtifact() {
     secrets: true,
     editableArtifacts: false,
     videoGeneration: false,
-  }).find((entry) => entry.name === "opengeni-secrets");
-  if (!artifact) throw new Error("Missing opengeni-secrets artifact");
+  }).find((entry) => entry.name === "secrets");
+  if (!artifact) throw new Error("Missing secrets artifact");
   return artifact;
 }
 
@@ -33,7 +33,7 @@ function file(path: string): string {
   return secretsArtifact().files.find((entry) => entry.path === path)!.content;
 }
 
-describe("opengeni-secrets bundled Skill (AG-3)", () => {
+describe("secrets bundled Skill (AG-3)", () => {
   test("is a packaged artifact with SKILL.md and every reference file", () => {
     const artifact = secretsArtifact();
     expect(artifact.description).toBe(
@@ -54,16 +54,16 @@ describe("opengeni-secrets bundled Skill (AG-3)", () => {
       editableArtifacts: false,
       videoGeneration: false,
     });
-    expect(composition.index.map((entry) => entry.name)).toEqual(["opengeni-secrets"]);
+    expect(composition.index.map((entry) => entry.name)).toEqual(["secrets"]);
     expect(composition.selections[0]).toMatchObject({
-      name: "opengeni-secrets",
+      name: "secrets",
       source: "native_tool",
       reason: "native secrets tool surface",
     });
-    const listed = readRuntimeSkill(composition, { skill: "opengeni-secrets", listFiles: true });
+    const listed = readRuntimeSkill(composition, { skill: "secrets", listFiles: true });
     expect([...(listed.paths ?? [])].sort()).toEqual(["SKILL.md", ...REFERENCE_FILES]);
     const read = readRuntimeSkill(composition, {
-      skill: "opengeni-secrets",
+      skill: "secrets",
       paths: REFERENCE_FILES,
     });
     expect(read.files?.map((entry) => entry.path)).toEqual(REFERENCE_FILES);
@@ -75,10 +75,10 @@ describe("opengeni-secrets bundled Skill (AG-3)", () => {
       { secrets: false, editableArtifacts: false, videoGeneration: false },
     ]) {
       expect(loadNativeToolSkillArtifacts(flags).map((entry) => entry.name)).not.toContain(
-        "opengeni-secrets",
+        "secrets",
       );
       expect(composeRuntimeSkills([], flags).index.map((entry) => entry.name)).not.toContain(
-        "opengeni-secrets",
+        "secrets",
       );
     }
   });
@@ -171,8 +171,8 @@ describe("opengeni-secrets bundled Skill (AG-3)", () => {
           ...(agentConfig ? { agentConfig } : {}),
         }),
       ).map((selection) => selection.name);
-    expect(names(config(true))).toContain("opengeni-secrets");
-    expect(names(config(false))).not.toContain("opengeni-secrets");
-    expect(names()).not.toContain("opengeni-secrets");
+    expect(names(config(true))).toContain("secrets");
+    expect(names(config(false))).not.toContain("secrets");
+    expect(names()).not.toContain("secrets");
   });
 });

@@ -50,6 +50,7 @@ import type {
   SignalSessionAttemptQuiesced,
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
+  StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
@@ -429,6 +430,7 @@ export async function createWorkerWorkflowSignaler(
   ) => Promise<TurnTaskQueueStats>;
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
+  startSessionTitleWorkflow: StartSessionTitleWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -569,6 +571,22 @@ export async function createWorkerWorkflowSignaler(
         }
       }
       return starts[0].status === "fulfilled" ? "started" : "already_running";
+    },
+    startSessionTitleWorkflow: async ({ accountId, workspaceId, operationId }) => {
+      try {
+        await temporal.workflow.start("sessionTitleWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `session-title:${operationId}`,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [
+            { accountId, workspaceId, operationId, baseTaskQueue: settings.temporalTaskQueue },
+          ],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
+        throw error;
+      }
     },
     startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
       try {
@@ -786,7 +804,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.inspectSessionAttemptActivity ||
       !options.activityDependencies.signalCodexCapacityWorkflow ||
       !options.activityDependencies.startSandboxReaperWorkflow ||
-      !options.activityDependencies.startVideoGenerationWorkflow;
+      !options.activityDependencies.startVideoGenerationWorkflow ||
+      !options.activityDependencies.startSessionTitleWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -811,13 +830,16 @@ export async function createOpenGeniWorkerService(
     const startVideoGenerationWorkflow =
       options.activityDependencies.startVideoGenerationWorkflow ??
       signaler?.startVideoGenerationWorkflow;
+    const startSessionTitleWorkflow =
+      options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
       !inspectSessionAttemptActivity ||
       !signalCodexCapacityWorkflow ||
       !startSandboxReaperWorkflow ||
-      !startVideoGenerationWorkflow
+      !startVideoGenerationWorkflow ||
+      !startSessionTitleWorkflow
     ) {
       throw new Error("Opengeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -836,6 +858,7 @@ export async function createOpenGeniWorkerService(
         signalCodexCapacityWorkflow,
         startSandboxReaperWorkflow,
         startVideoGenerationWorkflow,
+        startSessionTitleWorkflow,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
           cleanupContainment.request();

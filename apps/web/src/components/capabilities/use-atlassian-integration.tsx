@@ -5,11 +5,14 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
 } from "@opengeni/contracts/atlassian-native-retirement";
 import { request as apiRequest } from "@/api";
-import { userErrorText } from "@/lib/api-error";
-import type { IntegrationChip, IntegrationViewModel } from "./integration-view-model";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import type {
+  IntegrationChip,
+  IntegrationViewModel,
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { useAppContext } from "@/context";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   ATLASSIAN_APP_DESCRIPTION,
   atlassianConnectionMetadata,
@@ -17,9 +20,9 @@ import {
   localConnectedAtlassianPreview,
   preferredAtlassianConnection,
 } from "@/lib/atlassian-connection";
-import { oauthCallbackReasonMessage } from "@/lib/oauth-callback-messages";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import type { ConnectionMetadata } from "@/types";
+import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 export const ATLASSIAN_LOGO_URL =
   "https://wac-cdn.atlassian.com/assets/img/favicons/atlassian/favicon.png";

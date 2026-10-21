@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Settings } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { createApp } from "../src/app";

@@ -40,6 +40,22 @@ const missing = [
   { id: "accessibility" as const, granted: false },
 ];
 
+test("existing service setup explains preservation and app-independent lifetime", () => {
+  const offered = computer(status({ management: "service" }));
+  const card = renderToStaticMarkup(<ThisComputerCard computer={offered} productName="Acme" />);
+  expect(card).toContain("installation and permissions stay in place");
+  const panel = renderToStaticMarkup(
+    <ThisComputerPanel
+      computer={computer(status({ state: "connected", management: "service" }))}
+      platform="macos"
+      onSetup={() => undefined}
+    />,
+  );
+  expect(panel).toContain("Quitting this app leaves it running");
+  expect(panel).toContain("Pause");
+  expect(panel).not.toContain("You can also pause it from");
+});
+
 test("each state maps to one view", () => {
   expect(thisComputerView(null)).toBe("hidden");
   expect(thisComputerView(status({ state: "unavailable" }))).toBe("hidden");
@@ -55,6 +71,21 @@ test("each state maps to one view", () => {
   ).toBe("finish_setup");
   expect(thisComputerView(status({ state: "paused" }))).toBe("paused");
   expect(thisComputerView(status({ state: "paused", busy: true }))).toBe("resuming");
+});
+
+test("embedded products own downloads and the account handoff without a console or command fallback", () => {
+  const html = renderToStaticMarkup(
+    <ThisComputerCard
+      productName="Acme"
+      downloads={[{ label: "Download Acme", url: "https://example.com/app" }]}
+      openAppUrl="acme://connect?destination=opaque"
+    />,
+  );
+  expect(html).toContain("Download Acme");
+  expect(html).toContain("acme://connect?destination=opaque");
+  expect(html).toContain("Open app and connect");
+  expect(html).not.toContain("curl");
+  expect(html).not.toContain("app.opengeni.ai");
 });
 
 test("the offer shows only while there is something to do", () => {

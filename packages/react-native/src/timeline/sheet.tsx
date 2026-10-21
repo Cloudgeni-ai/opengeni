@@ -6,7 +6,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   PanResponder,
-  Platform,
   Pressable,
   View,
   useWindowDimensions,
@@ -96,7 +95,9 @@ export function BottomSheet(props: {
       onRequestClose={props.onClose}
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        // Edge-to-edge Android doesn't resize a modal's window for the
+        // keyboard either, so the sheet lifts itself on both platforms.
+        behavior="padding"
         style={{ flex: 1, justifyContent: "flex-end" }}
       >
         <Animated.View

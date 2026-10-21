@@ -9,7 +9,7 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createDb,
@@ -19,7 +19,7 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { siteLimitsForProfile } from "../../../apps/api/src/site-publishing/limits";
 import { previousReleaseSiteLimitsForProfile } from "./fixtures/site-limits-2fef1581b";
 

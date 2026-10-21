@@ -23,9 +23,11 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
   type SelfhostedSession,
+  type ComputeTurnDeps,
   resolveConnectedMachineWorkspaceRoot,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
+import { managedCodemodeClientDownload } from "./codemode-client-download";
 import { managedSessionGroupBackend, managedSessionGroupOs } from "@opengeni/core";
 import { mergeResourceRefs } from "../common";
 import {
@@ -44,6 +46,7 @@ import {
 import {
   wrapTurnBoxWithRouting,
   wrapLazyTurnBoxWithRouting,
+  agentBackgroundCommandDeps,
   establishSelfhostedTurnSession,
   routingEnabled,
 } from "../../sandbox-routing";
@@ -273,6 +276,14 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     ? (managedSessionGroupBackend(settings.sandboxBackend, runSettings.sandboxBackend) ??
       runSettings.sandboxBackend)
     : runSettings.sandboxBackend;
+  // A machine-home chat with no machine selected, on a deployment without a
+  // managed sandbox to fall back to, has nowhere to run. Say so plainly instead
+  // of building a Connected Machine client that names no machine.
+  if (!machinePrimary && groupBoxBackend === "selfhosted") {
+    throw new Error(
+      "This chat runs on a Connected Machine, but no machine is selected for it. Choose a machine for this chat, then send the message again.",
+    );
+  }
   const groupRouteSettings = sandboxSettingsForRoute({
     runSettings,
     machinePrimary,
@@ -416,6 +427,25 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   ) {
     const sandboxEstablishStartedAt = performance.now();
     let sandboxEstablishOutcome: "completed" | "failed" = "completed";
+    // A compute box's provider session is its agent's: bind this turn's op
+    // journal and background-command ledger onto it, as a Connected Machine
+    // turn does, so a yielded command is adopted instead of blocking.
+    const computeTurn: ComputeTurnDeps | undefined =
+      groupBoxBackend === "compute"
+        ? {
+            ...(opJournal !== undefined ? { opJournal } : {}),
+            ...agentBackgroundCommandDeps(db, bus ?? undefined, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              backgroundCommandAttempt: {
+                turnId: turn.id,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+              },
+            }),
+          }
+        : undefined;
     // A committed system recovery decision is rematerialized in this turn even
     // when the sandbox is otherwise on-demand: the decision pins group
     // membership until publication, and the next turn must not dead-end.
@@ -553,8 +583,11 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
             transactionalFsWriteSupported:
               liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
+            transactionalFsWriteMachineSupported:
+              liveMachineEnrollment?.agentCapabilities.transactionalFsWriteMachine === true,
             browserControlHttpSupported:
               liveMachineEnrollment?.agentCapabilities.browserControlHttp === true,
+            runAsSupported: liveMachineEnrollment?.agentCapabilities.runAs === true,
             // Carried for shared machines too: the audience can narrow to Only me
             // mid-turn, and each operation then rechecks this authority.
             personalMachineAttempt: {
@@ -667,6 +700,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
                   accountId: input.accountId,
@@ -750,6 +784,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                   onSandboxLost: publishSandboxLost,
                   objectStorage,
                   bus,
+                  ...(computeTurn ? { computeTurn } : {}),
                 },
                 {
                   accountId: input.accountId,
@@ -943,6 +978,7 @@ export async function bindLazySandboxProvisioner(
     toolResultSpill,
     connectionScope,
     codemodeAuthority,
+    objectStorage,
   } = deps;
   const {
     releaseLateSandbox,
@@ -1069,6 +1105,14 @@ export async function bindLazySandboxProvisioner(
           const lazyCodemodeToken = sandboxCodemodeToken
             ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
             : undefined;
+          // A fresh URL: a lazy box can be provisioned long after agent build.
+          const lazyCodemodeClientDownload = lazyCodemodeToken
+            ? await managedCodemodeClientDownload({
+                settings: runSettings,
+                objectStorage,
+                activeSandboxBackend: activeSandboxBackend ?? groupBoxBackend,
+              })
+            : undefined;
           await attachRunCredentialRenewal(
             provisioned.established.session as RunCredentialCommandSession,
             initialRunCredentialMaterial,
@@ -1101,6 +1145,9 @@ export async function bindLazySandboxProvisioner(
                   ...(lazyCodemodeToken
                     ? {
                         codemodeTokenSeedOverride: lazyCodemodeToken.token,
+                        ...(lazyCodemodeClientDownload
+                          ? { codemodeClientDownloadOverride: lazyCodemodeClientDownload }
+                          : {}),
                       }
                     : {}),
                   ...(eventing.toolCancellationFenceRef.current

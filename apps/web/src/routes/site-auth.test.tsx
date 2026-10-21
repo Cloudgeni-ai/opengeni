@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import type { SiteAuthAuthorizeRequest } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
-mock.module("@/context", () => ({ useAppContext: () => ({}) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({}) }));
 let module: typeof import("./site-auth");
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;

@@ -38,11 +38,8 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { createObservability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxLeaseActivities } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
 import {
@@ -678,7 +675,9 @@ describe("checkpoints of held boxes between turns", () => {
     const fixture = await heldBoxFixture();
     const provider = modalProvider();
     await idleFor(fixture, 45);
-    // A direct API write (e.g. a file upload) admitted on the box, still open.
+    // A stdin write to the running build, admitted on the box and still open.
+    // (A direct API request in flight holds the box itself; one left open by a
+    // dead API process no longer does, see crashed-worker-orphan-requests.)
     const [generation] = await admin<{ workspace_generation: number }[]>`
       update sandbox_leases set workspace_generation = workspace_generation + 1
       where id = ${fixture.leaseId} returning workspace_generation`;
@@ -686,12 +685,14 @@ describe("checkpoints of held boxes between turns", () => {
         lease_id, sandbox_group_id, session_id, actor_kind, actor_id, holder_kind, holder_id,
         lease_epoch, provider_backend, provider_instance_id, route_kind, route_target_id,
         route_epoch, workspace_generation, operation, admitted_at)
-      select account_id, workspace_id, lease_id, sandbox_group_id, session_id, 'direct',
-        gen_random_uuid(), 'direct', 'direct:' || gen_random_uuid()::text, lease_epoch,
-        provider_backend, provider_instance_id, route_kind, route_target_id, route_epoch,
-        ${generation!.workspace_generation}, 'upload_file', now()
-      from sandbox_workspace_mutation_admissions
-      where lease_id = ${fixture.leaseId} and operation = 'exec_command'`;
+      select admission.account_id, admission.workspace_id, admission.lease_id,
+        admission.sandbox_group_id, admission.session_id, 'process', process.id, 'process',
+        process.holder_id, admission.lease_epoch, admission.provider_backend,
+        admission.provider_instance_id, admission.route_kind, admission.route_target_id,
+        admission.route_epoch, ${generation!.workspace_generation}, 'write_stdin', now()
+      from sandbox_workspace_mutation_admissions admission
+      join sandbox_retained_processes process on process.parent_admission_id = admission.id
+      where admission.lease_id = ${fixture.leaseId} and admission.operation = 'exec_command'`;
     const [open] = await admin<{ count: number }[]>`
       select count(*)::integer as count from sandbox_workspace_mutation_admissions admission
       where lease_id = ${fixture.leaseId} and settled_at is null

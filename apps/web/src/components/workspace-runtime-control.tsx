@@ -2,16 +2,16 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import { useEffect, useId, useState } from "react";
 import { ChevronDownIcon, Clock3Icon, Loader2Icon, PauseIcon, PlayIcon } from "lucide-react";
 import type { Workspace, WorkspacePauseTimerRequest } from "@opengeni/contracts";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Select } from "@opengeni/react/ui/select";
 import { durationLabel, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 type Control = Workspace["inferenceControl"];

@@ -13,39 +13,46 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { DestructiveConfirm, showUndoToast } from "@/components/ui/destructive-confirm";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import {
+  DestructiveConfirm,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Toolbar, ToolbarSearch, ToolbarSummary } from "@/components/ui/toolbar";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Toolbar, ToolbarSearch, ToolbarSummary } from "@opengeni/react/ui/toolbar";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import type {
   OrganizationMember,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   useOrganizationDirectory,
@@ -64,8 +71,8 @@ import {
   workspaceRoleOptions,
   WORKSPACE_SEARCH_THRESHOLD,
 } from "./organization-people-model";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import type { ReturnTo } from "@/lib/return-to";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import type { ReturnTo } from "@opengeni/react/app/lib/return-to";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Workspaces: every shared workspace, who is in it

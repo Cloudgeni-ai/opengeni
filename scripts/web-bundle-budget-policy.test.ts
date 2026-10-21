@@ -72,7 +72,7 @@ describe("web bundle budget policy", () => {
       "initialFiles: 20",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      "cssGzip: wholeKibEnvelope(46_869)",
+      "cssGzip: wholeKibEnvelope(48_180)",
     ])
       expect(source).toContain(limit);
     expect(source).toContain("39,");
@@ -95,8 +95,8 @@ describe("web bundle budget policy", () => {
       "directSessionFiles: 31",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      // The neutral retheme's documented stylesheet growth.
-      "cssGzip: wholeKibEnvelope(46_869)",
+      // The command menu's documented stylesheet growth (#5368).
+      "cssGzip: wholeKibEnvelope(48_180)",
     ])
       expect(source).toContain(limit);
   });
@@ -119,10 +119,10 @@ describe("web bundle budget policy", () => {
     for (const [measured, limit] of [
       [2_933_830, wholeKibEnvelope(2_933_830, 1.5 * KIB)],
       [838_954, wholeKibEnvelope(838_954, 1.5 * KIB)],
-      [46_869, wholeKibEnvelope(46_869)],
+      [48_180, wholeKibEnvelope(48_180)],
     ] as const) {
       expect(limit % KIB).toBe(0);
-      expect(limit - measured).toBeGreaterThanOrEqual(measured === 46_869 ? KIB : 1.5 * KIB);
+      expect(limit - measured).toBeGreaterThanOrEqual(measured === 48_180 ? KIB : 1.5 * KIB);
     }
   });
 

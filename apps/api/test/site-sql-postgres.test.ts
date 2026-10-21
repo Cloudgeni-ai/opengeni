@@ -4,7 +4,7 @@
  * gateway Worker and its `SiteDatabase` SQLite Durable Object in workerd
  * (Miniflare) through the signed internal route.
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,12 +24,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
@@ -110,6 +107,10 @@ const memberPermissions = [
   "artifacts:read",
   "artifacts:publish",
 ] as const;
+// A Site viewer: anyone with artifacts:publish manages any Site they can see.
+const viewerPermissions = memberPermissions.filter(
+  (permission) => permission !== "artifacts:publish",
+);
 const SQL_SETTINGS: Partial<Settings> = {
   sitesCloudflareStorageEnabled: true,
   sitesGatewayInternalOrigin: ORIGIN,
@@ -229,7 +230,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
     };
   };
   const owner = await person(memberPermissions);
-  const member = await person(memberPermissions);
+  const member = await person(viewerPermissions);
   const admin = await person([...memberPermissions, "workspace:admin"]);
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'site-sql-test')`;
@@ -753,37 +754,47 @@ test("published hosts run named queries as the verified viewer; guests only ever
   const stored = await s.request(f.owner, "POST", "/query", { sql: "SELECT voter FROM votes" });
   expect(stored.json.rows).toEqual([{ voter: `user:${f.member.subjectId}` }]);
 
-  // Guests' write queries share the Site's guest write limit with Site Data.
-  expect((await run("sign_guestbook", { note: "hi" }, guest)).status).toBe(200);
-  expect((await run("sign_guestbook", { note: "hello" }, guest)).status).toBe(200);
-  const flooded = await run("sign_guestbook", { note: "again" }, guest);
-  expect(flooded.status, JSON.stringify(flooded.json)).toBe(429);
-  expect(flooded.json.error.details).toMatchObject({ bucket: "guest_writes" });
-  // Reads and signed-in writes are not guest writes.
-  expect((await run("results", { poll: "lunch" }, guest)).status).toBe(200);
-  expect((await run("sign_guestbook", { note: "member" }, signedIn)).status).toBe(200);
-  // New visitor ids from the same client address share its guest write budget
-  // (SITE_GUEST_IP_LIMIT_FACTOR times the per-visitor limit).
-  let addressFlooded: Awaited<ReturnType<typeof run>> | null = null;
-  for (let attempt = 0; attempt < 12 && !addressFlooded; attempt += 1) {
-    const fresh = { visitor: randomBytes(18).toString("base64url") };
-    const signed = await run("sign_guestbook", { note: `fresh ${attempt}` }, fresh);
-    if (signed.status === 429) addressFlooded = signed;
-    else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
+  // Keep the burst in one fixed minute: real requests can straddle :00 on CI.
+  // Use today's clock so signed requests and database-backed sessions stay valid.
+  const rateWindow = new Date();
+  setSystemTime(rateWindow);
+  try {
+    // Guests' write queries share the Site's guest write limit with Site Data.
+    expect((await run("sign_guestbook", { note: "hi" }, guest)).status).toBe(200);
+    expect((await run("sign_guestbook", { note: "hello" }, guest)).status).toBe(200);
+    const flooded = await run("sign_guestbook", { note: "again" }, guest);
+    expect(flooded.status, JSON.stringify(flooded.json)).toBe(429);
+    expect(flooded.json.error.details).toMatchObject({ bucket: "guest_writes" });
+    // Reads and signed-in writes are not guest writes.
+    expect((await run("results", { poll: "lunch" }, guest)).status).toBe(200);
+    expect((await run("sign_guestbook", { note: "member" }, signedIn)).status).toBe(200);
+    // New visitor ids from the same client address share its guest write budget
+    // (SITE_GUEST_IP_LIMIT_FACTOR times the per-visitor limit).
+    const addressStatuses: number[] = [];
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      const fresh = { visitor: randomBytes(18).toString("base64url") };
+      const signed = await run("sign_guestbook", { note: `fresh ${attempt}` }, fresh);
+      addressStatuses.push(signed.status);
+      if (attempt === 6)
+        expect(signed.json.error.details).toMatchObject({ bucket: "guest_writes" });
+    }
+    expect(addressStatuses).toEqual([200, 200, 200, 200, 200, 200, 429]);
+    // IPv6 clients count per /64: new addresses in the same /64 share one budget.
+    const prefixStatuses: number[] = [];
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      const fresh = {
+        visitor: randomBytes(18).toString("base64url"),
+        clientIp: `2001:db8:7:1:${(attempt + 1).toString(16)}::${attempt + 2}`,
+      };
+      const signed = await run("sign_guestbook", { note: `v6 ${attempt}` }, fresh);
+      prefixStatuses.push(signed.status);
+      if (attempt === 8)
+        expect(signed.json.error.details).toMatchObject({ bucket: "guest_writes" });
+    }
+    expect(prefixStatuses).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
+  } finally {
+    setSystemTime();
   }
-  expect(addressFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
-  // IPv6 clients count per /64: new addresses in the same /64 share one budget.
-  let prefixFlooded: Awaited<ReturnType<typeof run>> | null = null;
-  for (let attempt = 0; attempt < 12 && !prefixFlooded; attempt += 1) {
-    const fresh = {
-      visitor: randomBytes(18).toString("base64url"),
-      clientIp: `2001:db8:7:1:${(attempt + 1).toString(16)}::${attempt + 2}`,
-    };
-    const signed = await run("sign_guestbook", { note: `v6 ${attempt}` }, fresh);
-    if (signed.status === 429) prefixFlooded = signed;
-    else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
-  }
-  expect(prefixFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
 
   // sql.run goes through the gateway signature like every site-runtime call:
   // a body that is not the signed one is refused before anything runs.
@@ -1105,7 +1116,7 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
   ).toEqual([]);
 }, 120_000);
 
-test("agents started from a Site page run only the queries the page could", async () => {
+test("Site-origin and console agents have identical native SQL manager authority", async () => {
   const f = await fixture();
   const siteId = await f.publish("Notes");
   const otherId = await f.publish("Other notes");
@@ -1145,25 +1156,19 @@ test("agents started from a Site page run only the queries the page could", asyn
       siteId: otherId,
       sql: "SELECT * FROM notes",
     });
-    expect(crossSite.value.error.code).toBe("forbidden");
+    expect(crossSite.isError, JSON.stringify(crossSite.value)).toBe(false);
     const write = await agent.callTool("site_sql_query", { siteId, sql: "DELETE FROM notes" });
     expect(write.value.error.code).toBe("validation");
-    // Every management tool refuses an agent started from the page.
+    // Native management works without a Site-specific downgrade.
     for (const [tool, args] of [
       ["site_sql_inspect", {}],
-      ["site_sql_enable", { enabled: false }],
-      ["site_sql_migrate", { name: "more", sql: "CREATE TABLE more (a);" }],
-      ["site_sql_define_query", { name: "x", sql: "SELECT 1 AS one" }],
-      ["site_sql_execute", { sql: "DELETE FROM notes" }],
       ["site_sql_export", { format: "json" }],
-      ["site_sql_import", { format: "json", table: "notes", rows: [{ who: "x", note: "y" }] }],
-      ["site_sql_reset", { confirm: true }],
     ] as const) {
       const refused = await agent.callTool(tool, { siteId, ...args });
       expect({ tool, isError: refused.isError, code: refused.value?.error?.code }).toEqual({
         tool,
-        isError: true,
-        code: "forbidden",
+        isError: false,
+        code: undefined,
       });
     }
     // Named queries run with the page's reach: :viewer is the agent's person.
@@ -1180,12 +1185,10 @@ test("agents started from a Site page run only the queries the page could", asyn
     expect(mine.value.rows.map((row: { note: string }) => row.note)).not.toContain("member");
     // Managers-only queries stay out of reach, as on the page.
     const everything = await agent.callTool("site_sql_run", { siteId, name: "everything" });
-    expect(everything.isError).toBe(true);
-    expect(everything.value.error.code).toBe("forbidden");
+    expect(everything.isError, JSON.stringify(everything.value)).toBe(false);
     // Another Site is out of reach.
     const elsewhere = await agent.callTool("site_sql_run", { siteId: otherId, name: "mine" });
-    expect(elsewhere.isError).toBe(true);
-    expect(elsewhere.value.error.code).toBe("forbidden");
+    expect(elsewhere.isError, JSON.stringify(elsewhere.value)).toBe(false);
   };
 
   // A session the page created.
@@ -1206,8 +1209,7 @@ test("agents started from a Site page run only the queries the page could", asyn
   const sent = await agentTools(f, { surface: "site" });
   try {
     const refused = await sent.callTool("site_sql_run", { siteId, name: "mine" });
-    expect(refused.isError).toBe(true);
-    expect(refused.value.error.code).toBe("forbidden");
+    expect(refused.isError, JSON.stringify(refused.value)).toBe(false);
   } finally {
     await sent.mcp.close();
   }
@@ -1381,6 +1383,11 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
     const sessionId = String(created.json.id);
     const [row] = await shared.admin`select first_party_mcp_tools, first_party_mcp_permissions,
         sandbox_backend from sessions where id = ${sessionId}`;
+    if (kind === "member") {
+      expect(row!.first_party_mcp_tools).toContain("sessions_list");
+      expect(row!.first_party_mcp_permissions).toContain("sessions:read");
+      continue;
+    }
     // Exactly the Site's own data tools for this viewer, and no sandbox.
     expect({ kind, tools: [...row!.first_party_mcp_tools].sort() }).toEqual({
       kind,
@@ -1519,14 +1526,11 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
       await agent.mcp.close();
     }
   }
-  // The members' and invited person's notes carry their own principals.
+  // The invited person's writes carry that visitor's own principal.
   const stored = await f.sql(siteId).request(f.owner, "POST", "/query", {
     sql: "SELECT who FROM notes ORDER BY rowid",
   });
-  expect(stored.json.rows).toEqual([
-    { who: viewers.member.principal },
-    { who: viewers.invited.principal },
-  ]);
+  expect(stored.json.rows).toEqual([{ who: viewers.invited.principal }]);
   // An ordinary agent of the owner is unaffected: manager reach on any Site.
   const plain = await agentTools(f);
   try {

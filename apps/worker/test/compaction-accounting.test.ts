@@ -3,7 +3,8 @@ import { Agent, Runner, RunRawModelStreamEvent, tool } from "@openai/agents";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { CompactionNeededError, contextRobustnessFilterForSettings } from "@opengeni/runtime";
-import { ScriptedModel, assistantMessage, functionCall, testSettings } from "@opengeni/testing";
+import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createModelResponseEventState,
   modelResponseContextSignal,

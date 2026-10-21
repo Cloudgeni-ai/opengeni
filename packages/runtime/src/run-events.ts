@@ -27,6 +27,8 @@ import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
+import { isPreemptedModelResponse } from "./model-preemption";
+import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -162,7 +164,9 @@ export class AssistantMessagePhaseTracker {
       return [];
     }
     if (data?.type !== "response_done" || !Array.isArray(data.response?.output)) return [];
-    return this.responseDone(data.response.output);
+    // A Steer cut this response short: the turn goes on, so what it kept is a
+    // progress note, never the final answer.
+    return this.responseDone(data.response.output, isPreemptedModelResponse(data));
   }
 
   /** Phase for a streamed text delta, when the provider already declared it. */
@@ -219,8 +223,8 @@ export class AssistantMessagePhaseTracker {
     return due;
   }
 
-  private responseDone(output: unknown[]): NormalizedRuntimeEvent[] {
-    const asksForToolWork = output.some(isClientToolWork);
+  private responseDone(output: unknown[], preempted: boolean): NormalizedRuntimeEvent[] {
+    const asksForToolWork = preempted || output.some(isClientToolWork);
     const messages = output.filter(isAssistantMessageItem);
     const finalMessage = asksForToolWork ? undefined : messages.at(-1);
     this.anonymousPhases = [];
@@ -601,20 +605,25 @@ export function normalizeSdkEvent(
     });
   } else if (item.type === "tool_call_output_item") {
     const retainedMcpResult = mcpResultFromCustomData(item.customData);
+    const output =
+      "toolOutputOverride" in options
+        ? options.toolOutputOverride
+        : normalizeToolOutputForEvent(
+            options.toolOutputTransform
+              ? options.toolOutputTransform(retainedMcpResult ?? item.output)
+              : (retainedMcpResult ?? item.output),
+          );
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: toolCallIdFromSdkItem(item.rawItem) ?? item.id ?? null,
         // Inline media becomes a content-free audit fact. Model history keeps
         // the provider's real structured image output on its separate path.
-        output:
-          "toolOutputOverride" in options
-            ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(
-                options.toolOutputTransform
-                  ? options.toolOutputTransform(retainedMcpResult ?? item.output)
-                  : (retainedMcpResult ?? item.output),
-              ),
+        output,
+        // The shell intentionally returns a legible fault instead of throwing
+        // into the SDK's generic "Please try again" wrapper. Keep that text for
+        // the model, but do not present uncertain execution as a successful tool.
+        ...(isConnectedMachineOutcomeUnknownOutput(output) ? { error: true } : {}),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }

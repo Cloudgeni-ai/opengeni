@@ -6,7 +6,11 @@ import {
   TurnExecutionPolicyV1,
   TURN_EXECUTION_POLICY_METADATA_KEY,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, waitFor, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
+import { waitFor } from "@opengeni/testing/process";
 import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import { postClaimDatabaseRecoveryFailure } from "../../../apps/worker/src/activities/agent-turn/errors";
 import type { PostClaimDatabaseRecoveryDetail } from "../../../apps/worker/src/activities/types";
@@ -50,11 +54,14 @@ import {
 } from "../src/index";
 import * as schema from "../src/schema";
 
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("session-workflow-wake-outbox");
+  const acquired = await acquireRestrictedRuntimeTestDatabase(
+    "session-workflow-wake-outbox",
+    "public",
+  );
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);

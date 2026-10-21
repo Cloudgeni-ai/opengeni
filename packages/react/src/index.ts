@@ -64,6 +64,8 @@ export type {
   PluralCategory,
 } from "./messages/runtime";
 export { englishMessages } from "./messages/en";
+export { SINGLE_SEND_WORDING, singleSendText } from "./messages/single-send";
+export { SingleSendWording } from "./messages/runtime";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -109,6 +111,7 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
   InitialComposerDraft,
@@ -237,6 +240,7 @@ export type {
   UseWorkspaceSessionsResult,
 } from "./hooks/use-workspace-sessions";
 export { useSessionBackgroundCommands } from "./hooks/use-session-background-commands";
+export { useWorkspaceBackgroundCommands } from "./hooks/use-workspace-background-commands";
 export type {
   UseSessionBackgroundCommandsOptions,
   UseSessionBackgroundCommandsResult,
@@ -471,7 +475,10 @@ export type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
+  ToolOutputPreview,
   UserMessageItem,
   WorkerItem,
 } from "./timeline";
@@ -592,6 +599,11 @@ export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
 export { SessionConversation, SessionConversationView } from "./components/session-conversation";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {
   NewConversationController,
@@ -707,12 +719,16 @@ export type {
 } from "./components/markdown";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,

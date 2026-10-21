@@ -32,6 +32,89 @@ export type AgentRuntimeStatus = {
 /** An update request the agent has not confirmed after this long can be resent. */
 export const UPDATE_CONFIRMATION_GRACE_MS = 30_000;
 
+/** Presentation only; never a deadline for work or update admission. */
+export const UPDATE_HOLD_ATTENTION_MS = 10 * 60_000;
+
+function elapsedDuration(t: OpenGeniText, ms: number): string {
+  const minutes = Math.max(1, Math.floor(ms / 60_000));
+  return minutes < 60
+    ? t("lib.format.minutes", { count: minutes })
+    : minutes < 1440
+      ? t("lib.format.hours", { count: Math.floor(minutes / 60) })
+      : t("lib.format.days", { count: Math.floor(minutes / 1440) });
+}
+
+function updateWaitingReason(
+  t: OpenGeniText,
+  update: NonNullable<Runtime["update"]>,
+  now: number,
+): string {
+  const labels: Record<string, string> = {
+    browser_action: t("machines.machineStatus.blockerBrowserAction"),
+    browser_session: t("machines.machineStatus.blockerBrowserSession"),
+    browser_creation: t("machines.machineStatus.blockerBrowserCreation"),
+    browser_closing: t("machines.machineStatus.blockerBrowserClosing"),
+    browser_recovery: t("machines.machineStatus.blockerBrowserRecovery"),
+    browser_authentication: t("machines.machineStatus.blockerBrowserAuth"),
+    browser_state_transfer: t("machines.machineStatus.blockerBrowserTransfer"),
+    computer_action: t("machines.machineStatus.blockerComputerAction"),
+    computer_virtual_seat: t("machines.machineStatus.blockerVirtualDesktop"),
+    computer_session: t("machines.machineStatus.blockerComputerSession"),
+    computer_creation: t("machines.machineStatus.blockerComputerCreation"),
+    computer_closing: t("machines.machineStatus.blockerComputerClosing"),
+    computer_seat_transfer: t("machines.machineStatus.blockerSeatTransfer"),
+    controller_request: t("machines.machineStatus.blockerControllerRequest"),
+    controller_lifecycle: t("machines.machineStatus.blockerControllerLifecycle"),
+    controller_stream: t("machines.machineStatus.blockerStream"),
+    controller_producer: t("machines.machineStatus.blockerProducer"),
+    controller_previous_update: t("machines.machineStatus.blockerPreviousUpdate"),
+    other_work: t("machines.machineStatus.blockerOtherWork"),
+    upload: t("machines.machineStatus.blockerUpload"),
+    native_request: t("machines.machineStatus.blockerNativeRequest"),
+    native_operation: t("machines.machineStatus.blockerNativeOperation"),
+    native_light_running: t("machines.machineStatus.blockerNativeRequest"),
+    native_light_queued: t("machines.machineStatus.blockerQueuedRequest"),
+    native_heavy_running: t("machines.machineStatus.blockerNativeOperation"),
+    native_heavy_queued: t("machines.machineStatus.blockerQueuedOperation"),
+  };
+  const raw = update.blockers ?? [];
+  const native = raw.filter(
+    (blocker) => blocker.kind.startsWith("native_") && !blocker.kind.includes("cleanup"),
+  );
+  const blockers = raw.filter((blocker) => !native.includes(blocker));
+  if (native.length)
+    blockers.push({
+      kind: "native_work",
+      count: Math.max(...native.map((blocker) => blocker.count)),
+    });
+  labels.native_work = t("machines.machineStatus.blockerNativeCounters");
+  if (blockers.length) {
+    const details = blockers
+      .map((blocker) => {
+        const label =
+          labels[blocker.kind] ??
+          (blocker.kind.includes("cleanup")
+            ? t("machines.machineStatus.blockerCleanup")
+            : t("machines.machineStatus.blockerUnknown"));
+        return t("machines.machineStatus.blockerCount", { label, count: blocker.count });
+      })
+      .join("; ");
+    return t("machines.machineStatus.reportedBlockers", {
+      details,
+      duration: elapsedDuration(t, now - Date.parse(update.updatedAt)),
+    });
+  }
+  switch (update.errorCode) {
+    case "update_busy_interactions":
+    case "update_busy_browsers":
+      return t("machines.machineStatus.waitingForInteractions");
+    case "update_busy_uploads":
+      return t("machines.machineStatus.waitingForUploads");
+    default:
+      return t("machines.machineStatus.waitingForUnspecifiedWork");
+  }
+}
+
 /** A busy machine postpones an update instead of interrupting work. The agent
  * reports this as a retryable `update_busy_*` result; it is not a failure. */
 export function isPostponedUpdate(errorCode: string | null | undefined): boolean {
@@ -39,6 +122,7 @@ export function isPostponedUpdate(errorCode: string | null | undefined): boolean
 }
 
 const FAILURE_REASON = (t: OpenGeniText): Record<string, string> => ({
+  update_cleanup_unconfirmed: t("machines.machineStatus.previousWorkCleanupUnconfirmed"),
   update_state_unavailable: t("machines.machineStatus.theAgentCouldnTCheck"),
   agent_offline: t("machines.machineStatus.theMachineWasOffline"),
   update_dispatch_rejected: t("machines.machineStatus.theAgentRefusedTheRequest"),
@@ -69,6 +153,7 @@ export function describeAgentRuntime(
   t: OpenGeniText,
   runtime: Runtime,
   now: number,
+  online = true,
 ): AgentRuntimeStatus {
   const installed = runtime.installedVersion;
   const title = installed
@@ -100,12 +185,20 @@ export function describeAgentRuntime(
       }
       case "accepted":
         return { ...base, status: t("machines.machineStatus.updatingToTarget", { target }) };
-      case "waiting_for_idle":
+      case "waiting_for_idle": {
+        const heldMs = Math.max(0, now - Date.parse(update.requestedAt));
+        const duration = elapsedDuration(t, heldMs);
         return {
           ...base,
-          tone: "waiting",
-          status: t("machines.machineStatus.updatesToTargetWhenCurrent", { target }),
+          tone: !online ? "muted" : heldMs >= UPDATE_HOLD_ATTENTION_MS ? "attention" : "waiting",
+          status: !online
+            ? t("machines.machineStatus.offlineUpdateReport")
+            : heldMs >= UPDATE_HOLD_ATTENTION_MS
+              ? t("machines.machineStatus.updateHeldDuration", { target, duration })
+              : t("machines.machineStatus.updatesToTargetWhenCurrent", { target }),
+          note: blocked ?? updateWaitingReason(t, update, now),
         };
+      }
       case "downloading":
         return { ...base, status: `Downloading ${target}…` };
       case "verifying":
@@ -130,7 +223,9 @@ export function describeAgentRuntime(
         tone: "waiting",
         note:
           blocked ??
-          (browsersWouldClose ? t("machines.machineStatus.theInstalledAgentClosesIts") : null),
+          (browsersWouldClose
+            ? t("machines.machineStatus.theInstalledAgentClosesIts")
+            : updateWaitingReason(t, update, now)),
         action: blocked ? null : { kind: "update", label: t("machines.machineStatus.updateNow") },
       };
     }
@@ -241,6 +336,12 @@ export function describeAgentConnection(
   label: string;
   detail: string | null;
 } {
+  if (authority.state !== "active" && authority.authenticationError === "credentials_expired") {
+    return {
+      label: t("machines.machineStatus.credentialsExpired"),
+      detail: t("machines.machineStatus.credentialsRecovery"),
+    };
+  }
   const label =
     authority.state === "active"
       ? t("machines.machineStatus.agentConnected")
@@ -250,7 +351,12 @@ export function describeAgentConnection(
   const n = authority.supersededCount;
   return {
     label,
-    detail: n > 0 ? t("machines.machineStatus.reconnectedTimesSinceSetup", { count: n }) : null,
+    detail:
+      authority.state === "expired" || authority.state === "unclaimed"
+        ? t("machines.machineStatus.offlineRecovery")
+        : n > 0
+          ? t("machines.machineStatus.reconnectedTimesSinceSetup", { count: n })
+          : null,
   };
 }
 

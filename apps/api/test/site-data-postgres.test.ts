@@ -10,18 +10,14 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
-  getSiteDataAgentSession,
   withSessionRlsActorContext,
   SiteDataError,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
@@ -48,6 +44,11 @@ const memberPermissions = [
   "artifacts:read",
   "artifacts:publish",
 ] as const;
+// A Site viewer: anyone with artifacts:publish manages any Site they can see,
+// so the viewer fixtures (`member`, `third`) hold read access only.
+const viewerPermissions = memberPermissions.filter(
+  (permission) => permission !== "artifacts:publish",
+);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
 
 function memoryObjectStorage() {
@@ -178,8 +179,9 @@ async function fixture(overrides: Partial<Settings> = {}) {
     };
   };
   const owner = await person(memberPermissions);
-  const member = await person(memberPermissions);
-  const third = await person(memberPermissions);
+  const member = await person(viewerPermissions);
+  const third = await person(viewerPermissions);
+  const teammate = await person(memberPermissions);
   const admin = await person([...memberPermissions, "workspace:admin"]);
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'site-data-test')`;
@@ -253,6 +255,7 @@ async function fixture(overrides: Partial<Settings> = {}) {
     owner,
     member,
     third,
+    teammate,
     admin,
     objects,
     call,
@@ -269,9 +272,12 @@ test("each access mode applies to viewers and managers", async () => {
   const f = await fixture();
   const s = f.site((await f.publish("Team CRM")).id);
 
-  // Only managers define collections; members are viewers of the owner's Site.
+  // Only managers define collections; read-only members are viewers of the owner's Site.
   const denied = await s.define(f.member, "contacts", { accessMode: "shared" });
   expect(denied.status).toBe(403);
+  // A teammate who can publish artifacts manages a Site someone else started.
+  const teammate = await s.define(f.teammate, "teammate-notes", { accessMode: "shared" });
+  expect(teammate.status, JSON.stringify(teammate.json)).toBe(201);
   for (const [name, definition] of [
     ["contacts", { accessMode: "shared", uniqueFields: [["email"]] }],
     ["companies", { accessMode: "shared_read" }],
@@ -1311,7 +1317,7 @@ test("new records are validated before the write takes the Site's lock", async (
   );
 });
 
-test("only personless keys and people who manage the Site are managers", async () => {
+test("personless keys and people who can publish artifacts are managers", async () => {
   const { siteDataRole } = await import("../src/site-data/service");
   const site = { ownerSubjectId: "owner", createdBySubjectId: "owner" };
   const grant = (principalKind: AccessGrant["principalKind"]): AccessGrant => ({
@@ -1328,7 +1334,11 @@ test("only personless keys and people who manage the Site are managers", async (
   expect(siteDataRole(grant("human_session"), site, null)).toBe("viewer");
   expect(siteDataRole(grant(undefined), site, null)).toBe("viewer");
   expect(siteDataRole(grant("agent_attempt"), site, "owner")).toBe("manager");
-  expect(siteDataRole(grant("human_session"), site, "someone")).toBe("viewer");
+  // Sites are shared work: any teammate (or their agent) with artifacts:publish manages them.
+  expect(siteDataRole(grant("human_session"), site, "someone")).toBe("manager");
+  expect(siteDataRole(grant("agent_attempt"), site, "someone")).toBe("manager");
+  const readOnly = { ...grant("human_session"), permissions: ["artifacts:read" as const] };
+  expect(siteDataRole(readOnly, site, "someone")).toBe("viewer");
 });
 
 test("counters, per-record charge, record cap, bounded filters and tampered cursors", async () => {
@@ -1558,105 +1568,50 @@ test("CSV import builds each row in one pass and caps width and rows before buil
   expect(stored.json.records[0].data).toEqual({ name: "Ada", address: { city: "London" } });
 });
 
-test("agents started from a Site page get that page's viewer reach", async () => {
+test("Site-origin, child and Site-sent agents retain ordinary Site Data manager access", async () => {
   const f = await fixture();
-  const created = await f.publish("Tracker");
+  const site = await f.publish("Tracker");
   const other = await f.publish("Other");
-  const s = f.site(created.id);
-  await s.define(f.owner, "habits", { accessMode: "per_viewer" });
-  await s.define(f.owner, "shared", { accessMode: "shared" });
+  await f.site(site.id).define(f.owner, "habits", { accessMode: "per_viewer" });
   await f.site(other.id).define(f.owner, "notes", { accessMode: "shared" });
-  await s.write(f.member, [{ op: "insert", collection: "habits", data: { who: "member" } }]);
-  await s.write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
-  const origin = { _opengeniSiteOrigin: { siteId: created.id, title: "Tracker" } };
-  const checkClamped = async (agent: Awaited<ReturnType<typeof agentTools>>) => {
-    const [binding] = await shared.admin`select visibility,site_id,site_owner_subject_id
-      from sessions where id=${agent.session.id}`;
-    expect(binding).toEqual({
-      visibility: "user_private",
-      site_id: created.id,
-      site_owner_subject_id: f.owner.subjectId,
-    });
-    for (const [tool, args] of [
-      ["site_data_describe", { siteId: created.id }],
-      ["site_data_define_collection", { siteId: created.id, name: "x", accessMode: "shared" }],
-      ["site_data_reset", { siteId: created.id, collection: "habits", confirm: true }],
-      ["site_data_export", { siteId: created.id, collection: "habits", format: "json" }],
-      [
-        "site_data_import",
-        { siteId: created.id, collection: "shared", format: "json", records: [{ a: 1 }] },
-      ],
-    ] as const) {
-      const refused = await agent.callTool(tool, args);
-      expect(refused.isError, tool).toBe(true);
-      expect(refused.value.error.code, tool).toBe("forbidden");
+  await f
+    .site(site.id)
+    .write(f.member, [{ op: "insert", collection: "habits", data: { who: "member" } }]);
+  await f
+    .site(site.id)
+    .write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
+  const root = await agentTools(f, {
+    metadata: { _opengeniSiteOrigin: { siteId: site.id, title: "Tracker" } },
+  });
+  const agents = [
+    root,
+    await agentTools(f, { parentSessionId: root.session.id }),
+    await agentTools(f, { surface: "site" }),
+    await agentTools(f),
+  ];
+  try {
+    for (const agent of agents) {
+      const all = await agent.callTool("site_data_query", {
+        siteId: site.id,
+        collection: "habits",
+        scope: "all",
+      });
+      expect(all.isError, JSON.stringify(all.value)).toBe(false);
+      expect(all.value.records).toHaveLength(2);
+      const elsewhere = await agent.callTool("site_data_query", {
+        siteId: other.id,
+        collection: "notes",
+      });
+      expect(elsewhere.isError, JSON.stringify(elsewhere.value)).toBe(false);
+      const define = await agent.callTool("site_data_define_collection", {
+        siteId: other.id,
+        name: "x" + agents.indexOf(agent),
+        accessMode: "shared",
+      });
+      expect(define.isError, JSON.stringify(define.value)).toBe(false);
     }
-    // The owner's agent sees only the owner's own per-viewer records, as the page would.
-    const own = await agent.callTool("site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-    });
-    expect(own.isError, JSON.stringify(own.value)).toBe(false);
-    expect(own.value.records.map((record: any) => record.data.who)).toEqual(["owner"]);
-    const all = await agent.callTool("site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-      scope: "all",
-    });
-    expect(all.isError ? "forbidden" : all.value.records.length).not.toBe(2);
-    // Viewer writes still work within the page's own Site.
-    const wrote = await agent.callTool("site_data_write", {
-      siteId: created.id,
-      operations: [{ op: "insert", collection: "shared", data: { from: "agent" } }],
-    });
-    expect(wrote.isError, JSON.stringify(wrote.value)).toBe(false);
-    // Another Site is out of reach.
-    const elsewhere = await agent.callTool("site_data_query", {
-      siteId: other.id,
-      collection: "notes",
-    });
-    expect(elsewhere.isError).toBe(true);
-    expect(elsewhere.value.error.code).toBe("forbidden");
-  };
-
-  // A session the page created.
-  const fromPage = await agentTools(f, { metadata: origin });
-  try {
-    await checkClamped(fromPage);
   } finally {
-    await fromPage.mcp.close();
-  }
-  // A worker spawned by that session inherits the clamp through its lineage.
-  const worker = await agentTools(f, { parentSessionId: fromPage.session.id });
-  try {
-    await checkClamped(worker);
-  } finally {
-    await worker.mcp.close();
-  }
-  // A message the page sent into a session without a Site origin reaches no Site Data.
-  const sent = await agentTools(f, { surface: "site" });
-  try {
-    const refused = await sent.callTool("site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-    });
-    expect(refused.isError).toBe(true);
-    expect(refused.value.error.code).toBe("forbidden");
-  } finally {
-    await sent.mcp.close();
-  }
-  // The same owner's agent outside any Site keeps manager reach.
-  const plain = await agentTools(f);
-  try {
-    const all = await plain.callTool("site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-      scope: "all",
-    });
-    expect(all.isError, JSON.stringify(all.value)).toBe(false);
-    expect(all.value.records).toHaveLength(2);
-  } finally {
-    await plain.mcp.close();
+    for (const agent of agents) await agent.mcp.close();
   }
 });
 
@@ -2964,218 +2919,4 @@ test("managers share a per-Site write window counted before any work", async () 
       (await s.write(f.member, [{ op: "insert", collection: "rows", data: { i: 3 } }])).status,
     ).toBe(200);
   });
-});
-
-test("an unreadable agent lineage fails closed", async () => {
-  const f = await fixture();
-  const created = await f.publish("Deep");
-  const s = f.site(created.id);
-  await s.define(f.owner, "habits", { accessMode: "per_viewer" });
-  await s.write(f.member, [{ op: "insert", collection: "habits", data: { who: "member" } }]);
-  await s.write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
-  // A chain of nested workers deeper than the lineage walk reads.
-  let parent: string | undefined;
-  let root: string | undefined;
-  for (let depth = 0; depth < 34; depth += 1) {
-    const session = await createSession(db.db, {
-      accountId: f.accountId,
-      workspaceId: f.workspace.id,
-      initialMessage: `level ${depth}`,
-      resources: [],
-      tools: [],
-      metadata: {},
-      model: "gpt-5.6-sol",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    });
-    if (parent)
-      await shared.admin.begin(async (tx) => {
-        await tx`set local session_replication_role = replica`;
-        await tx`UPDATE sessions SET parent_session_id = ${parent!}, root_session_id = ${root!}
-          WHERE id = ${session.id}`;
-      });
-    root ??= session.id;
-    parent = session.id;
-  }
-  const deep = await agentTools(f, { parentSessionId: parent! });
-  await shared.admin.begin(async (tx) => {
-    await tx`set local session_replication_role = replica`;
-    await tx`UPDATE sessions SET root_session_id = ${root!} WHERE id = ${deep.session.id}`;
-  });
-  const other = await f.publish("Elsewhere");
-  try {
-    // No known Site origin: an incomplete lineage reaches no Site Data at all.
-    for (const [name, args] of [
-      ["site_data_define_collection", { siteId: created.id, name: "x", accessMode: "shared" }],
-      ["site_data_query", { siteId: created.id, collection: "habits" }],
-    ] as const) {
-      const denied = await deep.callTool(name, args);
-      expect(denied.isError, JSON.stringify(denied.value)).toBe(true);
-      expect(denied.value.error.code).toBe("forbidden");
-    }
-    // The root session's Site origin is read directly, past the walk's depth cap:
-    // viewer reach on that one Site, and no management.
-    await shared.admin`UPDATE sessions SET metadata = jsonb_build_object(
-        '_opengeniSiteOrigin', jsonb_build_object('siteId', ${created.id}::text, 'title', 'Deep'))
-      WHERE id = ${root!}`;
-    const define = await deep.callTool("site_data_define_collection", {
-      siteId: created.id,
-      name: "x",
-      accessMode: "shared",
-    });
-    expect(define.isError).toBe(true);
-    expect(define.value.error.code).toBe("forbidden");
-    const own = await deep.callTool("site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-    });
-    expect(own.isError, JSON.stringify(own.value)).toBe(false);
-    expect(own.value.records.map((record: any) => record.data.who)).toEqual(["owner"]);
-    const elsewhere = await deep.callTool("site_data_query", {
-      siteId: other.id,
-      collection: "habits",
-    });
-    expect(elsewhere.value.error.code).toBe("forbidden");
-  } finally {
-    await deep.mcp.close();
-  }
-  // A shallower worker of the same kind keeps manager reach: the walk reads its whole lineage.
-  const shallow = await agentTools(f, { parentSessionId: (await agentTools(f)).session.id });
-  try {
-    const all = await shallow.callTool("site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-      scope: "all",
-    });
-    expect(all.isError, JSON.stringify(all.value)).toBe(false);
-    expect(all.value.records).toHaveLength(2);
-  } finally {
-    await shallow.mcp.close();
-  }
-  // A delegated credential naming a session that does not exist is not trusted to manage.
-  const { resolveSiteDataAccess } = await import("../src/site-data/service");
-  const delegated = (sessionId?: string): AccessGrant => ({
-    ...f.owner.grant,
-    metadata: { delegated: true, ...(sessionId ? { sessionId } : {}) },
-  });
-  const deps = f.deps as never;
-  const manager = await resolveSiteDataAccess(deps, delegated(), created.id, { management: true });
-  expect(manager.caller.role).toBe("manager");
-  const missing = await resolveSiteDataAccess(deps, delegated(crypto.randomUUID()), created.id, {
-    management: true,
-  }).catch((error: any) => error);
-  expect(missing.code).toBe("forbidden");
-  // Without a readable session there is no known Site, so no Site Data at all.
-  const unknown = await resolveSiteDataAccess(
-    deps,
-    delegated(crypto.randomUUID()),
-    created.id,
-  ).catch((error: any) => error);
-  expect(unknown.code).toBe("forbidden");
-});
-
-test("an agent's lineage is read under the production session RLS context", async () => {
-  const { withAccessGrantSessionRlsContext } = await import("../src/access-grant-rls");
-  const f = await fixture();
-  const created = await f.publish("Private agent");
-  const s = f.site(created.id);
-  await s.define(f.owner, "habits", { accessMode: "per_viewer" });
-  await s.write(f.member, [{ op: "insert", collection: "habits", data: { who: "member" } }]);
-  await s.write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
-  const membership = async (subjectId: string) => {
-    const [row] = await shared.admin<{ id: string }[]>`
-      select id from organization_memberships
-      where account_id = ${f.accountId} and subject_id = ${subjectId} limit 1`;
-    if (row) return row.id;
-    const id = crypto.randomUUID();
-    await shared.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`insert into organization_memberships(
-          id, account_id, subject_id, role, status, personal_workspace_id)
-        values (${id}, ${f.accountId}, ${subjectId}, 'member', 'active', ${f.workspace.id})`;
-    });
-    return id;
-  };
-  const makePrivate = async (sessionId: string, subjectId: string) => {
-    const membershipId = await membership(subjectId);
-    await shared.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`update sessions set visibility = 'user_private', owner_subject_id = ${subjectId},
-          owner_organization_membership_id = ${membershipId}
-        where id = ${sessionId}`;
-    });
-  };
-  // Each call runs the way the production MCP route runs it: inside the agent
-  // attempt's session RLS context, where private sessions are visible only to
-  // their owner.
-  const call = (
-    tools: Awaited<ReturnType<typeof agentTools>>,
-    name: string,
-    args: Record<string, unknown>,
-  ) =>
-    withAccessGrantSessionRlsContext(f.deps as never, tools.grant, () =>
-      tools.callTool(name, args),
-    );
-  // The owner's own Only me session reads its lineage in full: manager reach.
-  const own = await agentTools(f);
-  await makePrivate(own.session.id, f.owner.subjectId);
-  try {
-    const all = await call(own, "site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-      scope: "all",
-    });
-    expect(all.isError, JSON.stringify(all.value)).toBe(false);
-    expect(all.value.records).toHaveLength(2);
-  } finally {
-    await own.mcp.close();
-  }
-  // An Only me session started from the Site keeps the Site clamp under RLS.
-  const fromSite = await agentTools(f, {
-    metadata: { _opengeniSiteOrigin: { siteId: created.id, title: "Private agent" } },
-  });
-  const [siteOwner] = await shared.admin`select visibility,owner_subject_id from sessions
-    where id=${fromSite.session.id}`;
-  expect(siteOwner).toEqual({ visibility: "user_private", owner_subject_id: f.owner.subjectId });
-  try {
-    const clamped = await call(fromSite, "site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-    });
-    expect(clamped.isError, JSON.stringify(clamped.value)).toBe(false);
-    expect(clamped.value.records.map((record: any) => record.data.who)).toEqual(["owner"]);
-    const define = await call(fromSite, "site_data_define_collection", {
-      siteId: created.id,
-      name: "x",
-      accessMode: "shared",
-    });
-    expect(define.value.error.code).toBe("forbidden");
-  } finally {
-    await fromSite.mcp.close();
-  }
-  // A parent session the agent's person cannot see makes the lineage unreadable
-  // under RLS, so it fails closed instead of granting manager reach.
-  const hidden = await agentTools(f, { initiatorSubjectId: f.member.subjectId });
-  await makePrivate(hidden.session.id, f.member.subjectId);
-  const child = await agentTools(f, { parentSessionId: hidden.session.id });
-  try {
-    // The same read outside the RLS context sees the whole lineage.
-    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
-    const lineage = () => getSiteDataAgentSession(db.db, scope, child.session.id, child.turnId);
-    expect((await lineage()).complete).toBe(true);
-    expect(
-      (await withAccessGrantSessionRlsContext(f.deps as never, child.grant, lineage)).complete,
-    ).toBe(false);
-    const denied = await call(child, "site_data_query", {
-      siteId: created.id,
-      collection: "habits",
-      scope: "all",
-    });
-    expect(denied.isError, JSON.stringify(denied.value)).toBe(true);
-    expect(denied.value.error.code).toBe("forbidden");
-  } finally {
-    await child.mcp.close();
-    await hidden.mcp.close();
-  }
 });

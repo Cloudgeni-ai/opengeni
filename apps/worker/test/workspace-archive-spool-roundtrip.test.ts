@@ -10,7 +10,7 @@ import {
   terminateManagedSandboxSession,
 } from "@opengeni/runtime/sandbox";
 import { downloadWorkspaceArchiveSpool, type ObjectStorage } from "@opengeni/storage";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { putVersion1TarArchiveOrInline } from "../src/sandbox-archive-storage";
 
 const large = process.env.OPENGENI_TEST_LARGE_WORKSPACE_ARCHIVE === "1";

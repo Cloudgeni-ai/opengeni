@@ -31,7 +31,9 @@ describe("Helm database upgrade contract", () => {
       "deploy/helm/opengeni/templates/worker-turns-deployment.yaml",
     );
 
-    expect(migrationJob).toContain('name: {{ include "opengeni.secretName" . }}');
+    expect(migrationJob).toContain(
+      'name: {{ include "opengeni.jobRuntimeSecretName" $settingsScope }}',
+    );
     expect(migrationJob).toContain(
       '{{- if ne (include "opengeni.migrationSecretName" .) (include "opengeni.secretName" .) }}',
     );
@@ -81,7 +83,9 @@ describe("Helm database upgrade contract", () => {
     }
 
     const migrationJob = workloads[3]!;
-    const runtimeSecret = migrationJob.indexOf('name: {{ include "opengeni.secretName" . }}');
+    const runtimeSecret = migrationJob.indexOf(
+      'name: {{ include "opengeni.jobRuntimeSecretName" $settingsScope }}',
+    );
     const migrationSecret = migrationJob.indexOf(
       'name: {{ include "opengeni.migrationSecretName" . }}',
     );

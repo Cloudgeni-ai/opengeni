@@ -1,6 +1,6 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
-import { recentSessionsForHome } from "@opengeni/react/session-list-model";
+import { homeSessionSections } from "@opengeni/react/session-list-model";
 import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
 import {
@@ -131,7 +131,8 @@ function Home() {
       // Top-level conversations only, as web's home: sub-agents are reached from
       // their parent and would otherwise crowd the list.
       // The page also carries every pin, which leads the list as on web.
-      const page = await client.listSessionPage(workspaceId, { limit: 12, parentSessionId: null });
+      // Enough for every pin plus a screenful of recent work below them.
+      const page = await client.listSessionPage(workspaceId, { limit: 24, parentSessionId: null });
       const next = { pinned: page.pinned, sessions: page.sessions };
       rememberLists(workspaceId, { home: next });
       setLists(next);
@@ -187,8 +188,8 @@ function Home() {
       ...patch,
     }));
   const pill = model ? compactModelPill(t, models, model, effort) : null;
-  const recent = useMemo(
-    () => recentSessionsForHome(t, lists.sessions, lists.pinned, 6),
+  const sections = useMemo(
+    () => homeSessionSections(t, lists.sessions, lists.pinned, HOME_RECENT_LIMIT),
     [t, lists],
   );
   const togglePin = useSessionPinToggle({ client, workspaceId, setLists });
@@ -462,6 +463,7 @@ function Home() {
                   label={pill.name}
                   detail={pill.effort}
                   fast={latencyMode === "fast"}
+                  ultrafast={latencyMode === "ultrafast"}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();
@@ -500,17 +502,29 @@ function Home() {
             {problem}
           </Text>
         ) : null}
-        {recent.length > 0 ? (
+        {sections.pinned.length > 0 ? (
           <View style={{ marginTop: 48 }}>
-            <SectionLabel>Recent sessions</SectionLabel>
+            <SectionLabel>Pinned</SectionLabel>
             <SessionRowList
-              sessions={recent}
+              sessions={sections.pinned}
               models={models}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />
           </View>
         ) : null}
+        {sections.recent.length > 0 ? (
+          <View style={{ marginTop: sections.pinned.length > 0 ? 28 : 48 }}>
+            <SectionLabel>Recent</SectionLabel>
+            <SessionRowList
+              sessions={sections.recent}
+              models={models}
+              onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
+              onTogglePin={(session) => void togglePin(session)}
+            />
+          </View>
+        ) : null}
+        {sections.pinned.length + sections.recent.length > 0 ? <AllSessionsRow /> : null}
       </ScrollView>
       <ModelPickerSheet
         open={pickerOpen}
@@ -606,6 +620,45 @@ function InboxButton() {
           </Text>
         </View>
       ) : null}
+    </Pressable>
+  );
+}
+
+/** Recent chats under the pins; everything else is one tap away. */
+const HOME_RECENT_LIMIT = 15;
+
+/* The end of the home list: every chat, with search and projects. */
+function AllSessionsRow() {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="All sessions"
+      onPress={() => router.push("/sessions")}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        marginTop: 8,
+        paddingHorizontal: 4,
+        paddingVertical: 12,
+        borderRadius: theme.radius.md,
+        backgroundColor: pressed ? c.hover : "transparent",
+      })}
+    >
+      <Text
+        style={{
+          ...fontStyle(theme, 500),
+          flex: 1,
+          fontSize: 14,
+          lineHeight: 20,
+          color: c["fg-muted"],
+        }}
+      >
+        All sessions
+      </Text>
+      <Icon name="chevron-right" size={14} color={c["fg-subtle"]} />
     </Pressable>
   );
 }

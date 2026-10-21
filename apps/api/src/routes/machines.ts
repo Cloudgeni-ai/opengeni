@@ -36,6 +36,7 @@ import {
   updateEnrollmentOperationPolicy,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
@@ -111,6 +112,30 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
+    if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(400, { message: "sessionId must be a UUID" });
+    }
+    if (sessionId) {
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: "session.read",
+          surface: "http",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found", cause: error });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    }
     const response = await listMachines(
       { db, settings },
       {

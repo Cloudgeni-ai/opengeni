@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { useNavigate } from "@tanstack/react-router";
 
 import {
@@ -7,11 +7,11 @@ import {
   useLearningDefaults,
 } from "@/components/knowledge/knowledge-learning";
 import { useReviewQueue } from "@/components/knowledge/knowledge-review";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { orgLabel } from "@/lib/org";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import { organizationSettingsAccess } from "@/lib/organization-settings-access";
-import { canManageWorkspaceSettings } from "@/lib/permissions";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 
 /**
  * Settings > Agent learning: what agents may change on their own in this

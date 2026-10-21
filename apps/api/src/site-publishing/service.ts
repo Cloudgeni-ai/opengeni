@@ -18,10 +18,8 @@ import {
 } from "@opengeni/contracts";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
-  assertNotSiteClampedAgent,
   currentSiteSessionOrigin,
   hasLiteralPermission,
-  siteAgentClamp,
   siteViewerForGrant,
   type ApiRouteDeps,
   type cancelPublishedSiteSession,
@@ -32,21 +30,24 @@ import {
   countOpenSiteAbuseReports,
   getPublishedSiteVersion,
   getSiteDataSite,
-  artifactCreatedInSessionTree,
   getSitePublication,
+  getSiteWorkspaceMemberPermissions,
   isSitePublishingUuid,
   getWorkspaceSiteLimitProfile,
   markSitePublicationEdgeSynced,
   readSiteRuntimeUsage,
   recordSitePublicationScan,
   getPublishedSite,
+  getWorkspace,
   listSiteRuntimeCancellationCandidates,
   revokeSiteViewerSessions,
   SitePublishingError,
   SITE_RUNTIME_SITE_PRINCIPAL,
+  updateWorkspaceArtifactVisibility,
   upsertSitePublication,
   readSiteHostnameEdgeState,
   readSiteHostnameLiveGeneration,
+  resolveNamedManagedPersonalWorkspaceGrant,
   type PublishedSiteRecord,
   type SiteDataSite,
   type SiteHostnameEdgeState,
@@ -55,7 +56,6 @@ import {
   type StoredSiteLimitProfile,
 } from "@opengeni/db";
 import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
-import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
@@ -672,8 +672,6 @@ export async function stopSiteViewers(
   options: {
     revokeSessions?: boolean;
     cancelConversations?: boolean;
-    /** Cancel only conversations holding tools outside these (see `siteAgentToolsNarrowed`). */
-    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
     reason: string;
   },
 ): Promise<{ revokedSessions: number }> {
@@ -710,7 +708,6 @@ export async function stopSiteViewers(
           limit: STOP_CONVERSATIONS_PAGE_SIZE,
           startedBefore,
           ...(after ? { after } : {}),
-          ...(options.toolsNarrowedTo ? { toolsNarrowedTo: options.toolsNarrowedTo } : {}),
         });
         if (sessionIds.length === 0) break;
         for (const sessionId of sessionIds) {
@@ -823,13 +820,12 @@ export type SiteManagement = {
 
 /**
  * Publication changes come from people and their own agents, never from a
- * Site page: refuse a request that carries a validated Site origin (a Site or
- * frame page reaching the API through a host) and an agent started from a
- * Site page, or acting in a turn one sent (the Site clamp).
+ * Site page: refuse a direct request that carries a validated frame origin.
+ * Agents use the person's ordinary authorization regardless of turn origin.
  */
 export async function requireSitePublicationWriter(
-  deps: SitePublishingDeps,
-  grant: AccessGrant,
+  _deps: SitePublishingDeps,
+  _grant: AccessGrant,
 ): Promise<void> {
   if (currentSiteSessionOrigin())
     throw sitePublishingError(
@@ -838,68 +834,13 @@ export async function requireSitePublicationWriter(
       "site_page_forbidden",
       "A Site page cannot change Site publications",
     );
-  try {
-    await assertNotSiteClampedAgent(deps.db, grant, "Site publications");
-  } catch (error) {
-    if (error instanceof HTTPException && error.status === 403)
-      throw sitePublishingError(
-        403,
-        "forbidden",
-        "site_agent_forbidden",
-        "An agent started from a Site page cannot change Site publications",
-      );
-    throw error;
-  }
-}
-
-export const SITE_AGENT_OTHER_SITE_MESSAGE =
-  "An agent started from a Site page can change only its own Site and Sites it created";
-
-/**
- * Whether `grant` may change a Site's content (new versions, rollback,
- * archive, restore, audience). An agent started from a Site page may only
- * for a Site it was started from, or one an agent in its own session tree
- * created with the artifact tools (the Site's first version records that
- * session). It never rewrites another Site the person can edit, published
- * or not, so a page cannot spread itself through the person's drafts. Other
- * callers are not limited here.
- */
-export async function siteAgentMayChangeArtifact(
-  deps: SitePublishingDeps,
-  grant: AccessGrant,
-  artifactId: string,
-): Promise<boolean> {
-  const clamp = await siteAgentClamp(deps.db, grant);
-  if (!clamp?.clamped || clamp.originSiteIds.includes(artifactId)) return true;
-  const sessionId = grant.metadata?.sessionId;
-  if (typeof sessionId !== "string") return false;
-  return await artifactCreatedInSessionTree(
-    deps.db,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId },
-    artifactId,
-    sessionId,
-  );
-}
-
-/** `siteAgentMayChangeArtifact`, refusing with 403 `site_agent_forbidden`. */
-export async function requireSiteAgentMayChangeArtifact(
-  deps: SitePublishingDeps,
-  grant: AccessGrant,
-  artifactId: string,
-): Promise<void> {
-  if (!(await siteAgentMayChangeArtifact(deps, grant, artifactId)))
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_agent_forbidden",
-      SITE_AGENT_OTHER_SITE_MESSAGE,
-    );
 }
 
 /**
  * Resolve a Site for publication management. The caller must see the Site
- * (its audience); managers are the Site Data managers (owner, workspace admin,
- * an agent acting for one, or a person-less key with artifacts:publish).
+ * (its audience); managers are the Site Data managers (anyone in the workspace
+ * with artifacts:publish, an agent acting for one, or a person-less key with
+ * artifacts:publish).
  * `mutate` callers must also pass `requireSitePublicationWriter`.
  */
 export async function resolveSiteManagement(
@@ -921,10 +862,32 @@ export async function resolveSiteManagement(
     site,
     record,
     manager: siteDataRole(grant, site, viewer.subjectId) === "manager",
-    admin: hasLiteralPermission(grant.permissions, "workspace:admin"),
+    admin: await isSiteAdministrator(deps, grant, viewer.subjectId),
     owner: viewer.subjectId !== null && owner === viewer.subjectId,
     subjectId: viewer.subjectId,
   };
+}
+
+/**
+ * Site administration (limits, extra assistant tools, lifting an admin
+ * takedown): a workspace admin, or the owner of a Personal workspace (and
+ * their agents) in that workspace. A Personal workspace deliberately carries
+ * no workspace:admin, but its owner administers it, as workspace settings do.
+ */
+export async function isSiteAdministrator(
+  deps: Pick<SitePublishingDeps, "db">,
+  grant: AccessGrant,
+  personSubjectId: string | null,
+): Promise<boolean> {
+  if (hasLiteralPermission(grant.permissions, "workspace:admin")) return true;
+  if (personSubjectId === null) return false;
+  return (
+    (await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: personSubjectId,
+    })) !== null
+  );
 }
 
 export function requireSiteManager(management: SiteManagement): void {
@@ -933,7 +896,7 @@ export function requireSiteManager(management: SiteManagement): void {
       403,
       "forbidden",
       "site_manager_required",
-      "Only the Site's owner or a workspace admin can manage its publication",
+      "You need permission to publish artifacts in this workspace to manage this Site's publication",
     );
 }
 
@@ -1051,9 +1014,64 @@ export async function siteHostnameAvailability(
 }
 
 /**
+ * Whether publishing this Site first shares it with its personal workspace.
+ *
+ * Publication serves workspace Sites only. A personal workspace has nobody
+ * but its owner, and every chat there is Only me, so a Site its owner's agent
+ * makes is Only me too, and the personal workspace offers no Share step:
+ * publishing such a Site was a dead end. There, Only me and the workspace are
+ * the same one person, so publishing an active Only me Site shares it as part
+ * of publishing. Only the Site's owner, or their own agent, does this (the
+ * same person who could change its audience); in a shared workspace the owner
+ * still shares it first, because that widens who can see it.
+ *
+ * Only a publication that is not yet active shares: once published, a Site
+ * its owner set back to Only me stays Only me, and edits answer
+ * `site_not_shared` like anywhere else until they unpublish or share it.
+ */
+async function publishesPersonalOnlyMeSite(
+  deps: SitePublishingDeps,
+  management: SiteManagement,
+  existing: SitePublicationRecord | null,
+): Promise<boolean> {
+  const { record } = management;
+  if (existing?.status === "active") return false;
+  if (record.status !== "active" || record.visibility !== "user_private") return false;
+  if (!management.owner || !management.subjectId) return false;
+  if ((await getWorkspace(deps.db, management.scope.workspaceId))?.kind !== "personal")
+    return false;
+  // Defence in depth: the caller is this personal workspace's live owner.
+  if (management.subjectId.startsWith("user:"))
+    return (
+      (await getSiteWorkspaceMemberPermissions(deps.db, management.scope, management.subjectId)) !==
+      null
+    );
+  return true;
+}
+
+async function sharePersonalSiteForPublishing(
+  deps: SitePublishingDeps,
+  management: SiteManagement,
+  visibility: "workspace_shared" | "user_private" = "workspace_shared",
+): Promise<PublishedSiteRecord> {
+  const { scope, record } = management;
+  await updateWorkspaceArtifactVisibility(deps.db, {
+    workspaceId: scope.workspaceId,
+    artifactId: record.id,
+    viewer: { subjectId: management.subjectId },
+    visibility,
+  });
+  const shared = await getPublishedSite(deps.db, scope, record.id);
+  if (!shared) throw sitePublishingError(404, "not_found", "site_not_found", "Site not found");
+  return shared;
+}
+
+/**
  * Create or change a Site's publication. The caller is a manager; a Site must
  * be active and visible to its workspace to be served; public access needs the
  * deployment to allow it; changing the limit profile needs a workspace admin.
+ * In a personal workspace, publishing an Only me Site shares it with that
+ * one-person workspace (see `publishesPersonalOnlyMeSite`).
  */
 export async function upsertSitePublicationForManager(
   deps: SitePublishingDeps,
@@ -1063,7 +1081,8 @@ export async function upsertSitePublicationForManager(
 ): Promise<{ publication: SitePublication; created: boolean }> {
   requireSitesDomain(deps.settings);
   requireSiteManager(management);
-  const { scope, record } = management;
+  const { scope } = management;
+  let record = management.record;
   const existing = await getSitePublication(deps.db, scope, record.id);
   if (
     existing?.status === "suspended" &&
@@ -1087,7 +1106,12 @@ export async function upsertSitePublicationForManager(
     await requireSitePlatformOpen(deps, "publish");
     await requireSitePlatformQuota(deps, scope, ["requests", "storage_bytes"]);
   }
-  if (activating && !siteServable(record))
+  const sharesPersonalSite =
+    activating && (await publishesPersonalOnlyMeSite(deps, management, existing));
+  if (
+    activating &&
+    !siteServable(sharesPersonalSite ? { ...record, visibility: "workspace_shared" } : record)
+  )
     throw sitePublishingError(
       409,
       "conflict",
@@ -1187,28 +1211,37 @@ export async function upsertSitePublicationForManager(
       ? { invitedEmails: normalizeEmails(request.invitedEmails) }
       : {}),
   };
+  // Shared just before the publication is written, so it is served the
+  // moment it exists; if publishing fails, the Site goes back to Only me.
+  if (sharesPersonalSite) record = await sharePersonalSiteForPublishing(deps, management);
   // A new publication without a label takes a suggested one; a random suffix
   // collides rarely, so retry a few times.
   let result: Awaited<ReturnType<typeof upsertSitePublication>> | null = null;
-  for (let attempt = 0; attempt < 5 && result === null; attempt += 1) {
-    try {
-      result = await upsertSitePublication(deps.db, scope, {
-        siteId: record.id,
-        defaultLabel: suggestSiteHostnameLabel(record.title, randomSuffix()),
-        changes,
-        actor: grant.subjectId,
-        holdDays: deps.settings.sitesHostnameHoldDays,
-        defaults: { access: "members", noindex: true },
-      });
-    } catch (error) {
-      const retry =
-        error instanceof SitePublishingError &&
-        (error.code === "taken" || error.code === "held") &&
-        request.label === undefined &&
-        existing === null &&
-        attempt < 4;
-      if (!retry) throw error;
+  try {
+    for (let attempt = 0; attempt < 5 && result === null; attempt += 1) {
+      try {
+        result = await upsertSitePublication(deps.db, scope, {
+          siteId: record.id,
+          defaultLabel: suggestSiteHostnameLabel(record.title, randomSuffix()),
+          changes,
+          actor: grant.subjectId,
+          holdDays: deps.settings.sitesHostnameHoldDays,
+          defaults: { access: "members", noindex: true },
+        });
+      } catch (error) {
+        const retry =
+          error instanceof SitePublishingError &&
+          (error.code === "taken" || error.code === "held") &&
+          request.label === undefined &&
+          existing === null &&
+          attempt < 4;
+        if (!retry) throw error;
+      }
     }
+  } catch (error) {
+    if (sharesPersonalSite)
+      await sharePersonalSiteForPublishing(deps, management, "user_private").catch(() => undefined);
+    throw error;
   }
   const { publication, created, previousLabel } = result!;
   const stopping = existing ? siteAccessNarrowed(existing, publication) : null;
@@ -1216,14 +1249,6 @@ export async function upsertSitePublicationForManager(
     await stopSiteViewers(deps, scope, record.id, {
       reason: stopping,
       revokeSessions: stopping !== "agent_disabled",
-    });
-  else if (existing && siteAgentToolsNarrowed(existing.agent, publication.agent))
-    // Fewer tools, or no longer for everyone: stop the conversations that hold
-    // tools they would not get now. Viewers stay signed in.
-    await stopSiteViewers(deps, scope, record.id, {
-      reason: "agent_tools_narrowed",
-      revokeSessions: false,
-      toolsNarrowedTo: { tools: publication.agent.tools ?? [], everyoneTools: false },
     });
   scheduleSiteEdgeSync(deps, [publication.label, previousLabel], {
     siteIdHint: record.id,
@@ -1253,15 +1278,6 @@ export function siteAccessNarrowed(
   }
   if (before.agent.enabled && !after.agent.enabled) return "agent_disabled";
   return null;
-}
-
-/** Whether a Site's workspace tools narrowed: a tool removed. */
-export function siteAgentToolsNarrowed(
-  before: Pick<SitePublicationRecord["agent"], "tools">,
-  after: Pick<SitePublicationRecord["agent"], "tools">,
-): boolean {
-  const kept = new Set(after.tools ?? []);
-  return (before.tools ?? []).some((tool) => !kept.has(tool));
 }
 
 /** MCP server ids (the session tool reference format). */

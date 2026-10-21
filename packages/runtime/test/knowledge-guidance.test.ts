@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { allAgentCapabilities, type FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   DEFAULT_AGENT_IDENTITY,
@@ -66,7 +66,7 @@ test("agent guidance teaches canonical authoring, proposal reuse, and publicatio
     expect(core).toContain(concept);
   expect(core).not.toMatch(/memory_(save|correct|search|propose)/);
   const skill = await readFile(
-    new URL("../src/bundled_management_skills/opengeni-skills/SKILL.md", import.meta.url),
+    new URL("../src/bundled_management_skills/skill-management/SKILL.md", import.meta.url),
     "utf8",
   );
   expect(skill).toContain("knowledge_save");

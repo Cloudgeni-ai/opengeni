@@ -26,3 +26,19 @@ test("Hello projects the in-process controller transport capability exactly", ()
     expect(helloRuntimeCapabilities(hello).browserControlHttp).toBe(browserControlHttp === true);
   }
 });
+
+test("Hello preserves machine-addressed write support and clears a missing legacy bit", () => {
+  for (const transactionalFsWriteMachine of [true, false, undefined]) {
+    const hello = Hello.decode(
+      Hello.encode(
+        Hello.fromPartial({
+          capabilities: { transactionalFsWrite: true, transactionalFsWriteMachine },
+        }),
+      ).finish(),
+    );
+    expect(helloRuntimeCapabilities(hello)).toMatchObject({
+      transactionalFsWrite: true,
+      transactionalFsWriteMachine: transactionalFsWriteMachine === true,
+    });
+  }
+});

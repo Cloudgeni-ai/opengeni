@@ -1,7 +1,7 @@
 import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { MEANINGFUL_SESSION_EVENT_TYPES } from "../src/session-meaningful-events";
 import { toPostgresLosslessJson } from "../src/lossless-json";

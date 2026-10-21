@@ -1,21 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section } from "@/components/ui/section";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { formatMoneyMicros } from "@/lib/format";
-import { userErrorText } from "@/lib/api-error";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section } from "@opengeni/react/ui/section";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   planDate,
   planSeats,
   subscriptionAction,
   type CatalogPlan,
   type PlanAction,
-} from "@/lib/subscription-plans";
+} from "@opengeni/react/app/lib/subscription-plans";
 
 type Selection = { target: CatalogPlan; action: PlanAction; idempotencyKey: string };
 
@@ -154,16 +154,15 @@ export function SubscriptionPlans({
               </RowButton>
             ) : null}
           </div>
-          <UsageMeter
-            label="Monthly plan credit"
-            percent={
-              plan.creditGrantedMicros > 0
-                ? (plan.creditRemainingMicros / plan.creditGrantedMicros) * 100
-                : 0
-            }
-            valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
-            {...(reset ? { resetsLabel: reset } : {})}
-          />
+          {/* No grant this period (e.g. a Free org without monthly credit): show no empty meter. */}
+          {plan.creditGrantedMicros > 0 ? (
+            <UsageMeter
+              label="Monthly plan credit"
+              percent={(plan.creditRemainingMicros / plan.creditGrantedMicros) * 100}
+              valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
+              {...(reset ? { resetsLabel: reset } : {})}
+            />
+          ) : null}
           {plan.cancelAtPeriodEnd ? (
             <Notice title="Cancellation scheduled">
               Your paid plan ends{reset ? ` ${reset}` : " at the end of this period"}. You'll move
@@ -202,11 +201,7 @@ export function SubscriptionPlans({
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-sm font-semibold text-fg">{item.label}</h3>
-                  {selected ? (
-                    <MetaChip>Current</MetaChip>
-                  ) : item.key === "pro" ? (
-                    <MetaChip>Popular</MetaChip>
-                  ) : null}
+                  {selected ? <MetaChip>Current</MetaChip> : null}
                 </div>
                 <div>
                   <p className="text-xl font-semibold tracking-[-0.5px] text-fg">
@@ -233,7 +228,9 @@ export function SubscriptionPlans({
                     </p>
                   ) : null}
                   {item.freeCredit ? (
-                    <p className="text-xs text-fg-muted">Monthly credit for eligible accounts</p>
+                    <p className="text-xs text-fg-muted">
+                      For free-credit models · Eligible accounts only
+                    </p>
                   ) : null}
                 </div>
                 <div className="mt-auto pt-1">

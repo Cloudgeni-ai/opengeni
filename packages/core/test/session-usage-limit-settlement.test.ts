@@ -7,7 +7,7 @@ import { toPostgresLosslessJson } from "@opengeni/db";
 /** The lossless codec's JSON string tag (packages/db/src/lossless-json.ts). */
 const LOSSLESS_JSON_STRING_PREFIX = "opengeni_lossless_json_string_v2_81f06e15:";
 import { normalizeModelCallUsage } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES,
   settleModelUsage,

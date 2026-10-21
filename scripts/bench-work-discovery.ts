@@ -15,7 +15,7 @@ import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 

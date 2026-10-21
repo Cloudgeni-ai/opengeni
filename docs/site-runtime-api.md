@@ -82,8 +82,8 @@ managers. The Site must be shared with the workspace, not "Only me".
 
 Every changing route (`PUT`, `DELETE`, takedown, restore, report status and
 `PUT site-limit-profile`), and the `site_publication_update` tool, refuses
-a request made from a Site page (403 `site_page_forbidden`) and an agent
-started from a Site page (403 `site_agent_forbidden`).
+a request made from a Site page (403 `site_page_forbidden`). Agents use ordinary
+owner authorization regardless of where their turn started.
 
 Other management routes:
 
@@ -443,7 +443,12 @@ Profiles:
 (`SiteViewerCapabilities`: `agent`, `workspaceTools`, `siteData`,
 `sqlQueryAudiences`, `viewAs`), computed from the same checks the routes
 enforce (the agent also reflects the platform brake and whether a
-credit-billed model exists for people outside the workspace;
+credit-billed model exists for people outside the workspace, and answers a
+member without `sessions:create` as the outside visitor the agent serves them
+as, or `false` on a members-only Site, where `models.list` is empty and
+`sessions.*` answer 403 `not_available_for_viewer`; such a member's
+`viewer.kind` stays `member`, so Site code should gate its chat UI on
+`capabilities.agent`, not on the viewer kind;
 `workspaceTools` needs a member who may use connections). Anything the
 viewer's audience can't do answers 403 `not_available_for_viewer` with a
 `feature`, and `details.legacyCode` carries the code older Site code matched

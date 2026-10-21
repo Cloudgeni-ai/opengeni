@@ -7,7 +7,7 @@
  * fails when a registered route is neither in the catalog nor exempt.
  */
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";
@@ -46,6 +46,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
+  {
+    pattern: /^\/v1\/office\/workbook-tickets$/,
+    reason: "the Office add-in connecting its own workbook socket",
+  },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
 ];

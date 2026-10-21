@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
 import { rawRows, withWorkspaceSubjectRls } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
@@ -10,6 +10,7 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 // helper once per statement instead of once per row, with the same answers,
 // and turn-scoped runtime capability rows no longer accumulate.
 // Migration 0838: rows left by backends that have exited are reclaimed too.
+// Migration 0847: admin authorization reads no longer mint capabilities.
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -86,7 +87,7 @@ async function organization(): Promise<Org> {
 }
 
 describe.skipIf(!realDb)("subscription admin policies", () => {
-  test("an administrator sees every assignment while the helper runs once per statement", async () => {
+  test("an administrator sees every assignment without capability writes", async () => {
     const org = await organization();
     const result = await withWorkspaceSubjectRls(
       client!.db,
@@ -98,8 +99,8 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
           sql`select count(*)::int as count from subscription_connection_workspaces
             where account_id = ${org.accountId}::uuid`,
         );
-        // The admin helper records and removes one lifecycle capability per
-        // call; this transaction's own counters show how often it ran.
+        // Authorization now reads membership directly. Listing assignments
+        // must not restore the former lifecycle-capability write.
         const [writes] = await rawRows<{ inserted: number }>(
           tx,
           sql`select coalesce(sum(n_tup_ins), 0)::int as inserted from pg_stat_xact_all_tables
@@ -109,7 +110,7 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
       },
     );
     expect(result.visible).toBe(8);
-    expect(result.inserted).toBe(1);
+    expect(result.inserted).toBe(0);
   });
 
   test("a non-administrator still sees only the current workspace's assignments", async () => {

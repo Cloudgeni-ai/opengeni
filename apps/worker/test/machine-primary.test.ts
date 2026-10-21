@@ -12,7 +12,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ResourceRef } from "@opengeni/contracts";
 import { sandboxEnvironmentForRun } from "../src/activities/environment";
 import { establishSelfhostedTurnSession } from "../src/sandbox-routing";

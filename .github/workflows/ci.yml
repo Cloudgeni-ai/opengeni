@@ -5,13 +5,14 @@ on:
     branches:
       - main
       - production
-  # Ordinary main PRs use targeted local checks; post-merge CI remains enabled.
+  # Main PRs/merge groups use merge-queue.yml. Full CI is a separate,
+  # non-cancelling release-candidate lane.
   pull_request:
     branches:
       - production
   schedule:
-    # Weekly full-mode drift coverage complements impact-selected pull-request
-    # CI without rebuilding an unchanged source/image matrix every day.
+    # Scheduled service coverage has its own lane; it must never replace a
+    # pending push run, which alone can publish exact-SHA release receipts.
     - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
@@ -55,7 +56,7 @@ concurrency:
   # run, so a manual re-run of an older main run would otherwise enter as the
   # pending run and cancel the newest push waiting behind the running build.
   # A re-run is an explicit request for that exact SHA and runs on its own.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && github.run_attempt == '1' && 'ci-main-push' || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && contains(github.event.head_commit.message, 'changeset-release/main') == false && github.run_attempt == '1' && 'ci-main-push' || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
@@ -177,7 +178,9 @@ jobs:
           trap 'git worktree remove --force "$expected"' EXIT
           (
             cd "$expected"
-            bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+            # The clean worktree has no node_modules. Use the controller's locked
+            # formatter instead of Bun auto-installing a different Prettier.
+            bun --no-install "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
             if [ -f scripts/release/drop-ignored-changesets.ts ]; then bun scripts/release/drop-ignored-changesets.ts; fi
             bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
@@ -306,7 +309,8 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
-          elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ] ||
+               { [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; }; then
             bun scripts/ci/impact.ts --full --output impact-plan.json
           else
             BEFORE="${{ github.event.before }}"
@@ -345,9 +349,10 @@ jobs:
             jq -cn --argjson total "$total" \
               '[range(0; $total) | {index: ., number: (. + 1), total: $total}]'
           }
-          # Unit shards are coverage-identical independent runners. Eight keeps the
-          # slowest source-byte-balanced shard inside its 20-minute budget on a full run.
-          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 8)" >> "$GITHUB_OUTPUT"
+          # Preserve the complete inventory and 1200-second deadline. Eight hit
+          # that deadline on run39580448753/shard7 despite passing tests. Twelve
+          # adds balancing headroom without increasing any test/attempt budget.
+          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 12)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
@@ -466,6 +471,11 @@ jobs:
           bun install --frozen-lockfile --ignore-scripts
           bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'
 
+      # SDK/package builds regenerate this file. Check the committed bytes first
+      # so passing consumer builds cannot hide a stale console/preview runtime.
+      - name: Check committed Site browser runtime before builds
+        run: bun scripts/generate-site-browser-runtime.ts --check
+
       - name: Download exact impact plan
         uses: actions/download-artifact@v4
         with:
@@ -505,7 +515,8 @@ jobs:
 
             (
               cd "$expected"
-              bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              # Keep formatter resolution identical to the installed generator.
+              bun --no-install "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
               if [ -f scripts/release/drop-ignored-changesets.ts ]; then bun scripts/release/drop-ignored-changesets.ts; fi
               bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
@@ -660,7 +671,7 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun packages/testing/src/acquisition-diagnostics.ts -- bun install --frozen-lockfile
 
       - name: Download exact impact plan
         uses: actions/download-artifact@v4
@@ -1591,7 +1602,9 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 27
+    # 17m browser installation + 2m recovery + 6m headless + 5m headed,
+    # with 3m for checkout, dependencies and cleanup.
+    timeout-minutes: 33
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@v6
@@ -1630,7 +1643,7 @@ jobs:
             packages/browserd/test/supervisor.e2e.test.ts \
             --test-name-pattern '^a (graceful|killed) controller leaves the same live browser'
 
-      - name: Run actual browserd end-to-end suite
+      - name: Run headless browserd end-to-end suite
         timeout-minutes: 6
         run: |
           set -euo pipefail
@@ -1640,6 +1653,14 @@ jobs:
           chmod 700 "$RUNNER_TEMP/opengeni-test-chromium"
           export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
           bun run --cwd packages/browserd test:e2e
+
+      # The headed stream test deliberately observes 60 seconds of frames.
+      # It must not inherit whatever remains of the headless suite's budget.
+      - name: Run headed browserd streaming and interaction suite
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          export OPENGENI_BROWSER_EXECUTABLE="$RUNNER_TEMP/opengeni-test-chromium"
           OPENGENI_BROWSERD_HEADED_E2E=1 xvfb-run --auto-servernum \
             bun test --timeout 120000 packages/browserd/test/cdp-driver.e2e.test.ts \
             --test-name-pattern 'streams a mobile headed tab continuously'
@@ -2339,6 +2360,69 @@ jobs:
           cache-from: type=gha,scope=opengeni-ci-sandbox
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true' || '' }}
 
+  # The Modal Computer/Browser image carries the browser controller. Publishing
+  # it with the other exact-SHA canary images keeps a deployed server and its
+  # controller on the same source revision.
+  desktop-image:
+    name: Build desktop sandbox workload image
+    needs: [automation-admission, plan, artifact-runtime]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
+    outputs:
+      desktop_digest: ${{ steps.desktop_image.outputs.digest }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
+          path: .release/artifact-runtime
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build desktop sandbox image
+        id: desktop_image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/desktop.Dockerfile
+          platforms: linux/amd64
+          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-{0}', github.sha) || 'opengeni-desktop:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=opengeni-ci-desktop
+          cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-desktop,ignore-error=true' || '' }}
+      - name: Verify anonymous desktop image resolution
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          DIGEST: ${{ steps.desktop_image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Modal pulls the pinned digest without registry credentials.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker logout ghcr.io
+          export DOCKER_CONFIG="$(mktemp -d)"
+          resolved="$(docker buildx imagetools inspect "ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          [ "$resolved" = "$DIGEST" ]
+
   images:
     name: Workload image builds
     needs:
@@ -2351,6 +2435,7 @@ jobs:
       - artifact-outbox-dispatcher-image
       - relay-image
       - sandbox-image
+      - desktop-image
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -2366,6 +2451,7 @@ jobs:
           ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: ${{ needs.artifact-outbox-dispatcher-image.result }}
           RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}
           SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}
+          DESKTOP_IMAGE_RESULT: ${{ needs.desktop-image.result }}
         run: |
           set -euo pipefail
           test "$API_IMAGE_RESULT" = "success"
@@ -2375,6 +2461,7 @@ jobs:
           test "$ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT" = "success"
           test "$RELAY_IMAGE_RESULT" = "success"
           test "$SANDBOX_IMAGE_RESULT" = "success"
+          test "$DESKTOP_IMAGE_RESULT" = "success"
 
       - name: Check out exact aggregate source
         uses: actions/checkout@v6
@@ -2391,6 +2478,7 @@ jobs:
           RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}
           ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.artifact-materializer-image.outputs.artifact_materializer_digest }}
           ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}
+          DESKTOP_DIGEST: ${{ needs.desktop-image.outputs.desktop_digest }}
         run: |
           set -euo pipefail
           for digest in \
@@ -2400,7 +2488,8 @@ jobs:
             "$SANDBOX_DIGEST" \
             "$RELAY_DIGEST" \
             "$ARTIFACT_MATERIALIZER_DIGEST" \
-            "$ARTIFACT_OUTBOX_DISPATCHER_DIGEST"; do
+            "$ARTIFACT_OUTBOX_DISPATCHER_DIGEST" \
+            "$DESKTOP_DIGEST"; do
             printf '%s\n' "$digest" \
               | grep -Eq '^sha256:[0-9a-f]{64}$'
           done
@@ -2422,6 +2511,7 @@ jobs:
             --arg relayDigest "$RELAY_DIGEST" \
             --arg artifactMaterializerDigest "$ARTIFACT_MATERIALIZER_DIGEST" \
             --arg artifactOutboxDispatcherDigest "$ARTIFACT_OUTBOX_DISPATCHER_DIGEST" \
+            --arg desktopDigest "$DESKTOP_DIGEST" \
             '{
               schemaVersion: 1,
               source: {
@@ -2443,7 +2533,8 @@ jobs:
                 sandbox: { repository: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: $sandboxDigest },
                 relay: { repository: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: $relayDigest },
                 "artifact-materializer": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-materializer", digest: $artifactMaterializerDigest },
-                "artifact-outbox-dispatcher": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher", digest: $artifactOutboxDispatcherDigest }
+                "artifact-outbox-dispatcher": { repository: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher", digest: $artifactOutboxDispatcherDigest },
+                desktop: { repository: "ghcr.io/cloudgeni-ai/opengeni-desktop", digest: $desktopDigest }
               }
             }' > canary-images.json
           sha256sum canary-images.json > canary-images.sha256
@@ -2488,3 +2579,72 @@ jobs:
           AUTOMATION_CHECK_CONCLUSION: ${{ needs.automation-admission.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
+
+      # GITHUB_TOKEN-created Version PRs do not emit pull_request workflows.
+      # Their authenticated full CI is stronger than the fast entry check.
+      # merge_group still tests their combined tree normally after enqueueing.
+      - name: Report queue entry check for the admitted Version PR
+        if: ${{ success() && needs.automation-admission.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.automation_head_sha }}
+          CONCLUSION: ${{ needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
+            -f name='Queue ready' -f head_sha="$HEAD_SHA" -f status=completed \
+            -f conclusion="$CONCLUSION" \
+            -f details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  merge-content:
+    name: Verify landed merge content
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Recompute landed merge trees from their parents
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/verify-merge-content.ts --since-full-green "$GITHUB_SHA"
+
+  full-green:
+    name: Publish fully green main SHA
+    needs: [plan, test, deployment, images, merge-content]
+    # Push runs always skip the dispatch-only automation-admission ancestor, so
+    # success() over the whole ancestry would never publish. The aggregate needs
+    # (test, images) already verify every lane they cover; require each direct
+    # need explicitly and never publish from a cancelled run.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && needs.merge-content.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Publish exact-SHA full CI evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" --arg url "$url" \
+            '{schemaVersion:1,sha:$sha,runId:$run,runAttempt:$attempt,url:$url,mode:"full"}' > full-green-main.json
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=success -f context='Full CI' -f target_url="$url" \
+            -f description='Full tests, contracts and workload images passed for this exact main SHA'
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: full-green-main-${{ github.sha }}
+          path: full-green-main.json
+          if-no-files-found: error

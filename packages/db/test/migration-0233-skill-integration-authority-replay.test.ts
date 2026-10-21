@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readdir } from "node:fs/promises";
 import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
 import postgres from "postgres";

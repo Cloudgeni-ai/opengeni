@@ -6,6 +6,8 @@ import {
   withOrganizationGatewayCatalogProvider,
   withOrganizationOpenRouterCatalogProvider,
   withOrganizationOpperCatalogProvider,
+  withOrganizationDirectCatalogProvider,
+  organizationDirectModelIdPrefix,
 } from "@opengeni/config";
 import { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/contracts";
 import {
@@ -29,13 +31,15 @@ import {
   updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
   listOrganizationModelProviderCustomModels,
+  getOrganizationModelProviderConnection,
   getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { codexRouteDisposition } from "./codex-core";
 import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
 
@@ -47,8 +51,12 @@ const Kind = z.enum([
   "anthropic",
   "claude_subscription",
   "opper",
+  "openai",
+  "azure_openai",
 ]);
 function modelPrefix(target: ModelConnectionTarget) {
+  if (target.kind === "openai" || target.kind === "azure_openai")
+    return organizationDirectModelIdPrefix(target.kind);
   if (target.kind === "anthropic" || target.kind === "claude_subscription")
     return (
       claudeProviderId(target.kind, target.workspaceId === null ? "organization" : "workspace") +
@@ -108,6 +116,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           core: (await coreAccessDisposition(deps, kind, scopeId)) === "core",
         };
       }
+      // Workspace OpenAI and Azure OpenAI connections are exact direct
+      // connections with no shared access policy; only the organization's has one.
+      if (kind === "openai" || kind === "azure_openai")
+        throw new HTTPException(404, { message: "Connection not found" });
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       // On the core a SuperGrok or Claude access policy is a shared connection's, which
       // the core editor authorizes; only the legacy pools have private rows.
@@ -205,6 +217,22 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
               : connection.kind === "opper"
                 ? withOrganizationOpperCatalogProvider(settings, models)
                 : withOrganizationOpenRouterCatalogProvider(settings, models);
+        }
+        if (connection.kind === "openai" || connection.kind === "azure_openai") {
+          const [models, direct] = await Promise.all([
+            listOrganizationModelProviderCustomModels(deps.db, {
+              ...actor,
+              providerKind: connection.kind,
+            }),
+            getOrganizationModelProviderConnection(deps.db, {
+              ...actor,
+              providerKind: connection.kind,
+            }),
+          ]);
+          settings = withOrganizationDirectCatalogProvider(settings, connection.kind, {
+            endpoint: direct?.endpoint ?? null,
+            models,
+          });
         }
       }
       // The people an administrator can choose, or null when the account

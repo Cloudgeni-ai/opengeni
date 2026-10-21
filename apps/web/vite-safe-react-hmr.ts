@@ -18,6 +18,17 @@ export function reactModuleNeedsFullReload(source: string): boolean {
   return false;
 }
 
+/**
+ * Shared `@opengeni/react/app/*` modules are all `.tsx` (the package export
+ * pattern names one extension), including plain helpers. Only a module that
+ * renders JSX is a Fast Refresh candidate; any JSX element or fragment closes
+ * with `</`, `/>` or opens with `<>`. Helpers keep Vite's ordinary propagation.
+ */
+export function isReactModule(file: string, source: string): boolean {
+  if (!/\.[jt]sx$/u.test(file) || file.includes("/node_modules/")) return false;
+  return /<\/|\/>|<>/u.test(source);
+}
+
 export function safeReactHmrPlugin(): Plugin {
   return {
     name: "opengeni-safe-react-hmr",
@@ -25,7 +36,7 @@ export function safeReactHmrPlugin(): Plugin {
     async handleHotUpdate(context) {
       if (!/\.[jt]sx$/u.test(context.file) || context.file.includes("/node_modules/")) return;
       const source = await context.read();
-      if (!reactModuleNeedsFullReload(source)) return;
+      if (!isReactModule(context.file, source) || !reactModuleNeedsFullReload(source)) return;
       context.server.ws.send({ type: "full-reload", path: "*" });
       return [];
     },

@@ -178,7 +178,8 @@ class Client {
     const setCookie = response.headers.getSetCookie?.() ?? [];
     for (const value of setCookie) {
       const pair = value.split(";")[0]!;
-      if (pair.startsWith("better-auth.session_token=")) this.cookie = pair;
+      // An https public origin makes Better Auth use the __Secure- cookie prefix.
+      if (/^(?:__Secure-)?better-auth\.session_token=/.test(pair)) this.cookie = pair;
     }
     const text = await response.text();
     let parsed: any = text;

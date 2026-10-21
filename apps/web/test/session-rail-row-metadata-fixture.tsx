@@ -1,26 +1,39 @@
-import { SessionWaitStatus } from "../src/components/session/session-wait-status";
-import { SessionBrowseOrderControls } from "../src/components/rail/session-browse-order-controls";
-import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "../src/lib/sessions-group";
-import type { SessionBrowseStatus } from "../src/lib/session-browse-preferences";
+import { SessionWaitStatus } from "@opengeni/react/app/components/session/session-wait-status";
+import { SessionBrowseOrderControls } from "@opengeni/react/app/components/rail/session-browse-order-controls";
+import type {
+  SessionBrowseGroupBy,
+  SessionBrowseSortBy,
+} from "@opengeni/react/app/lib/sessions-group";
+import type { SessionBrowseStatus } from "@opengeni/react/app/lib/session-browse-preferences";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "../src/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { SessionHeader } from "../src/components/rail/session-header";
-import { sessionStateLabel } from "../src/lib/session-rail";
-import { RowQuickActions } from "../src/components/rail/session-list";
-import { SessionRowContent } from "../src/components/rail/session-row-content";
-import { SessionRowHoverDetails } from "../src/components/rail/session-row-hover-details";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "../src/components/ui/hover-card";
-import { cn } from "../src/lib/utils";
-import type { Session } from "../src/types";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
+import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
+import { RowQuickActions } from "@opengeni/react/app/components/rail/session-list";
+import { SessionRowContent } from "@opengeni/react/app/components/rail/session-row-content";
+import { SessionRowHoverDetails } from "@opengeni/react/app/components/rail/session-row-hover-details";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@opengeni/react/ui/hover-card";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
+
+// The header and rows only render inside the app shell, which always provides
+// the app context; their chat actions (copy link, pin) run through it. The
+// fixture runs none of them, so any read of the context fails loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    throw new Error(`The session rail fixture's app context has no ${String(key)}`);
+  },
+});
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
 const longTitle =
   "Now I am testing your workspace rail and this title should use every available pixel";
@@ -240,4 +253,8 @@ function SessionRailRowMetadataFixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<SessionRailRowMetadataFixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={appContext}>
+    <SessionRailRowMetadataFixture />
+  </AppContext.Provider>,
+);

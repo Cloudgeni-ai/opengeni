@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { RunContext } from "@openai/agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { RunMcpCredentials } from "../src/mcp-run-credentials";
 import { normalizeRunCredentialsResolution } from "../src/sandbox/run-credentials";
 import {

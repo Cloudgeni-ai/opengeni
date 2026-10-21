@@ -1,5 +1,279 @@
 # @opengeni/core
 
+## 4.3.1
+
+### Patch Changes
+
+- 31c6406: Batch editable artifact catalog metadata reads while preserving per-artifact live authorization and revision fences. Custom application and storage adapters retain their existing single-read fallback.
+- 1b1805f: Batch current collection reads during Knowledge save preparation while retaining per-entry authorization, current-view checks, ordering, and cursor behavior.
+- 3fbbe43: Session creation no longer refuses an API or SDK client whose `firstPartyMcpTools` names a tool of an agent capability that is off. The tool is left out instead, so a client built against an older capability map keeps working when a tool moves under a capability. An agent's own list is still checked strictly.
+- 1ce8ea5: A Docker sandbox whose container is reported missing during an idle drain no longer loses its chat. The drain used to commit the lease as archive-only and drop the provider state, so the workspace was declared unrecoverable even though its host directory was still on disk, and every later turn in that chat was blocked (this also happened when the daemon briefly reported NotFound while the host was under memory pressure). The cold commit now keeps the same Docker continuity receipt a lost warm instance keeps, and the next turn restarts a container on the same host directory, or reattaches the one a false NotFound missed. Separately, sandbox recovery consent can now be given through the API by an organization key acting as one verified external user on that user's own behalf (asUser), not only from the browser cookie session. Agents, bare API keys, service initiators and delegated bearers still cannot consent.
+- b20c9b2: Retain bounded agent-update blocker categories/counts and show their report age
+  and elapsed holds in Machines and fleet, without disclosing private session IDs. Distinguish controller work
+  from native request admission without changing update safety, killing work or
+  adding command deadlines. Older agents that cannot identify a blocker remain
+  explicitly unspecified. These diagnostics do not establish the cause of an earlier
+  hold whose admission snapshot was not retained.
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- 1d62cf3: When an agent tries to use someone's personal (Only me) computer that they have not yet allowed in the chat, the chat now shows them the card to allow it right away. The agent is told the card is posted in the chat and gets the chat link, so it tells the person in one sentence (or gives the link when they are reading in Slack or a worker chat) instead of waiting or retrying the same command. Cards for other connections, such as Slack and GitHub together, are not limited; only a repeated computer refusal in the same turn reuses that turn's computer card, even when several are refused at once.
+- 5934780: Remote MCP servers that answer the 2026-07-28 `server/discover` probe but send 2025-era results (no `resultType`) are reconnected over the 2025 handshake instead of losing every tool. This covers agent turns, connector tool permissions, capability probes and OAuth connection checks. A best-effort server's failed `tools/list` warning now names its structural cause (error class, SDK or numeric code, validation violation) without message text.
+- 6794bf2: Removing a workspace member or offboarding an organization member now works when that person's sessions selected their own connected account. Previously two session fences rejected the revocation and the removal failed with a generic "not available". External membership errors now also name the database check that refused them.
+- 7517fbc: Organization owners and admins can now connect OpenAI and Azure OpenAI once for the whole organization in Organization settings → Models, next to the other organization providers. OpenAI stores an encrypted API key; Azure OpenAI stores an encrypted key plus the Azure resource endpoint. Admins add the organization's OpenAI model IDs or Azure deployments as its models, and each is checked with the organization's key (and Azure endpoint) before it is saved. The models (`organization-openai/<model>` and `organization-azure-openai/<deployment>`) inherit into the organization's current and future shared workspaces (Personal workspaces stay local), work for sessions created through the web app and the public API, and are billed to the organization's own provider account with no Opengeni credits. `OrganizationModelProviderKind` and `ModelConnectionAccessKind` gain `openai` and `azure_openai`; organization provider connection requests and responses gain an optional `endpoint` (Azure only). A missing or revoked connection fails closed and never falls back to deployment credentials. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `organization-openai` or `organization-azure-openai` provider ids. Rolling migration `0898_organization_direct_openai_model_providers.sql` widens the provider-kind, lifecycle-fact and analytics allow-lists and adds the nullable endpoint columns.
+
+  An organization ElevenLabs key no longer counts as an OpenRouter access policy when a workspace's model restrictions are read.
+
+- 29a1d94: Allow catalog projections to reuse a request-local billing balance when selecting a default model, and overlap the session-create response read with joined post-commit notifications.
+- 9ff7e74: Retain long-running attempt-owned Connected Machine one-offs in the existing command ledger, returning a command ID after a bounded observation without imposing a process deadline or tying cancellation to HTTP lifetime. Preserve terminal result fields, Unix update handover, existing update diagnostics and the Windows exec_command shell default.
+- 7b1da5b: Reuse public workspace connection metadata within each model catalog or admission-input load to avoid a second direct-provider query. Preserve per-request scope, private connection filtering, fresh admission boundaries, and standalone or transaction-scoped fallback reads.
+- 734ad21: Resolve model metadata once per distinct model in a session response page instead of reparsing the provider registry for every row. Reuse is limited to the page's freshly loaded catalog context; session responses, permissions, and subsequent-request freshness are unchanged.
+- b95784c: Support multiple personal Slack identities with exact-account reconnect, selected-workspace bot availability, and the same bot posting capabilities in scheduled and interactive work. Preserve existing schedule destinations as defaults without adding excluded tools.
+
+  Keep role provisioning compatible with database schemas that predate selected-workspace bot access.
+
+  Add workspace default machines for new chats and schedules that follow the workspace. Preserve accepted execution placement across retries and report unavailable machines without silently choosing another computer.
+
+- Updated dependencies [75101c9]
+- Updated dependencies [e907c46]
+- Updated dependencies [2d1350b]
+- Updated dependencies [cca885b]
+- Updated dependencies [29a1d94]
+- Updated dependencies [31c6406]
+- Updated dependencies [1b1805f]
+- Updated dependencies [b1a5fad]
+- Updated dependencies [a363a8c]
+- Updated dependencies [49f2177]
+- Updated dependencies [29a1d94]
+- Updated dependencies [3d83bfd]
+- Updated dependencies [d142e5b]
+- Updated dependencies [0e135b2]
+- Updated dependencies [03947ed]
+- Updated dependencies [5e32e0f]
+- Updated dependencies [cd3fdb2]
+- Updated dependencies [74f6ab1]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [659c01a]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [b7ee3dc]
+- Updated dependencies [fda625e]
+- Updated dependencies [f47e3b2]
+- Updated dependencies [b8aaefa]
+- Updated dependencies [c2cbeae]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [ec0855c]
+- Updated dependencies [1ce8ea5]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [dc9a23b]
+- Updated dependencies [a252bf9]
+- Updated dependencies [18030c8]
+- Updated dependencies [23fed2a]
+- Updated dependencies [29a1d94]
+- Updated dependencies [95c5219]
+- Updated dependencies [8c58607]
+- Updated dependencies [eeab39f]
+- Updated dependencies [8f66667]
+- Updated dependencies [ebdd6dc]
+- Updated dependencies [f83cd2a]
+- Updated dependencies [4a2e10f]
+- Updated dependencies [559eaa8]
+- Updated dependencies [00a0865]
+- Updated dependencies [e4915c1]
+- Updated dependencies [1d62cf3]
+- Updated dependencies [5934780]
+- Updated dependencies [6794bf2]
+- Updated dependencies [1e63001]
+- Updated dependencies [9eae8df]
+- Updated dependencies [d3996f9]
+- Updated dependencies [fa5347a]
+- Updated dependencies [d8289f0]
+- Updated dependencies [dc1dd93]
+- Updated dependencies [a00e4bb]
+- Updated dependencies [d8761a7]
+- Updated dependencies [16781e5]
+- Updated dependencies [0432630]
+- Updated dependencies [27a5a89]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9ff7e74]
+- Updated dependencies [18030c8]
+- Updated dependencies [59a90e2]
+- Updated dependencies [9976132]
+- Updated dependencies [b45d380]
+- Updated dependencies [0cc6b93]
+- Updated dependencies [724b529]
+- Updated dependencies [bc64dbb]
+- Updated dependencies [3915617]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [29a1d94]
+- Updated dependencies [726c332]
+- Updated dependencies [b1a2e5b]
+- Updated dependencies [390562e]
+- Updated dependencies [a1265ca]
+- Updated dependencies [7b1da5b]
+- Updated dependencies [4199cd5]
+- Updated dependencies [017121f]
+- Updated dependencies [7851b64]
+- Updated dependencies [cc0d008]
+- Updated dependencies [d21ada4]
+- Updated dependencies [72e00f6]
+- Updated dependencies [a78e908]
+- Updated dependencies [6e61993]
+- Updated dependencies [1bc6fe5]
+- Updated dependencies [72e032c]
+- Updated dependencies [d0c8261]
+- Updated dependencies [a82b6a4]
+- Updated dependencies [a5d6f8a]
+- Updated dependencies [06b8b74]
+- Updated dependencies [b95784c]
+- Updated dependencies [d6a83bc]
+- Updated dependencies [22e3585]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+- Updated dependencies [db09421]
+- Updated dependencies [e6b2285]
+- Updated dependencies [1b76e0d]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/vaults@4.3.0
+
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: A finished command's stored output is now released on its runner in one answered exchange, for foreground and background commands alike. The agent serves a new `OpRelease` request (advertised as `capabilities.op_release`): it drops the operation at once and confirms the release in its answer, so the release settles right where the output is stored, while the agent is live from the command, and nothing about the command is left for a later maintenance pass. When the storing process dies first, the agent's own operation inventory recovers the release, so maintenance never sends such an agent anything to release output. Every request Opengeni sends on its own behalf carries `Opengeni-No-Wake`, which a compute host answers itself instead of waking a sleeping sandbox; an unanswered one records nothing and is left to the agent's next inventory. The agent remembers every operation it has started for longer than Opengeni may resend a start for it, independent of output retention and across an in-place update, so a released operation never runs again. Connected Machine agents without the capability keep the existing final acknowledgement and later observation; a compute sandbox whose agent lacks it is refused as an image built with an older agent.
+
+### Patch Changes
+
+- 7dcb1d5: Making room on a full browser controller is now safer. A browser is saved to make room only if it is still idle, active on the same controller and free of other operations at the moment it is claimed, and a browser another request already saved no longer counts as room made. A failure while preparing the save returns the browser to active instead of leaving it stuck suspending. Downloads kept when any browser is saved stay private to the owner of a private chat instead of becoming workspace files, even when another person's request made the room, and are read back as that owner once the request is authorized for the chat. Keeping downloads no longer risks the save expiring before capture. The memory-based browser limit now honours memory limits on the controller's own nested cgroup and its ancestors, wherever the cgroup hierarchy is mounted.
+- 4c90154: Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+- Updated dependencies [641e179]
+- Updated dependencies [641e179]
+- Updated dependencies [7dcb1d5]
+- Updated dependencies [e189078]
+- Updated dependencies [49b121d]
+- Updated dependencies [b02f045]
+- Updated dependencies [aebb860]
+- Updated dependencies [c27cffc]
+- Updated dependencies [93e20fe]
+- Updated dependencies [641e179]
+- Updated dependencies [1830cf0]
+- Updated dependencies [507caf7]
+- Updated dependencies [e018445]
+- Updated dependencies [b8d5b64]
+- Updated dependencies [a336e51]
+- Updated dependencies [5715a3e]
+- Updated dependencies [4c90154]
+- Updated dependencies [523bac6]
+- Updated dependencies [47eeb80]
+- Updated dependencies [78bd3fd]
+- Updated dependencies [641e179]
+- Updated dependencies [da09a6e]
+- Updated dependencies [32c356f]
+- Updated dependencies [dfd0ce5]
+- Updated dependencies [641e179]
+- Updated dependencies [184167c]
+- Updated dependencies [6c603cb]
+- Updated dependencies [fd7e63f]
+- Updated dependencies [ac63730]
+- Updated dependencies [daec93b]
+- Updated dependencies [25c316a]
+  - @opengeni/runtime@4.2.0
+  - @opengeni/db@4.2.0
+  - @opengeni/contracts@4.2.0
+  - @opengeni/config@4.2.0
+  - @opengeni/events@4.2.0
+  - @opengeni/observability@4.2.0
+  - @opengeni/documents@4.2.0
+  - @opengeni/capabilities@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/storage@4.2.0
+  - @opengeni/vaults@4.2.0
+  - @opengeni/network@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- Updated dependencies [1e77fbc]
+- Updated dependencies [3beb7bc]
+- Updated dependencies [175f595]
+  - @opengeni/runtime@4.1.2
+  - @opengeni/db@4.1.2
+  - @opengeni/documents@4.1.2
+  - @opengeni/events@4.1.2
+  - @opengeni/capabilities@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/storage@4.1.2
+  - @opengeni/vaults@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- a254a76: Read execution-time provider catalog inputs in one scoped transaction instead of repeating serial catalog and connection-list queries. Turn startup and stateless model calls share the same settings-building path. Catalog ordering, retained-model handling, live workspace credential checks and selected model policy remain unchanged; no data is cached across executions.
+- c602300: Fix large Connected Machine writes for machine-addressed operations, including run_on. Negotiate epoch-zero transactional upload support without inventing session epochs or replaying mutations. Older transactional agents receive a preflight 256 KiB limit and update guidance; nonzero session transfers remain compatible. Large machine-addressed transfers require the corresponding native agent release.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- 523d8f9: Release the workbench correction for permission-aware optional reads: keep published Knowledge available to readers without requesting management-only pending entries, and discover rigs and Connected Machines only with their existing workspace read permissions. Preserve authorized errors and invalidate stale results when authority changes. No API permission or runtime authorization changes.
+- Updated dependencies [a254a76]
+- Updated dependencies [373f408]
+- Updated dependencies [afff3f9]
+- Updated dependencies [6156fab]
+- Updated dependencies [e6f56a1]
+- Updated dependencies [84688e2]
+- Updated dependencies [cf899f4]
+- Updated dependencies [cf899f4]
+- Updated dependencies [c602300]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [7837e4f]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [89ac8a8]
+- Updated dependencies [f20f60c]
+- Updated dependencies [91dc10d]
+- Updated dependencies [9be9a82]
+- Updated dependencies [3b980e6]
+  - @opengeni/db@4.1.0
+  - @opengeni/runtime@4.1.0
+  - @opengeni/contracts@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/documents@4.1.0
+  - @opengeni/events@4.1.0
+  - @opengeni/capabilities@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/storage@4.1.0
+  - @opengeni/vaults@4.1.0
+  - @opengeni/network@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

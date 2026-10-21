@@ -6,7 +6,7 @@ import {
   ConnectedAgents,
   type ConnectedAgentsLocation,
 } from "@/components/organization-access/connected-agents";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import type { McpConnectionsApi } from "@/lib/mcp-connections";
 
 /** Organization settings > Developer > Connected agents, on the live API. */

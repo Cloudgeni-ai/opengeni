@@ -13,19 +13,19 @@ import {
   VariableIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { DisabledReason } from "@/components/ui/disabled-reason";
-import { LineTabs, LineTabsList, LineTabsTrigger } from "@/components/ui/line-tabs";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { DisabledReason } from "@opengeni/react/ui/disabled-reason";
+import { LineTabs, LineTabsList, LineTabsTrigger } from "@opengeni/react/ui/line-tabs";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   PageHeader,
   PageHeaderStyleProvider,
   type PageHeaderVariant,
-} from "@/components/ui/page-header";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
-import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/page-header";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { organization, reviewItems, schedules, variableSets } from "../fixtures";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";

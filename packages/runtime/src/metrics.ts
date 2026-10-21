@@ -1,4 +1,5 @@
 import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
+import type { SandboxSetupOperationObservation } from "./sandbox/operation-purpose";
 
 export const MCP_TOOL_CALL_OUTCOMES = [
   "success",
@@ -94,6 +95,12 @@ export type McpLifecyclePolicy = (typeof MCP_LIFECYCLE_POLICIES)[number];
 export type McpLifecycleOutcome = (typeof MCP_LIFECYCLE_OUTCOMES)[number];
 
 export type RuntimeMetricsHooks = {
+  /**
+   * One platform setup operation on a raw provider session (lifecycle hooks,
+   * run credentials, file resources, repository skill discovery). Operations
+   * outside a setup purpose scope are measured by the routed veneer instead.
+   */
+  onSandboxSetupOperation?: (input: SandboxSetupOperationObservation) => void;
   onModelCall?: (input: {
     provider: string;
     outcome: "completed" | "failed";

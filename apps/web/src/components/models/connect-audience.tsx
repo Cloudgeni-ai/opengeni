@@ -3,10 +3,10 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useState } from "react";
 
 import type { ConnectionAccessKind } from "@/components/connection-access-settings";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { CheckboxField } from "@/components/ui/field";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { CheckboxField } from "@opengeni/react/ui/field";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 
 /* ----------------------------------------------------------------------------
    Connect account, step two: which workspaces can use what you connect.

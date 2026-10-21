@@ -23,26 +23,26 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { Section, SectionStack, type SectionVariant } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow } from "@/components/ui/setting-row";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { Section, SectionStack, type SectionVariant } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import {
   NavGroup,
   NavItem,
   NavItemSkeleton,
   SettingsNav,
   type NavItemSize,
-} from "@/components/ui/settings-nav";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/settings-nav";
+import { Switch } from "@opengeni/react/ui/switch";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   chats,

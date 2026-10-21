@@ -16,7 +16,7 @@ import {
   upsertConnectorActionPolicy,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;

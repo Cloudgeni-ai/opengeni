@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Session } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { scheduledConnectionSurfaceEligibility } from "../src/domain/scheduled-tasks";
 
 const googleTools = ["editable_artifact_export", "editable_artifact_export_status"] as const;

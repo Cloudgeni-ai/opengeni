@@ -109,6 +109,7 @@ import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
 } from "./turn-tool-cancellation";
+import { SelfhostedControlError } from "./selfhosted/control-rpc";
 
 export {
   isExecSessionLostBanner,
@@ -3285,7 +3286,12 @@ export class SandboxChannelAService {
 
   /** Run a bounded command to physical completion and return buffered output.
    *  A deadline cancels the exact provider operation, proves its process group
-   *  absent, and settles any retained-process admission before returning 124. */
+   *  absent, and settles any retained-process admission before returning 124.
+   *  124 says the deadline ended the command, so it is returned only with that
+   *  proof. A machine agent's failure past the deadline means the command's end
+   *  was not proven (its agent was replaced or stopped answering and the
+   *  command was handed to the session's ledger, or it never reached an agent):
+   *  that failure is thrown as it is, since its message says what is known. */
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
@@ -3316,6 +3322,7 @@ export class SandboxChannelAService {
     } catch (error) {
       controller.cancel(error);
       await controller.waitForQuiescence();
+      if (timedOut && error instanceof SelfhostedControlError) throw error;
       if (!timedOut && !(error instanceof TurnSandboxCommandCancelledError)) throw error;
       r = {
         stdout: "",

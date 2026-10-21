@@ -22,12 +22,9 @@ import {
   publishWorkspaceArtifactVersion,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Hono } from "hono";
@@ -726,6 +723,137 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
     expect(immutableError).toBeInstanceOf(Error);
     expect(String(immutableError)).toContain("workspace artifact history is immutable");
+  }, 60_000);
+
+  test("duplicates a Site's current version into a new Site, idempotently", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const publishPermissions: Permission[] = ["artifacts:publish", "documents:search"];
+    const original = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Duplicable board",
+            description: "Copied with its source",
+            html: "<!doctype html><h1>Original</h1>",
+            source: {
+              entrypoint: "src/index.tsx",
+              files: [{ path: "src/index.tsx", content: "export const original = true;" }],
+            },
+            requestedTools: [{ serverId: "docs", toolName: "search_documents" }],
+            idempotencyKey: "duplicate-original",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${original.artifact.id}/duplicate`;
+    const body = JSON.stringify({ idempotencyKey: "duplicate-once" });
+
+    expect((await request(grant, ["artifacts:read"], path, { method: "POST", body })).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await request(
+          otherGrant,
+          publishPermissions,
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${original.artifact.id}/duplicate`,
+          {
+            method: "POST",
+            body,
+          },
+        )
+      ).status,
+    ).toBe(404);
+
+    const response = await requestAsCanonicalLocalHuman(path, { method: "POST", body });
+    expect(response.status).toBe(201);
+    const copy = WorkspaceArtifactMutationResponse.parse(await response.json());
+    expect(copy.artifact.id).not.toBe(original.artifact.id);
+    expect(copy.artifact.title).toBe("Duplicable board (copy)");
+    expect(copy.artifact.description).toBe("Copied with its source");
+    expect(copy.artifact.visibility).toBe(original.artifact.visibility);
+    expect(copy.artifact.currentVersion?.revision).toBe(1);
+    expect(copy.version.requestedTools).toEqual(original.version.requestedTools);
+
+    const copied = WorkspaceArtifactContentResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${copy.artifact.id}/content`)).json(),
+    );
+    expect(copied.html).toBe("<!doctype html><h1>Original</h1>");
+    expect(copied.source.files).toEqual([
+      { path: "src/index.tsx", content: "export const original = true;" },
+    ]);
+
+    const replay = WorkspaceArtifactMutationResponse.parse(
+      await (await requestAsCanonicalLocalHuman(path, { method: "POST", body })).json(),
+    );
+    expect(replay.replayed).toBe(true);
+    expect(replay.artifact.id).toBe(copy.artifact.id);
+
+    const titled = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(path, {
+          method: "POST",
+          body: JSON.stringify({ title: "Second board", idempotencyKey: "duplicate-titled" }),
+        })
+      ).json(),
+    );
+    expect(titled.artifact.title).toBe("Second board");
+
+    // The key belongs to this Site's copy: another Site with the same metadata
+    // and key gets its own copy instead of replaying this one.
+    const twin = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Duplicable board",
+            description: "Copied with its source",
+            html: "<!doctype html><h1>Twin</h1>",
+            idempotencyKey: "duplicate-twin",
+          }),
+        })
+      ).json(),
+    );
+    const twinCopyResponse = await requestAsCanonicalLocalHuman(
+      `${base}/${twin.artifact.id}/duplicate`,
+      { method: "POST", body },
+    );
+    expect(twinCopyResponse.status).toBe(201);
+    const twinCopy = WorkspaceArtifactMutationResponse.parse(await twinCopyResponse.json());
+    expect(twinCopy.replayed).toBe(false);
+    expect(twinCopy.artifact.id).not.toBe(copy.artifact.id);
+    // An HTML-only Site's copy stays HTML-only and shares the stored content.
+    expect(twinCopy.version.sourceSha256).toBe(twin.version.sourceSha256);
+    expect(twinCopy.version.sizeBytes).toBe(twin.version.sizeBytes);
+
+    // A committed copy replays even after the original changes.
+    const renamed = await requestAsCanonicalLocalHuman(`${base}/${original.artifact.id}/versions`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Renamed board",
+        html: "<!doctype html><h1>Changed</h1>",
+        expectedCurrentVersionId: original.version.id,
+        idempotencyKey: "duplicate-original-rename",
+      }),
+    });
+    expect(renamed.status).toBe(200);
+    const afterRename = await requestAsCanonicalLocalHuman(path, { method: "POST", body });
+    expect(afterRename.status).toBe(201);
+    const replayAfterRename = WorkspaceArtifactMutationResponse.parse(await afterRename.json());
+    expect(replayAfterRename.replayed).toBe(true);
+    expect(replayAfterRename.artifact.id).toBe(copy.artifact.id);
+    expect(replayAfterRename.artifact.title).toBe("Duplicable board (copy)");
+
+    // The same key with a different request is a conflict, not a silent replay.
+    expect(
+      (
+        await requestAsCanonicalLocalHuman(path, {
+          method: "POST",
+          body: JSON.stringify({ title: "Other title", idempotencyKey: "duplicate-once" }),
+        })
+      ).status,
+    ).toBe(409);
   }, 60_000);
 
   test("carries exact attempt provenance through create, publish, rollback, and replay", async () => {

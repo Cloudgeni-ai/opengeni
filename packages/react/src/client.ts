@@ -171,15 +171,19 @@ type SessionClientMethods = Pick<
       | "createVideoArtifactPlaybackSource"
       | "streamWorkspaceLiveEvents"
       | "listSessionBackgroundCommands"
+      | "listWorkspaceBackgroundCommands"
       | "cancelSessionBackgroundCommand"
       | "getComputerInputPosture"
       | "getSessionModelAccount"
     >
   >;
 
-/** Compact list transport is optional for scripted and older clients. */
+/**
+ * Compact list transport is optional for scripted and older clients, and so is
+ * the attention mutation an open conversation uses to mark itself read.
+ */
 export type SessionClientLike = SessionClientMethods &
-  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal">>;
+  Partial<Pick<OpenGeniClient, "listSessionSummaryPage" | "findGoal" | "updateSessionAttention">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -210,6 +214,18 @@ export type EmbeddedSessionClientLike = Pick<
   | "sendApprovalDecision"
 > & {
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+  /**
+   * Optional: lets an open conversation mark itself read while the person
+   * watches it. Without it the conversation works, but replies stay unread.
+   */
+  updateSessionAttention?: OpenGeniClient["updateSessionAttention"] | undefined;
+  /**
+   * Optional: lets conversation history see what the server's history filter
+   * applied and whether a page has more. Without it history stays correct on
+   * every server version, but keeps each long turn's tool calls and model
+   * bookkeeping in its reads.
+   */
+  listEventPage?: OpenGeniClient["listEventPage"] | undefined;
 };
 
 /** Event-read surface shared by hooks that optionally tail a session. */
@@ -257,7 +273,8 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "activateCodexRealtimeConnection"
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"
->;
+> &
+  Partial<Pick<OpenGeniClient, "negotiateRealtimeWebsocket">>;
 
 /** Exact public SDK surface required by cross-surface human interventions. */
 export type EmbeddedInterventionClientLike = Pick<

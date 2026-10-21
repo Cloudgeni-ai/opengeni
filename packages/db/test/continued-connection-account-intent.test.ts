@@ -6,7 +6,7 @@ import type {
   McpConnectionAccountBinding,
   McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { seedSenderConnections } from "./sender-connection-fixture";
 import {
   addSessionSystemUpdate,

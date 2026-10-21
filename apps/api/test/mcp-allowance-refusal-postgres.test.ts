@@ -12,12 +12,9 @@ import {
   setMemberAllowance,
   setWorkspaceAllowance,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { createApp } from "../src/app";
 

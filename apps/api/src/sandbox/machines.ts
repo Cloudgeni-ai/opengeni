@@ -23,6 +23,8 @@ import type { Settings } from "@opengeni/config";
 import {
   enrollmentMacPermissions,
   getSession,
+  getSessionForSubject,
+  getSessionMachineAccess,
   getLiveEnrollmentConnection,
   listEnrollments,
   listSandboxes,
@@ -96,7 +98,7 @@ export function machineUpdateBlockedReason(os: string, version: string | null): 
   const order = version ? compareAgentVersions(version, "0.1.29") : null;
   return order !== null && order >= 0
     ? null
-    : "Install Opengeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+    : "Install the connected-machine agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
 }
 
 type AgentUpdateRecord = EnrollmentRecord["agentUpdate"];
@@ -186,6 +188,9 @@ function connectionAuthorityFor(
     leaseExpiresAt: enrollment.connectionLeaseExpiresAt,
     duplicateRunnerDeniedCount: enrollment.connectionDuplicateDeniedCount,
     duplicateRunnerDeniedAt: enrollment.connectionDuplicateDeniedAt,
+    ...(!liveConnection && enrollment.wentOfflineReason === "credentials_expired"
+      ? { authenticationError: "credentials_expired" as const }
+      : {}),
   };
 }
 
@@ -281,7 +286,9 @@ export async function listMachines(
   let activeEpoch = 0;
   let session: Awaited<ReturnType<typeof getSession>> | null = null;
   if (input.sessionId) {
-    session = await getSession(db, workspaceId, input.sessionId);
+    session = input.subjectId
+      ? await getSessionForSubject(db, workspaceId, input.sessionId, input.subjectId, "target")
+      : await getSession(db, workspaceId, input.sessionId);
     if (session) {
       const pointer = await readActiveSandbox(db, workspaceId, input.sessionId);
       activeSandboxId = pointer?.activeSandboxId ?? null;
@@ -443,5 +450,14 @@ export async function listMachines(
   );
   machines.push(...machineViews.filter((machine): machine is MachineView => machine !== null));
 
-  return { activeSandboxId, activeEpoch, machines };
+  const sessionMachineAccess =
+    session && input.subjectId && input.accountId
+      ? await getSessionMachineAccess(db, {
+          accountId: input.accountId,
+          workspaceId,
+          sessionId: session.id,
+          subjectId: input.subjectId,
+        })
+      : null;
+  return { activeSandboxId, activeEpoch, machines, sessionMachineAccess };
 }

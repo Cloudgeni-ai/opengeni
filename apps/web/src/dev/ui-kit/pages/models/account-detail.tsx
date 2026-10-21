@@ -13,8 +13,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { CopyField, copyText } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField, copyText } from "@opengeni/react/ui/copy-field";
 import {
   DetailBody,
   DetailFact,
@@ -23,28 +23,28 @@ import {
   DetailHeader,
   DetailSection,
   useDetailPresentation,
-} from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-sheet";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/detail-page";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup } from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
 
 import { KIT_NOW, KIT_TIME_ZONE, currentWorkspace, workspaces, you } from "../../fixtures";
 import { ProviderTile } from "./marks";

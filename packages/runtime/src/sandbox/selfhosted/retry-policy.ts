@@ -13,7 +13,7 @@
 // clock, no transport, and no session. The sleep + jitter side effects live behind
 // the injected `SelfhostedRetryClock` so tests are deterministic.
 
-import type { SelfhostedControlError } from "./control-rpc";
+import { RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY, type SelfhostedControlError } from "./control-rpc";
 
 /**
  * The read-only, idempotent-safe control ops that MAY be retried after a TIMEOUT
@@ -125,11 +125,28 @@ export function decideSelfhostedRetry(input: {
 }): SelfhostedRetryDecision {
   const { opKind, error, drainingRetries, timeoutRetries, neverSentRetries = 0, jitter } = input;
 
+  if (
+    error.connectionReplaced &&
+    !error.neverSent &&
+    SELFHOSTED_IDEMPOTENT_READONLY_OPS.has(opKind)
+  ) {
+    // The agent restarted with a read in flight: read again from the new one.
+    if (timeoutRetries >= SELFHOSTED_TIMEOUT_MAX_RETRIES) {
+      return { action: "fail" };
+    }
+    return { action: "retry", delayMs: selfhostedRetryBackoffMs(timeoutRetries, jitter) };
+  }
+
   if (error.neverSent) {
     // Provably not executed (the request never reached the machine) → safe to
     // re-issue for ANY op kind. Bounded so a genuinely-offline machine surfaces
     // honestly rather than hanging the turn.
     if (neverSentRetries >= SELFHOSTED_NEVER_SENT_MAX_RETRIES) {
+      return { action: "fail" };
+    }
+    // The transport already waited out its reconnect window for this exact
+    // process; another attempt would only wait that window again.
+    if (error.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] === "1") {
       return { action: "fail" };
     }
     return { action: "retry", delayMs: selfhostedRetryBackoffMs(neverSentRetries, jitter) };

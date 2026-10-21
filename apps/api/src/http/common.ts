@@ -1,4 +1,4 @@
-import { getSession, type Database } from "@opengeni/db";
+import { getSessionEventSequence, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export function boundedLimit(raw: string | undefined): number {
@@ -31,9 +31,9 @@ export async function requireSessionSequence(
   workspaceId: string,
   sessionId: string,
 ): Promise<number> {
-  const session = await getSession(db, workspaceId, sessionId);
-  if (!session) {
+  const sequence = await getSessionEventSequence(db, workspaceId, sessionId);
+  if (sequence === null) {
     throw new HTTPException(404, { message: "session not found" });
   }
-  return session.lastSequence;
+  return sequence;
 }

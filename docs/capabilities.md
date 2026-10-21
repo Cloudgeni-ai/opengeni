@@ -2,11 +2,14 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, Skill, API Integration, and Integration Facet mutations
+Capability, Plugin, API Integration, and Integration Facet mutations
 require the narrow `capabilities:manage` permission. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
+Workspace Skill authoring, review, install, import and removal instead require
+`documents:manage`, which ordinary Members hold: workspace Skills are shared
+team content.
 
 The catalog merges:
 
@@ -691,7 +694,7 @@ enabled strip carries only `mcp`/`api` rows, so its one remove affordance is
 
 The Connectors search and kind filters are scoped to Connectors. The catalog is
 narrowed to `kind: "mcp"` and `kind: "api"` items once
-(`isConnectorCatalogItem` in `apps/web/src/lib/capabilities.ts`) before the
+(`isConnectorCatalogItem` in `packages/react/src/app/lib/capabilities.tsx`) before the
 Featured, Enabled, Browse, and count projections are derived, so no Skill,
 or Plugin row can appear in any of them and the chip counts describe what
 that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly

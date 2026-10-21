@@ -16,7 +16,7 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -38,6 +38,11 @@ import {
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { ABSENT_USAGE_HISTORY_POSTURE } from "./fixtures/absent-usage-history-posture";
+import {
+  MAINTENANCE_PRIVATE_TABLES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
+} from "../src/runtime-posture";
 import {
   isSubscriptionSessionBindingRollingConflict,
   readSubscriptionSessionBinding,
@@ -405,10 +410,14 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "billing_subscription_operations",
       // 0820 (retained browser downloads).
       "browser_session_retained_downloads",
+      // 0890 (model fact reconciliation progress and candidates).
+      "model_call_fact_reconciliation_candidates",
+      "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
@@ -430,6 +439,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_runtime_conversations",
       "site_runtime_rate_windows",
       "site_runtime_usage",
+      // 0842 adds private Site/chat grants to both posture inventories.
+      "site_session_access",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
@@ -460,10 +471,16 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "subscription plan Free anniversary helper is missing",
       "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
       ...missing0735Routines,
+      // Usage-history routines arrive in the withheld 0871/0872.
+      ...ABSENT_USAGE_HISTORY_POSTURE,
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
       // tables the runtime and protected contracts list.
       `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
       `protected tables are missing: ${PROTECTED_TABLES.join(", ")}`,
+      // Nor session-tree machine consent and agent-child provenance (0851).
+      "owner-internal target-schema helper guard_session_agent_creation_provenance() is missing or ambiguous",
+      "owner-internal target-schema helper personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid) is missing or ambiguous",
+      "owner-internal target-schema helper personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid) is missing or ambiguous",
       // Nor the personal machine consent helpers (0823).
       "owner-internal target-schema helper live_session_turn_machine_consent(uuid) is missing or ambiguous",
       "owner-internal target-schema helper bind_session_attempt_machine_consent(uuid, uuid, uuid) is missing or ambiguous",
@@ -473,18 +490,26 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
         (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
       ),
       "owner-internal target-schema helper set_subscription_plan_catalog(jsonb, text, text) is missing or ambiguous",
+      "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
       ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
       ),
       ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
       ),
+      // Nor the chat-visible machine access explanation (0841).
+      "target-schema runtime capability get_session_machine_access(uuid, uuid, uuid) is missing or ambiguous",
       // Nor personal machine consent (0823) or the private-actor visibility
       // helper the inlined session visibility probe calls (0805).
       "target-schema runtime capability consent_session_turn_personal_machine(uuid, uuid, uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean) is missing or ambiguous",
       "target-schema runtime capability session_private_actor_visible_keys() is missing or ambiguous",
       "runtime role cannot read the subscription plan catalog",
+      // Nor the private-file lookup (0854).
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+      // Nor selected-workspace Slack bot access (0864).
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),
@@ -494,6 +519,19 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "Site cancellation policy predicate is missing or unsafe",
       "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
       "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
+      // Nor the strict-owner maintenance projections and claim boundaries (0848–0849).
+      ...MAINTENANCE_PRIVATE_TABLES.map(
+        (table) => `maintenance probe index ${table} is missing or accessible to runtime`,
+      ),
+      // The two checkpoint validators already exist in this historical schema;
+      // provisioning revokes their runtime EXECUTE even before 0849 wraps them.
+      ...MAINTENANCE_PROBE_OWNER_ROUTINES.filter(
+        (routine) =>
+          routine !== "validate_sandbox_checkpoint_refs()" &&
+          routine !== "validate_sandbox_checkpoint_artifact_refs()",
+      ).map((routine) => `maintenance probe helper ${routine} is missing or unsafe`),
+      "maintenance claim predicate maintenance_claim_active(text, text) is missing or unsafe",
+      "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
     ];
     expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });

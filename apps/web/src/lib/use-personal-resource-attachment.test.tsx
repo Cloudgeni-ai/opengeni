@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { OpenGeniApiError, type ResourceAuthorityScope } from "@opengeni/sdk";
+import { OpenGeniApiError, type AccessContext, type ResourceAuthorityScope } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   actRun,
@@ -8,11 +8,11 @@ import {
   renderHook,
 } from "../../../../packages/react/test/render-hook";
 
-import { managedSelfContextIdentity } from "./managed-self-context";
+import { managedSelfContextIdentity } from "@opengeni/react/app/lib/managed-self-context";
 import {
   useFixedRigScope,
   usePersonalResourceAttachment,
-} from "./use-personal-resource-attachment";
+} from "@opengeni/react/app/lib/use-personal-resource-attachment";
 
 registerDom();
 afterEach(() => document.body.replaceChildren());
@@ -23,6 +23,10 @@ const personalWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const rigId = "77777777-7777-4777-8777-777777777777";
 const workspace = { id: workspaceId, accountId: organizationId };
 type ResourceKind = "rig" | "connected_machine";
+
+function access(permissions = ["rigs:use", "enrollments:read"]): AccessContext {
+  return { workspaceGrants: [{ workspaceId, permissions }] } as AccessContext;
+}
 
 function identity(principal: string) {
   return {
@@ -111,6 +115,27 @@ function personalClient(input?: {
 }
 
 describe("useFixedRigScope", () => {
+  test("disabled optional lookup never fetches and hides a previously classified rig", async () => {
+    let calls = 0;
+    const client = {
+      getRig: async () => {
+        calls++;
+        return rig();
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const hook = await renderHook(
+      ({ enabled }: { enabled: boolean }) => useFixedRigScope(client, workspaceId, rigId, enabled),
+      { enabled: false },
+    );
+    expect(calls).toBe(0);
+    await hook.rerender({ enabled: true });
+    await flush();
+    expect(hook.result.current).toBe("user");
+    await hook.rerender({ enabled: false });
+    expect(hook.result.current).toBeNull();
+    expect(calls).toBe(1);
+    await hook.unmount();
+  });
   test("classifies the fixed Rig through an exact ordinary catalog read", async () => {
     const requested: string[] = [];
     const client = {
@@ -149,6 +174,71 @@ describe("useFixedRigScope", () => {
 });
 
 describe("usePersonalResourceAttachment", () => {
+  test("exact acceptance reader grants make no optional reads; revocation fences late catalog results", async () => {
+    const readerPermissions = [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "files:read",
+      "files:write",
+      "artifacts:read",
+      "documents:search",
+      "stream:view",
+      "stream:acknowledge",
+      "terminal:attach",
+    ];
+    const current = identity("owner");
+    const calls: string[] = [];
+    let finish!: (value: ReturnType<typeof rig>[]) => void;
+    const client = {
+      listRigs: async () => {
+        calls.push("rigs");
+        return await new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+      listUserResourceAuthorities: async (
+        _workspace: string,
+        options: { resourceKind: ResourceKind },
+      ) => {
+        calls.push(options.resourceKind);
+        return authorityPage(true, options.resourceKind);
+      },
+    } as unknown as OpenGeniBrowserClient;
+    const hook = await renderHook(
+      ({ permissions }: { permissions: string[] }) =>
+        usePersonalResourceAttachment({
+          client,
+          accessContext: access(permissions),
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          fixed: { rigId, connectedMachine: null },
+          personalWorkspaceTarget: false,
+        }),
+      { permissions: readerPermissions },
+    );
+    await flush();
+    expect(calls).toEqual([]);
+    expect(hook.result.current.intent).toBeUndefined();
+    expect(hook.result.current.error).toBeNull();
+    await hook.rerender({ permissions: ["rigs:use"] });
+    expect(calls).toEqual(["rigs", "rig"]);
+    await hook.rerender({ permissions: readerPermissions });
+    await actRun(() => finish([rig()]));
+    await flush();
+    expect(hook.result.current.catalog?.rigs).toEqual([]);
+    expect(hook.result.current.selected.resourceCount).toBe(0);
+    expect(hook.result.current.intent).toBeUndefined();
+    await hook.rerender({ permissions: ["enrollments:read"] });
+    await flush();
+    expect(calls).toEqual(["rigs", "rig", "connected_machine"]);
+    expect(hook.result.current.catalog?.connectedMachineAuthorities).toHaveLength(1);
+    await hook.unmount();
+  });
   test("discovers personal options without surfacing authority failure when nothing is selected", async () => {
     let calls = 0;
     const client = {
@@ -165,6 +255,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       () =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -205,6 +296,7 @@ describe("usePersonalResourceAttachment", () => {
       ({ principal }: { principal: string }) => {
         const current = identity(principal);
         return usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -242,6 +334,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       () =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -305,6 +398,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       () =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -359,6 +453,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         ({ authorityEpoch }: { authorityEpoch: number }) =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -452,6 +547,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       ({ authorityEpoch }: { authorityEpoch: number }) =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -511,6 +607,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       () =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -592,6 +689,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       () =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,
@@ -630,6 +728,7 @@ describe("usePersonalResourceAttachment", () => {
         const hook = await renderHook(
           () =>
             usePersonalResourceAttachment({
+              accessContext: access(),
               client,
               authMode: "managedSession",
               authSession: current.authSession,
@@ -658,6 +757,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -684,6 +784,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -710,6 +811,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -745,6 +847,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -783,6 +886,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -825,6 +929,7 @@ describe("usePersonalResourceAttachment", () => {
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
+            accessContext: access(),
             client,
             authMode: "managedSession",
             authSession: current.authSession,
@@ -862,6 +967,7 @@ describe("usePersonalResourceAttachment", () => {
     const hook = await renderHook(
       ({ enabled }: { enabled: boolean }) =>
         usePersonalResourceAttachment({
+          accessContext: access(),
           client,
           authMode: "managedSession",
           authSession: current.authSession,

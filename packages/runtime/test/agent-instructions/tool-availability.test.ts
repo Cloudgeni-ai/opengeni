@@ -7,7 +7,7 @@ import {
   type Permission,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   DEFAULT_AGENT_IDENTITY,
   composeModularAgentInstructions,
@@ -159,7 +159,9 @@ describe("deriveAgentPromptToolAvailability", () => {
     }
     const composed = compose(view);
     expect(composed).toContain("## Tool discovery");
-    expect(composed).toContain("stays callable by its exact name for the rest of the session");
+    expect(composed).toContain(
+      "Once its schema is in context, call the tool by name or through `tool_invoke`",
+    );
     expect(composed).toContain("`generate_image` is a runtime tool");
     expect(composed).toContain("Use `command_input` only to send input where supported");
   });

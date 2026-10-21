@@ -46,7 +46,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { organizationApiKeyAccess, requireOrganizationApiKeyControlPermission } from "./api-keys";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import {
   integrationBody as body,
   integrationDeliveryProjection as deliveryProjection,

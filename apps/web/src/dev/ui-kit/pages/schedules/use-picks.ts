@@ -1,14 +1,14 @@
-import type { CadencePickerVariant } from "@/components/ui/cadence-picker";
-import type { DestructiveConfirmVariant } from "@/components/ui/destructive-confirm";
-import type { DisclosureVariant } from "@/components/ui/disclosure";
-import type { EmptyStateVariant } from "@/components/ui/empty-state";
-import type { RowListVariant } from "@/components/ui/list-row";
-import type { PageHeaderIconMode, PageHeaderVariant } from "@/components/ui/page-header";
-import type { SegmentedControlVariant } from "@/components/ui/segmented-control";
-import type { SelectMenuVariant } from "@/components/ui/select-menu";
-import type { SettingRowVariant } from "@/components/ui/setting-row";
-import type { NavItemSize } from "@/components/ui/settings-nav";
-import type { SwitchVariant } from "@/components/ui/switch";
+import type { CadencePickerVariant } from "@opengeni/react/ui/cadence-picker";
+import type { DestructiveConfirmVariant } from "@opengeni/react/app/components/ui/destructive-confirm";
+import type { DisclosureVariant } from "@opengeni/react/ui/disclosure";
+import type { EmptyStateVariant } from "@opengeni/react/ui/empty-state";
+import type { RowListVariant } from "@opengeni/react/ui/list-row";
+import type { PageHeaderIconMode, PageHeaderVariant } from "@opengeni/react/ui/page-header";
+import type { SegmentedControlVariant } from "@opengeni/react/ui/segmented-control";
+import type { SelectMenuVariant } from "@opengeni/react/ui/select-menu";
+import type { SettingRowVariant } from "@opengeni/react/ui/setting-row";
+import type { NavItemSize } from "@opengeni/react/ui/settings-nav";
+import type { SwitchVariant } from "@opengeni/react/ui/switch";
 
 import { usePick } from "../../picks";
 

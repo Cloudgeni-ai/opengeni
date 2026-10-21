@@ -24,38 +24,38 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Checkbox, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { InAppHelpLink } from "@/components/in-app-help-link";
-import { HelpLink } from "@/components/ui/inline-help";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Checkbox, Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
+import { HelpLink } from "@opengeni/react/ui/inline-help";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RevisionHistory, type Revision } from "@opengeni/react/ui/revision-history";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 import { errorText, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
@@ -73,7 +73,7 @@ import {
   type EntryRowActions,
 } from "./knowledge-library";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
-import { MoreMenu } from "@/components/ui/page-actions";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 /* ----------------------------------------------------------------------------
    One entry or collection: its own page with a back link, like a skill in

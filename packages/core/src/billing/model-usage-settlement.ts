@@ -206,7 +206,7 @@ export async function settleModelUsage(
     }
     if (unpinnedWorkspaceGatewayModel && chargesOpenGeniCredits) {
       throw new Error(
-        `Workspace Gateway custom model ${input.model} cannot charge Opengeni credits without pinned pricing`,
+        `Workspace Gateway custom model ${input.model} cannot charge credits without pinned pricing`,
       );
     }
   }

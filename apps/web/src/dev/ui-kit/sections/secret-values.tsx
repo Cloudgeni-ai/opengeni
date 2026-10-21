@@ -2,11 +2,11 @@ import { useEffect, useState, type ReactNode } from "react";
 import { EyeIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog, FormFrame } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormFrame } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
 import { SecretInput, SecretOnce, SecretValue } from "@/components/ui/secret-field";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import {

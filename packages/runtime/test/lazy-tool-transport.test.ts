@@ -1883,7 +1883,7 @@ describe("generic lazy tool dispatch", () => {
     expect(JSON.stringify(projected)).not.toContain("opengeni.lazy_dispatch.v1");
   });
 
-  test("preserves large generic search schemas across ordinary output truncation", async () => {
+  test("keeps candidate results compact even when every matched schema is huge", async () => {
     const tools = Array.from({ length: 8 }, (_, index) =>
       tool({
         name: `${SERVER_ID}__weather_${index}`,
@@ -1917,14 +1917,14 @@ describe("generic lazy tool dispatch", () => {
     );
     const parsed = JSON.parse(String(output)) as { tools: unknown[] };
     expect(parsed.tools.length).toBeGreaterThan(0);
-    expect(parsed.tools.length).toBeLessThan(tools.length);
-    expect(Buffer.byteLength(String(output))).toBeGreaterThan(48_000);
+    expect(parsed.tools.length).toBe(tools.length);
+    expect(Buffer.byteLength(String(output))).toBeLessThan(3_000);
     expect(Buffer.byteLength(String(output))).toBeLessThanOrEqual(
       MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
     );
 
     const item = { type: "function_call_result", callId: "search-1", output };
-    const truncated = boundModelToolOutputItem(item, 10_000) as typeof item;
+    const truncated = boundModelToolOutputItem(item, 100) as typeof item;
     expect(truncated.output).not.toBe(output);
     expect(String(truncated.output)).toContain("tokens truncated");
 
@@ -1961,6 +1961,41 @@ describe("generic lazy tool dispatch", () => {
     expect(() => JSON.parse(String(providerResult?.output))).not.toThrow();
   });
 
+  test("restores a truncated legacy full-schema receipt without consulting today's catalog", async () => {
+    const runtime = installLazyToolRuntime(
+      { getAllTools: async () => [] },
+      "openai_native",
+      new Set(),
+    );
+    const output = JSON.stringify({
+      tools: [{ name: "former__read", parameters: { type: "object" } }],
+    });
+    const marked = {
+      type: "function_call",
+      callId: "legacy",
+      name: "tool_search",
+      arguments: '{"query":"read"}',
+      providerData: { "opengeni.lazy_search.v1": { version: 1, output } },
+    };
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+    await wrapped.getResponse({
+      ...baseRequest([]),
+      input: [
+        marked,
+        {
+          type: "function_call_result",
+          callId: "legacy",
+          output: "truncated",
+        },
+      ] as ModelRequest["input"],
+    });
+    const input = inner.requests[0]!.input as Array<Record<string, unknown>>;
+    expect(input[1]!.output).toBe(output);
+    expect(input).toHaveLength(2);
+    expect(input[0]!.providerData).toBeUndefined();
+  });
+
   test("reserves only the control names installed by each transport", () => {
     const invokeNamedTool = tool({
       name: "tool_invoke",
@@ -1993,7 +2028,7 @@ describe("generic lazy tool dispatch", () => {
     expect(() => generic.refresh([invokeNamedTool])).toThrow(/reserved/);
   });
 
-  test("does not install an internal hosted registration search", () => {
+  test("never advertises the execution-only historical native search", () => {
     const runtime = installLazyToolRuntime(
       {
         async getAllTools() {
@@ -2009,7 +2044,9 @@ describe("generic lazy tool dispatch", () => {
       execute: async () => [],
     }) as unknown as Tool;
 
-    expect(runtime.controlTools.every((candidate) => candidate.type !== "hosted_tool")).toBe(true);
+    const historical = runtime.controlTools.find((candidate) => candidate.type === "hosted_tool");
+    expect(historical).toBeDefined();
+    expect(runtime.shouldHideSerializedTool(serializedFunction(historical!))).toBe(true);
     expect(
       runtime.shouldHideSerializedTool({
         type: "hosted_tool",
@@ -2066,8 +2103,8 @@ describe("OpenAI/Azure native client tool search", () => {
           model: "scripted",
           instructions: formatSkillCatalog([
             {
-              id: "builtin:opengeni-skills",
-              name: "opengeni-skills",
+              id: "builtin:skill-management",
+              name: "skill-management",
               description: "Manage Skills",
             },
           ]),
@@ -2103,7 +2140,7 @@ describe("OpenAI/Azure native client tool search", () => {
         await running;
         expect(outcome).toBe("completed");
         expect(reads).toBe(1);
-        expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
+        expect(JSON.stringify(model.requests[0])).toContain("builtin:skill-management");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
         expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
           "load_skill",

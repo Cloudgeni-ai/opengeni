@@ -2,16 +2,16 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRightIcon, BuildingIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { codexPoolCopy } from "@/components/models/codex-models";
-import { DetailInline, DetailPage } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { DetailInline, DetailPage } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import {
   SettingDangerRow,
   SettingNavRow,
@@ -19,11 +19,11 @@ import {
   SettingRowGroup,
   SettingRowSkeleton,
   useSettingRowField,
-} from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { UsageReadout } from "@/components/ui/usage-meter";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageReadout } from "@opengeni/react/ui/usage-meter";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { KIT_NOW, currentWorkspace, organization } from "../../fixtures";
 import {

@@ -2,21 +2,31 @@
 // and optional connector routes share this authenticated request helper so
 // connector-only code does not increase the core session bundle.
 import {
-  OpenGeniApiError,
   OpenGeniBrowserClient,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
 } from "@opengeni/sdk/browser";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import { desktopAppHeaders } from "@opengeni/react/app/lib/desktop";
 import { userActivityHeaders } from "./lib/user-activity";
 
-import type { AuthSession, ClientConfig } from "./types";
-import { beginAnalyticsRequest } from "./lib/analytics-observer";
+import type { AuthSession, ClientConfig } from "@opengeni/react/app/types";
+import { beginAnalyticsRequest } from "@opengeni/react/app/lib/analytics-observer";
+import {
+  ApiError,
+  apiErrorFromResponseBody,
+  isApiErrorStatus,
+} from "@opengeni/react/app/lib/app-api";
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
-import { noteClientRequestFailure } from "./lib/client-signals";
+import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
-import { browserAccountBridgeBlockersSnapshot } from "./lib/browser-account-bridge";
-import { decideVoiceDeployment, type VoiceDeploymentDecision } from "./lib/voice-deployment-guard";
+import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
+import {
+  decideVoiceDeployment,
+  voiceRelaunchUrl,
+  withVoiceDeploymentGuard,
+  type VoiceDeploymentDecision,
+} from "./lib/voice-deployment-guard";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -34,6 +44,12 @@ let apiUpdateNoticeContainer: HTMLElement | null = null;
 const boundedHttp1SseTransport = "http1-bounded";
 const boundedHttp1SseBatchContentType = "application/vnd.opengeni.sse-batch";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 4_000;
+// A bounded HTTP/1 batch that carried events usually has more right behind it
+// (a streaming answer, a Steer taking effect). Reconnect after this short
+// pause instead of the idle grace, so a live answer is not shown seconds
+// late; the pause still lets requests already queued for the freed
+// connection go first. Empty batches keep the idle grace.
+const HTTP1_BROWSER_SSE_ACTIVE_RECONNECT_GRACE_MS = 250;
 const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 // New APIs answer bounded HTTP/1 event requests from an immediate durable
 // snapshot. Keep a browser-owned backstop as well: it bounds a stalled network
@@ -111,54 +127,7 @@ if (typeof window !== "undefined") {
   });
 }
 
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly body: string,
-    options: {
-      code?: string;
-      retryable?: boolean;
-      outcomeUnknown?: boolean;
-      details?: Record<string, unknown>;
-      message?: string;
-    } = {},
-  ) {
-    super(options.message ?? `API ${status}: ${body}`);
-    this.name = "ApiError";
-    this.code = options.code;
-    this.retryable = options.retryable === true;
-    this.outcomeUnknown = options.outcomeUnknown === true;
-    this.details = options.details;
-  }
-
-  readonly code: string | undefined;
-  readonly retryable: boolean;
-  readonly outcomeUnknown: boolean;
-  readonly details: Record<string, unknown> | undefined;
-}
-
-export function apiErrorFromResponseBody(status: number, body: string): ApiError {
-  try {
-    const parsed = JSON.parse(body) as { error?: unknown };
-    if (typeof parsed.error !== "object" || parsed.error === null || Array.isArray(parsed.error)) {
-      return new ApiError(status, body);
-    }
-    const error = parsed.error as Record<string, unknown>;
-    return new ApiError(status, body, {
-      ...(typeof error.code === "string" ? { code: error.code } : {}),
-      ...(typeof error.message === "string" ? { message: error.message } : {}),
-      ...(error.retryable === true ? { retryable: true } : {}),
-      ...(error.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
-      ...(typeof error.details === "object" &&
-      error.details !== null &&
-      !Array.isArray(error.details)
-        ? { details: error.details as Record<string, unknown> }
-        : {}),
-    });
-  } catch {
-    return new ApiError(status, body);
-  }
-}
+export { ApiError, apiErrorFromResponseBody, isApiErrorStatus };
 
 export class AuthApiError extends Error {
   constructor(
@@ -172,12 +141,6 @@ export class AuthApiError extends Error {
   }
 }
 
-export function isApiErrorStatus(error: unknown, status: number): boolean {
-  return (
-    (error instanceof ApiError || error instanceof OpenGeniApiError) && error.status === status
-  );
-}
-
 /**
  * The console's API client is the public `@opengeni/sdk` client pointed at
  * the same API the console is served from. Auth headers are computed per
@@ -189,7 +152,7 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBr
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
-    headers: () => ({ ...authHeaders(), ...userActivityHeaders() }),
+    headers: () => ({ ...authHeaders(), ...userActivityHeaders(), ...desktopAppHeaders() }),
     fetch: async (input, init) => {
       const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
       if (actorBound) {
@@ -629,6 +592,7 @@ export function managedActorTrackedResponse(
   const reader = response.body!.getReader();
   let settled = false;
   let readerReleased = false;
+  let deliveredBytes = 0;
   let actorAbortReason: unknown | null = null;
   let cleanSeamGrace: Promise<void> | null = null;
   let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -729,9 +693,15 @@ export function managedActorTrackedResponse(
             // The native body has reached EOF and its HTTP/1 connection is now
             // free. Keep the wrapper logically live for a short grace period
             // so already-queued finite reads win the browser's newly available
-            // slots before the SDK reconnects this durable stream.
+            // slots before the SDK reconnects this durable stream. A batch
+            // that carried events reconnects sooner: more are likely queued.
             if (cleanCloseDelayMs > 0) {
-              await abortableDelay(cleanCloseDelayMs, signal);
+              await abortableDelay(
+                deliveredBytes > 0
+                  ? Math.min(cleanCloseDelayMs, HTTP1_BROWSER_SSE_ACTIVE_RECONNECT_GRACE_MS)
+                  : cleanCloseDelayMs,
+                signal,
+              );
             }
             if (actorAbortReason !== null) {
               controller.error(actorAbortReason);
@@ -741,6 +711,7 @@ export function managedActorTrackedResponse(
             if (settle()) controller.close();
             return;
           }
+          deliveredBytes += next.value.byteLength;
           controller.enqueue(next.value);
         } catch (error) {
           releaseReader();
@@ -847,6 +818,7 @@ export async function requestResponse(path: string, init?: RequestInit): Promise
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...authHeaders(),
       ...userActivityHeaders(),
+      ...desktopAppHeaders(),
       ...init?.headers,
     },
   });
@@ -1057,6 +1029,27 @@ export async function signOutManaged(): Promise<unknown> {
   return await authRequest<unknown>("/sign-out", { method: "POST" });
 }
 
+async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T> {
+  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
+    method: "POST",
+    credentials: "include",
+    // Managed-session mutations intentionally authenticate only with the
+    // Better Auth cookie. The contract header is protocol negotiation, not an
+    // access-key/bearer credential, and is required by the API before routing
+    // protected state changes.
+    headers: {
+      "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    handleApiContractResponse(response);
+    throw apiErrorFromResponseBody(response.status, await response.text());
+  }
+  return (await response.json()) as T;
+}
+
 export type CodexResetRedemptionPreparation = {
   attemptId: string;
   confirmationToken: string;
@@ -1136,27 +1129,6 @@ export async function redeemOrganizationCodexResetCredit(
     `/v1/organizations/${encodeURIComponent(organizationId)}/codex/accounts/${encodeURIComponent(accountId)}/reset-credits/redeem`,
     input,
   );
-}
-
-async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T> {
-  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
-    method: "POST",
-    credentials: "include",
-    // Managed-session mutations intentionally authenticate only with the
-    // Better Auth cookie. The contract header is protocol negotiation, not an
-    // access-key/bearer credential, and is required by the API before routing
-    // protected state changes.
-    headers: {
-      "content-type": "application/json",
-      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    handleApiContractResponse(response);
-    throw apiErrorFromResponseBody(response.status, await response.text());
-  }
-  return (await response.json()) as T;
 }
 
 // Request uses the same public auth boundary as sign-in and returns no account
@@ -1359,6 +1331,21 @@ function voiceReloadBlocked(): boolean {
 /** A stale tab that cannot reload right now says so plainly. */
 export function showVoiceUpdatePrompt(): void {
   showApiUpdateNotice(false);
+}
+
+/**
+ * The client a voice call runs on. Live voice starts only from the current
+ * build: a stale tab reloads once onto `sessionHref()` and resumes voice there
+ * via `?realtime=`.
+ */
+export function voiceRealtimeClient<
+  C extends { beginSessionRealtime: (...args: never[]) => Promise<unknown> },
+>(client: C, sessionHref: () => string): C {
+  return withVoiceDeploymentGuard(client, {
+    decide: checkVoiceDeployment,
+    relaunch: (model) => window.location.assign(voiceRelaunchUrl(sessionHref(), model)),
+    prompt: showVoiceUpdatePrompt,
+  });
 }
 
 function reloadIfStaleDeployment(config: ClientConfig): void {

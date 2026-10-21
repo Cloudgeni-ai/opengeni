@@ -7,8 +7,8 @@ import {
   assertMcpToolListWithinBounds,
 } from "@opengeni/runtime/mcp-network";
 import {
-  connectMcpStreamableHttpClient,
   legacyMcpClientError,
+  withMcpStreamableHttpClient,
   type McpStreamableHttpClient,
 } from "./mcp-streamable-http-client";
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
@@ -57,6 +57,12 @@ import {
   settingsWithMcpCapabilityServers,
   settingsWithApiIntegrationServers,
 } from "./capabilities";
+
+export class ConnectorConnectionRequiredError extends HTTPException {
+  constructor() {
+    super(409, { message: "Connect an account to manage its tool permissions" });
+  }
+}
 
 type Input = {
   db: Database;
@@ -236,7 +242,7 @@ async function resolveTarget(input: Input) {
   );
   const connection = visible.find((candidate) => candidate.id === binding?.connectionId) ?? null;
   if (ref && !connection) {
-    throw new HTTPException(409, { message: "Reconnect this connector to manage its tools" });
+    throw new ConnectorConnectionRequiredError();
   }
   if (connection?.subjectId && !input.personalOwnerVerified)
     throw new HTTPException(403, {
@@ -318,9 +324,8 @@ async function listTools(
   }
   const pinned = createPinnedIntegrationTransport({ network: input.settings });
   const deadline = AbortSignal.timeout(15_000);
-  let client: McpStreamableHttpClient | undefined;
-  try {
-    client = await connectMcpStreamableHttpClient({
+  const tools = await withMcpStreamableHttpClient(
+    {
       url: target.server.url,
       clientName: "opengeni-tool-permissions",
       clientVersion: "0.1.0",
@@ -334,16 +339,15 @@ async function listTools(
           }),
           MCP_MAX_RESPONSE_BYTES,
         ),
-    });
-    const tools = await collectConnectorToolPages(client, deadline).catch((error: unknown) => {
-      throw legacyMcpClientError(error);
-    });
-    return tools.filter(
-      (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
-    );
-  } finally {
-    await client?.close().catch(() => undefined);
-  }
+    },
+    (client) =>
+      collectConnectorToolPages(client, deadline).catch((error: unknown) => {
+        throw legacyMcpClientError(error);
+      }),
+  );
+  return tools.filter(
+    (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
+  );
 }
 
 /** Collect discovery pages without changing the caller's connection or authority. */

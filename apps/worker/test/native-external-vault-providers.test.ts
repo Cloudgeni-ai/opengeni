@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createProviderCallBudget, VaultProviderError } from "@opengeni/vaults";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { FakeKsm, loginData } from "../../../packages/vaults-keeper/test/fake-ksm";
 import {
   closeNativeExternalVaultProviders,

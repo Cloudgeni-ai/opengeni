@@ -3,7 +3,7 @@ import type Stripe from "stripe";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   createDb,
   completeSelfServiceOrganizationSetup,
@@ -50,6 +50,28 @@ async function* listed<T>(values: T[]) {
   yield* values;
 }
 
+function previousMonthlyAnchor(anniversary: Date): Date {
+  // A clamped prior month changes the account's permanent anniversary day.
+  // At least one of the previous two months has the requested UTC day.
+  for (const monthsBack of [1, 2]) {
+    const candidate = new Date(anniversary);
+    candidate.setUTCMonth(candidate.getUTCMonth() - monthsBack);
+    if (candidate.getUTCDate() === anniversary.getUTCDate()) return candidate;
+  }
+  throw new Error("Could not construct the exact Free anniversary fixture");
+}
+
+test("the Free fixture preserves UTC anniversaries across month ends and leap years", () => {
+  for (const [anniversary, expected] of [
+    ["2026-03-31T23:59:30.000Z", "2026-01-31T23:59:30.000Z"],
+    ["2026-03-29T23:59:30.000Z", "2026-01-29T23:59:30.000Z"],
+    ["2028-03-29T23:59:30.000Z", "2028-02-29T23:59:30.000Z"],
+    ["2026-01-31T00:00:30.000Z", "2025-12-31T00:00:30.000Z"],
+  ]) {
+    expect(previousMonthlyAnchor(new Date(anniversary!)).toISOString()).toBe(expected);
+  }
+});
+
 async function fixture(
   fixtureOptions: {
     upgradePeriodShiftSeconds?: number;
@@ -69,11 +91,17 @@ async function fixture(
         operationId: crypto.randomUUID(),
         requestFingerprint: "b".repeat(64),
         trialCreditsEnabled: true,
+        trialCreditModelIds: ["free-credit-test-model"],
       })
     ).organizationId;
+    const anniversary = new Date(Date.now() - fixtureOptions.eligibleAnniversaryAgoSeconds * 1000);
+    const anchor = previousMonthlyAnchor(anniversary);
     await shared.admin`update managed_accounts
-      set created_at = clock_timestamp() - interval '1 month' - make_interval(secs => ${fixtureOptions.eligibleAnniversaryAgoSeconds})
+      set created_at = ${anchor}
       where id = ${accountId}`;
+    const [period] = await shared.admin`select period_start
+      from opengeni_private.subscription_plan_free_anniversary(${anchor}, clock_timestamp())`;
+    expect(period!.period_start).toEqual(anniversary);
   } else {
     accountId = (
       await ensureManagedAccessForUser(client.db, {

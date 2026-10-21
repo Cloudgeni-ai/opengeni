@@ -1,0 +1,5248 @@
+// The session list — the rail's home. Uses workspace discovery for search and
+// independently paged project folders for browsing, with pins above the tree.
+// Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
+// dot + single-line truncated title + relative time (visible at rest). The
+// active session (from the URL) is highlighted with an accent bar.
+import { t } from "../../lib/console-text";
+import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
+import { useOpenGeni } from "../../../session-context";
+import { useChannels } from "../../../hooks/use-channels";
+import { useSessionLineage } from "../../../hooks/use-session-lineage";
+import { useWorkspaceSessions } from "../../../hooks/use-workspace-sessions";
+import {
+  emptySessionListDirtyScopes,
+  invalidateSessionListScopes,
+  sessionListGroupRevision,
+} from "../../lib/session-list-dirty-scopes";
+import { SiteOriginLink } from "../session/site-origin-link";
+import { SiteSessionGroupHeading } from "./site-session-group-heading";
+import { SessionBrowseOrderControls } from "./session-browse-order-controls";
+import {
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+  type SessionListEntryResponse as SessionListResponse,
+} from "@opengeni/sdk";
+import { Link, useNavigate, useRouterState } from "../../lib/navigation";
+import {
+  ArchiveIcon,
+  ChevronRightIcon,
+  EllipsisIcon,
+  FolderIcon,
+  FolderPlusIcon,
+  FolderOpenIcon,
+  ListFilterIcon,
+  MailIcon,
+  MailOpenIcon,
+  MessagesSquareIcon,
+  PencilIcon,
+  PinIcon,
+  PlusIcon,
+  SearchIcon,
+  Trash2Icon,
+  LinkIcon,
+} from "lucide-react";
+import { toast } from "../../lib/toast";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+  type DragEvent,
+  type ReactNode,
+} from "react";
+
+import { useRail } from "./rail-context";
+import {
+  ActiveWorkMark,
+  RailTrailingMetadata,
+  SessionRowContent,
+  sessionRowAccessibleName,
+} from "./session-row-content";
+import { SessionRowHoverDetails } from "./session-row-hover-details";
+export { RailTrailingMetadata } from "./session-row-content";
+import { isPersonalWorkspace } from "../../lib/managed-self-context";
+import { sessionHoverDescription, sessionHoverFacts } from "../../lib/session-hover-facts";
+import { Button } from "../../../ui/button";
+import { ConfirmDialog } from "../../../ui/confirm-dialog";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from "../../../ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuCheck,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuTrigger,
+} from "../../../ui/dropdown-menu";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
+import { ChannelCreateDialog } from "./channel-create-dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
+import { useAppContext } from "../../app-context";
+import {
+  activeSessionContinuation,
+  advanceSessionPageIdentity,
+  applySessionArchiveProjection,
+  compareSessionArchiveOrder,
+  authoritativeSessionContinuationChannels,
+  emptySessionContinuation,
+  mergeSessionContinuation,
+  projectSessionArchiveMembership,
+  rebaseSessionContinuation,
+  reconcileRetainedSessionContinuationChannel,
+  sessionPageKey,
+} from "../../lib/session-pagination";
+import {
+  sessionMatchesPaginationGroup,
+  sessionPaginationGroupQuery,
+  sessionPaginationProjectGroup,
+  type SessionPaginationBrowseFilter,
+  type SessionPaginationGroup,
+} from "../../lib/session-group-pagination";
+import {
+  SESSION_GROUP_VISIBLE_STEP,
+  planSessionGroupFill,
+  sameSessionGroupFill,
+  sessionGroupDisclosurePlan,
+  sessionGroupWindowNodes,
+  type SessionGroupFillCandidate,
+} from "../../lib/session-group-window";
+import {
+  readSessionGroupWindows,
+  sessionGroupWindowMemoryId,
+  writeSessionGroupWindows,
+} from "../../lib/session-group-window-memory";
+import { pinLiveAnnouncement } from "../../lib/pin-live-announcement";
+import { analyticsAction } from "../../../ui/analytics-actions";
+import { countNeedsYou, filterNeedsYou } from "../../lib/needs-you";
+import {
+  SESSION_TITLE_MAX_LENGTH,
+  sessionDisplayTitle,
+  useInlineRename,
+} from "../../lib/session-rename";
+import {
+  applySessionChannelMove,
+  beginSessionChannelMove,
+  commitSessionChannelMove,
+  discardRejectedSessionChannelMove,
+  readSessionChannelMovePoint,
+  reconcileSessionChannelMovePointRead,
+  reconcileSessionChannelMoves,
+  rollbackSessionChannelMove,
+  type SessionChannelMoveOverrides,
+} from "../../lib/session-channel-move";
+import {
+  MAX_VISUAL_TREE_DEPTH,
+  defaultExpandedAncestors,
+  sessionAncestorPath,
+  sessionStateLabel,
+  sessionInputWait,
+  visualTreeDepth,
+} from "../../lib/session-rail";
+import {
+  cancelSessionRowRevealIntent,
+  consumeSessionRowRevealIntent,
+  requestSessionComposerFocus,
+  sessionFocusAttribute,
+  shouldRecordSessionRowFocusIntent,
+  shouldMoveSessionRowFocus,
+  shouldRestoreSessionFocus,
+  createSessionFocusCompletion,
+  type SessionFocusTarget,
+} from "../../lib/session-focus";
+import {
+  applySessionChannelProjection,
+  applySessionPinProjection,
+  applySessionRailProjection,
+  subscribeToSessionPinChanges,
+} from "../../lib/session-pins";
+import {
+  applySessionAttentionProjections,
+  localSessionDeliveryAttentionCounts,
+  latestSessionAttentionProjection,
+  notifySessionAttentionChanged,
+  subscribeToLocalSessionDeliveryAttention,
+  subscribeToSessionAttentionChanges,
+  type SessionAttentionProjection,
+} from "../../lib/session-attention";
+import {
+  buildPinnedRailSections,
+  channelRailSections,
+  groupSessionForestForBrowse,
+  sortSessionForest,
+  compareSessionBrowse,
+  projectRailSessions,
+  groupSessionsForRail,
+  mergeSessionForRail,
+  relativeTimeLabel,
+  sessionBrowseResultCount,
+  selectedDescendantNode,
+  sessionCreatorLabelMap,
+  visibleForestRows,
+  visibleTreeRows,
+  summarizeRailNodes,
+  summarizeRailStatusCounts,
+  sessionProjectTotals,
+  type RailStatusCounts,
+  SESSION_GROUP_LABELS,
+  SESSION_GROUP_ORDER,
+  type RailAggregateStatus,
+  type SessionTreeNode,
+  type SessionForest,
+  type SessionRecencyGroup,
+} from "../../lib/sessions-group";
+import {
+  readSessionBrowsePreferences,
+  DEFAULT_SESSION_BROWSE_PREFERENCES,
+  sessionBrowsePreferencesCustomized,
+  type SessionBrowsePreferences,
+  sessionBrowsePreferenceStorageId,
+  writeSessionBrowsePreferences,
+} from "../../lib/session-browse-preferences";
+import { railRowCreator } from "../../lib/creator-initials";
+import { formatWaitingSince } from "../../lib/format";
+import {
+  sessionDescendantCountAria,
+  sessionDescendantCountText,
+} from "../../lib/session-tree-count";
+import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
+import {
+  notifySessionListChanged,
+  subscribeToWorkspaceSessionListChanges,
+} from "../../lib/session-list-invalidation";
+import {
+  authoritativeSessionBranchChannels,
+  beginSessionBranchRequest,
+  commitSessionBranchPage,
+  readLoadedSessionBranchWindow,
+  failSessionBranchRequest,
+  sessionBranchNeedsHydration,
+  sessionBranchSummaryKey,
+  sessionBranchSummaryDecision,
+  upsertSessionBranchChild,
+  type SessionBranchPage,
+} from "../../lib/session-branch-cache";
+import { cn } from "../../lib/utils";
+import type { Channel, Session as SessionDetails } from "../../types";
+import type { RailSession as Session } from "../../lib/session-list-entry";
+import { useUiEventTarget } from "../../lib/ui-events";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { requestCommandMenu } from "../../lib/actions/events";
+import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
+import { useChatOperations } from "../../lib/actions/chat-operations";
+import { TooltipWithKeys } from "../command-menu/keycaps";
+
+/** True when the browser should own navigation (new tab / window / modified click). */
+function isModifiedNavigationClick(
+  event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "button">,
+): boolean {
+  return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
+}
+
+/** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
+export function NewSessionLink(props: {
+  className?: string | undefined;
+  "aria-label"?: string | undefined;
+  channelId?: string | null | undefined;
+  children: ReactNode;
+}) {
+  const windowEvents = useUiEventTarget("window");
+  const newChatShortcut = useActionShortcut("chat.new");
+  const rail = useRail();
+  const context = useAppContext();
+  return (
+    <Link
+      to="/workspaces/$workspaceId/sessions"
+      params={{ workspaceId: rail.workspaceId }}
+      search={props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }}
+      aria-label={props["aria-label"]}
+      aria-keyshortcuts={newChatShortcut?.ariaKeys}
+      className={props.className}
+      {...analyticsAction("new_session")}
+      onClick={(event) => {
+        if (isModifiedNavigationClick(event)) return;
+        context.resetSessionView();
+        rail.setDrawerOpen(false);
+        // Same-route Link may not remount the index or rerun search-keyed effects.
+        queueMicrotask(() => requestCreateComposerFocus(windowEvents, props.channelId));
+      }}
+    >
+      {props.children}
+    </Link>
+  );
+}
+
+type RenameFn = (
+  workspaceId: string,
+  sessionId: string,
+  title: string,
+) => Promise<SessionDetails | null>;
+type PinFn = (
+  session: Session,
+  pinned: boolean,
+  restoreFocusTo?: SessionFocusTarget,
+) => Promise<Session | null>;
+type MoveToChannelFn = (
+  session: Session,
+  channelId: string | null,
+  restoreFocusTo?: SessionFocusTarget,
+) => Promise<void>;
+const SESSION_DRAG_TYPE = "application/x-opengeni-session";
+const PROJECT_DRAG_TYPE = "application/x-opengeni-project";
+type UpdateAttentionFn = (
+  session: Session,
+  update: { unread?: boolean; activelyWorking?: boolean },
+) => Promise<void>;
+type ArchiveFn = (
+  session: Session,
+  archived: boolean,
+  restoreFocusTo?: SessionFocusTarget,
+) => Promise<void>;
+type RequestDeleteFn = (session: Session) => void;
+type PinOverride = { session: Session; operation: number };
+type PendingSessionFocus = {
+  sessionId: string;
+  operation: number;
+  target: SessionFocusTarget;
+  action?: "archive" | undefined;
+  settled: boolean;
+};
+type ChildPageState = SessionBranchPage<Session>;
+
+const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
+const ARCHIVED_SESSION_GROUP: SessionPaginationGroup = {
+  key: "archived",
+  label: "Archived",
+  kind: "archived",
+};
+
+function findSessionTreeNode(
+  nodes: readonly SessionTreeNode[],
+  sessionId: string | null,
+): SessionTreeNode | null {
+  if (!sessionId) return null;
+  for (const node of nodes) {
+    if (node.session.id === sessionId) return node;
+    const child = findSessionTreeNode(node.children, sessionId);
+    if (child) return child;
+  }
+  return null;
+}
+
+export function SessionList() {
+  const windowEvents = useUiEventTarget("window");
+  const rail = useRail();
+  const context = useAppContext();
+  const { workspaceSessionListEvent, workspaceControlEvent } = useOpenGeni();
+  const listHintsAvailable =
+    workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
+    workspaceSessionListEvent.available;
+  const [dirtyScopes, setDirtyScopes] = useState(emptySessionListDirtyScopes);
+  const knownListSessions = useRef<ReadonlyMap<string, Session>>(new Map());
+  useEffect(() => setDirtyScopes(emptySessionListDirtyScopes()), [rail.workspaceId]);
+  const sessionClient = context.client;
+  const setContextSession = context.setSession;
+  const navigate = useNavigate();
+  const activeSessionId = useRouterState({
+    select: (state): string | null => {
+      const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
+      return match?.[1] ?? null;
+    },
+  });
+  const [documentForeground, setDocumentForeground] = useState(() =>
+    Boolean(document.visibilityState === "visible" && document.hasFocus()),
+  );
+  useEffect(() => {
+    const reconcileDocumentForeground = () => {
+      setDocumentForeground(document.visibilityState === "visible" && document.hasFocus());
+    };
+    window.addEventListener("focus", reconcileDocumentForeground);
+    window.addEventListener("blur", reconcileDocumentForeground);
+    document.addEventListener("visibilitychange", reconcileDocumentForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileDocumentForeground);
+      window.removeEventListener("blur", reconcileDocumentForeground);
+      document.removeEventListener("visibilitychange", reconcileDocumentForeground);
+    };
+  }, []);
+  // Poll so running sessions surface and move to the top without a manual
+  // refresh; the previous index relied on a one-shot load.
+  const [searchDraft, setSearchDraft] = useState("");
+  const openSearchDialog = useCallback(() => requestCommandMenu(windowEvents), [windowEvents]);
+  const searchShortcut = useActionShortcut("commandMenu.open");
+  const [search, setSearch] = useState("");
+  const browsePreferenceStorageId = useMemo(
+    () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId, rail.workspaceId),
+    [context.accessContext.subjectId, rail.workspaceId],
+  );
+  const previousBrowsePreferenceStorageId = useRef(browsePreferenceStorageId);
+  const [browsePreferences, setBrowsePreferences] = useState(() =>
+    readSessionBrowsePreferences(browsePreferenceStorageId),
+  );
+  const {
+    groupBy: browseGroupBy,
+    sortBy: browseSortBy,
+    status: browseStatusPreference,
+    mineOnly,
+    showEmptyGroups,
+  } = browsePreferences;
+  // Attention filtering belongs before pagination, including project windows.
+  const needsYouOnly = browseStatusPreference === "needs-you";
+  const browseStatus: "active" | "archived" | "all" = needsYouOnly
+    ? "active"
+    : browseStatusPreference;
+  useEffect(() => {
+    if (previousBrowsePreferenceStorageId.current === browsePreferenceStorageId) return;
+    previousBrowsePreferenceStorageId.current = browsePreferenceStorageId;
+    setBrowsePreferences(readSessionBrowsePreferences(browsePreferenceStorageId));
+  }, [browsePreferenceStorageId]);
+  const updateBrowsePreferences = useCallback(
+    (patch: Partial<SessionBrowsePreferences>) => {
+      setBrowsePreferences((current) => {
+        const next = { ...current, ...patch };
+        writeSessionBrowsePreferences(browsePreferenceStorageId, next);
+        return next;
+      });
+    },
+    [browsePreferenceStorageId],
+  );
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchDraft.trim()), 200);
+    return () => window.clearTimeout(timer);
+  }, [searchDraft]);
+  // Search is the one intentionally flat projection: it can surface a match
+  // from anywhere in a workstream. Sorting and filtering still operate on
+  // root workstreams and preserve their expandable descendant hierarchy.
+  const hierarchyMode = search.length === 0;
+  const channelMode = browseGroupBy === "project";
+  const clearBrowseControls = useCallback(() => {
+    updateBrowsePreferences(DEFAULT_SESSION_BROWSE_PREFERENCES);
+  }, [updateBrowsePreferences]);
+  const updateSearchDraft = useCallback((value: string) => {
+    setSearchDraft(value);
+  }, []);
+
+  const rootPage = useWorkspaceSessions({
+    projection: "summary",
+    // Project windows are fetched independently. Keep discovery to one display
+    // step instead of hydrating hidden workstreams a second time.
+    limit:
+      channelMode && hierarchyMode && browseStatus !== "archived" ? SESSION_GROUP_VISIBLE_STEP : 50,
+    // Filtered root pins carry exact attention membership beyond treeStats' cap.
+    // The separate global pin read still owns the complete shortcut section.
+    includePinned: needsYouOnly || !hierarchyMode,
+    includeTotals: hierarchyMode && browseStatus !== "archived",
+    needsYouOnly,
+    mineOnly,
+    search,
+    ...(hierarchyMode ? { parentSessionId: null } : {}),
+    archiveStatus: browseStatus,
+    ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
+    pollIntervalMs: listHintsAvailable ? undefined : 15_000,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
+  });
+  // Pins are shortcuts and may point anywhere in a workstream. Fetch their
+  // complete global section separately from the root-only hierarchy page; a
+  // pinned child must never make either it or its descendants disappear from
+  // the actual tree.
+  const globalPinPage = useWorkspaceSessions({
+    projection: "summary",
+    limit: 1,
+    pinsOnly: true,
+    includeTotals: !hierarchyMode || browseStatus === "archived",
+    pollIntervalMs: listHintsAvailable ? undefined : 15_000,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
+  });
+  // Channel edits send a full reconciliation hint. Older servers retain the
+  // existing gentle fallback poll.
+  const channelsQuery = useChannels({ pollIntervalMs: listHintsAvailable ? undefined : 60_000 });
+  const refreshChannels = channelsQuery.refresh;
+  const channels = channelsQuery.channels;
+  const {
+    create: requestCreateChannel,
+    update: updateProject,
+    remove: removeProject,
+    reorder: reorderProjects,
+  } = channelsQuery;
+  const [channelDialogOpen, setChannelDialogOpen] = useState(false);
+  const [channelNameDraft, setChannelNameDraft] = useState("");
+  const [projectPendingRename, setProjectPendingRename] = useState<Channel | null>(null);
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
+  const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
+  const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
+  const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
+  const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
+  const {
+    sessions,
+    nextCursor,
+    loading,
+    error,
+    readRevision: rootReadRevision,
+    readGeneration: rootReadGeneration,
+    refresh,
+  } = rootPage;
+  const {
+    pinned: globalPinned,
+    loading: globalPinsLoading,
+    error: globalPinsError,
+    pinnedTruncated: globalPinsTruncated,
+    readGeneration: globalPinsReadGeneration,
+    refresh: refreshGlobalPins,
+  } = globalPinPage;
+  const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
+  const pinnedTruncated = hierarchyMode ? globalPinsTruncated : rootPage.pinnedTruncated;
+  // The hierarchy and its global pinned shortcuts come from separate queries.
+  // Every invalidation must refresh both or a pin changed in another tab/device
+  // can disappear from the shortcut section until the next polling interval.
+  const refreshSessionPages = useCallback(
+    async (sessionIds: string[] | null = null) => {
+      // Cross-document invalidations must not restart suspended list polling.
+      // Visibility/focus reconciliation below re-reads durable state on return.
+      if (document.visibilityState === "hidden") return;
+      setDirtyScopes((current) =>
+        invalidateSessionListScopes(current, sessionIds, knownListSessions.current),
+      );
+      await Promise.all([
+        refresh(),
+        refreshGlobalPins(),
+        ...(sessionIds === null ? [refreshChannels()] : []),
+      ]);
+    },
+    [refresh, refreshGlobalPins, refreshChannels],
+  );
+  useEffect(() => {
+    if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
+    if (workspaceSessionListEvent.available)
+      void refreshSessionPages(workspaceSessionListEvent.sessionIds);
+  }, [workspaceSessionListEvent, rail.workspaceId, refreshSessionPages]);
+  useEffect(() => {
+    if (workspaceControlEvent) void refreshSessionPages();
+  }, [workspaceControlEvent, refreshSessionPages]);
+  // Ordinary rows page independently of the complete pinned section. The
+  // polled hook owns the shared discovery page. Projects share a workspace
+  // continuation; filtered browsing and Archived retain their own cursors.
+  const paginationDate = new Date();
+  const paginationKey = sessionPageKey(
+    rail.workspaceId,
+    [
+      search,
+      hierarchyMode ? "tree" : "search",
+      browseGroupBy,
+      browseSortBy,
+      browseStatusPreference,
+      [paginationDate.getFullYear(), paginationDate.getMonth() + 1, paginationDate.getDate()].join(
+        "-",
+      ),
+    ].join("\n"),
+  );
+  const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
+  paginationIdentity.current = advanceSessionPageIdentity(
+    paginationIdentity.current,
+    paginationKey,
+  );
+  const pageGeneration = paginationIdentity.current.generation;
+  // Manual Show more windows survive leaving the rail (for example Settings)
+  // in this tab. Each person/workspace remembers the current view only.
+  const groupWindowMemoryId = sessionGroupWindowMemoryId(
+    context.accessContext.subjectId,
+    rail.workspaceId,
+  );
+  const restoredGroupWindows = useMemo(
+    () => readSessionGroupWindows(groupWindowMemoryId, paginationKey),
+    [groupWindowMemoryId, paginationKey],
+  );
+  const [groupWindows, setGroupWindows] = useState<{
+    generation: number;
+    memoryId: string;
+    counts: ReadonlyMap<string, number>;
+  }>(() => ({ generation: -1, memoryId: "", counts: new Map() }));
+  const activeGroupWindows =
+    groupWindows.generation === pageGeneration && groupWindows.memoryId === groupWindowMemoryId
+      ? groupWindows.counts
+      : restoredGroupWindows;
+  useEffect(() => {
+    if (groupWindows.generation !== pageGeneration) return;
+    if (groupWindows.memoryId !== groupWindowMemoryId) return;
+    writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts);
+  }, [groupWindowMemoryId, groupWindows, pageGeneration, paginationKey]);
+  // Extra rows that use spare rail height, planned from measured layout.
+  // Manual disclosure (groupWindows) stacks on top of this fill.
+  const [groupFill, setGroupFill] = useState<{
+    generation: number;
+    counts: ReadonlyMap<string, number>;
+  }>(() => ({ generation: pageGeneration, counts: new Map() }));
+  const fillCountForGroup = useCallback(
+    (key: string) =>
+      (groupFill.generation === pageGeneration ? groupFill.counts.get(key) : undefined) ?? 0,
+    [groupFill, pageGeneration],
+  );
+  const baseCountForGroup = useCallback(
+    (key: string) => activeGroupWindows.get(key) ?? SESSION_GROUP_VISIBLE_STEP,
+    [activeGroupWindows],
+  );
+  const visibleCountForGroup = useCallback(
+    (key: string) => baseCountForGroup(key) + fillCountForGroup(key),
+    [baseCountForGroup, fillCountForGroup],
+  );
+  const visibleNodesForGroup = useCallback(
+    (key: string, nodes: SessionTreeNode[]) =>
+      search ? nodes : sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId),
+    [activeSessionId, search, visibleCountForGroup],
+  );
+  const [archiveFolder, setArchiveFolder] = useState({
+    generation: pageGeneration,
+    expanded: browseStatus === "archived",
+  });
+  const archiveExpanded =
+    archiveFolder.generation === pageGeneration
+      ? archiveFolder.expanded
+      : browseStatus === "archived";
+  const [groupContinuations, setGroupContinuations] = useState<
+    ReadonlyMap<string, ReturnType<typeof emptySessionContinuation>>
+  >(() => new Map());
+  const groupContinuationsRef = useRef(groupContinuations);
+  groupContinuationsRef.current = groupContinuations;
+  const activeGroupContinuations = useMemo(
+    () =>
+      [...groupContinuations].map(
+        ([key, state]) => [key, activeSessionContinuation(state, pageGeneration)] as const,
+      ),
+    [groupContinuations, pageGeneration],
+  );
+  const [archiveOverrides, setArchiveOverrides] = useState<
+    ReadonlyMap<string, { session: Session; completedGeneration: number }>
+  >(() => new Map());
+  const archiveMembershipEvidence = useMemo(() => {
+    const evidence = new Map([...archiveOverrides].map(([id, receipt]) => [id, receipt.session]));
+    // A retained first page can overlap a newer continuation. Preserve its
+    // versioned archive decision separately from whole-row merge priority;
+    // channel membership still follows its independent read authority below.
+    const continuationSessions = activeGroupContinuations.flatMap(
+      ([, continuation]) => continuation.sessions,
+    );
+    for (const session of [...sessions, ...continuationSessions]) {
+      const previous = evidence.get(session.id);
+      if (!previous || (session.archiveVersion ?? 0) > (previous.archiveVersion ?? 0)) {
+        evidence.set(session.id, session);
+      }
+    }
+    return evidence;
+  }, [activeGroupContinuations, archiveOverrides, sessions]);
+  const archiveReadEvidence = useMemo(() => {
+    const rowReadGenerations = new Map<string, number>();
+    for (const [, continuation] of activeGroupContinuations) {
+      for (const [id, generation] of continuation.channelGenerations) {
+        rowReadGenerations.set(id, Math.max(rowReadGenerations.get(id) ?? 0, generation));
+      }
+    }
+    for (const session of sessions) {
+      // The shared first page can predate an accepted overlapping continuation.
+      // Preserve the newest membership proof for each row, not source priority.
+      rowReadGenerations.set(
+        session.id,
+        Math.max(rowReadGenerations.get(session.id) ?? 0, rootReadGeneration),
+      );
+    }
+    return {
+      rowReadGenerations,
+      completedGenerations: new Map(
+        [...archiveOverrides].map(([id, receipt]) => [id, receipt.completedGeneration]),
+      ),
+    };
+  }, [activeGroupContinuations, archiveOverrides, rootReadGeneration, sessions]);
+  useEffect(() => {
+    setArchiveOverrides(new Map());
+  }, [rail.workspaceId]);
+  const extraSessions = useMemo(() => {
+    const rows = new Map<string, Session>();
+    for (const [, continuation] of activeGroupContinuations) {
+      for (const session of continuation.sessions) rows.set(session.id, session);
+    }
+    return [...rows.values()];
+  }, [activeGroupContinuations]);
+  const authoritativeExtraSessionEvidence = useMemo(
+    () =>
+      activeGroupContinuations.flatMap(([, continuation]) =>
+        authoritativeSessionContinuationChannels(
+          continuation,
+          pageGeneration,
+          rootReadRevision,
+          rootReadGeneration,
+        ),
+      ),
+    [activeGroupContinuations, pageGeneration, rootReadGeneration, rootReadRevision],
+  );
+  const deletedRootIds = useRef(new Set<string>());
+  useEffect(() => {
+    deletedRootIds.current.clear();
+  }, [rail.workspaceId]);
+  const groupLoadAttempts = useRef(new Map<string, number>());
+  const groupLoadingRef = useRef(new Map<string, number>());
+  const groupRefreshing = useRef(new Set<string>());
+  const [groupLoadingGenerations, setGroupLoadingGenerations] = useState<
+    ReadonlyMap<string, number>
+  >(() => new Map());
+  const [announcement, setAnnouncement] = useState("");
+  const pinAnnouncementSequence = useRef(0);
+  const announcePinResult = useCallback((message: string) => {
+    pinAnnouncementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, pinAnnouncementSequence.current));
+  }, []);
+  const [childPages, setChildPages] = useState<ReadonlyMap<string, ChildPageState>>(
+    () => new Map(),
+  );
+  const childPagesRef = useRef(childPages);
+  childPagesRef.current = childPages;
+  const childLoadEpoch = useRef(0);
+  const childRequestSequence = useRef(0);
+  const branchSummaryKeys = useRef(new Map<string, string>());
+  const activeBranchHydration = useRef<string | null>(null);
+  useEffect(() => {
+    childLoadEpoch.current += 1;
+    branchSummaryKeys.current.clear();
+    activeBranchHydration.current = null;
+    setChildPages(new Map());
+  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus]);
+  // Short-lived optimistic projections only. The page returned by the server
+  // remains canonical; after each mutation we replace the projection with that
+  // returned row and refresh once to reconcile tabs/devices/offline recovery.
+  const [pinOverrides, setPinOverrides] = useState<ReadonlyMap<string, PinOverride>>(
+    () => new Map(),
+  );
+  const [channelMoveOverrides, setChannelMoveOverrides] = useState<SessionChannelMoveOverrides>(
+    () => new Map(),
+  );
+  const acceptedChannelReadRevision = useSyncExternalStore(
+    context.sessionChannelProjectionAuthority.subscribe,
+    context.sessionChannelProjectionAuthority.getRevision,
+    context.sessionChannelProjectionAuthority.getRevision,
+  );
+  useEffect(
+    () =>
+      context.sessionChannelProjectionAuthority.subscribe((accepted) => {
+        if (!accepted) return;
+        if (accepted.workspaceId !== rail.workspaceId) return;
+        setChannelMoveOverrides((current) => {
+          const override = current.get(accepted.id);
+          return override?.committed
+            ? reconcileSessionChannelMovePointRead(
+                current,
+                accepted.id,
+                override.operation,
+                accepted,
+              )
+            : current;
+        });
+        // The route records an exact read before merging its full detail
+        // projection. Apply the accepted channel immediately so that merge
+        // cannot preserve an older committed move owner in the same batch.
+        setContextSession((current) => applySessionChannelProjection(current, accepted));
+      }),
+    [context.sessionChannelProjectionAuthority, rail.workspaceId, setContextSession],
+  );
+  const [archiveTransitions, setArchiveTransitions] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [attentionOverrides, setAttentionOverrides] = useState<
+    ReadonlyMap<string, SessionAttentionProjection>
+  >(() => new Map());
+  const [localDeliveryAttention, setLocalDeliveryAttention] = useState<ReadonlyMap<string, number>>(
+    () => localSessionDeliveryAttentionCounts(rail.workspaceId),
+  );
+  useEffect(() => {
+    const refreshLocalDeliveryAttention = () => {
+      setLocalDeliveryAttention(localSessionDeliveryAttentionCounts(rail.workspaceId));
+    };
+    refreshLocalDeliveryAttention();
+    return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
+  }, [rail.workspaceId]);
+  const archiving = useRef(new Set<string>());
+  useEffect(
+    () =>
+      subscribeToWorkspaceSessionListChanges(rail.workspaceId, (invalidation) => {
+        // The archive callback below already awaits this refresh while holding
+        // its optimistic transition. Other mounted producers, including For
+        // You Dismiss/Stop, need the same prompt re-read immediately.
+        if (archiving.current.has(invalidation.sessionId)) return;
+        void refreshSessionPages();
+      }),
+    [rail.workspaceId, refreshSessionPages],
+  );
+  const moveRequestOwner = useRef({});
+  const pinOperation = useRef(0);
+  const focusRestoreOperation = useRef(0);
+  const pinning = useRef(new Set<string>());
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const viewport = listRef.current?.closest("[data-rail-scroll-viewport]");
+    if (!viewport) return;
+    const cancelReveal = () => cancelSessionRowRevealIntent(rowRevealIntent);
+    viewport.addEventListener("wheel", cancelReveal, { passive: true });
+    viewport.addEventListener("touchstart", cancelReveal, { passive: true });
+    viewport.addEventListener("pointerdown", cancelReveal);
+    return () => {
+      viewport.removeEventListener("wheel", cancelReveal);
+      viewport.removeEventListener("touchstart", cancelReveal);
+      viewport.removeEventListener("pointerdown", cancelReveal);
+    };
+  }, []);
+  const pendingSessionFocus = useRef<PendingSessionFocus | null>(null);
+  const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
+  const channelMoveProbes = useRef(
+    new Map<string, { operation: number; promise: Promise<void> }>(),
+  );
+  const rootChannelProjectionOwner = useRef({});
+  const continuationChannelProjectionOwner = useRef({});
+  const branchChannelProjectionOwner = useRef({});
+  const pinsChannelProjectionOwner = useRef({});
+  const lineageChannelProjectionOwner = useRef({});
+  const moveChannelProjectionOwner = useRef({});
+  const activeLineage = useSessionLineage(context.session?.id ?? null, {
+    pollIntervalMs: listHintsAvailable ? undefined : 30_000,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
+  });
+  const lineageDirtyRevision = Math.max(
+    dirtyScopes.all,
+    dirtyScopes.branches.get(context.session?.rootSessionId ?? context.session?.id ?? "") ?? 0,
+  );
+  const refreshLineage = activeLineage.refresh;
+  useEffect(() => {
+    if (listHintsAvailable && lineageDirtyRevision > 0) void refreshLineage();
+  }, [listHintsAvailable, lineageDirtyRevision, refreshLineage]);
+  const lineageChannelAuthoritySessions = useMemo(
+    () => activeLineage.lineage?.ancestors ?? [],
+    [activeLineage.lineage?.ancestors],
+  );
+  const loadedChildren = useMemo(
+    () => [...childPages.values()].flatMap((page) => page.sessions),
+    [childPages],
+  );
+  const loadedChildChannelEvidence = useMemo(
+    () => [...childPages.values()].flatMap(authoritativeSessionBranchChannels),
+    [childPages],
+  );
+  const pinnedChannelReadGeneration = hierarchyMode ? globalPinsReadGeneration : rootReadGeneration;
+  const currentListChannelEvidence = useMemo(() => {
+    void acceptedChannelReadRevision;
+    const evidence = new Map<string, readonly [session: Session, readGeneration: number]>();
+    const add = (candidates: readonly Session[], readGeneration: number) => {
+      for (const session of candidates) {
+        const current = evidence.get(session.id);
+        if (!current || readGeneration >= current[1]) {
+          evidence.set(session.id, [session, readGeneration]);
+        }
+      }
+    };
+    for (const [session, readGeneration] of authoritativeExtraSessionEvidence) {
+      add([session], readGeneration);
+    }
+    add(sessions, rootReadGeneration);
+    add(pinned, pinnedChannelReadGeneration);
+    for (const [session, readGeneration] of loadedChildChannelEvidence) {
+      add([session], readGeneration);
+    }
+    return evidence;
+  }, [
+    acceptedChannelReadRevision,
+    authoritativeExtraSessionEvidence,
+    loadedChildChannelEvidence,
+    pinned,
+    pinnedChannelReadGeneration,
+    rootReadGeneration,
+    sessions,
+  ]);
+  const listedSessions = useMemo(() => {
+    const source = new Map<string, Session>();
+    for (const session of [...extraSessions, ...sessions, ...loadedChildren, ...pinned]) {
+      const current = source.get(session.id);
+      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
+    }
+    return [...source.values()].map((session) => {
+      const evidence = currentListChannelEvidence.get(session.id);
+      const projected =
+        evidence && (session.channelId ?? null) !== (evidence[0].channelId ?? null)
+          ? { ...session, channelId: evidence[0].channelId ?? null }
+          : session;
+      return context.sessionChannelProjectionAuthority.project(projected, evidence?.[1] ?? 0);
+    });
+  }, [
+    context.sessionChannelProjectionAuthority,
+    currentListChannelEvidence,
+    extraSessions,
+    loadedChildren,
+    pinned,
+    sessions,
+  ]);
+  const rootChannelAuthoritySessions = useMemo(() => sessions, [sessions]);
+  const channelAuthoritySessions = useMemo(() => {
+    return [...currentListChannelEvidence.values()].map(([session, readGeneration]) =>
+      context.sessionChannelProjectionAuthority.project(session, readGeneration),
+    );
+  }, [context.sessionChannelProjectionAuthority, currentListChannelEvidence]);
+  const channelAuthorityById = useMemo(
+    () => new Map(channelAuthoritySessions.map((session) => [session.id, session])),
+    [channelAuthoritySessions],
+  );
+  useEffect(() => {
+    setGroupContinuations((current) => {
+      let changed = false;
+      const next = new Map(current);
+      for (const [key, continuation] of current) {
+        const reconciled = reconcileRetainedSessionContinuationChannel(
+          continuation,
+          pageGeneration,
+          rootReadRevision,
+          context.session,
+          rootReadGeneration,
+        );
+        if (reconciled !== continuation) {
+          next.set(key, reconciled);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [context.session, pageGeneration, rootReadGeneration, rootReadRevision]);
+  useLayoutEffect(() => {
+    const owner = rootChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      rootChannelAuthoritySessions,
+      0,
+      rootReadGeneration,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [context.sessionChannelProjectionAuthority, rootChannelAuthoritySessions, rootReadGeneration]);
+  useLayoutEffect(() => {
+    const owner = continuationChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replaceOwner(
+      owner,
+      authoritativeExtraSessionEvidence,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [authoritativeExtraSessionEvidence, context.sessionChannelProjectionAuthority]);
+  useLayoutEffect(() => {
+    const owner = branchChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replaceOwner(owner, loadedChildChannelEvidence);
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [context.sessionChannelProjectionAuthority, loadedChildChannelEvidence]);
+  useLayoutEffect(() => {
+    const owner = pinsChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      hierarchyMode ? globalPinned : [],
+      0,
+      globalPinsReadGeneration,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [
+    context.sessionChannelProjectionAuthority,
+    globalPinned,
+    globalPinsReadGeneration,
+    hierarchyMode,
+  ]);
+  useLayoutEffect(() => {
+    const owner = lineageChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      hierarchyMode ? lineageChannelAuthoritySessions : [],
+      0,
+      activeLineage.readGeneration,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [
+    activeLineage.readGeneration,
+    context.sessionChannelProjectionAuthority,
+    hierarchyMode,
+    lineageChannelAuthoritySessions,
+  ]);
+  useLayoutEffect(() => {
+    const owner = moveChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      [...channelMoveOverrides].map(([id, override]) => ({
+        id,
+        workspaceId: rail.workspaceId,
+        channelId: override.channelId,
+      })),
+      1,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [channelMoveOverrides, context.sessionChannelProjectionAuthority, rail.workspaceId]);
+  const serverSessions = useMemo(() => {
+    const source = new Map(listedSessions.map((session) => [session.id, session]));
+    // Search is intentionally flat. Normal navigation starts with real roots,
+    // then adds only explicitly loaded child pages and the active session's
+    // lineage. A child can therefore never become a fake root merely because
+    // its parent fell outside a global recency page.
+    // List/page projections own personal pin revisions and server treeStats.
+    // Insert those first, with the current pinned section last so an older
+    // ordinary continuation cannot overwrite a newer pin projection.
+    // Route/lineage projections own lifecycle and content. Project their
+    // channel through persistent authority first, then merge list-owned fields
+    // rather than replacing either domain wholesale; in particular, a stale
+    // route object must not resurrect a cross-device pin or project move.
+    const lineageSessions = hierarchyMode
+      ? [...(activeLineage.lineage?.ancestors ?? []), ...(context.session ? [context.session] : [])]
+      : [];
+    for (const session of lineageSessions) {
+      const lineageProjected = context.sessionChannelProjectionAuthority.project(
+        session,
+        activeLineage.readGeneration,
+      );
+      const projected = source.get(session.id);
+      const authoritative = channelAuthorityById.get(session.id);
+      const channelOwned =
+        authoritative !== undefined &&
+        context.sessionChannelProjectionAuthority.owns(authoritative) &&
+        (authoritative.channelId ?? null) === (projected?.channelId ?? null);
+      source.set(
+        session.id,
+        projected
+          ? applySessionRailProjection(lineageProjected, projected, { channelOwned })
+          : lineageProjected,
+      );
+    }
+    return [...source.values()];
+  }, [
+    activeLineage.lineage?.ancestors,
+    activeLineage.readGeneration,
+    channelAuthorityById,
+    context.sessionChannelProjectionAuthority,
+    context.session,
+    hierarchyMode,
+    listedSessions,
+  ]);
+  const allSessions = useMemo(() => {
+    const source = new Map(serverSessions.map((session) => [session.id, session]));
+    for (const [id, override] of pinOverrides) {
+      const current = source.get(id);
+      source.set(
+        id,
+        current
+          ? (applySessionPinProjection(current, override.session) ?? current)
+          : override.session,
+      );
+    }
+    for (const [id, override] of channelMoveOverrides) {
+      const current = source.get(id);
+      if (current) source.set(id, applySessionChannelMove(current, override));
+    }
+    const archiveProjected = projectSessionArchiveMembership(
+      [...source.values()],
+      archiveMembershipEvidence,
+      browseStatus === "all" ? "all" : browseStatus === "archived",
+      rail.workspaceId,
+      { flat: !hierarchyMode, ...archiveReadEvidence },
+    );
+    const projectedAttention = new Map(attentionOverrides);
+    const active = activeSessionId
+      ? archiveProjected.find((session) => session.id === activeSessionId)
+      : null;
+    if (documentForeground && active?.unread && active.workspaceId === rail.workspaceId) {
+      const foregroundProjection: SessionAttentionProjection = {
+        id: active.id,
+        workspaceId: active.workspaceId,
+        unread: false,
+        ...(active.attentionVersion !== undefined
+          ? { attentionVersion: active.attentionVersion }
+          : {}),
+        lastSequence: active.lastSequence,
+      };
+      projectedAttention.set(
+        active.id,
+        latestSessionAttentionProjection(projectedAttention.get(active.id), foregroundProjection),
+      );
+    }
+    return applySessionAttentionProjections(archiveProjected, projectedAttention);
+  }, [
+    activeSessionId,
+    archiveMembershipEvidence,
+    archiveReadEvidence,
+    attentionOverrides,
+    hierarchyMode,
+    channelMoveOverrides,
+    documentForeground,
+    pinOverrides,
+    rail.workspaceId,
+    serverSessions,
+    browseStatus,
+  ]);
+
+  const verifySessionChannelMove = useCallback(
+    (sessionId: string, operation: number): Promise<void> => {
+      const existing = channelMoveProbes.current.get(sessionId);
+      if (existing?.operation === operation) return existing.promise;
+
+      let readGeneration = 0;
+      const detailReadOwner = {};
+      const promise = readSessionChannelMovePoint(
+        sessionClient,
+        rail.workspaceId,
+        sessionId,
+        () => {
+          readGeneration = context.sessionChannelProjectionAuthority.beginDetailRead(
+            detailReadOwner,
+            { id: sessionId, workspaceId: rail.workspaceId },
+          );
+        },
+      )
+        .then((authoritative) => {
+          const currentProbe = channelMoveProbes.current.get(sessionId);
+          if (currentProbe?.operation !== operation) return;
+          const accepted = context.sessionChannelProjectionAuthority.recordRead(
+            authoritative,
+            readGeneration,
+          );
+          if (accepted) {
+            setChannelMoveOverrides((current) =>
+              reconcileSessionChannelMovePointRead(current, sessionId, operation, authoritative),
+            );
+            setContextSession((current) => applySessionChannelProjection(current, authoritative));
+            return;
+          }
+
+          // A still-newer accepted detail/point read won while this request was
+          // in flight. Retire only this operation's overlay, then expose that
+          // persistent winner instead of the rejected response.
+          setChannelMoveOverrides((current) =>
+            discardRejectedSessionChannelMove(current, sessionId, operation),
+          );
+          const winner = context.sessionChannelProjectionAuthority.project(
+            authoritative,
+            readGeneration,
+          );
+          if (context.sessionChannelProjectionAuthority.owns(winner)) {
+            setContextSession((current) => applySessionChannelProjection(current, winner));
+          }
+        })
+        .catch((requestError: unknown) => {
+          const currentProbe = channelMoveProbes.current.get(sessionId);
+          if (
+            currentProbe?.operation !== operation ||
+            !(requestError instanceof OpenGeniApiError) ||
+            requestError.status !== 404
+          ) {
+            return;
+          }
+          // Whether this absence is accepted or loses to a still-newer read,
+          // exact post-settlement evidence makes the temporary move overlay
+          // redundant. Persistent authority retains any newer present winner.
+          context.sessionChannelProjectionAuthority.recordMissing(
+            { id: sessionId, workspaceId: rail.workspaceId },
+            readGeneration,
+          );
+          setChannelMoveOverrides((current) =>
+            reconcileSessionChannelMovePointRead(current, sessionId, operation, null),
+          );
+        });
+      const probe = { operation, promise };
+      channelMoveProbes.current.set(sessionId, probe);
+      void promise.finally(() => {
+        context.sessionChannelProjectionAuthority.finishDetailReads(detailReadOwner);
+        if (channelMoveProbes.current.get(sessionId) === probe) {
+          channelMoveProbes.current.delete(sessionId);
+        }
+      });
+      return promise;
+    },
+    [context.sessionChannelProjectionAuthority, rail.workspaceId, sessionClient, setContextSession],
+  );
+
+  // Matching causally authoritative list/page evidence confirms the optimistic
+  // destination. Display-only retained rows cannot confirm or disagree: their
+  // channel may have been patched from context after their list authority
+  // expired. Resolve absent or different authority with an exact point read
+  // started after the write. That point read can preserve the optimistic move,
+  // supersede it with a newer cross-client move, or retire it after deletion
+  // without requiring a database schema revision.
+  useEffect(() => {
+    setChannelMoveOverrides((current) =>
+      reconcileSessionChannelMoves(current, channelAuthoritySessions),
+    );
+    const authoritativeById = new Map(
+      channelAuthoritySessions.map((session) => [session.id, session]),
+    );
+    for (const [sessionId, override] of channelMoveOverrides) {
+      if (!override.committed) continue;
+      const authoritativeEvidence = authoritativeById.get(sessionId);
+      if (
+        authoritativeEvidence &&
+        (authoritativeEvidence.channelId ?? null) === override.channelId
+      ) {
+        continue;
+      }
+      void verifySessionChannelMove(sessionId, override.operation);
+    }
+  }, [channelMoveOverrides, channelAuthoritySessions, verifySessionChannelMove]);
+
+  useEffect(() => {
+    channelMoveProbes.current.clear();
+    pendingSessionFocus.current = null;
+    setChannelMoveOverrides(new Map());
+  }, [rail.workspaceId]);
+  const branchParentsById = useRef<ReadonlyMap<string, Session>>(new Map());
+  branchParentsById.current = new Map(allSessions.map((session) => [session.id, session]));
+  knownListSessions.current = branchParentsById.current;
+
+  useEffect(() => {
+    setAttentionOverrides(new Map());
+    return subscribeToSessionAttentionChanges((projection) => {
+      setAttentionOverrides((current) => {
+        const latest = latestSessionAttentionProjection(current.get(projection.id), projection);
+        if (latest !== projection) return current;
+        const next = new Map(current);
+        next.set(projection.id, latest);
+        if (next.size > 64) next.delete(next.keys().next().value!);
+        return next;
+      });
+    });
+  }, [rail.workspaceId]);
+  const creatorSessions = useMemo(() => {
+    if (!hierarchyMode) return allSessions;
+    const loadedIds = new Set(allSessions.map((session) => session.id));
+    return allSessions.filter(
+      (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
+    );
+  }, [allSessions, hierarchyMode]);
+  const creatorLabels = useMemo(() => sessionCreatorLabelMap(creatorSessions), [creatorSessions]);
+  const paginationBrowseFilter = useMemo<SessionPaginationBrowseFilter>(
+    () => ({
+      creator: null,
+      dateField: "activity",
+      dateRange: "any",
+    }),
+    [],
+  );
+  const browseControlsActive = sessionBrowsePreferencesCustomized(browsePreferences);
+  const needsYouCount =
+    (hierarchyMode && browseStatus !== "archived" ? rootPage.totals : globalPinPage.totals)
+      ?.needsYouCount ?? countNeedsYou(allSessions);
+  const projectTotals = useMemo(
+    () =>
+      hierarchyMode && rootPage.totals
+        ? sessionProjectTotals(
+            rootPage.totals,
+            channels.map((channel) => channel.id),
+          )
+        : null,
+    [channels, hierarchyMode, rootPage.totals],
+  );
+  const acceptedAttentionRoots = useMemo(
+    () =>
+      new Set(
+        needsYouOnly
+          ? [...sessions, ...activeGroupContinuations.flatMap(([, page]) => page.sessions)]
+              .filter((session) => session.parentSessionId === null)
+              .map((session) => session.id)
+          : [],
+      ),
+    [needsYouOnly, sessions, activeGroupContinuations],
+  );
+  const browseSessions = useMemo(
+    () =>
+      (needsYouOnly
+        ? hierarchyMode
+          ? allSessions.filter(
+              (session) =>
+                acceptedAttentionRoots.has(session.rootSessionId) ||
+                filterNeedsYou([session]).length > 0,
+            )
+          : filterNeedsYou(allSessions)
+        : allSessions
+      ).filter((session) => {
+        if (archiveTransitions.has(session.rootSessionId)) return false;
+        // Child rows inherit their root's archive membership from the
+        // lineage query. Only roots carry the personal archive projection.
+        return (
+          session.parentSessionId !== null ||
+          browseStatus === "all" ||
+          Boolean(session.archived) === (browseStatus === "archived")
+        );
+      }),
+    [
+      allSessions,
+      archiveTransitions,
+      browseStatus,
+      needsYouOnly,
+      hierarchyMode,
+      acceptedAttentionRoots,
+    ],
+  );
+
+  // A complete pins-only page makes presence authoritative, but absence does
+  // not carry the version of a remotely unpinned relation. Loaded child pages
+  // can outlive many root/global polls, so point-read only their stale positive
+  // pins and merge the exact revision back into every cached parent page.
+  const staleChildPinProbes = useRef(new Map<string, string>());
+  useEffect(() => {
+    if (globalPinsLoading || globalPinsError) return;
+    const pinnedIds = new Set(globalPinned.map((session) => session.id));
+    const stalePins = loadedChildren.filter(
+      (session) => session.pinned && !pinnedIds.has(session.id),
+    );
+    const staleKeys = new Set(
+      stalePins.map((session) => `${session.id}:${session.pinVersion ?? 0}`),
+    );
+    for (const [sessionId, key] of staleChildPinProbes.current) {
+      if (!staleKeys.has(key)) staleChildPinProbes.current.delete(sessionId);
+    }
+    const childEpoch = childLoadEpoch.current;
+    for (const stale of stalePins) {
+      const key = `${stale.id}:${stale.pinVersion ?? 0}`;
+      if (staleChildPinProbes.current.get(stale.id) === key) continue;
+      staleChildPinProbes.current.set(stale.id, key);
+      void context.client
+        .getSession(rail.workspaceId, stale.id)
+        .then((authoritative) => {
+          if (
+            childLoadEpoch.current !== childEpoch ||
+            staleChildPinProbes.current.get(stale.id) !== key
+          ) {
+            return;
+          }
+          setChildPages((current) => {
+            let changed = false;
+            const next = new Map(current);
+            for (const [parentId, page] of current) {
+              const projectedSessions = page.sessions.map((session) => {
+                if (session.id !== stale.id) return session;
+                const projected = applySessionPinProjection(session, authoritative) ?? session;
+                if (projected !== session) changed = true;
+                return projected;
+              });
+              if (projectedSessions.some((session, index) => session !== page.sessions[index])) {
+                next.set(parentId, { ...page, sessions: projectedSessions });
+              }
+            }
+            return changed ? next : current;
+          });
+        })
+        .catch((requestError: unknown) => {
+          if (requestError instanceof OpenGeniApiError && requestError.status === 404) {
+            setChildPages((current) => {
+              let changed = false;
+              const next = new Map(current);
+              for (const [parentId, page] of current) {
+                const retainedSessions = page.sessions.filter((session) => session.id !== stale.id);
+                if (retainedSessions.length !== page.sessions.length) {
+                  changed = true;
+                  next.set(parentId, { ...page, sessions: retainedSessions });
+                }
+              }
+              return changed ? next : current;
+            });
+          }
+          if (staleChildPinProbes.current.get(stale.id) === key) {
+            staleChildPinProbes.current.delete(stale.id);
+          }
+        });
+    }
+  }, [
+    context.client,
+    globalPinned,
+    globalPinsError,
+    globalPinsLoading,
+    loadedChildren,
+    rail.workspaceId,
+  ]);
+  const openSessionId = context.session?.id;
+  const openSessionWorkspaceId = context.session?.workspaceId;
+  const openSessionPinned = Boolean(context.session?.pinned);
+  const openSessionPinVersion = context.session?.pinVersion ?? 0;
+  // The route header and rail intentionally keep separate projections. Merge
+  // list-owned pin and project fields into the open session while preserving
+  // route/SSE-owned lifecycle and content. Project reconciliation is paused
+  // only while an optimistic move owns the row; its point-read fence updates
+  // the context directly and prevents a pre-write list response from winning.
+  useEffect(() => {
+    if (!openSessionId || openSessionWorkspaceId !== rail.workspaceId) return;
+    // Do not feed the rail's short-lived optimistic override into the route
+    // header. A same-version optimistic timestamp can make a later failed
+    // rollback look non-exact, causing its authoritative lower revision to be
+    // rejected as stale and leaving the header pinned forever.
+    const projected = serverSessions.find((candidate) => candidate.id === openSessionId);
+    if (!projected) return;
+    setContextSession((current) => {
+      const pinProjected = applySessionPinProjection(current, projected);
+      return channelMoveOverrides.has(openSessionId)
+        ? pinProjected
+        : applySessionChannelProjection(pinProjected, projected);
+    });
+  }, [
+    channelMoveOverrides,
+    openSessionId,
+    openSessionWorkspaceId,
+    rail.workspaceId,
+    serverSessions,
+    setContextSession,
+  ]);
+
+  const activePinProbe = useRef<{ key: string | null; operation: number }>({
+    key: null,
+    operation: 0,
+  });
+  useEffect(() => {
+    const globalPageContainsOpenSession = globalPinned.some(
+      (candidate) => candidate.id === openSessionId,
+    );
+    if (
+      !openSessionId ||
+      openSessionWorkspaceId !== rail.workspaceId ||
+      !openSessionPinned ||
+      globalPinsLoading ||
+      globalPinsError ||
+      globalPageContainsOpenSession
+    ) {
+      activePinProbe.current.key = null;
+      activePinProbe.current.operation += 1;
+      return;
+    }
+
+    const key = `${openSessionId}:${openSessionPinVersion}`;
+    if (activePinProbe.current.key === key) return;
+    const operation = ++activePinProbe.current.operation;
+    activePinProbe.current.key = key;
+    void context.client
+      .getSession(rail.workspaceId, openSessionId)
+      .then((authoritative) => {
+        if (activePinProbe.current.operation !== operation) return;
+        // Point reads are used only for the absent pin projection. Route/SSE
+        // remains authoritative for every lifecycle and content field.
+        setContextSession((current) => applySessionPinProjection(current, authoritative));
+      })
+      .catch(() => {
+        if (activePinProbe.current.operation === operation) {
+          activePinProbe.current.key = null;
+        }
+      });
+  }, [
+    context.client,
+    globalPinned,
+    globalPinsError,
+    globalPinsLoading,
+    openSessionId,
+    openSessionPinned,
+    openSessionPinVersion,
+    openSessionWorkspaceId,
+    rail.workspaceId,
+    setContextSession,
+  ]);
+
+  // Only a route transition or keyboard navigation may reveal a row. Polls and
+  // pagination replace `flat` too, so a derived focus index is not itself
+  // permission to move this scroll container.
+  const rowRevealIntent = useRef<string | null>(activeSessionId);
+
+  // Search results are deliberately flat because a partial match set is not a
+  // tree. Normal and custom-grouped browsing carry true roots, lazily loaded
+  // children, and the active lineage.
+  const projectedSessions = useMemo(
+    () =>
+      projectRailSessions(
+        browseStatus === "archived" ? [] : browseSessions.filter((session) => !session.archived),
+        hierarchyMode,
+      ),
+    [browseSessions, browseStatus, hierarchyMode],
+  );
+  const archivedNodes = useMemo(() => {
+    const archived = buildPinnedRailSections(
+      projectRailSessions(
+        browseSessions.filter((session) => browseStatus === "archived" || session.archived),
+        hierarchyMode,
+      ),
+    ).complete;
+    return [...archived.running, ...archived.grouped.flatMap((bucket) => bucket.sessions)].sort(
+      (a, b) => compareSessionArchiveOrder(a.session, b.session),
+    );
+  }, [browseSessions, browseStatus, hierarchyMode]);
+  // The helper builds all three projections together so explicit nested pins
+  // never disappear into an ancestor shortcut.
+  const railSections = useMemo(
+    () =>
+      buildPinnedRailSections(projectedSessions, new Date(), {
+        groupSites: hierarchyMode && browseGroupBy === "project",
+      }),
+    [projectedSessions, hierarchyMode, browseGroupBy],
+  );
+  const forest = useMemo(
+    () =>
+      sortSessionForest(
+        browseGroupBy === "activity"
+          ? railSections.ordinary
+          : groupSessionForestForBrowse(railSections.ordinary, browseGroupBy, { creatorLabels }),
+        browseSortBy,
+      ),
+    [browseGroupBy, browseSortBy, creatorLabels, railSections.ordinary],
+  );
+  const visibleForest = useMemo(
+    () => ({
+      running: visibleNodesForGroup("activity:active", forest.running),
+      grouped: forest.grouped.map((bucket) => ({
+        ...bucket,
+        sessions: visibleNodesForGroup(
+          browseGroupBy === "none"
+            ? "workspace"
+            : browseGroupBy === "activity"
+              ? `activity:${bucket.group}`
+              : bucket.group,
+          bucket.sessions,
+        ),
+      })),
+    }),
+    [browseGroupBy, forest, visibleNodesForGroup],
+  );
+  // Keep personal pin order while applying the selected sort to shortcut descendants.
+  const pinnedNodes = useMemo(
+    () =>
+      railSections.pinned.map((node) => ({
+        ...node,
+        children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
+      })),
+    [railSections.pinned, browseSortBy],
+  );
+  // The hierarchy rail always has the same shape: unfiled Recents first, then
+  // workstreams. A workspace with no created workstreams should not fall back
+  // to a completely different recency UI.
+  const projectPaginationGroups = useMemo(
+    () => [
+      ...channels.map((channel) => sessionPaginationProjectGroup(channel.id, channel.name)),
+      sessionPaginationProjectGroup(null, "Default"),
+    ],
+    [channels],
+  );
+  const channelSections = useMemo(
+    () =>
+      channelMode
+        ? channelRailSections(forest, channels)
+            .map((section) => ({
+              ...section,
+              sessions: [...section.sessions].sort((a, b) =>
+                compareSessionBrowse(a.session, b.session, browseSortBy),
+              ),
+            }))
+            .filter((section) => {
+              if (browseStatus === "archived") return false;
+              if (showEmptyGroups || section.sessions.length > 0) return true;
+              const key = sessionPaginationProjectGroup(section.channelId, section.name).key;
+              const continuation = activeSessionContinuation(
+                groupContinuations.get(key) ?? emptySessionContinuation(pageGeneration),
+                pageGeneration,
+              );
+              // An off-page project still needs a visible retry when its first
+              // independent read fails (and a loading state while it starts).
+              return continuation.failed || groupLoadingGenerations.get(key) === pageGeneration;
+            })
+        : [],
+    [
+      channelMode,
+      forest,
+      channels,
+      browseSortBy,
+      browseStatus,
+      showEmptyGroups,
+      groupContinuations,
+      groupLoadingGenerations,
+      pageGeneration,
+    ],
+  );
+  // Workstreams open on first paint. A user collapse is local interaction
+  // state; new or newly loaded sections therefore remain open by default.
+  const [collapsedChannelSections, setCollapsedChannelSections] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    setCollapsedChannelSections(new Set());
+  }, [rail.workspaceId]);
+  const toggleChannelSection = useCallback((sectionKey: string) => {
+    setCollapsedChannelSections((current) => {
+      const next = new Set(current);
+      if (next.has(sectionKey)) next.delete(sectionKey);
+      else next.add(sectionKey);
+      return next;
+    });
+  }, []);
+  const submitCreateChannel = useCallback(async () => {
+    const name = channelNameDraft.trim();
+    if (!name) return;
+    const created = await requestCreateChannel({ name });
+    if (created) {
+      setChannelDialogOpen(false);
+      setChannelNameDraft("");
+    } else {
+      toast.error("Couldn't create the project. The name may already be in use.");
+    }
+  }, [channelNameDraft, requestCreateChannel]);
+  const onMoveToChannel = useCallback(
+    async (
+      session: Session,
+      channelId: string | null,
+      restoreFocusTo: SessionFocusTarget = "row",
+    ) => {
+      if (session.channelId === channelId) return;
+      const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+      if (!acceptedTransition) return;
+      const moveRequest = context.sessionChannelProjectionAuthority.beginMove(
+        moveRequestOwner.current,
+        session,
+      );
+      if (!moveRequest) return;
+      const operation = moveRequest.operation;
+      const focusOperation = ++focusRestoreOperation.current;
+      pendingSessionFocus.current = {
+        sessionId: session.id,
+        operation: focusOperation,
+        target: restoreFocusTo,
+        settled: false,
+      };
+      setCollapsedChannelSections((current) => {
+        const destinationKey = channelId ?? "default";
+        if (!current.has(destinationKey)) return current;
+        const next = new Set(current);
+        next.delete(destinationKey);
+        return next;
+      });
+      setChannelMoveOverrides((current) =>
+        beginSessionChannelMove(current, session.id, channelId, operation),
+      );
+      try {
+        let moved: Session | null = null;
+        try {
+          moved = await context.client.updateSessionChannel(session.workspaceId, session.id, {
+            channelId,
+          });
+        } catch {
+          // Preserve the existing optimistic rollback UX, while keeping the
+          // raw successful response available after this component unmounts.
+        }
+        if (
+          !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition) ||
+          !context.sessionChannelProjectionAuthority.ownsMove(moveRequestOwner.current, moveRequest)
+        ) {
+          return;
+        }
+        if (moved) {
+          // The successful write response is exact evidence. Settlement
+          // fences reads that started before it returned, while a completed
+          // newer read requires the post-response point verification below.
+          const disposition = context.sessionChannelProjectionAuthority.recordMove(
+            moveRequestOwner.current,
+            moveRequest,
+            moved,
+          );
+          if (disposition === "rejected") {
+            setChannelMoveOverrides((current) =>
+              discardRejectedSessionChannelMove(current, session.id, operation),
+            );
+            return;
+          }
+          setChannelMoveOverrides((current) =>
+            commitSessionChannelMove(current, session.id, moved.channelId ?? null, operation),
+          );
+          context.setSession((current) =>
+            current?.id === moved.id && current.workspaceId === moved.workspaceId
+              ? { ...current, channelId: moved.channelId ?? null }
+              : current,
+          );
+          // Always start and await an exact read after the successful response
+          // settles. It distinguishes the committed B from a genuinely newer
+          // C; if it fails, the persistent move token and settlement fence keep
+          // B visible through rail remounts and late overlapping reads.
+          await verifySessionChannelMove(session.id, operation);
+        } else {
+          setChannelMoveOverrides((current) =>
+            rollbackSessionChannelMove(current, session.id, operation),
+          );
+          toast.error("Couldn't move the workstream. Its previous project was restored.");
+        }
+        await refreshSessionPages();
+      } finally {
+        context.sessionChannelProjectionAuthority.finishMove(moveRequestOwner.current, moveRequest);
+        const pending = pendingSessionFocus.current;
+        if (pending?.sessionId === session.id && pending.operation === focusOperation) {
+          pending.settled = true;
+          setFocusRestoreRevision((current) => current + 1);
+        }
+      }
+    },
+    [context, refreshSessionPages, verifySessionChannelMove],
+  );
+  const submitRenameProject = useCallback(async () => {
+    const name = projectRenameDraft.trim();
+    if (!projectPendingRename || !name || channelsQuery.mutating) return;
+    if (name === projectPendingRename.name) {
+      setProjectPendingRename(null);
+      return;
+    }
+    const updated = await updateProject(projectPendingRename.id, { name });
+    if (updated) {
+      setProjectPendingRename(null);
+    } else {
+      toast.error("Couldn't rename the project. The name may already be in use.");
+    }
+  }, [projectRenameDraft, projectPendingRename, channelsQuery.mutating, updateProject]);
+  const onToggleProjectPin = useCallback(
+    async (project: Channel) => {
+      const updated = await updateProject(project.id, { pinned: !project.pinned });
+      if (!updated) toast.error("Couldn't update the project pin.");
+    },
+    [updateProject],
+  );
+  const onDeleteProject = useCallback(async (): Promise<boolean> => {
+    if (!projectPendingDelete) return false;
+    const deleted = await removeProject(projectPendingDelete.id);
+    if (!deleted) {
+      toast.error("Couldn't delete the project.");
+      return false;
+    }
+    await refreshSessionPages();
+    return true;
+  }, [projectPendingDelete, refreshSessionPages, removeProject]);
+  const onReorderProjects = useCallback(
+    async (sourceProjectId: string, targetProjectId: string) => {
+      if (sourceProjectId === targetProjectId) return;
+      const sourceIndex = channels.findIndex((project) => project.id === sourceProjectId);
+      const sourceProject = channels[sourceIndex];
+      const targetProject = channels.find((project) => project.id === targetProjectId);
+      if (!sourceProject || !targetProject) return;
+      if (sourceProject.pinned !== targetProject.pinned) {
+        toast.error(
+          "Pinned projects stay at the top. Pin or unpin it before moving it between groups.",
+        );
+        return;
+      }
+      const ordered = [...channels];
+      const [moved] = ordered.splice(sourceIndex, 1);
+      if (!moved) return;
+      // Dropping on a project always places the dragged project immediately
+      // before it, regardless of whether the source began above or below.
+      ordered.splice(
+        ordered.findIndex((project) => project.id === targetProjectId),
+        0,
+        moved,
+      );
+      const result = await reorderProjects(ordered.map((project) => project.id));
+      if (!result) toast.error("Couldn't save the project order. Try again.");
+    },
+    [channels, reorderProjects],
+  );
+  const onUpdateAttention = useCallback<UpdateAttentionFn>(
+    async (session, update) => {
+      try {
+        const updated = await context.client.updateSessionAttention(rail.workspaceId, session.id, {
+          ...update,
+          expectedVersion: session.attentionVersion ?? 0,
+        });
+        // The open session has a separate detail/SSE projection from the rail
+        // page. Reflect the mutation there immediately; waiting for a later
+        // navigation or stream event left the action menu showing stale text.
+        context.setSession((current) =>
+          current?.id === updated.id
+            ? {
+                ...current,
+                ...(updated.unread !== undefined ? { unread: updated.unread } : {}),
+                ...(updated.activelyWorking !== undefined
+                  ? { activelyWorking: updated.activelyWorking }
+                  : {}),
+                ...(updated.attentionVersion !== undefined
+                  ? { attentionVersion: updated.attentionVersion }
+                  : {}),
+              }
+            : current,
+        );
+        await refreshSessionPages();
+      } catch (attentionError) {
+        toast.error("Couldn't update the session status.", {
+          description:
+            attentionError instanceof Error ? attentionError.message : String(attentionError),
+        });
+        await refreshSessionPages();
+      }
+    },
+    [context, rail.workspaceId, refreshSessionPages],
+  );
+  const onArchive = useCallback<ArchiveFn>(
+    async function archiveSession(session, archived, restoreFocusTo = "row") {
+      if (archiving.current.has(session.id)) return;
+      const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+      if (!acceptedTransition) return;
+      const focusOperation = ++focusRestoreOperation.current;
+      pendingSessionFocus.current = {
+        sessionId: session.id,
+        operation: focusOperation,
+        target: restoreFocusTo,
+        action: "archive",
+        settled: false,
+      };
+      archiving.current.add(session.id);
+      setArchiveTransitions((current) => new Set(current).add(session.id));
+      let archivedResult: Session | undefined;
+      try {
+        const updated = await context.client.updateSessionArchive(rail.workspaceId, session.id, {
+          archived,
+          expectedVersion: session.archiveVersion ?? 0,
+        });
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        const completedGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        setArchiveOverrides((current) => {
+          const next = new Map(current).set(updated.id, { session: updated, completedGeneration });
+          if (next.size > 64) next.delete(next.keys().next().value!);
+          return next;
+        });
+        context.setSession((current) =>
+          current?.id === updated.id && current.workspaceId === updated.workspaceId
+            ? applySessionArchiveProjection(current, updated)
+            : current,
+        );
+        notifySessionListChanged({
+          workspaceId: rail.workspaceId,
+          sessionId: session.id,
+          archived: updated.archived,
+        });
+        archivedResult = updated;
+        await refreshSessionPages();
+      } catch (archiveError) {
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+          description: archiveError instanceof Error ? archiveError.message : String(archiveError),
+        });
+        await refreshSessionPages();
+      } finally {
+        archiving.current.delete(session.id);
+        const pending = pendingSessionFocus.current;
+        if (
+          pending?.operation === focusOperation &&
+          context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          pending.settled = true;
+          setFocusRestoreRevision((current) => current + 1);
+        }
+        setArchiveTransitions((current) => {
+          const next = new Set(current);
+          next.delete(session.id);
+          return next;
+        });
+        if (
+          archivedResult &&
+          context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          const updated = archivedResult;
+          toast.success(archived ? "Chat archived" : "Chat restored", {
+            ...(archived
+              ? {
+                  duration: 8000,
+                  action: {
+                    label: "Undo",
+                    onClick: () => {
+                      if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition))
+                        return;
+                      void archiveSession(updated, false);
+                    },
+                  },
+                }
+              : {}),
+          });
+        }
+      }
+    },
+    [context, rail.workspaceId, refreshSessionPages],
+  );
+  const onDeleteSession = useCallback(async (): Promise<boolean> => {
+    if (!sessionPendingDelete) return false;
+    try {
+      const result = await deleteStoppingIfRunning(
+        context.client,
+        rail.workspaceId,
+        sessionPendingDelete.id,
+      );
+      deletedRootIds.current.add(sessionPendingDelete.id);
+      setArchiveOverrides((current) => {
+        if (!current.has(sessionPendingDelete.id)) return current;
+        const next = new Map(current);
+        next.delete(sessionPendingDelete.id);
+        return next;
+      });
+      setGroupContinuations((current) => {
+        let changed = false;
+        const next = new Map(current);
+        for (const [key, continuation] of current) {
+          const removedIds = new Set(
+            continuation.sessions
+              .filter((session) => session.rootSessionId === sessionPendingDelete.id)
+              .map((session) => session.id),
+          );
+          const retainedSessions = continuation.sessions.filter(
+            (session) => !removedIds.has(session.id),
+          );
+          if (retainedSessions.length !== continuation.sessions.length) {
+            next.set(key, {
+              ...continuation,
+              sessions: retainedSessions,
+              authoritativeIds: new Set(
+                [...continuation.authoritativeIds].filter((id) => !removedIds.has(id)),
+              ),
+              channelGenerations: new Map(
+                [...continuation.channelGenerations].filter(([id]) => !removedIds.has(id)),
+              ),
+            });
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+      const viewingDeletedTree = context.session?.rootSessionId === sessionPendingDelete.id;
+      if (viewingDeletedTree) {
+        context.resetSessionView();
+        await navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId: rail.workspaceId },
+          replace: true,
+        });
+      }
+      await refreshSessionPages();
+      toast.success(
+        result.deletedSessionCount === 1
+          ? "Chat deleted"
+          : `${result.deletedSessionCount} chats deleted`,
+      );
+      return true;
+    } catch (deleteError) {
+      toast.error("Couldn't delete the chat.", {
+        description: deleteError instanceof Error ? deleteError.message : String(deleteError),
+      });
+      return false;
+    }
+  }, [context, navigate, rail.workspaceId, refreshSessionPages, sessionPendingDelete]);
+  const nodesById = useMemo(() => {
+    const result = new Map<string, SessionTreeNode>();
+    const visit = (node: SessionTreeNode): void => {
+      if (result.has(node.session.id)) return;
+      result.set(node.session.id, node);
+      for (const child of node.children) visit(child);
+    };
+    for (const node of railSections.complete.running) visit(node);
+    for (const bucket of railSections.complete.grouped) {
+      for (const node of bucket.sessions) visit(node);
+    }
+    for (const node of archivedNodes) visit(node);
+    return result;
+  }, [archivedNodes, railSections.complete]);
+
+  // Manual state is separate from the small derived active-path expansion.
+  // Polls can therefore never reopen a branch the user explicitly collapsed.
+  const [manualExpanded, setManualExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [manualCollapsed, setManualCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const parentOf = useMemo(() => {
+    const map = new Map<string, string>();
+    const byId = new Set(allSessions.map((session) => session.id));
+    for (const session of allSessions) {
+      if (session.parentSessionId && byId.has(session.parentSessionId)) {
+        map.set(session.id, session.parentSessionId);
+      }
+    }
+    return map;
+  }, [allSessions]);
+  const activeAncestorIds = useMemo(
+    () => sessionAncestorPath(activeSessionId, parentOf),
+    [activeSessionId, parentOf],
+  );
+  const autoExpanded = useMemo(
+    () => defaultExpandedAncestors(activeAncestorIds, manualCollapsed),
+    [activeAncestorIds, manualCollapsed],
+  );
+  const expanded = useMemo(
+    () => new Set([...manualExpanded, ...autoExpanded]),
+    [autoExpanded, manualExpanded],
+  );
+  useEffect(() => {
+    setManualExpanded(new Set());
+    setManualCollapsed(new Set());
+  }, [rail.workspaceId]);
+  const branchReadRevision = useCallback(
+    (parentId: string) =>
+      listHintsAvailable
+        ? Math.max(dirtyScopes.all, dirtyScopes.branches.get(parentId) ?? 0)
+        : rootReadRevision,
+    [listHintsAvailable, dirtyScopes, rootReadRevision],
+  );
+  const loadChildPage = useCallback(
+    async (
+      parentSessionId: string,
+      cursor?: string,
+      options: {
+        preserve?: readonly Session[] | undefined;
+        feedbackVisible?: boolean | undefined;
+      } = {},
+    ): Promise<void> => {
+      const epoch = childLoadEpoch.current;
+      if (!branchSummaryKeys.current.has(parentSessionId)) {
+        const parent = branchParentsById.current.get(parentSessionId);
+        if (parent) {
+          branchSummaryKeys.current.set(
+            parentSessionId,
+            sessionBranchSummaryKey(parent, branchReadRevision(parentSessionId)),
+          );
+        }
+      }
+      childRequestSequence.current += 1;
+      const requestId = childRequestSequence.current;
+      setChildPages((current) =>
+        beginSessionBranchRequest(current, parentSessionId, requestId, cursor, {
+          feedbackVisible: options.feedbackVisible,
+        }),
+      );
+      try {
+        const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        const page = await readLoadedSessionBranchWindow(
+          (pageCursor) =>
+            context.client.listSessionSummaryPage(rail.workspaceId, {
+              limit: 50,
+              parentSessionId,
+              ...(pageCursor ? { cursor: pageCursor } : {}),
+              archiveStatus: browseStatus,
+              sortBy: browseSortBy,
+            }),
+          cursor === undefined
+            ? Math.max(50, childPagesRef.current.get(parentSessionId)?.channelGenerations.size ?? 0)
+            : 1,
+          cursor,
+        );
+        if (childLoadEpoch.current !== epoch) return;
+        setChildPages((current) =>
+          commitSessionBranchPage(
+            current,
+            parentSessionId,
+            {
+              sessions: page.sessions,
+              nextCursor: page.nextCursor,
+            },
+            {
+              append: cursor !== undefined,
+              replaceWindow: cursor === undefined,
+              preserve: options.preserve,
+              requestId,
+              readGeneration,
+            },
+          ),
+        );
+      } catch {
+        if (childLoadEpoch.current !== epoch) return;
+        setChildPages((current) => failSessionBranchRequest(current, parentSessionId, requestId));
+      }
+    },
+    [
+      context.client,
+      context.sessionChannelProjectionAuthority,
+      rail.workspaceId,
+      branchReadRevision,
+      browseSortBy,
+      browseStatus,
+    ],
+  );
+  // The active route supplies exact child + ancestor detail even before the
+  // lazy branch query catches up. Commit that projection into the branch cache
+  // and reconcile the complete sibling page once, so leaving the child route
+  // cannot make the row disappear again.
+  useEffect(() => {
+    const active = context.session;
+    if (!hierarchyMode || !active?.parentSessionId) {
+      activeBranchHydration.current = null;
+      return;
+    }
+    const cachedPage = childPagesRef.current.get(active.parentSessionId);
+    setChildPages((current) => upsertSessionBranchChild(current, active));
+    const hydrationKey = `${active.parentSessionId}:${active.id}`;
+    if (activeBranchHydration.current === hydrationKey) return;
+    activeBranchHydration.current = hydrationKey;
+    if (!sessionBranchNeedsHydration(cachedPage)) return;
+    void loadChildPage(active.parentSessionId, undefined, {
+      preserve: [active],
+      feedbackVisible: false,
+    });
+  }, [context.session, hierarchyMode, loadChildPage]);
+
+  // Deep active routes auto-expand their ancestor path. Load every missing
+  // parent page on that path, not just the active session's immediate siblings,
+  // so leaving the route does not collapse lineage-only projections back out of
+  // the durable rail hierarchy.
+  useEffect(() => {
+    if (!hierarchyMode) return;
+    const activeParentSessionId = context.session?.parentSessionId ?? null;
+    for (const parentId of autoExpanded) {
+      if (parentId === activeParentSessionId) continue;
+      const page = childPages.get(parentId);
+      if (page && !page.stale) continue;
+      const node = nodesById.get(parentId);
+      const knownDirectChildren =
+        node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
+      if (knownDirectChildren > 0) {
+        void loadChildPage(parentId, undefined, { feedbackVisible: false });
+      }
+    }
+  }, [
+    autoExpanded,
+    childPages,
+    context.session?.parentSessionId,
+    hierarchyMode,
+    loadChildPage,
+    nodesById,
+  ]);
+
+  // Root pages carry bounded descendant summaries. Commit hints refresh only
+  // dirty branches; legacy polling refreshes observation-only changes as before.
+  // When a loaded branch's summary changes (notably directChildren after an
+  // orchestrator spawn), refresh that exact branch instead of retaining its old
+  // child list forever. This preserves root-only pagination and lazy hierarchy
+  // while making newly authorized children durable sidebar state.
+  useEffect(() => {
+    const parentsById = new Map(allSessions.map((session) => [session.id, session]));
+    const loadedParentIds = new Set(childPages.keys());
+    const newlyStale = new Set<string>();
+    for (const parentId of branchSummaryKeys.current.keys()) {
+      if (!loadedParentIds.has(parentId)) branchSummaryKeys.current.delete(parentId);
+    }
+    for (const [parentId, page] of childPages) {
+      const parent = parentsById.get(parentId);
+      if (!parent) continue;
+      const nextKey = sessionBranchSummaryKey(parent, branchReadRevision(parentId));
+      const previousKey = branchSummaryKeys.current.get(parentId);
+      const decision = sessionBranchSummaryDecision({
+        previousKey,
+        nextKey,
+        loading: page.loading,
+        expanded: expanded.has(parentId),
+        stale: page.stale,
+      });
+      if (decision.acknowledge) branchSummaryKeys.current.set(parentId, nextKey);
+      if (decision.refresh) {
+        void loadChildPage(parentId, undefined, {
+          feedbackVisible: false,
+          preserve: context.session?.parentSessionId === parentId ? [context.session] : undefined,
+        });
+      } else if (decision.markStale) newlyStale.add(parentId);
+    }
+    if (newlyStale.size > 0) {
+      setChildPages((current) => {
+        const next = new Map(current);
+        for (const parentId of newlyStale) {
+          const page = next.get(parentId);
+          if (page) next.set(parentId, { ...page, stale: true });
+        }
+        return next;
+      });
+    }
+  }, [allSessions, childPages, context.session, expanded, loadChildPage, branchReadRevision]);
+  const toggleExpand = useCallback(
+    (sessionId: string) => {
+      const opening = !expanded.has(sessionId);
+      setManualExpanded((current) => {
+        const next = new Set(current);
+        if (opening) next.add(sessionId);
+        else next.delete(sessionId);
+        return next;
+      });
+      setManualCollapsed((current) => {
+        const next = new Set(current);
+        if (opening) next.delete(sessionId);
+        else next.add(sessionId);
+        return next;
+      });
+      const node = nodesById.get(sessionId);
+      if (sessionId.startsWith("site:")) return;
+      const knownDirectChildren =
+        node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
+      if (
+        opening &&
+        hierarchyMode &&
+        knownDirectChildren > 0 &&
+        (!childPages.has(sessionId) ||
+          childPages.get(sessionId)?.failed === true ||
+          childPages.get(sessionId)?.stale === true)
+      ) {
+        void loadChildPage(sessionId);
+      }
+    },
+    [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
+  );
+  const visibleRows = useMemo(() => {
+    const seen = new Set<string>();
+    // Channel mode replaces the ordinary recency forest with channel sections;
+    // the flattened order must match the rendered order or arrow keys drift.
+    const ordinaryRows = channelMode
+      ? channelSections.flatMap((section) =>
+          !collapsedChannelSections.has(section.key)
+            ? visibleTreeRows(
+                visibleNodesForGroup(
+                  sessionPaginationProjectGroup(section.channelId, section.name).key,
+                  section.sessions,
+                ),
+                expanded,
+                activeSessionId,
+              )
+            : (() => {
+                const selected = findSessionTreeNode(section.sessions, activeSessionId);
+                return selected ? [{ node: selected, depth: 0 }] : [];
+              })(),
+        )
+      : visibleForestRows(visibleForest, expanded, activeSessionId);
+    const archiveRows =
+      browseStatus === "active"
+        ? []
+        : archiveExpanded
+          ? visibleTreeRows(
+              visibleNodesForGroup("archived", archivedNodes),
+              expanded,
+              activeSessionId,
+            )
+          : (() => {
+              const selected = findSessionTreeNode(archivedNodes, activeSessionId);
+              return selected ? [{ node: selected, depth: 0 }] : [];
+            })();
+    return [
+      ...visibleTreeRows(pinnedNodes, expanded, activeSessionId),
+      ...ordinaryRows,
+      ...archiveRows,
+    ].filter(({ node }) => {
+      if (seen.has(node.session.id)) return false;
+      seen.add(node.session.id);
+      return true;
+    });
+  }, [
+    activeSessionId,
+    archiveExpanded,
+    archivedNodes,
+    browseStatus,
+    channelMode,
+    channelSections,
+    expanded,
+    collapsedChannelSections,
+    visibleForest,
+    visibleNodesForGroup,
+    pinnedNodes,
+  ]);
+  const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
+
+  // The ⌘K menu answers from the chats loaded here, and next or previous chat
+  // and ⌘1 to ⌘9 follow the order shown here.
+  const directorySubject = context.accessContext.subjectId;
+  useEffect(() => {
+    rememberChats(directorySubject, rail.workspaceId, [...pinned, ...sessions]);
+  }, [directorySubject, rail.workspaceId, pinned, sessions]);
+  useEffect(() => {
+    setSidebarOrder(
+      directorySubject,
+      rail.workspaceId,
+      flat.map((session) => session.id),
+      pinned.map((session) => session.id),
+    );
+  }, [directorySubject, rail.workspaceId, flat, pinned]);
+
+  useLayoutEffect(() => {
+    const pending = pendingSessionFocus.current;
+    const root = listRef.current;
+    if (!pending || !root) return;
+    const operation = pending.operation;
+    let cancelled = false;
+    let frame: number | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const restore = () => {
+      if (cancelled) return;
+      const current = pendingSessionFocus.current;
+      if (!current || current.operation !== operation) return;
+      const attribute = sessionFocusAttribute(current.target);
+      const destinations = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].filter(
+        (element) => element.getAttribute(attribute) === current.sessionId,
+      );
+      const actionMode =
+        current.target === "actions" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(pointer: coarse)").matches
+          ? "overflow"
+          : "quick";
+      const destination =
+        current.target === "actions"
+          ? destinations.find(
+              (element) =>
+                element.getAttribute("data-session-actions-mode") === actionMode &&
+                (actionMode === "overflow" ||
+                  !current.action ||
+                  element.getAttribute("data-session-action") === current.action),
+            )
+          : destinations[0];
+      if (
+        destination &&
+        shouldRestoreSessionFocus(
+          document.activeElement as HTMLElement | null,
+          destination,
+          current.sessionId,
+          document.body,
+        )
+      ) {
+        try {
+          destination.focus({ preventScroll: true });
+        } catch {
+          // A concurrent query transition can remove the destination between
+          // the connectivity check and focus(). The next fenced attempt is the
+          // only safe recovery; never fall back to an unrelated element.
+        }
+      }
+    };
+    const finish = createSessionFocusCompletion(pendingSessionFocus, restore);
+
+    // Layout handles the optimistic/rollback commit. The microtask lets
+    // Radix finish its close bookkeeping, and rAF handles the post-animation
+    // remount; every attempt is fenced to this exact operation.
+    restore();
+    queueMicrotask(() => {
+      restore();
+      if (cancelled) return;
+      if (typeof window.requestAnimationFrame === "function") {
+        frame = window.requestAnimationFrame(finish);
+      } else {
+        timeout = setTimeout(finish, 0);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      if (timeout !== null) clearTimeout(timeout);
+    };
+  }, [flat, focusRestoreRevision]);
+
+  const onPin = useCallback<PinFn>(
+    async (target, nextPinned, restoreFocusTo = "row") => {
+      if (pinning.current.has(target.id)) {
+        return target;
+      }
+      const acceptedTransition = context.captureWorkspaceInvocation(target.workspaceId);
+      if (!acceptedTransition) return null;
+      pinning.current.add(target.id);
+      const operation = ++pinOperation.current;
+      const focusOperation = ++focusRestoreOperation.current;
+      // An optimistic pin moves the row between different group subtrees. That
+      // remounts the Radix menu trigger before Radix can restore keyboard focus.
+      // Keep the intended destination through the whole request so a failed
+      // mutation that rolls the row back also restores focus after its remount.
+      pendingSessionFocus.current = {
+        sessionId: target.id,
+        operation: focusOperation,
+        target: restoreFocusTo,
+        settled: false,
+      };
+      const optimistic: Session = {
+        ...target,
+        pinned: nextPinned,
+        pinnedAt: nextPinned ? new Date().toISOString() : null,
+        pinVersion: (target.pinVersion ?? 0) + 1,
+      };
+      setPinOverrides((current) =>
+        new Map(current).set(target.id, { session: optimistic, operation }),
+      );
+      try {
+        const updated = await context.updateSessionPin(
+          target.workspaceId,
+          target.id,
+          nextPinned,
+          target.pinVersion ?? 0,
+        );
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
+        if (updated) {
+          setPinOverrides((current) => {
+            if (current.get(target.id)?.operation !== operation) return current;
+            return new Map(current).set(target.id, {
+              session: updated,
+              operation,
+            });
+          });
+        }
+        await refreshSessionPages();
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
+        const label = sessionDisplayTitle(target);
+        announcePinResult(
+          updated
+            ? `${nextPinned ? "Pinned" : "Unpinned"} ${label}.`
+            : `${label} was not ${nextPinned ? "pinned" : "unpinned"}. Server state refreshed.`,
+        );
+        return updated;
+      } finally {
+        pinning.current.delete(target.id);
+        const pending = pendingSessionFocus.current;
+        if (pending?.sessionId === target.id && pending.operation === focusOperation) {
+          pending.settled = true;
+          setFocusRestoreRevision((current) => current + 1);
+        }
+        setPinOverrides((current) => {
+          if (current.get(target.id)?.operation !== operation) return current;
+          const next = new Map(current);
+          next.delete(target.id);
+          return next;
+        });
+      }
+    },
+    [announcePinResult, context, refreshSessionPages],
+  );
+
+  const loadedSessionIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const loadedGroupWindows = useRef(
+    new Map<string, { generation: number; group: SessionPaginationGroup; rows: number }>(),
+  );
+  const groupReadRevisions = useRef(new Map<string, string>());
+  const [failedGroupRefreshes, setFailedGroupRefreshes] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const groupReadRevision = (group: SessionPaginationGroup) =>
+    listHintsAvailable
+      ? `hint:${sessionListGroupRevision(dirtyScopes, group)}`
+      : `poll:${rootReadRevision}`;
+  const currentGroupReadRevision = useRef(groupReadRevision);
+  currentGroupReadRevision.current = groupReadRevision;
+  loadedSessionIdsRef.current = new Set(allSessions.map((session) => session.id));
+  const loadMoreInGroup = useCallback(
+    async (
+      group: SessionPaginationGroup,
+      refreshWindow = false,
+      minimumAdditional = 0,
+      // Automatic fill loads are layout, not a reader action: keep them quiet.
+      announce = true,
+    ) => {
+      const requestGeneration = pageGeneration;
+      const current = activeSessionContinuation(
+        groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(requestGeneration),
+        requestGeneration,
+      );
+      if (current.nextCursor === null && !refreshWindow) return;
+      // A quiet reconciliation must not consume an explicit pagination retry
+      // or race an explicit read. Leave its revision unread instead: the
+      // revision effect rereads this window once the explicit read settles.
+      if (
+        refreshWindow &&
+        (current.failed ||
+          (groupLoadingRef.current.get(group.key) === requestGeneration &&
+            !groupRefreshing.current.has(group.key)))
+      ) {
+        groupReadRevisions.current.delete(group.key);
+        return;
+      }
+      if (
+        groupLoadingRef.current.get(group.key) === requestGeneration &&
+        (refreshWindow || !groupRefreshing.current.has(group.key))
+      )
+        return;
+
+      const requestedAt = new Date();
+      const groupQuery = sessionPaginationGroupQuery(group, paginationBrowseFilter, requestedAt);
+      if (!groupQuery) return;
+
+      const attempt = (groupLoadAttempts.current.get(group.key) ?? 0) + 1;
+      groupLoadAttempts.current.set(group.key, attempt);
+      groupLoadingRef.current = new Map(groupLoadingRef.current).set(group.key, requestGeneration);
+      if (refreshWindow) groupRefreshing.current.add(group.key);
+      else {
+        groupRefreshing.current.delete(group.key);
+        setGroupLoadingGenerations(
+          new Map(
+            [...groupLoadingRef.current].filter(([key]) => !groupRefreshing.current.has(key)),
+          ),
+        );
+      }
+
+      const requestIsCurrent = (): boolean =>
+        paginationIdentity.current.generation === requestGeneration &&
+        groupLoadAttempts.current.get(group.key) === attempt;
+
+      // The first read already observes this revision. Do not immediately
+      // reread its window on settlement; a newer hint during the read still
+      // differs and is reconciled by the effect below.
+      if (
+        !refreshWindow &&
+        loadedGroupWindows.current.get(group.key)?.generation !== requestGeneration
+      )
+        groupReadRevisions.current.set(group.key, currentGroupReadRevision.current(group));
+
+      const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;
+      // A request for more rows than one step (automatic fill) reads them in
+      // one bounded page instead of a chain of four-row requests.
+      const continuationLimit = Math.min(50, Math.max(pageSize, minimumAdditional));
+      const listPage = async (pageCursor?: string, limit = pageSize) => {
+        const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        const page = await context.client.listSessionSummaryPage(rail.workspaceId, {
+          // Server-filtered projects fetch only the displayed step. Client-only
+          // discovery groups retain larger pages to avoid empty-match reads.
+          limit,
+          includePinned: false,
+          ...(needsYouOnly && group.kind !== "archived" ? { needsYouOnly: true } : {}),
+          ...(mineOnly ? { mineOnly: true } : {}),
+          ...(pageCursor ? { cursor: pageCursor } : {}),
+          ...(group.kind !== "archived" && search ? { search } : {}),
+          ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
+          ...groupQuery,
+          archiveStatus:
+            group.kind === "archived"
+              ? "archived"
+              : browseStatus === "all"
+                ? "active"
+                : browseStatus,
+          ...(group.kind === "archived" ? {} : { sortBy: browseSortBy }),
+        });
+        return { page, readGeneration };
+      };
+      const filterPage = (page: SessionListResponse): SessionListResponse => ({
+        ...page,
+        pinned: [],
+        sessions: page.sessions.filter(
+          (session) =>
+            !deletedRootIds.current.has(session.rootSessionId ?? session.id) &&
+            sessionMatchesPaginationGroup(session, group, requestedAt),
+        ),
+      });
+      setGroupContinuations((states) => {
+        const latest = activeSessionContinuation(
+          states.get(group.key) ?? emptySessionContinuation(requestGeneration),
+          requestGeneration,
+        );
+        return new Map(states).set(group.key, { ...latest, failed: false });
+      });
+
+      try {
+        if (refreshWindow) {
+          const window = loadedGroupWindows.current.get(group.key);
+          if (!window || window.generation !== requestGeneration) return;
+          let replacement = emptySessionContinuation(requestGeneration);
+          let pagesRead = 0;
+          let rowsRead = 0;
+          // Revalidate only the window the user already loaded. Keep the old
+          // window visible until its replacement is complete, including when
+          // another device moves an old row into an exhausted group.
+          do {
+            // Refresh the retained window in bounded full pages, rather than
+            // repeating one network request per four-row disclosure click.
+            const readLimit = Math.min(500, Math.max(pageSize, window.rows - rowsRead));
+            const read = await listPage(replacement.nextCursor ?? undefined, readLimit);
+            if (!requestIsCurrent()) return;
+            replacement = mergeSessionContinuation(
+              replacement,
+              requestGeneration,
+              requestGeneration,
+              filterPage(read.page),
+              attempt,
+              pagesRead === 0 ? read.readGeneration : replacement.snapshotGeneration,
+              "group",
+              read.readGeneration,
+            );
+            pagesRead += 1;
+            rowsRead += readLimit;
+          } while (replacement.nextCursor && rowsRead < window.rows);
+          setGroupContinuations((states) => {
+            if (!requestIsCurrent()) return states;
+            return new Map(states).set(group.key, {
+              ...replacement,
+              sessions: replacement.sessions.filter(
+                (session) => !deletedRootIds.current.has(session.rootSessionId ?? session.id),
+              ),
+            });
+          });
+          loadedGroupWindows.current.set(group.key, {
+            ...window,
+            rows: Math.max(pageSize, rowsRead),
+          });
+          setFailedGroupRefreshes((failed) => {
+            const next = new Map(failed);
+            next.delete(group.key);
+            return next;
+          });
+          return;
+        }
+        let pageRead;
+        let rebased = false;
+        try {
+          pageRead = await listPage(current.nextCursor ?? undefined, continuationLimit);
+        } catch (cursorError) {
+          if (!current.nextCursor || !(cursorError instanceof OpenGeniSessionListCursorError)) {
+            throw cursorError;
+          }
+          pageRead = await listPage(undefined, continuationLimit);
+          rebased = true;
+        }
+        if (!requestIsCurrent()) return;
+        const reads = [pageRead];
+        const receivedIds = new Set(
+          filterPage(pageRead.page).sessions.map((session) => session.id),
+        );
+        const newlyLoadedCount = () =>
+          [...receivedIds].filter((id) => !loadedSessionIdsRef.current.has(id)).length;
+        // Client-only groups (running/creator discovery) and overlapping
+        // discovery pages can contain no new matches. One disclosure action
+        // continues until its small display step is filled or the cursor ends.
+        while (reads.at(-1)!.page.nextCursor && newlyLoadedCount() < minimumAdditional) {
+          const read = await listPage(reads.at(-1)!.page.nextCursor!, continuationLimit);
+          if (!requestIsCurrent()) return;
+          reads.push(read);
+          for (const session of filterPage(read.page).sessions) receivedIds.add(session.id);
+        }
+        const page = filterPage(reads.at(-1)!.page);
+        const pageReadGeneration = pageRead.readGeneration;
+        const snapshotRevision =
+          current.nextCursor === undefined || rebased ? attempt : current.snapshotRevision;
+        const snapshotGeneration =
+          current.nextCursor === undefined || rebased
+            ? pageReadGeneration
+            : current.snapshotGeneration;
+        const newlyLoaded = newlyLoadedCount();
+        const receivedRowCount = reads.reduce(
+          (count, read) => count + read.page.sessions.length,
+          0,
+        );
+        const previousWindow = loadedGroupWindows.current.get(group.key);
+        loadedGroupWindows.current.set(group.key, {
+          generation: requestGeneration,
+          group,
+          rows:
+            !rebased && previousWindow?.generation === requestGeneration
+              ? previousWindow.rows + receivedRowCount
+              : Math.max(pageSize, receivedRowCount),
+        });
+        setGroupContinuations((states) => {
+          if (!requestIsCurrent()) return states;
+          const latest = activeSessionContinuation(
+            states.get(group.key) ?? emptySessionContinuation(requestGeneration),
+            requestGeneration,
+          );
+          let next = latest;
+          for (const [index, read] of reads.entries()) {
+            next =
+              rebased && index === 0
+                ? rebaseSessionContinuation(
+                    next,
+                    requestGeneration,
+                    requestGeneration,
+                    filterPage(read.page),
+                    snapshotRevision,
+                    snapshotGeneration,
+                    "group",
+                  )
+                : mergeSessionContinuation(
+                    next,
+                    requestGeneration,
+                    requestGeneration,
+                    filterPage(read.page),
+                    snapshotRevision,
+                    snapshotGeneration,
+                    "group",
+                    read.readGeneration,
+                  );
+          }
+          return new Map(states).set(group.key, {
+            ...next,
+            sessions: next.sessions.filter(
+              (session) => !deletedRootIds.current.has(session.rootSessionId ?? session.id),
+            ),
+          });
+        });
+        if (announce)
+          setAnnouncement(
+            newlyLoaded > 0
+              ? `More sessions are available in ${group.label}.`
+              : page.nextCursor
+                ? `No additional older sessions in ${group.label} yet.`
+                : `No more older sessions in ${group.label}.`,
+          );
+        return { exhausted: page.nextCursor === null, added: newlyLoaded, failed: false };
+      } catch {
+        if (!requestIsCurrent()) return;
+        if (refreshWindow) {
+          // Keep the accepted rows and disclosure cursor usable. A failed
+          // background refresh is not a failed request for older rows.
+          setFailedGroupRefreshes((failed) => new Map(failed).set(group.key, requestGeneration));
+          return;
+        }
+        setGroupContinuations((states) => {
+          if (!requestIsCurrent()) return states;
+          const latest = activeSessionContinuation(
+            states.get(group.key) ?? emptySessionContinuation(requestGeneration),
+            requestGeneration,
+          );
+          return new Map(states).set(group.key, { ...latest, failed: true });
+        });
+        if (announce && !refreshWindow)
+          setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
+        return { exhausted: false, added: 0, failed: true };
+      } finally {
+        if (requestIsCurrent()) {
+          const nextLoading = new Map(groupLoadingRef.current);
+          nextLoading.delete(group.key);
+          groupLoadingRef.current = nextLoading;
+          groupRefreshing.current.delete(group.key);
+          // A dirty hint may have arrived while this quiet refresh was busy.
+          // Publish settlement even without a spinner so it cannot be lost.
+          setGroupLoadingGenerations(
+            new Map([...nextLoading].filter(([key]) => !groupRefreshing.current.has(key))),
+          );
+        }
+      }
+    },
+    [
+      context.client,
+      context.sessionChannelProjectionAuthority,
+      hierarchyMode,
+      pageGeneration,
+      paginationBrowseFilter,
+      needsYouOnly,
+      mineOnly,
+      rail.workspaceId,
+      search,
+      browseSortBy,
+      browseStatus,
+    ],
+  );
+
+  useEffect(() => {
+    if (!channelMode || search || browseStatus === "archived") return;
+    for (const group of projectPaginationGroups) {
+      const continuation = activeSessionContinuation(
+        groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(pageGeneration),
+        pageGeneration,
+      );
+      if (continuation.nextCursor === undefined && !continuation.failed) {
+        void loadMoreInGroup(group);
+      }
+    }
+  }, [browseStatus, channelMode, loadMoreInGroup, pageGeneration, projectPaginationGroups, search]);
+
+  // A workspace-wide discovery page may contain only one row for a creator.
+  // Hydrate each discovered creator independently before offering disclosure.
+  useEffect(() => {
+    if (browseGroupBy !== "creator" || search || browseStatus === "archived") return;
+    for (const bucket of forest.grouped) {
+      const creator = bucket.sessions[0]?.session.createdBy;
+      if (!creator) continue;
+      const group: SessionPaginationGroup = {
+        key: bucket.group,
+        label: bucket.label,
+        kind: "creator",
+        creator: { kind: creator.kind, subjectId: creator.subjectId },
+      };
+      const continuation = activeSessionContinuation(
+        groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(pageGeneration),
+        pageGeneration,
+      );
+      if (continuation.nextCursor === undefined && !continuation.failed)
+        void loadMoreInGroup(group);
+    }
+  }, [browseGroupBy, browseStatus, forest.grouped, loadMoreInGroup, pageGeneration, search]);
+
+  useEffect(() => {
+    if (browseStatus === "active" || search) return;
+    const continuation = activeSessionContinuation(
+      groupContinuationsRef.current.get("archived") ?? emptySessionContinuation(pageGeneration),
+      pageGeneration,
+    );
+    if (continuation.nextCursor === undefined && !continuation.failed) {
+      void loadMoreInGroup(ARCHIVED_SESSION_GROUP);
+    }
+  }, [browseStatus, loadMoreInGroup, pageGeneration, search]);
+
+  const refreshGroupWindow = useRef(loadMoreInGroup);
+  refreshGroupWindow.current = loadMoreInGroup;
+  useEffect(() => {
+    for (const [key, window] of loadedGroupWindows.current) {
+      if (window.generation !== pageGeneration) {
+        loadedGroupWindows.current.delete(key);
+        groupReadRevisions.current.delete(key);
+      }
+    }
+  }, [pageGeneration]);
+  useEffect(() => {
+    for (const window of loadedGroupWindows.current.values()) {
+      if (window.generation !== pageGeneration) continue;
+      const revision = currentGroupReadRevision.current(window.group);
+      if (groupReadRevisions.current.get(window.group.key) === revision) continue;
+      // A hint arriving during a read remains dirty until that read settles.
+      if (groupLoadingRef.current.get(window.group.key) === pageGeneration) continue;
+      groupReadRevisions.current.set(window.group.key, revision);
+      void refreshGroupWindow.current(window.group, true);
+    }
+  }, [
+    rootReadRevision,
+    pageGeneration,
+    listHintsAvailable,
+    dirtyScopes,
+    groupContinuations,
+    groupLoadingGenerations,
+  ]);
+
+  // Successful scopes stay idle. A failed read remains dirty and retries on
+  // the existing cadence even if no further database changes occur.
+  useEffect(() => {
+    if (!listHintsAvailable || document.visibilityState === "hidden") return;
+    const failedChildren = [...childPages].filter(([, page]) => page.failed);
+    const failedGroups = [...failedGroupRefreshes].filter(
+      ([, generation]) => generation === pageGeneration,
+    );
+    if (
+      !error &&
+      !globalPinsError &&
+      !channelsQuery.error &&
+      !activeLineage.error &&
+      !failedChildren.length &&
+      !failedGroups.length
+    )
+      return;
+    const retry = window.setTimeout(() => {
+      if (error) void refresh();
+      if (globalPinsError) void refreshGlobalPins();
+      if (channelsQuery.error) void refreshChannels();
+      if (activeLineage.error) void refreshLineage();
+      for (const [parentId] of failedChildren)
+        void loadChildPage(parentId, undefined, { feedbackVisible: false });
+      for (const [key] of failedGroups) {
+        const window = loadedGroupWindows.current.get(key);
+        if (window?.generation === pageGeneration)
+          void refreshGroupWindow.current(window.group, true);
+      }
+    }, 15_000);
+    return () => window.clearTimeout(retry);
+  }, [
+    listHintsAvailable,
+    documentForeground,
+    childPages,
+    failedGroupRefreshes,
+    error,
+    globalPinsError,
+    channelsQuery.error,
+    activeLineage.error,
+    refresh,
+    refreshGlobalPins,
+    refreshChannels,
+    refreshLineage,
+    loadChildPage,
+    pageGeneration,
+  ]);
+
+  const groupPageState = (
+    group: SessionPaginationGroup,
+    initialNextCursor: string | null,
+    independentlyPaged: boolean,
+  ) => {
+    const continuation = activeSessionContinuation(
+      groupContinuations.get(group.key) ?? emptySessionContinuation(pageGeneration),
+      pageGeneration,
+    );
+    return {
+      continuation,
+      loading: groupLoadingGenerations.get(group.key) === pageGeneration,
+      hasMore:
+        continuation.nextCursor === undefined
+          ? independentlyPaged || initialNextCursor !== null
+          : continuation.nextCursor !== null,
+    };
+  };
+
+  const paginationForGroup = (
+    group: SessionPaginationGroup,
+    initialNextCursor: string | null,
+    independentlyPaged = false,
+    nodes?: SessionTreeNode[],
+  ): SessionGroupPaginationProps | undefined => {
+    const {
+      continuation,
+      loading: groupLoading,
+      hasMore,
+    } = groupPageState(group, initialNextCursor, independentlyPaged);
+    const visibleCount = visibleCountForGroup(group.key);
+    const fillCount = fillCountForGroup(group.key);
+    const hiddenLocally = !search && nodes !== undefined && nodes.length > visibleCount;
+    if (!hasMore && !hiddenLocally && !continuation.failed && !groupLoading) return undefined;
+    return {
+      group,
+      hasMore: hasMore || hiddenLocally || continuation.failed,
+      loading: groupLoading,
+      failed: continuation.failed,
+      isCurrent: () => paginationIdentity.current.generation === pageGeneration,
+      ...(nodes && !search
+        ? {
+            revealCount:
+              hasMore || continuation.failed
+                ? SESSION_GROUP_VISIBLE_STEP
+                : Math.min(SESSION_GROUP_VISIBLE_STEP, nodes.length - visibleCount),
+          }
+        : {}),
+      onLoadMore: async (requestedGroup) => {
+        if (!nodes || search)
+          return (await loadMoreInGroup(requestedGroup, false, SESSION_GROUP_VISIBLE_STEP))
+            ?.exhausted;
+        const { nextCount, needsPage } = sessionGroupDisclosurePlan(
+          visibleCount,
+          nodes.length,
+          hasMore,
+          continuation.failed,
+        );
+        const result = needsPage
+          ? await loadMoreInGroup(requestedGroup, false, Math.max(0, nextCount - nodes.length))
+          : { exhausted: !hasMore, added: 0, failed: false };
+        if (result === undefined || paginationIdentity.current.generation !== pageGeneration)
+          return;
+        // A current failure keeps its Retry control, but never advances the
+        // disclosure window. Stale/no-op loads still return no focus outcome.
+        if (result.failed) return false;
+        // Manual disclosure stacks on the automatic fill shown when clicked.
+        setGroupWindows((current) => ({
+          generation: pageGeneration,
+          memoryId: groupWindowMemoryId,
+          counts: new Map(
+            current.generation === pageGeneration && current.memoryId === groupWindowMemoryId
+              ? current.counts
+              : restoredGroupWindows,
+          ).set(group.key, Math.max(SESSION_GROUP_VISIBLE_STEP, nextCount - fillCount)),
+        }));
+        setAnnouncement(`Showing up to ${nextCount} sessions in ${group.label}.`);
+        return result.exhausted && nodes.length + result.added <= nextCount;
+      },
+    };
+  };
+
+  const paginationGroupForBucket = (
+    bucket: SessionForest["grouped"][number],
+  ): SessionPaginationGroup | null => {
+    if (browseGroupBy === "none") return { key: "workspace", label: "sessions", kind: "results" };
+    if (browseGroupBy === "activity") {
+      return {
+        key: `activity:${bucket.group}`,
+        label: bucket.label,
+        kind: "activity",
+        group: bucket.group as SessionRecencyGroup,
+      };
+    }
+    if (browseGroupBy === "created") {
+      return {
+        key: bucket.group,
+        label: bucket.label,
+        kind: "created",
+        group: bucket.group.replace(/^created:/, "") as SessionRecencyGroup,
+      };
+    }
+    const creator = bucket.sessions[0]?.session.createdBy;
+    return creator
+      ? {
+          key: bucket.group,
+          label: bucket.label,
+          kind: "creator",
+          creator: { kind: creator.kind, subjectId: creator.subjectId },
+        }
+      : null;
+  };
+  const matchingResultsPagination = paginationForGroup(
+    { key: "matching-results", label: "matching sessions", kind: "results" },
+    nextCursor,
+  );
+  // Default is also a move destination: keep its header when its last row
+  // leaves, even if there is no next page of unfiled sessions.
+  const renderedChannelSections =
+    browseStatus === "archived" ||
+    !showEmptyGroups ||
+    channelSections.some((section) => section.channelId === null)
+      ? channelSections
+      : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
+  const renderedGroupedBuckets =
+    browseGroupBy === "creator" || browseGroupBy === "none" || browseGroupBy === "project"
+      ? forest.grouped
+      : SESSION_GROUP_ORDER.flatMap((group) => {
+          const key = browseGroupBy === "created" ? `created:${group}` : group;
+          const existing = forest.grouped.find((bucket) => bucket.group === key);
+          if (existing) return [existing];
+          const bucket: SessionForest["grouped"][number] = {
+            group: key,
+            label:
+              browseGroupBy === "created"
+                ? group === "today"
+                  ? "Created today"
+                  : group === "yesterday"
+                    ? "Created yesterday"
+                    : group === "previous7"
+                      ? "Created in previous 7 days"
+                      : "Created earlier"
+                : SESSION_GROUP_LABELS(t)[group],
+            sessions: [],
+          };
+          return showEmptyGroups ? [bucket] : [];
+        });
+
+  // Expanded, windowed groups in rendered (top-down) order. Spare rail height
+  // fills these before any "Show more" control is needed.
+  const fillTargets: (SessionGroupFillCandidate & {
+    group: SessionPaginationGroup | null;
+    loading: boolean;
+  })[] = [];
+  const addFillTarget = (
+    key: string,
+    nodes: readonly SessionTreeNode[],
+    group: SessionPaginationGroup | null,
+    initialNextCursor: string | null,
+    independentlyPaged: boolean,
+  ) => {
+    const state = group ? groupPageState(group, initialNextCursor, independentlyPaged) : null;
+    fillTargets.push({
+      key,
+      group,
+      loaded: nodes.length,
+      base: baseCountForGroup(key),
+      // Failed pages keep their Retry control. Active sessions are filtered
+      // client-side across the whole workspace, so fill uses only loaded rows.
+      hasMore:
+        state !== null &&
+        state.hasMore &&
+        !state.continuation.failed &&
+        !(group?.kind === "activity" && group.group === "active"),
+      loading: state?.loading ?? false,
+    });
+  };
+  if (!search) {
+    if (browseStatus !== "archived" && channelMode) {
+      for (const section of renderedChannelSections) {
+        if (collapsedChannelSections.has(section.key)) continue;
+        const group = sessionPaginationProjectGroup(section.channelId, section.name);
+        addFillTarget(group.key, section.sessions, group, null, true);
+      }
+    } else if (browseStatus !== "archived") {
+      if (browseGroupBy !== "none" && forest.running.length > 0) {
+        addFillTarget(
+          "activity:active",
+          forest.running,
+          { key: "activity:active", label: "Active", kind: "activity", group: "active" },
+          nextCursor,
+          false,
+        );
+      }
+      for (const bucket of renderedGroupedBuckets) {
+        const group = paginationGroupForBucket(bucket);
+        addFillTarget(
+          group?.key ?? bucket.group,
+          bucket.sessions,
+          group,
+          nextCursor,
+          browseGroupBy === "creator",
+        );
+      }
+    }
+    if (browseStatus !== "active" && archiveExpanded) {
+      addFillTarget("archived", archivedNodes, ARCHIVED_SESSION_GROUP, null, true);
+    }
+  }
+  const fillTargetsRef = useRef(fillTargets);
+  fillTargetsRef.current = fillTargets;
+  const fillGenerationRef = useRef(pageGeneration);
+  fillGenerationRef.current = pageGeneration;
+  const lastFillViewportHeight = useRef<number | null>(null);
+  const measureFill = useCallback(() => {
+    const list = listRef.current;
+    const viewport = list?.closest<HTMLElement>("[data-rail-scroll-viewport]");
+    if (!list || !viewport) return;
+    // Row pitch comes from the rendered rows, so density and coarse-pointer
+    // sizing need no constants here.
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-session-row]")].map((row) =>
+      (row.parentElement ?? row).getBoundingClientRect(),
+    );
+    const first = rows[0];
+    if (!first || first.height <= 0) return;
+    const gap = rows[1] ? rows[1].top - first.top : 0;
+    const rowHeight = gap > first.height && gap < first.height * 2 ? gap : first.height;
+    const viewportHeight = viewport.clientHeight;
+    const previousHeight = lastFillViewportHeight.current;
+    lastFillViewportHeight.current = viewportHeight;
+    const contentBottom =
+      list.getBoundingClientRect().bottom -
+      viewport.getBoundingClientRect().top +
+      viewport.scrollTop;
+    const free = viewportHeight - contentBottom;
+    const freeRows = free >= 0 ? Math.floor(free / rowHeight) : -Math.ceil(-free / rowHeight);
+    // Only a shorter viewport takes rows back. Manual disclosure, expanded
+    // branches and new sessions scroll instead of retracting visible rows.
+    const shrink = previousHeight !== null && viewportHeight < previousHeight;
+    const generation = fillGenerationRef.current;
+    setGroupFill((current) => {
+      const counts = current.generation === generation ? current.counts : new Map<string, number>();
+      const next = planSessionGroupFill(fillTargetsRef.current, counts, freeRows, shrink);
+      return current.generation === generation && sameSessionGroupFill(counts, next)
+        ? current
+        : { generation, counts: next };
+    });
+  }, []);
+  useEffect(() => {
+    const list = listRef.current;
+    const viewport = list?.closest<HTMLElement>("[data-rail-scroll-viewport]");
+    if (!list || !viewport || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measureFill();
+      });
+    };
+    // The viewport resizes with the window and rail chrome; the list resizes
+    // when groups collapse, rows load or the selected row changes.
+    const observer = new ResizeObserver(schedule);
+    observer.observe(viewport);
+    observer.observe(list);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [measureFill]);
+  const fillSignature = fillTargets
+    .map(
+      (target) =>
+        `${target.key}:${target.loaded}:${target.base}:${target.hasMore ? 1 : 0}:${
+          target.loading ? 1 : 0
+        }:${fillCountForGroup(target.key)}`,
+    )
+    .join("|");
+  // Membership or paging can change without resizing the list (for example a
+  // group becoming exhausted). Re-plan on those transitions too.
+  useEffect(() => {
+    const frame = requestAnimationFrame(measureFill);
+    return () => cancelAnimationFrame(frame);
+  }, [fillSignature, measureFill, pageGeneration]);
+  // Load rows that the fill plan shows but no page holds yet. Each request is
+  // keyed by what it asks for, so a page with no new rows is not retried.
+  const fillRequests = useRef(new Map<string, string>());
+  useEffect(() => {
+    for (const target of fillTargetsRef.current) {
+      const fill = fillCountForGroup(target.key);
+      const visible = target.base + fill;
+      // Restored manual windows load too, after the rail returns from Settings.
+      const restored = target.base > SESSION_GROUP_VISIBLE_STEP;
+      if (!target.group || !target.hasMore || target.loading || (fill === 0 && !restored)) continue;
+      if (visible <= target.loaded) continue;
+      const request = `${pageGeneration}:${target.loaded}:${visible}`;
+      if (fillRequests.current.get(target.key) === request) continue;
+      fillRequests.current.set(target.key, request);
+      void loadMoreInGroup(target.group, false, visible - target.loaded, false);
+    }
+  }, [fillCountForGroup, fillSignature, loadMoreInGroup, pageGeneration]);
+
+  // The discovery cursor is workspace-wide, so it cannot prove that any
+  // individual project contains older rows. Keep its control outside projects.
+  const workspacePagination = paginationForGroup(
+    { key: "workspace", label: "this workspace", kind: "results" },
+    nextCursor,
+  );
+  const activePagination = paginationForGroup(
+    { key: "activity:active", label: "Active", kind: "activity", group: "active" },
+    nextCursor,
+  );
+  const creatorDiscoveryPagination =
+    browseGroupBy === "creator" && !paginationBrowseFilter.creator
+      ? paginationForGroup(
+          {
+            key: "creator-discovery",
+            label: "More creators",
+            kind: "creatorDiscovery",
+            knownCreators: forest.grouped.flatMap((bucket) => {
+              const creator = bucket.sessions[0]?.session.createdBy;
+              return creator ? [{ kind: creator.kind, subjectId: creator.subjectId }] : [];
+            }),
+          },
+          nextCursor,
+        )
+      : undefined;
+
+  // Cross-tab invalidation and lifecycle reconciliation. Cross-device commit
+  // hints arrive within the existing 15s cadence; focus/online reconcile now.
+  useEffect(
+    () => subscribeToSessionPinChanges(rail.workspaceId, () => void refreshSessionPages()),
+    [rail.workspaceId, refreshSessionPages],
+  );
+  useEffect(() => {
+    const reconcile = () => void refreshSessionPages();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") reconcile();
+    };
+    window.addEventListener("focus", reconcile);
+    window.addEventListener("online", reconcile);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", reconcile);
+      window.removeEventListener("online", reconcile);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refreshSessionPages]);
+
+  const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const rowFocusIntent = useRef<string | null>(null);
+  const focusIndex = useMemo(() => {
+    const preferredId = focusedSessionId ?? activeSessionId;
+    const preferred = preferredId ? flat.findIndex((session) => session.id === preferredId) : -1;
+    return preferred >= 0 ? preferred : flat.length > 0 ? 0 : -1;
+  }, [activeSessionId, flat, focusedSessionId]);
+
+  // Follow the active session only when the ROUTE changes. Polls, pagination,
+  // pin reorder, and cross-device reconciliation also replace `flat`; those
+  // refreshes must preserve a keyboard user's still-visible roving target
+  // instead of stealing focus back to the route-active row.
+  const previousActiveSessionId = useRef(activeSessionId);
+  useEffect(() => {
+    const routeChanged = previousActiveSessionId.current !== activeSessionId;
+    previousActiveSessionId.current = activeSessionId;
+    if (routeChanged) {
+      rowRevealIntent.current = activeSessionId;
+    }
+    setFocusedSessionId((current) => {
+      if (!routeChanged && current && flat.some((session) => session.id === current)) {
+        return current;
+      }
+      if (activeSessionId && flat.some((session) => session.id === activeSessionId)) {
+        return activeSessionId;
+      }
+      return flat[0]?.id ?? null;
+    });
+  }, [activeSessionId, flat]);
+
+  const onKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (flat.length === 0) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (!target?.hasAttribute("data-session-focus")) {
+        return;
+      }
+      let nextIndex: number | null = null;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        nextIndex = Math.min(flat.length - 1, focusIndex + 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        nextIndex = Math.max(0, focusIndex - 1);
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        event.preventDefault();
+        nextIndex = flat.length - 1;
+      }
+      const next = nextIndex === null ? null : flat[nextIndex];
+      if (next && shouldRecordSessionRowFocusIntent(nextIndex, focusIndex)) {
+        rowFocusIntent.current = next.id;
+        setFocusedSessionId(next.id);
+      } else {
+        // A boundary key is a navigation no-op. Clear any older intent
+        // synchronously so a later list refresh cannot steal focus from a row
+        // action that the user focused after the no-op.
+        rowFocusIntent.current = null;
+      }
+    },
+    [flat, focusIndex],
+  );
+
+  // Consume an explicit reveal/focus intent once. Data churn can rerun this
+  // effect, but with no intent it owns neither DOM focus nor rail scroll.
+  // Layout timing makes real DOM focus part of the discrete keyboard commit;
+  // a passive effect can leave Home/End visibly on the prior row for a frame.
+  useLayoutEffect(() => {
+    const root = listRef.current;
+    if (focusIndex < 0 || !root) {
+      return;
+    }
+    const requestedFocusId = rowFocusIntent.current;
+    const requestedRevealId = rowRevealIntent.current;
+    const requestedSessionId = requestedFocusId ?? requestedRevealId;
+    if (!requestedSessionId) {
+      return;
+    }
+    const row = [...root.querySelectorAll<HTMLElement>("[data-session-row]")].find(
+      (candidate) => candidate.dataset.sessionRow === requestedSessionId,
+    );
+    if (!row) {
+      return;
+    }
+    // Arrow/Home/End navigation must move real DOM focus, not just paint a
+    // visual highlight. A route/poll/pin reorder has no such intent and must
+    // never steal focus from an actions trigger or another active control.
+    if (requestedFocusId) {
+      const renderedSessionId = flat[focusIndex]?.id ?? null;
+      if (
+        pendingSessionFocus.current ||
+        !root.contains(document.activeElement) ||
+        !shouldMoveSessionRowFocus(requestedFocusId, renderedSessionId)
+      ) {
+        rowFocusIntent.current = null;
+        return;
+      }
+      rowFocusIntent.current = null;
+      row.scrollIntoView({ block: "nearest" });
+      row.focus();
+    } else {
+      consumeSessionRowRevealIntent(root, rowRevealIntent);
+    }
+  }, [flat, focusIndex]);
+
+  useEffect(() => {
+    if (loading || (!search && !browseControlsActive)) return;
+    const count = sessionBrowseResultCount(browseSessions, hierarchyMode);
+    setAnnouncement(`${count} matching session${count === 1 ? "" : "s"}.`);
+  }, [browseControlsActive, browseSessions, hierarchyMode, loading, search]);
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
+        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
+          {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
+        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={openSearchDialog}
+              aria-label="Search sessions"
+              aria-haspopup="dialog"
+              aria-keyshortcuts={searchShortcut?.ariaKeys}
+              className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
+            >
+              <SearchIcon aria-hidden="true" className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            <TooltipWithKeys label="Search sessions" shortcut={searchShortcut} />
+          </TooltipContent>
+        </Tooltip>
+        {channelMode ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="New project"
+                onClick={() => setChannelDialogOpen(true)}
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
+              >
+                <FolderPlusIcon className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">New project</TooltipContent>
+          </Tooltip>
+        ) : null}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={
+                needsYouOnly
+                  ? "Session view, showing sessions that need you"
+                  : needsYouCount > 0
+                    ? `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`
+                    : browseControlsActive
+                      ? "Session view, customized"
+                      : "Session view"
+              }
+              className="relative shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
+            >
+              <ListFilterIcon className="size-3.5" />
+              {needsYouCount > 0 && !needsYouOnly ? (
+                <span
+                  data-needs-you-dot
+                  className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-status-waiting"
+                />
+              ) : browseControlsActive ? (
+                <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-brand" />
+              ) : null}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <SessionBrowseOrderControls
+              groupBy={browseGroupBy}
+              onGroupByChange={(groupBy) => updateBrowsePreferences({ groupBy })}
+              sortBy={browseSortBy}
+              onSortByChange={(sortBy) => updateBrowsePreferences({ sortBy })}
+              status={browseStatusPreference}
+              needsYouCount={needsYouCount}
+              onStatusChange={(status) => updateBrowsePreferences({ status })}
+              mineOnly={mineOnly}
+              onMineOnlyChange={(next) => updateBrowsePreferences({ mineOnly: next })}
+              showEmptyGroups={showEmptyGroups}
+              onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
+            />
+            {context.clientConfig.sessionArchive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/read-only-chats",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Read-only chats
+                </DropdownMenuItem>
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <div
+        ref={listRef}
+        role="region"
+        tabIndex={-1}
+        aria-label={search ? "Session search results" : "Sessions"}
+        data-sessionpin-session-list
+        onKeyDown={onKeyDown}
+        onPointerDown={() => {
+          // Direct reader input cancels a reveal whose target has not mounted
+          // yet. A generic scroll handler cannot distinguish that input from
+          // browser anchoring caused by page merges and other DOM reflow.
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        onTouchStart={() => {
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        onWheel={() => {
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        className="min-w-0 pb-2 pl-2 pr-3"
+      >
+        <p className="sr-only" aria-live="polite" aria-atomic="true">
+          {announcement}
+        </p>
+        {(loading && allSessions.length === 0) ||
+        (channelMode && channelsQuery.loading && channels.length === 0) ? (
+          // The second clause holds the skeleton until the initial channels
+          // read resolves, so the rail paints Recents/workstreams directly
+          // instead of flashing the old recency layout first.
+          <SessionListSkeleton />
+        ) : error && allSessions.length === 0 ? (
+          <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
+            Session history is unavailable.{" "}
+            <button
+              type="button"
+              className="underline hover:text-fg"
+              onClick={() => void refresh()}
+            >
+              Retry
+            </button>
+          </div>
+        ) : flat.length === 0 &&
+          !showEmptyGroups &&
+          (search || browseControlsActive) &&
+          (search || browseStatus === "active") ? (
+          <div className="px-2 py-4 text-center text-xs text-fg-subtle">
+            <p>
+              {needsYouOnly && !search
+                ? "Nothing needs you right now."
+                : "No sessions match this view."}
+            </p>
+            {matchingResultsPagination ? (
+              <SessionGroupPaginationControl {...matchingResultsPagination} className="mt-2" />
+            ) : null}
+            <button
+              type="button"
+              className="mt-2 min-h-8 rounded px-2 underline hover:text-fg pointer-coarse:min-h-11"
+              onClick={() => {
+                updateSearchDraft("");
+                clearBrowseControls();
+              }}
+            >
+              {needsYouOnly && !search ? "Show all sessions" : "Clear search and filters"}
+            </button>
+          </div>
+        ) : (browseSessions.length === 0 && !hierarchyMode) ||
+          (!search &&
+            !browseControlsActive &&
+            allSessions.length === 0 &&
+            pinnedNodes.length === 0) ? (
+          <EmptySessions />
+        ) : (
+          <>
+            {pinnedNodes.length > 0 ? (
+              <>
+                <SessionGroup
+                  label="Pinned"
+                  nodes={pinnedNodes}
+                  localDeliveryAttention={localDeliveryAttention}
+                  flat={flat}
+                  activeSessionId={activeSessionId}
+                  focusIndex={focusIndex}
+                  onFocusSession={setFocusedSessionId}
+                  expanded={expanded}
+                  onToggleExpand={toggleExpand}
+                  childPages={childPages}
+                  onLoadMoreChildren={loadChildPage}
+                  onRename={context.updateSessionTitle}
+                  onPin={onPin}
+                  channels={channels}
+                  onMoveToChannel={onMoveToChannel}
+                  onUpdateAttention={onUpdateAttention}
+                  onArchive={onArchive}
+                  onRequestDelete={setSessionPendingDelete}
+                />
+                {pinnedTruncated ? (
+                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                    Showing the 100 most recently pinned sessions. Older pins are omitted.
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+            {browseStatus === "archived" ? null : channelMode ? (
+              renderedChannelSections.map((section) => (
+                <SessionGroup
+                  key={section.key}
+                  label={section.name}
+                  channelId={section.channelId}
+                  sectionId={`channel-${section.key}`}
+                  channelHeader
+                  completeCounts={projectTotals?.get(section.channelId)}
+                  project={
+                    section.channelId
+                      ? channels.find((project) => project.id === section.channelId)
+                      : undefined
+                  }
+                  onToggleProjectPin={onToggleProjectPin}
+                  onRenameProject={(project) => {
+                    setProjectRenameDraft(project.name);
+                    setProjectPendingRename(project);
+                  }}
+                  onDeleteProject={setProjectPendingDelete}
+                  draggedProjectId={draggedProjectId}
+                  dragOverProjectId={dragOverProjectId}
+                  onProjectDragStart={setDraggedProjectId}
+                  onProjectDragOver={setDragOverProjectId}
+                  onProjectDrop={(sourceProjectId, targetProjectId) => {
+                    void onReorderProjects(sourceProjectId, targetProjectId);
+                    setDraggedProjectId(null);
+                    setDragOverProjectId(null);
+                  }}
+                  onProjectDragEnd={() => {
+                    setDraggedProjectId(null);
+                    setDragOverProjectId(null);
+                  }}
+                  sectionExpanded={!collapsedChannelSections.has(section.key)}
+                  onToggleSection={() => toggleChannelSection(section.key)}
+                  nodes={section.sessions}
+                  visibleNodes={visibleNodesForGroup(
+                    sessionPaginationProjectGroup(section.channelId, section.name).key,
+                    section.sessions,
+                  )}
+                  pagination={
+                    search
+                      ? undefined
+                      : paginationForGroup(
+                          sessionPaginationProjectGroup(section.channelId, section.name),
+                          null,
+                          true,
+                          section.sessions,
+                        )
+                  }
+                  localDeliveryAttention={localDeliveryAttention}
+                  flat={flat}
+                  activeSessionId={activeSessionId}
+                  focusIndex={focusIndex}
+                  onFocusSession={setFocusedSessionId}
+                  expanded={expanded}
+                  onToggleExpand={toggleExpand}
+                  childPages={childPages}
+                  onLoadMoreChildren={loadChildPage}
+                  onRename={context.updateSessionTitle}
+                  onPin={onPin}
+                  channels={channels}
+                  onMoveToChannel={onMoveToChannel}
+                  onUpdateAttention={onUpdateAttention}
+                  onArchive={onArchive}
+                  onRequestDelete={setSessionPendingDelete}
+                />
+              ))
+            ) : (
+              <>
+                {browseGroupBy !== "none" &&
+                (forest.running.length > 0 || (showEmptyGroups && activePagination)) ? (
+                  <SessionGroup
+                    label="Active"
+                    nodes={forest.running}
+                    visibleNodes={visibleForest.running}
+                    pagination={paginationForGroup(
+                      {
+                        key: "activity:active",
+                        label: "Active",
+                        kind: "activity",
+                        group: "active",
+                      },
+                      nextCursor,
+                      false,
+                      forest.running,
+                    )}
+                    localDeliveryAttention={localDeliveryAttention}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
+                  />
+                ) : null}
+                {renderedGroupedBuckets.map((bucket) => {
+                  const paginationGroup = paginationGroupForBucket(bucket);
+                  return (
+                    <SessionGroup
+                      key={bucket.group}
+                      label={bucket.label}
+                      hideHeading={browseGroupBy === "none"}
+                      nodes={bucket.sessions}
+                      visibleNodes={visibleNodesForGroup(
+                        paginationGroup?.key ?? bucket.group,
+                        bucket.sessions,
+                      )}
+                      pagination={
+                        paginationGroup
+                          ? paginationForGroup(
+                              paginationGroup,
+                              nextCursor,
+                              browseGroupBy === "creator",
+                              bucket.sessions,
+                            )
+                          : undefined
+                      }
+                      localDeliveryAttention={localDeliveryAttention}
+                      flat={flat}
+                      activeSessionId={activeSessionId}
+                      focusIndex={focusIndex}
+                      onFocusSession={setFocusedSessionId}
+                      expanded={expanded}
+                      onToggleExpand={toggleExpand}
+                      childPages={childPages}
+                      onLoadMoreChildren={loadChildPage}
+                      onRename={context.updateSessionTitle}
+                      onPin={onPin}
+                      channels={channels}
+                      onMoveToChannel={onMoveToChannel}
+                      onUpdateAttention={onUpdateAttention}
+                      onArchive={onArchive}
+                      onRequestDelete={setSessionPendingDelete}
+                    />
+                  );
+                })}
+                {creatorDiscoveryPagination ? (
+                  <SessionGroup
+                    label="More creators"
+                    nodes={[]}
+                    pagination={creatorDiscoveryPagination}
+                    localDeliveryAttention={localDeliveryAttention}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
+                  />
+                ) : null}
+              </>
+            )}
+            {browseStatus !== "archived" &&
+            browseGroupBy !== "none" &&
+            browseGroupBy !== "creator" &&
+            (!channelMode || search) &&
+            workspacePagination ? (
+              <SessionGroupPaginationControl {...workspacePagination} />
+            ) : null}
+            {browseStatus !== "active" ? (
+              <SessionGroup
+                label="Archived"
+                sectionId="archived"
+                channelHeader
+                allowNewSession={false}
+                showSummary={false}
+                emptyLabel="No archived sessions"
+                sectionExpanded={archiveExpanded}
+                onToggleSection={() =>
+                  setArchiveFolder({ generation: pageGeneration, expanded: !archiveExpanded })
+                }
+                nodes={archivedNodes}
+                visibleNodes={visibleNodesForGroup("archived", archivedNodes)}
+                pagination={paginationForGroup(
+                  ARCHIVED_SESSION_GROUP,
+                  null,
+                  !search,
+                  archivedNodes,
+                )}
+                localDeliveryAttention={localDeliveryAttention}
+                flat={flat}
+                activeSessionId={activeSessionId}
+                focusIndex={focusIndex}
+                onFocusSession={setFocusedSessionId}
+                expanded={expanded}
+                onToggleExpand={toggleExpand}
+                childPages={childPages}
+                onLoadMoreChildren={loadChildPage}
+                onRename={context.updateSessionTitle}
+                onPin={onPin}
+                channels={channels}
+                onMoveToChannel={onMoveToChannel}
+                onUpdateAttention={onUpdateAttention}
+                onArchive={onArchive}
+                onRequestDelete={setSessionPendingDelete}
+              />
+            ) : null}
+          </>
+        )}
+      </div>
+      <ChannelCreateDialog
+        key={projectPendingRename?.id ?? "rename-project"}
+        mode="rename"
+        open={projectPendingRename !== null}
+        name={projectRenameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setProjectRenameDraft}
+        onOpenChange={(open) => {
+          if (!open) setProjectPendingRename(null);
+        }}
+        onSubmit={() => void submitRenameProject()}
+      />
+      <ChannelCreateDialog
+        open={channelDialogOpen}
+        name={channelNameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setChannelNameDraft}
+        onOpenChange={(open) => {
+          setChannelDialogOpen(open);
+          if (!open) setChannelNameDraft("");
+        }}
+        onSubmit={() => void submitCreateChannel()}
+      />
+      <ConfirmDialog
+        open={sessionPendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setSessionPendingDelete(null);
+        }}
+        title={
+          <>Delete “{sessionPendingDelete ? sessionDisplayTitle(sessionPendingDelete) : ""}”?</>
+        }
+        description={
+          sessionPendingDelete?.treeStats?.totalDescendants
+            ? `This permanently deletes the chat and its ${sessionPendingDelete.treeStats.totalDescendants} sub-chats. A running chat is stopped first. This cannot be undone.`
+            : "This permanently deletes the chat and its history. A running chat is stopped first. This cannot be undone."
+        }
+        confirmLabel="Delete"
+        cancelAutoFocus
+        onConfirm={onDeleteSession}
+      />
+      <ConfirmDialog
+        open={projectPendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setProjectPendingDelete(null);
+        }}
+        title={<>Delete project “{projectPendingDelete?.name}”?</>}
+        description="Its sessions will remain available in Default. This cannot be undone."
+        confirmLabel="Delete project"
+        cancelAutoFocus
+        onConfirm={onDeleteProject}
+      />
+    </div>
+  );
+}
+
+type SessionGroupPaginationProps = {
+  group: SessionPaginationGroup;
+  hasMore: boolean;
+  loading: boolean;
+  failed: boolean;
+  isCurrent: () => boolean;
+  revealCount?: number | undefined;
+  onLoadMore: (group: SessionPaginationGroup) => Promise<boolean | void>;
+};
+
+function SessionGroupPaginationControl(
+  props: SessionGroupPaginationProps & {
+    className?: string | undefined;
+    fallbackFocusId?: string | undefined;
+  },
+) {
+  const { failed, fallbackFocusId, group, hasMore, isCurrent, loading, onLoadMore, revealCount } =
+    props;
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const groupRef = useRef(group);
+  groupRef.current = group;
+  const focusAttempt = useRef(0);
+  const pendingFocus = useRef<{
+    attempt: number;
+    exhausted?: boolean | undefined;
+    restore?: (() => void) | undefined;
+    cancel: () => void;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (!loading && hasMore) pendingFocus.current?.restore?.();
+  }, [loading, hasMore]);
+  useEffect(
+    () => () => {
+      // Removal can precede the promise's exhaustion result. Let that result
+      // decide fallback; a settled surviving-control intent is abandoned here.
+      if (pendingFocus.current?.exhausted === false) pendingFocus.current?.cancel();
+    },
+    [],
+  );
+  const loadWithFocus = useCallback(async () => {
+    pendingFocus.current?.cancel();
+    const button = buttonRef.current;
+    const root = button?.closest<HTMLElement>("[data-sessionpin-session-list]") ?? null;
+    const shouldRestoreFocus = document.activeElement === button;
+    const requestedGroup = groupRef.current;
+    const attempt = ++focusAttempt.current;
+    let focusMoved = false;
+    let cancelled = false;
+    const observeFocus = (event: FocusEvent) => {
+      if (event.target !== button && event.target !== document.body) focusMoved = true;
+    };
+    const cancel = () => {
+      cancelled = true;
+      document.removeEventListener("focusin", observeFocus, true);
+      if (pendingFocus.current?.attempt === attempt) pendingFocus.current = null;
+    };
+    if (shouldRestoreFocus) {
+      pendingFocus.current = { attempt, cancel };
+      document.addEventListener("focusin", observeFocus, true);
+    }
+    let restoreScheduled = false;
+    try {
+      const exhausted = await onLoadMore(requestedGroup);
+      if (!shouldRestoreFocus || !root || cancelled || exhausted === undefined) return;
+      const restore = () => {
+        if (cancelled) return;
+        if (
+          focusMoved ||
+          focusAttempt.current !== attempt ||
+          !isCurrent() ||
+          groupRef.current.key !== requestedGroup.key ||
+          !root.isConnected
+        ) {
+          cancel();
+          return;
+        }
+        if (
+          document.activeElement &&
+          document.activeElement !== document.body &&
+          document.activeElement !== button
+        ) {
+          cancel();
+          return;
+        }
+        if (!exhausted) {
+          if (
+            !button ||
+            buttonRef.current !== button ||
+            !button.isConnected ||
+            !root.contains(button)
+          ) {
+            cancel();
+            return;
+          }
+          // The promise can settle before React commits disabled={false}.
+          // Keep this intent for that commit instead of dropping focus to BODY.
+          if (button.disabled) return;
+          cancel();
+          button.focus({ preventScroll: true });
+          return;
+        }
+        cancel();
+        const labelledFallback = fallbackFocusId ? document.getElementById(fallbackFocusId) : null;
+        const fallback =
+          labelledFallback && root.contains(labelledFallback)
+            ? labelledFallback
+            : (root.querySelector<HTMLElement>("a[data-session-row]") ?? root);
+        fallback.focus();
+      };
+      pendingFocus.current = { attempt, exhausted, restore, cancel };
+      restoreScheduled = true;
+      requestAnimationFrame(restore);
+    } finally {
+      if (!restoreScheduled) cancel();
+    }
+  }, [onLoadMore, fallbackFocusId, isCurrent]);
+  const isActiveGroup = group.kind === "activity" && group.group === "active";
+
+  const action = loading ? "Loading" : failed ? "Retry" : "Load";
+  return (
+    <div className={cn("px-2 py-1 text-center", props.className)}>
+      <button
+        ref={buttonRef}
+        type="button"
+        disabled={loading || !hasMore}
+        aria-label={
+          revealCount !== undefined
+            ? loading
+              ? `Loading sessions in ${group.label}`
+              : failed
+                ? `Retry sessions in ${group.label}`
+                : `Show ${revealCount} more sessions in ${group.label}`
+            : `${action} older sessions in ${group.label}`
+        }
+        onClick={() => void loadWithFocus()}
+        className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-hover hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
+      >
+        {revealCount !== undefined
+          ? loading
+            ? "Loading…"
+            : failed
+              ? "Retry"
+              : `Show ${revealCount} more`
+          : isActiveGroup
+            ? loading
+              ? "Checking older active sessions…"
+              : `${action} older active sessions`
+            : loading
+              ? "Loading older…"
+              : failed
+                ? "Retry older"
+                : group.kind === "creatorDiscovery"
+                  ? "Show more creators"
+                  : group.kind === "results"
+                    ? "Load older sessions"
+                    : "Load older"}
+      </button>
+      {failed ? (
+        <p role="status" className="mt-1 text-2xs text-status-failed">
+          Older sessions in this group didn&apos;t load.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function SessionGroup(props: {
+  label: string;
+  hideHeading?: boolean | undefined;
+  /**
+   * Stable DOM id suffix. Required for folder sections: labels are
+   * user-controlled, so slugging them can collide with each other and with
+   * the fixed groups ("Pinned", the synthetic "Recents").
+   */
+  sectionId?: string | undefined;
+  /** Real folder id. Null identifies the synthetic Recents section. */
+  channelId?: string | null | undefined;
+  /** Folder-styled, collapsible header instead of the recency label. */
+  channelHeader?: boolean | undefined;
+  completeCounts?: RailStatusCounts | undefined;
+  /** Archived folders are navigational only; new chats always start active. */
+  allowNewSession?: boolean | undefined;
+  project?: Channel | undefined;
+  onToggleProjectPin?: ((project: Channel) => void) | undefined;
+  onRenameProject?: ((project: Channel) => void) | undefined;
+  onDeleteProject?: ((project: Channel) => void) | undefined;
+  draggedProjectId?: string | null | undefined;
+  dragOverProjectId?: string | null | undefined;
+  onProjectDragStart?: ((projectId: string) => void) | undefined;
+  onProjectDragOver?: ((projectId: string) => void) | undefined;
+  onProjectDrop?: ((sourceProjectId: string, targetProjectId: string) => void) | undefined;
+  onProjectDragEnd?: (() => void) | undefined;
+  /** Archive is a destination, not an attention summary. */
+  showSummary?: boolean | undefined;
+  sectionExpanded?: boolean | undefined;
+  onToggleSection?: (() => void) | undefined;
+  nodes: SessionTreeNode[];
+  /** Keyboard navigation uses this same disclosure window. Summaries retain all loaded nodes. */
+  visibleNodes?: SessionTreeNode[] | undefined;
+  emptyLabel?: string | undefined;
+  pagination?: SessionGroupPaginationProps | undefined;
+  localDeliveryAttention: ReadonlyMap<string, number>;
+  flat: Session[];
+  activeSessionId: string | null;
+  focusIndex: number;
+  onFocusSession: (sessionId: string) => void;
+  expanded: ReadonlySet<string>;
+  onToggleExpand: (sessionId: string) => void;
+  childPages: ReadonlyMap<string, ChildPageState>;
+  onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
+  onRename: RenameFn;
+  onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
+}) {
+  const [sessionDragOver, setSessionDragOver] = useState(false);
+  const sectionId = `session-group-${
+    props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+  }`;
+  const sectionExpanded = props.channelHeader ? Boolean(props.sectionExpanded) : true;
+  const loadedSummary = summarizeRailNodes(props.nodes, props.localDeliveryAttention);
+  const summary = props.completeCounts
+    ? summarizeRailStatusCounts({
+        ...props.completeCounts,
+        sendFailed: loadedSummary.kind === "send_failed" ? loadedSummary.count : 0,
+      })
+    : loadedSummary;
+  const collapsedSelection = props.channelHeader
+    ? findSessionTreeNode(props.nodes, props.activeSessionId)
+    : null;
+  const renderedNodes = sectionExpanded
+    ? (props.visibleNodes ?? props.nodes)
+    : collapsedSelection
+      ? [collapsedSelection]
+      : [];
+  const treeExpanded = sectionExpanded ? props.expanded : EMPTY_SESSION_IDS;
+  return (
+    <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
+      {props.channelHeader ? (
+        <div
+          draggable={Boolean(props.project)}
+          onDragStart={(event: DragEvent<HTMLDivElement>) => {
+            if (!props.project) return;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData(PROJECT_DRAG_TYPE, props.project.id);
+            props.onProjectDragStart?.(props.project.id);
+          }}
+          onDragOver={(event: DragEvent<HTMLDivElement>) => {
+            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+              if (props.allowNewSession === false) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setSessionDragOver(true);
+              return;
+            }
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+            props.onProjectDragOver?.(props.project.id);
+          }}
+          onDrop={(event: DragEvent<HTMLDivElement>) => {
+            setSessionDragOver(false);
+            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+              event.preventDefault();
+              event.stopPropagation();
+              if (props.allowNewSession === false) return;
+              const session = props.flat.find(
+                (candidate) => candidate.id === event.dataTransfer.getData(SESSION_DRAG_TYPE),
+              );
+              if (session && session.parentSessionId === null && !session.archived) {
+                void props.onMoveToChannel(session, props.channelId ?? null, "row");
+              }
+              return;
+            }
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
+            event.preventDefault();
+            const sourceProjectId = event.dataTransfer.getData(PROJECT_DRAG_TYPE);
+            if (sourceProjectId) props.onProjectDrop?.(sourceProjectId, props.project.id);
+          }}
+          onDragEnd={props.onProjectDragEnd}
+          onDragLeave={() => setSessionDragOver(false)}
+          className={cn(
+            sessionDragOver && "bg-accent ring-1 ring-ring",
+            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-hover pointer-coarse:h-11",
+            props.project && "cursor-grab active:cursor-grabbing",
+            props.project && props.draggedProjectId === props.project.id && "opacity-45",
+            props.project &&
+              props.dragOverProjectId === props.project.id &&
+              props.draggedProjectId !== props.project.id &&
+              "ring-1 ring-inset ring-accent",
+          )}
+        >
+          <button
+            id={sectionId}
+            type="button"
+            aria-expanded={sectionExpanded}
+            aria-controls={renderedNodes.length > 0 ? `${sectionId}-sessions` : undefined}
+            onClick={props.onToggleSection}
+            title={`${summary.label} · ${summary.total} total`}
+            className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-1 pl-1.5 text-left text-sm font-normal text-fg"
+          >
+            <span className="flex w-4 shrink-0 items-center">
+              {sectionExpanded ? (
+                <FolderOpenIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              ) : (
+                <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+            </span>
+            <span className="min-w-0 flex-1 truncate">{props.label}</span>
+            {props.showSummary !== false ? (
+              // The row's actions sit where the summary is, on the translucent
+              // hover wash, so the summary steps aside while they show.
+              <span
+                className={cn(
+                  "inline-flex shrink-0",
+                  (props.project || props.allowNewSession !== false) &&
+                    "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
+                )}
+              >
+                <RailTrailingMetadata summary={summary} />
+              </span>
+            ) : null}
+          </button>
+          {props.project ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={`Actions for ${props.label}`}
+                  className={cn(
+                    "absolute top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded text-fg-subtle opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:size-9 pointer-coarse:opacity-100",
+                    props.allowNewSession !== false ? "right-7" : "right-0.5",
+                  )}
+                >
+                  <EllipsisIcon aria-hidden="true" className="size-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" side="right">
+                <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
+                  <PencilIcon aria-hidden="true" />
+                  Rename project
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
+                  <PinIcon
+                    aria-hidden="true"
+                    className={props.project.pinned ? "size-4 fill-current" : "size-4"}
+                  />
+                  {props.project.pinned ? "Unpin project" : "Pin project"}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={() => props.onDeleteProject?.(props.project!)}
+                >
+                  <Trash2Icon aria-hidden="true" />
+                  Delete project
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          {props.allowNewSession !== false ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <NewSessionLink
+                  channelId={props.channelId}
+                  aria-label={`New chat in ${props.label}`}
+                  className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded text-fg-subtle opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
+                >
+                  <PlusIcon aria-hidden="true" className="size-3.5" />
+                </NewSessionLink>
+              </TooltipTrigger>
+              <TooltipContent side="right">New chat in {props.label}</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </div>
+      ) : (
+        <p
+          id={sectionId}
+          tabIndex={-1}
+          className={
+            props.hideHeading
+              ? "sr-only"
+              : "px-1.5 pb-0.5 pt-2 text-2xs font-normal uppercase tracking-wider text-fg-muted"
+          }
+        >
+          {props.label}
+        </p>
+      )}
+      {renderedNodes.length > 0 ? (
+        <div
+          id={`${sectionId}-sessions`}
+          role="list"
+          aria-label={`${props.label} sessions`}
+          className="grid min-w-0 grid-cols-1 gap-px"
+        >
+          {renderedNodes.map((node) => (
+            <SessionTreeRow
+              key={node.session.id}
+              node={node}
+              localDeliveryAttention={props.localDeliveryAttention}
+              depth={0}
+              flat={props.flat}
+              activeSessionId={props.activeSessionId}
+              focusIndex={props.focusIndex}
+              onFocusSession={props.onFocusSession}
+              expanded={treeExpanded}
+              onToggleExpand={props.onToggleExpand}
+              childPages={props.childPages}
+              onLoadMoreChildren={props.onLoadMoreChildren}
+              onRename={props.onRename}
+              onPin={props.onPin}
+              channels={props.channels}
+              onMoveToChannel={props.onMoveToChannel}
+              onUpdateAttention={props.onUpdateAttention}
+              onArchive={props.onArchive}
+              onRequestDelete={props.onRequestDelete}
+            />
+          ))}
+        </div>
+      ) : null}
+      {sectionExpanded && renderedNodes.length === 0 && props.emptyLabel && !props.pagination ? (
+        <p className="px-6 py-2 text-xs text-fg-subtle">{props.emptyLabel}</p>
+      ) : null}
+      {sectionExpanded && props.pagination ? (
+        <SessionGroupPaginationControl {...props.pagination} fallbackFocusId={sectionId} />
+      ) : null}
+    </div>
+  );
+}
+
+/** A node plus, when expanded, its spawned children rendered one level deeper. */
+function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
+  const { node } = props;
+  const origin = node.siteGroup!;
+  const key = `site:${origin.siteId}`;
+  const expanded = props.expanded.has(key);
+  const summary = summarizeRailNodes(node.children, props.localDeliveryAttention);
+  const selected = selectedDescendantNode(node, props.activeSessionId);
+  const children = expanded ? node.children : selected ? [selected] : [];
+  return (
+    <div role="listitem" className="min-w-0">
+      <SiteSessionGroupHeading
+        origin={origin}
+        workspaceId={node.session.workspaceId}
+        expanded={expanded}
+        onToggle={() => props.onToggleExpand(key)}
+        summary={summary}
+      />
+      {children.length > 0 && (
+        <div role="list" aria-label={`Conversations from ${origin.title}`}>
+          {children.map((child) => (
+            <SessionTreeRow
+              key={child.session.id}
+              {...props}
+              node={child}
+              depth={props.depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionTreeRow(props: {
+  node: SessionTreeNode;
+  localDeliveryAttention: ReadonlyMap<string, number>;
+  depth: number;
+  flat: Session[];
+  activeSessionId: string | null;
+  focusIndex: number;
+  onFocusSession: (sessionId: string) => void;
+  expanded: ReadonlySet<string>;
+  onToggleExpand: (sessionId: string) => void;
+  childPages: ReadonlyMap<string, ChildPageState>;
+  onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
+  onRename: RenameFn;
+  onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
+}) {
+  const { node } = props;
+  if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
+  const index = props.flat.indexOf(node.session);
+  const directChildCount = node.session.treeStats?.directChildren ?? node.children.length;
+  // Server treeStats only counts spawned descendants. Repeat runs of a scheduled
+  // task are folded in client-side, so take whichever is larger or a grouped
+  // entry renders with no child region at all.
+  const childCount = Math.max(node.session.treeStats?.totalDescendants ?? 0, node.children.length);
+  const childCountTruncated = node.session.treeStats?.truncated ?? false;
+  const hasChildren = directChildCount > 0 || node.children.length > 0;
+  const aggregateStatus = summarizeRailNodes([node], props.localDeliveryAttention);
+  const isExpanded = props.expanded.has(node.session.id);
+  const childPage = props.childPages.get(node.session.id);
+  // A collapsed branch keeps only its selected descendant visible, rendered as
+  // the same ordinary row used by the expanded list. This preserves context
+  // without opening the whole branch or introducing a second navigation shape.
+  const collapsedSelectedNode = !isExpanded
+    ? selectedDescendantNode(node, props.activeSessionId)
+    : null;
+  const title = sessionDisplayTitle(node.session);
+  const hasVisibleChildRegion = Boolean(collapsedSelectedNode || (isExpanded && childCount > 0));
+  return (
+    <div role="listitem" className="min-w-0">
+      <SessionRow
+        session={node.session}
+        index={index}
+        depth={props.depth}
+        childCount={childCount}
+        childCountTruncated={childCountTruncated}
+        hasChildren={hasChildren}
+        expanded={isExpanded}
+        aggregateStatus={aggregateStatus}
+        onToggleExpand={() => props.onToggleExpand(node.session.id)}
+        active={node.session.id === props.activeSessionId}
+        focused={index >= 0 && index === props.focusIndex}
+        onFocus={() => props.onFocusSession(node.session.id)}
+        onRename={props.onRename}
+        onPin={props.onPin}
+        channels={props.channels}
+        onMoveToChannel={props.onMoveToChannel}
+        onUpdateAttention={props.onUpdateAttention}
+        onArchive={props.onArchive}
+        onRequestDelete={props.onRequestDelete}
+      />
+      {hasVisibleChildRegion ? (
+        <div role="list" aria-label={`Spawned sessions from ${title}`}>
+          {collapsedSelectedNode ? (
+            <SessionTreeRow
+              node={collapsedSelectedNode}
+              localDeliveryAttention={props.localDeliveryAttention}
+              depth={props.depth + 1}
+              flat={props.flat}
+              activeSessionId={props.activeSessionId}
+              focusIndex={props.focusIndex}
+              onFocusSession={props.onFocusSession}
+              expanded={props.expanded}
+              onToggleExpand={props.onToggleExpand}
+              childPages={props.childPages}
+              onLoadMoreChildren={props.onLoadMoreChildren}
+              onRename={props.onRename}
+              onPin={props.onPin}
+              channels={props.channels}
+              onMoveToChannel={props.onMoveToChannel}
+              onUpdateAttention={props.onUpdateAttention}
+              onArchive={props.onArchive}
+              onRequestDelete={props.onRequestDelete}
+            />
+          ) : null}
+          {childCount > 0 && isExpanded
+            ? node.children.map((child) => (
+                <SessionTreeRow
+                  key={child.session.id}
+                  node={child}
+                  localDeliveryAttention={props.localDeliveryAttention}
+                  depth={props.depth + 1}
+                  flat={props.flat}
+                  activeSessionId={props.activeSessionId}
+                  focusIndex={props.focusIndex}
+                  onFocusSession={props.onFocusSession}
+                  expanded={props.expanded}
+                  onToggleExpand={props.onToggleExpand}
+                  childPages={props.childPages}
+                  onLoadMoreChildren={props.onLoadMoreChildren}
+                  onRename={props.onRename}
+                  onPin={props.onPin}
+                  channels={props.channels}
+                  onMoveToChannel={props.onMoveToChannel}
+                  onUpdateAttention={props.onUpdateAttention}
+                  onArchive={props.onArchive}
+                  onRequestDelete={props.onRequestDelete}
+                />
+              ))
+            : null}
+          {isExpanded && childPage?.loading && childPage.feedbackVisible ? (
+            <TreeLoadRow depth={props.depth + 1} text="Loading sessions…" />
+          ) : null}
+          {isExpanded && childPage?.failed && childPage.feedbackVisible ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Retry loading sessions"
+              onClick={() =>
+                void props.onLoadMoreChildren(node.session.id, childPage.retryCursor ?? undefined)
+              }
+            />
+          ) : null}
+          {isExpanded && !childPage?.loading && !childPage?.failed && childPage?.nextCursor ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Show more"
+              onClick={() => void props.onLoadMoreChildren(node.session.id, childPage.nextCursor!)}
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TreeLoadRow({
+  depth,
+  text,
+  onClick,
+}: {
+  depth: number;
+  text: string;
+  onClick?: (() => void) | undefined;
+}) {
+  const style = { paddingLeft: 26 + visualTreeDepth(depth) * 12 };
+  return onClick ? (
+    <div role="listitem">
+      <button
+        type="button"
+        onClick={onClick}
+        style={style}
+        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:h-11"
+      >
+        {text}
+      </button>
+    </div>
+  ) : (
+    <div role="listitem">
+      <div style={style} className="flex h-8 items-center text-xs text-fg-subtle" role="status">
+        {text}
+      </div>
+    </div>
+  );
+}
+
+function SessionRow(props: {
+  session: Session;
+  index: number;
+  /** Nesting depth; children indent one step per level. */
+  depth: number;
+  /** Spawned-child count; a chevron + badge appear when > 0. */
+  childCount: number;
+  /** True when childCount is a server traversal lower bound. */
+  childCountTruncated: boolean;
+  hasChildren: boolean;
+  expanded: boolean;
+  /** One status for this session and every hidden descendant. */
+  aggregateStatus: RailAggregateStatus;
+  onToggleExpand: () => void;
+  active: boolean;
+  focused: boolean;
+  onFocus: () => void;
+  onRename: RenameFn;
+  onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
+}) {
+  const rail = useRail();
+  const context = useAppContext();
+  const title = sessionDisplayTitle(props.session);
+  const rename = useInlineRename(props.session, props.onRename);
+  const contextPinSelection = useRef(false);
+  const chatOps = useChatOperations();
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
+  const hasChildren = props.hasChildren;
+  const focusEvents = useUiEventTarget("window");
+  const creator = railRowCreator(props.session);
+  // A key press puts the person's attention elsewhere (⌘K right after opening a
+  // chat, with the pointer still on its row), so the hover card gives way, as
+  // tooltips do.
+  const [hoverOpen, setHoverOpen] = useState(false);
+  useEffect(() => {
+    if (!hoverOpen || typeof document === "undefined") return;
+    const close = () => setHoverOpen(false);
+    document.addEventListener("keydown", close, true);
+    return () => document.removeEventListener("keydown", close, true);
+  }, [hoverOpen]);
+  // The right-click menu replaces the preview: it would otherwise stay drawn
+  // over the menu, since the pointer is still on the row.
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  // Who started a session only adds information where other people work too.
+  const personalWorkspace = isPersonalWorkspace(
+    context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
+    null,
+  );
+  const stateLabel = sessionStateLabel(props.session);
+  const hoverDescendantCount = props.session.treeStats?.totalDescendants ?? props.childCount;
+  const hoverDescendantCountTruncated =
+    props.session.treeStats?.truncated ?? props.childCountTruncated;
+  // The hover card is pointer/focus-only and not announced, so the row also
+  // describes the same facts to assistive technology.
+  const hoverDescriptionId = `session-hover-${useId().replaceAll(":", "")}`;
+  const hoverDescription = sessionHoverDescription(
+    sessionHoverFacts(props.session, {
+      descendantCount: hoverDescendantCount,
+      descendantCountTruncated: hoverDescendantCountTruncated,
+    }),
+  );
+  const waiting = Boolean(sessionInputWait(props.session));
+  const [, refreshWaitClock] = useState(0);
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setInterval(() => refreshWaitClock(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [waiting]);
+  const descendantLabel = sessionDescendantLabel(props.session);
+  const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
+  const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
+  const relativeTime = relativeTimeLabel(t, props.session.updatedAt);
+  // Indent nested rows without changing the root title column. Parents and
+  // leaves reserve the same compact disclosure slot, so the chevron does not
+  // push a parent title away from the leaf titles beside it.
+  const indentStyle =
+    props.depth > 0 ? { marginLeft: visualTreeDepth(props.depth) * 12 } : undefined;
+
+  // The open session is a selected row: the selection fill, full-strength
+  // text and a faint accent edge. The border is always present (transparent
+  // otherwise) so selecting a row never shifts its contents.
+  const rowClassName = cn(
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md border py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
+    rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
+    props.active
+      ? "border-brand/20 bg-selection text-fg"
+      : "border-transparent text-fg-label hover:bg-hover hover:text-fg",
+    // The roving tab stop shows the hover wash only while it holds keyboard
+    // focus; otherwise it would read as a stray hover.
+    !props.active && "has-[[data-session-focus]:focus-visible]:bg-hover",
+  );
+
+  const lead = (
+    <span className="flex w-4 shrink-0 items-center" style={indentStyle}>
+      {hasChildren ? (
+        <button
+          type="button"
+          aria-label={props.expanded ? "Collapse spawned sessions" : "Expand spawned sessions"}
+          aria-expanded={props.expanded}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onToggleExpand();
+          }}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
+        >
+          <ChevronRightIcon
+            className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-90")}
+          />
+        </button>
+      ) : null}
+    </span>
+  );
+
+  // While renaming, the row body becomes an inline input. SessionTreeRow owns
+  // the listitem semantics so its spawned-session list can remain nested.
+  if (rename.editing) {
+    return (
+      <div className={rowClassName}>
+        {lead}
+        <input
+          ref={rename.inputRef}
+          data-session-index={props.index}
+          data-session-focus
+          tabIndex={props.focused ? 0 : -1}
+          onFocus={props.onFocus}
+          value={rename.draft}
+          onChange={(event) => rename.setDraft(event.target.value)}
+          onBlur={() => void rename.commit()}
+          onKeyDown={(event) => {
+            // Keep keystrokes (incl. Arrow/Enter/Esc) inside the field, away
+            // from the list's keyboard navigation.
+            event.stopPropagation();
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void rename.commit();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              rename.cancel();
+            }
+          }}
+          maxLength={SESSION_TITLE_MAX_LENGTH}
+          aria-label="Session title"
+          className="min-w-0 flex-1 truncate rounded-sm bg-transparent text-sm outline-hidden ring-1 ring-ring/40 focus-visible:ring-ring"
+        />
+        <RailTrailingMetadata
+          summary={props.aggregateStatus}
+          scheduled={props.session.hasSchedules === true}
+          relativeTime={rail.isMobile ? undefined : relativeTime}
+          creator={creator}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <ContextMenu
+      onOpenChange={(open) => {
+        setContextMenuOpen(open);
+        if (open) setHoverOpen(false);
+      }}
+    >
+      <ContextMenuTrigger asChild>
+        <div className={rowClassName}>
+          {lead}
+          <SiteOriginLink session={props.session} compact />
+          <HoverCard
+            openDelay={100}
+            closeDelay={80}
+            open={hoverOpen && !contextMenuOpen}
+            onOpenChange={(open) => setHoverOpen(open && !contextMenuOpen)}
+          >
+            <HoverCardTrigger asChild>
+              <Link
+                to="/workspaces/$workspaceId/sessions/$sessionId"
+                draggable={props.session.parentSessionId === null && !props.session.archived}
+                onDragStart={(event) => {
+                  if (props.session.parentSessionId !== null || props.session.archived) {
+                    event.preventDefault();
+                    return;
+                  }
+                  event.stopPropagation();
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData(SESSION_DRAG_TYPE, props.session.id);
+                }}
+                params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
+                data-session-index={props.index}
+                data-session-focus
+                data-session-row={props.session.id}
+                tabIndex={props.focused ? 0 : -1}
+                aria-current={props.active ? "page" : undefined}
+                aria-label={sessionRowAccessibleName({
+                  title,
+                  stateLabel,
+                  pinned: Boolean(props.session.pinned),
+                  statusLabel: props.aggregateStatus.label,
+                  spawnedLabel: hasChildren
+                    ? childCountAria.replace("descendant", "spawned")
+                    : null,
+                  creator,
+                })}
+                aria-describedby={hoverDescription ? hoverDescriptionId : undefined}
+                onFocus={props.onFocus}
+                onClick={(event) => {
+                  if (isModifiedNavigationClick(event)) return;
+                  if (
+                    props.session.unread &&
+                    !props.session.archived &&
+                    document.visibilityState === "visible" &&
+                    document.hasFocus()
+                  ) {
+                    const projection: SessionAttentionProjection = {
+                      id: props.session.id,
+                      workspaceId: props.session.workspaceId,
+                      unread: false,
+                      ...(props.session.attentionVersion !== undefined
+                        ? { attentionVersion: props.session.attentionVersion }
+                        : {}),
+                      lastSequence: props.session.lastSequence,
+                    };
+                    // A rail click is already a foreground view. Commit its exact
+                    // known frontier before route data loads so a fast second
+                    // navigation cannot cancel the read.
+                    notifySessionAttentionChanged(projection);
+                    const acceptedTransition = context.captureWorkspaceInvocation(
+                      props.session.workspaceId,
+                    );
+                    if (acceptedTransition) {
+                      const acknowledge = (retry: boolean): void => {
+                        void context.client
+                          .updateSessionAttention(props.session.workspaceId, props.session.id, {
+                            unread: false,
+                            acknowledgedThroughSequence: props.session.lastSequence,
+                          })
+                          .then((updated) => {
+                            if (
+                              context.ownsWorkspaceInvocation(
+                                props.session.workspaceId,
+                                acceptedTransition,
+                              )
+                            ) {
+                              notifySessionAttentionChanged(updated);
+                            }
+                          })
+                          .catch(() => {
+                            if (
+                              retry &&
+                              context.ownsWorkspaceInvocation(
+                                props.session.workspaceId,
+                                acceptedTransition,
+                              )
+                            ) {
+                              acknowledge(false);
+                            }
+                          });
+                      };
+                      acknowledge(true);
+                    }
+                  }
+                  if (!rail.isMobile) {
+                    requestSessionComposerFocus(focusEvents, rail.workspaceId, props.session.id);
+                  }
+                  rail.setDrawerOpen(false);
+                }}
+                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
+              >
+                <SessionRowContent
+                  quickActionSlots={
+                    Number(!props.session.archived) + Number(props.session.parentSessionId === null)
+                  }
+                  title={title}
+                  stateLabel={stateLabel}
+                  depthLabel={depthLabel}
+                  descendantLabel={descendantLabel}
+                  mobile={rail.isMobile}
+                  summary={props.aggregateStatus}
+                  scheduled={props.session.hasSchedules === true}
+                  relativeTime={rail.isMobile ? undefined : relativeTime}
+                  creator={creator}
+                />
+              </Link>
+            </HoverCardTrigger>
+            <HoverCardContent
+              // The narrow rail fills the screen, so there is no room beside it.
+              side={rail.isMobile ? "bottom" : "right"}
+              collisionPadding={8}
+              className="w-80 max-w-[calc(100vw-16px)] p-3.5"
+            >
+              <SessionRowHoverDetails
+                session={props.session}
+                title={title}
+                descendantCount={hoverDescendantCount}
+                descendantCountTruncated={hoverDescendantCountTruncated}
+                showCreator={!personalWorkspace}
+              />
+            </HoverCardContent>
+          </HoverCard>
+          {hoverDescription ? (
+            <span id={hoverDescriptionId} hidden>
+              {hoverDescription}
+            </span>
+          ) : null}
+          <RowQuickActions
+            session={props.session}
+            onPin={props.onPin}
+            onArchive={props.onArchive}
+          />
+          <RowActionsMenu
+            session={props.session}
+            onRename={rename.startEditing}
+            onPin={props.onPin}
+            channels={props.channels}
+            onMoveToChannel={props.onMoveToChannel}
+            onUpdateAttention={props.onUpdateAttention}
+            onArchive={props.onArchive}
+            onRequestDelete={props.onRequestDelete}
+          />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent
+        className="min-w-40"
+        data-session-menu={props.session.id}
+        onCloseAutoFocus={(event) => {
+          if (!contextPinSelection.current) return;
+          // The original trigger is about to be unmounted by the optimistic
+          // group move. SessionList restores the corresponding remounted row.
+          event.preventDefault();
+          contextPinSelection.current = false;
+        }}
+      >
+        <ContextMenuItem onSelect={rename.startEditing}>
+          <PencilIcon className="size-4" />
+          Rename
+        </ContextMenuItem>
+        <ContextMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(props.session)}
+        >
+          <LinkIcon className="size-4" />
+          Copy link
+          {copyLinkKeys ? <ContextMenuShortcut>{copyLinkKeys.label}</ContextMenuShortcut> : null}
+        </ContextMenuItem>
+        {!props.session.archived ? (
+          <>
+            <ContextMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
+              onSelect={() => {
+                contextPinSelection.current = true;
+                void props.onPin(props.session, !props.session.pinned, "row");
+              }}
+            >
+              <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
+              {props.session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <ContextMenuShortcut>{pinKeys.label}</ContextMenuShortcut> : null}
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() =>
+                void props.onUpdateAttention(props.session, { unread: !props.session.unread })
+              }
+            >
+              {props.session.unread ? (
+                <MailOpenIcon className="size-4" />
+              ) : (
+                <MailIcon className="size-4" />
+              )}
+              {props.session.unread ? "Mark as read" : "Mark as unread"}
+            </ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() =>
+                void props.onUpdateAttention(props.session, {
+                  activelyWorking: !props.session.activelyWorking,
+                })
+              }
+            >
+              <ActiveWorkMark className="size-4" />
+              {props.session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
+            </ContextMenuItem>
+          </>
+        ) : null}
+        {props.session.parentSessionId === null ? (
+          <ContextMenuItem
+            onSelect={() => void props.onArchive(props.session, !props.session.archived)}
+          >
+            <ArchiveIcon className="size-4" />
+            {props.session.archived ? "Restore" : "Archive"}
+          </ContextMenuItem>
+        ) : null}
+        {props.session.parentSessionId === null && props.session.archived ? (
+          <ContextMenuItem
+            variant="destructive"
+            onSelect={() => props.onRequestDelete(props.session)}
+          >
+            <Trash2Icon className="size-4" />
+            Delete chat
+          </ContextMenuItem>
+        ) : null}
+        {props.channels.length > 0 &&
+        props.session.parentSessionId === null &&
+        !props.session.archived ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuLabel>Move to project</ContextMenuLabel>
+            {[{ id: null, name: "Default" }, ...props.channels].map((channel) => {
+              const current = props.session.channelId === channel.id;
+              return (
+                <ContextMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (current) return;
+                    contextPinSelection.current = true;
+                    void props.onMoveToChannel(props.session, channel.id, "row");
+                  }}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </ContextMenuItem>
+              );
+            })}
+          </>
+        ) : null}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+function sessionDescendantLabel(session: Session): string | null {
+  const stats = session.treeStats;
+  if (!stats || stats.totalDescendants === 0) return null;
+  const live = stats.runningDescendants + stats.queuedDescendants;
+  const total = sessionDescendantCountText(stats.totalDescendants, stats.truncated);
+  if (stats.attentionDescendants > 0) {
+    const waiting = stats.attentionSince ? formatWaitingSince(stats.attentionSince) : "";
+    return `${stats.attentionDescendants} need you${waiting ? ` for ${waiting}` : ""} · ${total} total`;
+  }
+  if (live > 0) return `${live} active · ${total} total`;
+  return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
+}
+
+/**
+ * The two common row actions stay one click away on desktop. Keyboard focus
+ * reveals the same controls as hover; right-click still opens the complete
+ * context menu owned by SessionRow.
+ */
+export function RowQuickActions({
+  session,
+  onPin,
+  onArchive,
+}: {
+  session: Session;
+  onPin: PinFn;
+  onArchive: ArchiveFn;
+}) {
+  const canPin = !session.archived;
+  const canArchive = session.parentSessionId === null;
+  if (!canPin && !canArchive) return null;
+
+  return (
+    <div
+      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
+      data-session-quick-actions={session.id}
+    >
+      {canPin ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={session.pinned ? "Unpin session" : "Pin session"}
+          aria-pressed={Boolean(session.pinned)}
+          title={session.pinned ? "Unpin" : "Pin"}
+          data-session-actions={session.id}
+          data-session-actions-mode="quick"
+          onClick={(event) => {
+            event.stopPropagation();
+            void onPin(session, !session.pinned, "actions");
+          }}
+          className="text-fg-subtle hover:text-fg"
+        >
+          <PinIcon className={session.pinned ? "size-3.5 fill-current" : "size-3.5"} />
+        </Button>
+      ) : null}
+      {canArchive ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={session.archived ? "Restore session" : "Archive session"}
+          title={session.archived ? "Restore" : "Archive"}
+          data-session-actions={session.id}
+          data-session-actions-mode="quick"
+          data-session-action="archive"
+          onClick={(event) => {
+            event.stopPropagation();
+            void onArchive(session, !session.archived, "actions");
+          }}
+          className="text-fg-subtle hover:text-fg"
+        >
+          <ArchiveIcon className="size-3.5" />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Touch and other coarse pointers have no dependable hover or right-click, so
+ * they retain the complete overflow menu as an always-visible fallback.
+ */
+function RowActionsMenu({
+  session,
+  onRename,
+  onPin,
+  channels,
+  onMoveToChannel,
+  onUpdateAttention,
+  onArchive,
+  onRequestDelete,
+}: {
+  session: Session;
+  onRename: () => void;
+  onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
+  onUpdateAttention: UpdateAttentionFn;
+  onArchive: ArchiveFn;
+  onRequestDelete: RequestDeleteFn;
+}) {
+  const remountSelection = useRef(false);
+  const chatOps = useChatOperations();
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
+  // Filing is a root-session concept: the rail groups a whole tree by its
+  // root's channel, so children offer no move affordance.
+  const canMove = channels.length > 0 && session.parentSessionId === null && !session.archived;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`Actions for ${sessionDisplayTitle(session)}`}
+          data-session-actions={session.id}
+          data-session-actions-mode="overflow"
+          onClick={(event) => event.stopPropagation()}
+          className="absolute right-0 top-1/2 z-10 hidden size-11 -translate-y-1/2 bg-surface-2 text-fg-subtle hover:text-fg pointer-coarse:inline-flex"
+        >
+          <EllipsisIcon className="size-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="min-w-40"
+        data-session-menu={session.id}
+        onClick={(event) => event.stopPropagation()}
+        onCloseAutoFocus={(event) => {
+          if (!remountSelection.current) return;
+          // The optimistic projection remounts the trigger under another
+          // SessionGroup; the list-level focus owner targets that new node.
+          event.preventDefault();
+          remountSelection.current = false;
+        }}
+      >
+        <DropdownMenuItem
+          onSelect={onRename}
+          // The menu item lives inside the row; stop the synthetic click from
+          // activating the session link.
+          onClick={(event) => event.stopPropagation()}
+        >
+          <PencilIcon className="size-4" />
+          Rename
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(session)}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <LinkIcon className="size-4" />
+          Copy link
+          {copyLinkKeys ? <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut> : null}
+        </DropdownMenuItem>
+        {!session.archived ? (
+          <>
+            <DropdownMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
+              onSelect={() => {
+                remountSelection.current = true;
+                void onPin(session, !session.pinned, "actions");
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
+              {session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => void onUpdateAttention(session, { unread: !session.unread })}
+              onClick={(event) => event.stopPropagation()}
+            >
+              {session.unread ? (
+                <MailOpenIcon className="size-4" />
+              ) : (
+                <MailIcon className="size-4" />
+              )}
+              {session.unread ? "Mark as read" : "Mark as unread"}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                void onUpdateAttention(session, { activelyWorking: !session.activelyWorking })
+              }
+              onClick={(event) => event.stopPropagation()}
+            >
+              <ActiveWorkMark className="size-4" />
+              {session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
+            </DropdownMenuItem>
+          </>
+        ) : null}
+        {session.parentSessionId === null ? (
+          <DropdownMenuItem
+            onSelect={() => void onArchive(session, !session.archived)}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ArchiveIcon className="size-4" />
+            {session.archived ? "Restore" : "Archive"}
+          </DropdownMenuItem>
+        ) : null}
+        {session.parentSessionId === null && session.archived ? (
+          <DropdownMenuItem
+            variant="destructive"
+            onSelect={() => onRequestDelete(session)}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Trash2Icon className="size-4" />
+            Delete chat
+          </DropdownMenuItem>
+        ) : null}
+        {canMove ? (
+          // Flat section, deliberately not a Radix submenu: the Sub primitives
+          // are otherwise unused in the shell graph and pulling them in
+          // re-clusters ~470 KB of shared chunks into the startup bundle.
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Move to project</DropdownMenuLabel>
+            {[{ id: null, name: "Default" }, ...channels].map((channel) => {
+              const current = session.channelId === channel.id;
+              return (
+                <DropdownMenuItem
+                  key={channel.id ?? "default"}
+                  aria-current={current ? "true" : undefined}
+                  onSelect={() => {
+                    if (current) return;
+                    remountSelection.current = true;
+                    void onMoveToChannel(session, channel.id, "actions");
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <FolderIcon aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                  <DropdownMenuCheck checked={current} />
+                </DropdownMenuItem>
+              );
+            })}
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function EmptySessions({ archived = false }: { archived?: boolean | undefined }) {
+  return (
+    <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
+      <p className="text-xs text-fg-muted">
+        {archived ? "No archived sessions" : "No sessions yet"}
+      </p>
+      {!archived ? (
+        <Button asChild size="sm" className="mx-auto">
+          <NewSessionLink>
+            <PlusIcon className="size-3.5" />
+            Start your first session
+          </NewSessionLink>
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Collapsed-rail stand-in for the list: a Sessions icon carrying a count badge
+ * of running sessions; clicking expands the rail to reveal the full list.
+ */
+export function CollapsedSessionsButton() {
+  const windowEvents = useUiEventTarget("window");
+  const searchShortcut = useActionShortcut("commandMenu.open");
+  const rail = useRail();
+  const { workspaceSessionListEvent } = useOpenGeni();
+  const hintsAvailable =
+    workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
+    workspaceSessionListEvent.available;
+  const { sessions, loading, error, refresh } = useWorkspaceSessions({
+    projection: "summary",
+    limit: 50,
+    pollIntervalMs: hintsAvailable ? undefined : 15_000,
+  });
+  useSessionListHintRefresh(refresh, error);
+  const runningCount = useMemo(() => groupSessionsForRail(t, sessions).running.length, [sessions]);
+  // The collapsed rail can't render the expanded list's loading/error copy, so
+  // it mirrors those states: a failed load shows a failed-tone marker + tooltip
+  // (expanding reveals the retry), a first load shows a gentle pulse.
+  const failed = Boolean(error) && sessions.length === 0;
+  const firstLoad = loading && sessions.length === 0;
+  const tooltip = failed ? "Session history is unavailable" : "Sessions";
+  return (
+    <div className="flex flex-1 flex-col items-center gap-1 px-2 pt-1">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Search sessions"
+            aria-keyshortcuts={searchShortcut?.ariaKeys}
+            onClick={() => requestCommandMenu(windowEvents)}
+            className="text-fg-label hover:text-fg"
+          >
+            <SearchIcon className="size-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="right">
+          <TooltipWithKeys label="Search sessions" shortcut={searchShortcut} />
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={
+              failed
+                ? "Sessions (history unavailable)"
+                : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`
+            }
+            onClick={() => rail.setCollapsed(false)}
+            className="relative text-fg-label hover:text-fg"
+          >
+            <MessagesSquareIcon
+              className={cn("size-4", firstLoad && "motion-safe:animate-pulse")}
+            />
+            {failed ? (
+              <span className="absolute -right-0.5 -top-0.5 flex size-2 rounded-full bg-status-failed" />
+            ) : runningCount > 0 ? (
+              <span className="absolute -right-0.5 -top-0.5 flex min-w-3.5 items-center justify-center rounded-full bg-brand-strong px-1 text-2xs font-semibold leading-tight text-brand-fg">
+                {runningCount}
+              </span>
+            ) : null}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="right">{tooltip}</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
+function SessionListSkeleton() {
+  const skeletonRows = [
+    "session-skeleton-1",
+    "session-skeleton-2",
+    "session-skeleton-3",
+    "session-skeleton-4",
+    "session-skeleton-5",
+  ];
+  return (
+    <div className="grid gap-1 px-1 pt-2">
+      {skeletonRows.map((rowKey) => (
+        <div key={rowKey} className="flex h-8 items-center gap-2 px-1">
+          <span className="size-1.5 shrink-0 rounded-full bg-surface-3" />
+          <span className="h-3 flex-1 animate-pulse rounded bg-surface-2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Delete a chat, stopping it first when it is still running. The API refuses
+ * to delete a chat with an active turn (409), so the person's "Delete" stops
+ * the chat (terminal cancel) and retries until its turn has wound down. Every
+ * other 409 (saved outputs or forks depend on it, background commands, a
+ * sub-chat) is permanent: surface it as-is and never cancel the chat for it.
+ */
+async function deleteStoppingIfRunning(
+  client: {
+    deleteSession(workspaceId: string, sessionId: string): Promise<{ deletedSessionCount: number }>;
+    cancelSession(
+      workspaceId: string,
+      sessionId: string,
+      options: { reason?: string },
+    ): Promise<unknown>;
+  },
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ deletedSessionCount: number }> {
+  try {
+    return await client.deleteSession(workspaceId, sessionId);
+  } catch (error) {
+    if (!isStillRunningDeleteRefusal(error)) throw error;
+  }
+  await client.cancelSession(workspaceId, sessionId, { reason: "Deleted by user" });
+  const deadline = Date.now() + 30_000;
+  for (let delay = 500; ; delay = Math.min(delay * 2, 4_000)) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      return await client.deleteSession(workspaceId, sessionId);
+    } catch (error) {
+      if (!isStillRunningDeleteRefusal(error) || Date.now() > deadline) throw error;
+    }
+  }
+}
+
+/** Only "still running" (or a box still shutting down) is worth stopping the chat and retrying for. */
+export function isStillRunningDeleteRefusal(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 409) return false;
+  const code = error.details?.code;
+  if (typeof code === "string") {
+    return code === "session_delete_active_sessions" || code === "session_delete_live_sandboxes";
+  }
+  // Servers before structured refusal codes: keep the old behaviour only for the running case.
+  return /still running|still shutting down/i.test(error.message);
+}

@@ -840,11 +840,11 @@ function setCodexIdentityHeaders(
   headers.set("originator", CODEX_ORIGINATOR);
   headers.set("User-Agent", `${CODEX_ORIGINATOR}/${ctx.clientVersion}`);
   headers.set("version", ctx.clientVersion);
-  if (ctx.sessionId) {
-    // Backend sticky cache-routing key (see CodexRequestContext.sessionId):
-    // without it, byte-identical resends miss the prompt cache ~half the
-    // time; with it they pin to a warm shard and hit at the ceiling.
-    headers.set("session_id", ctx.sessionId);
+  const affinityKey = ctx.cacheAffinityKey ?? ctx.sessionId;
+  if (affinityKey) {
+    // Cache affinity is not conversation identity. Keep the body's session
+    // key and the transport's conversation-scoped continuation unchanged.
+    headers.set("session_id", affinityKey);
   }
   if (auth.isFedramp) {
     headers.set("X-OpenAI-Fedramp", "true");
@@ -1038,14 +1038,22 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         throw timeoutError;
       }
       // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
-      // OK/!res.ok branch, so the same fire-and-forget read also covers the 429
+      // OK/!res.ok branch, so the same observation also covers the 429
       // hard-cap path (an exhausted serving account stamps its own fresh
-      // used_percent with no extra fetch). Sync + non-throwing + never awaited;
+      // used_percent with no extra fetch). The latest-cache observer is sync;
+      // the optional durable observer is awaited independently of that cache.
       // `if (usage)` makes an absent/malformed header set a safe no-op. We read
       // res.headers only — the SSE body is never touched here.
       const usage = parseCodexUsageHeaders(res.headers);
       if (usage) {
         ctx.onUsageHeaders?.(usage);
+        // Join the durable observer before returning the response. Failure is
+        // telemetry-only and must not replace a provider response or refusal.
+        try {
+          await ctx.persistUsageHeaders?.(usage);
+        } catch {
+          // Both synchronous throws and rejected promises are telemetry-only.
+        }
       }
       if (process.env.CODEX_DEBUG && !res.ok) {
         // Never log provider bodies, identifiers, or headers: they can contain

@@ -8,18 +8,24 @@ import {
   retainedArtifactReferenceFromFile,
   type AccessGrant,
   type Session,
+  type WorkspaceArtifactVisibility,
+  type Workspace,
 } from "@opengeni/contracts";
 import {
+  changeFileVisibility,
+  fileAccessFor,
   fileOwnerContextForAccess,
   fileOwnerContextForAgent,
   recordWorkspaceUsage,
   requireLimit,
+  resolveNewFileAudience,
   type ApiRouteDeps,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import {
   completeFileUpload,
   getFile,
+  getGeneratedVideoArtifact,
   prepareGeneratedWorkspaceFile,
   getSessionAuthorityProjection,
   requireWorkspace,
@@ -45,10 +51,22 @@ const SANDBOX_EXPORT_URL_TTL_SECONDS = 4 * 60 * 60;
 const SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS = 4_096;
 const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
 
-/** Original bytes inherit the already-authorized source session's ownership. */
+/**
+ * Original bytes inherit the already-authorized source session's audience:
+ * Only me in an Only me chat, else the workspace. An explicit `visibility`
+ * wins on the owner's behalf. Republishing a file that already exists keeps
+ * the audience its owner has given it unless a visibility is asked for.
+ */
 export async function publishSandboxFileArtifact(
   deps: ApiRouteDeps,
-  input: Parameters<typeof publishSandboxFileArtifactInScope>[1],
+  input: {
+    grant: AccessGrant;
+    authorization?: AccessGrantAuthorization;
+    session: Session;
+    path: string;
+    visibility?: WorkspaceArtifactVisibility | undefined;
+    signal?: AbortSignal | undefined;
+  },
 ): Promise<SandboxFileArtifactReceipt> {
   const actor = input.authorization
     ? await fileOwnerContextForAccess(deps, input.authorization, "files:upload")
@@ -75,10 +93,83 @@ export async function publishSandboxFileArtifact(
       throw new HTTPException(403, {
         message: "Personal file publication requires the session owner's authority",
       });
+    // The person this publication acts for: the human caller, or the human
+    // whose turn the agent is running. Keys and services act for nobody.
+    const person =
+      input.grant.principalKind === "agent_attempt"
+        ? (actor.initiatingHumanSubjectId ?? null)
+        : (actor.privateFileOwnerSubjectId ?? null);
+    const audience = await resolveNewFileAudience({
+      db: deps.db,
+      settings: deps.settings,
+      workspace,
+      chatOwner: personal ? (expectedOwner ?? null) : null,
+      person,
+      requested: input.visibility,
+    });
     return withSessionRlsActorContext(
-      { ...actor, privateFileOwnerSubjectId: personal ? (expectedOwner ?? null) : null },
-      () => publishSandboxFileArtifactInScope(deps, input),
+      // Scoped as the file's owner so an existing copy is found whatever
+      // audience the owner has since given it.
+      { ...actor, privateFileOwnerSubjectId: audience.ownerSubjectId },
+      () =>
+        publishSandboxFileArtifactInScope(deps, {
+          ...input,
+          workspace,
+          person,
+          privateOwnerSubjectId: audience.privateOwnerSubjectId,
+        }),
     );
+  });
+}
+
+/** Who can open a file now, after an agent changed it for its owner. */
+export type FileAccessReceipt = {
+  type: "file_access";
+  artifactId: string;
+  filename: string;
+  access: import("@opengeni/contracts").FileAccess;
+};
+
+/**
+ * Change who can open a file the caller can already open (a published file,
+ * generated image or video, download or upload), on the owner's behalf. An
+ * agent acts for the person whose turn it runs and sees only what its chat's
+ * own audience lets it see, so it can never reach another chat's private file.
+ */
+export async function changeWorkspaceFileVisibility(
+  deps: ApiRouteDeps,
+  input: {
+    grant: AccessGrant;
+    artifactId: string;
+    visibility: WorkspaceArtifactVisibility;
+  },
+): Promise<FileAccessReceipt> {
+  const actor =
+    input.grant.principalKind === "agent_attempt"
+      ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
+      : { subjectId: input.grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, async () => {
+    const workspace = await requireWorkspace(deps.db, input.grant.workspaceId);
+    const fileId =
+      (await getFile(deps.db, input.grant.workspaceId, input.artifactId))?.id ??
+      (await getGeneratedVideoArtifact(deps.db, input.grant.workspaceId, input.artifactId))?.file
+        .id;
+    if (!fileId) throw new HTTPException(404, { message: "file not found" });
+    const { file } = await changeFileVisibility({
+      db: deps.db,
+      settings: deps.settings,
+      grant: input.grant,
+      workspace,
+      person: actor.initiatingHumanSubjectId ?? null,
+      fileId,
+      visibility: input.visibility,
+    });
+    return {
+      type: "file_access",
+      artifactId: input.artifactId,
+      filename: file.filename,
+      access: await fileAccessFor(deps.db, { workspace, file }),
+    };
   });
 }
 
@@ -89,6 +180,10 @@ async function publishSandboxFileArtifactInScope(
     authorization?: AccessGrantAuthorization;
     session: Session;
     path: string;
+    visibility?: WorkspaceArtifactVisibility | undefined;
+    workspace: Workspace;
+    person: string | null;
+    privateOwnerSubjectId: string | null;
     signal?: AbortSignal | undefined;
   },
 ): Promise<SandboxFileArtifactReceipt> {
@@ -176,6 +271,7 @@ async function publishSandboxFileArtifactInScope(
   const objectKey = `workspaces/${input.grant.workspaceId}/files/${identity.fileId}/sandbox/${safeFilename}`;
   const existing = await getFile(deps.db, input.grant.workspaceId, identity.fileId);
   let file = existing;
+  let newlyPrepared = false;
 
   if (!file) {
     await requireLimit(deps, {
@@ -196,12 +292,14 @@ async function publishSandboxFileArtifactInScope(
       sha256,
       bucket: storage.bucket,
       objectKey,
+      privateOwnerSubjectId: input.privateOwnerSubjectId,
       expiresAt: new Date(
         Date.now() +
           (content.kind === "box" ? SANDBOX_EXPORT_URL_TTL_SECONDS * 1_000 : UPLOAD_INTENT_TTL_MS),
       ),
     });
     file = prepared.file;
+    newlyPrepared = prepared.created;
   }
 
   assertSandboxArtifactFile(file, {
@@ -285,11 +383,25 @@ async function publishSandboxFileArtifactInScope(
     fileId: file.id,
     sourceSessionId: input.session.id,
   });
+  if (!newlyPrepared && input.visibility && input.workspace.kind !== "personal") {
+    file = (
+      await changeFileVisibility({
+        db: deps.db,
+        settings: deps.settings,
+        grant: input.grant,
+        workspace: input.workspace,
+        person: input.person,
+        fileId: file.id,
+        visibility: input.visibility,
+      })
+    ).file;
+  }
   return SandboxFileArtifactReceipt.parse({
     type: "sandbox_file",
     sandboxPath,
     filename,
     artifact,
+    access: await fileAccessFor(deps.db, { workspace: input.workspace, file }),
   });
 }
 

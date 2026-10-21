@@ -6,7 +6,7 @@ import {
   MCP_LIFECYCLE_POLICIES,
   MCP_TOOL_CALL_OUTCOMES,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { runtimeMetricsHooksForObservability } from "../src/observability-metrics";
 
 test("every model and MCP call exports measured spans under the physical attempt", async () => {

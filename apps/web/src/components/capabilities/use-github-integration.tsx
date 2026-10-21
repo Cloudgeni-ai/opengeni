@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
@@ -14,13 +17,13 @@ import type {
   IntegrationFooter,
   IntegrationOption,
   IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { PersonalGitHubDialog } from "@/components/capabilities/personal-github-dialog";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import type { GitHubAppInfo } from "@/types";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import type { GitHubAppInfo } from "@opengeni/react/app/types";
 
 export const GITHUB_APP_DESCRIPTION =
   "Work on repositories, issues, and pull requests. Automation uses the workspace GitHub App; reviews and merges can use your own GitHub identity.";

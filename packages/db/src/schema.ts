@@ -61,6 +61,7 @@ import {
   pgSchema,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -286,6 +287,33 @@ export const workspaceArtifacts = pgTable(
       sql`${table.visibility} in ('workspace_shared', 'user_private') and (${table.visibility} = 'workspace_shared' or ${table.ownerSubjectId} is not null)`,
     ),
   }),
+);
+
+export const siteSessionAccess = pgTable(
+  "site_session_access",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.siteId, table.sessionId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+  ],
 );
 
 export const workspaceArtifactUploads = pgTable(
@@ -2234,8 +2262,8 @@ export const connections = pgTable(
         organizationUserResourceAuthorities.organizationMembershipId,
       ],
     }).onDelete("restrict"),
-    // Migration 0255 owns the same-organization origin FK because Drizzle
-    // cannot express PostgreSQL's column-subset SET NULL action.
+    // Migrations own the same-organization origin FK (ON DELETE CASCADE since
+    // 0857, as origin_workspace_id always equals workspace_id).
   }),
 );
 
@@ -4749,6 +4777,8 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
     .$type<Record<string, number>>()
     .notNull()
     .default({}),
+  // Voice settings by realtime model id (0895); a workspace's own win.
+  realtimeVoice: jsonb("realtime_voice").$type<Record<string, unknown>>().notNull().default({}),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5669,7 +5699,9 @@ export const sessionRealtimeModes = pgTable(
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
         'workspace-gateway/openai/gpt-realtime-2.1',
         'workspace-gateway/openai/gpt-realtime-mini',
-        'workspace-gateway/xai/grok-voice-think-fast-2.0'
+        'workspace-gateway/xai/grok-voice-think-fast-2.0',
+        'workspace-elevenlabs/eleven_realtime_v1_max',
+        'workspace-elevenlabs/eleven_realtime_v1_mini'
       )`,
     ),
     endReasonValid: check(
@@ -5870,6 +5902,11 @@ export const sessionRealtimeEntries = pgTable(
     sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
       .on(table.realtimeId, table.sourceUpdateId)
       .where(sql`${table.sourceUpdateId} is not null`),
+    // History deletion's ON DELETE SET NULL check has only history_item_id,
+    // not a realtime_id. Avoid a full ledger scan for every archived item.
+    historyItem: index("session_realtime_entries_history_item_idx")
+      .on(table.historyItemId)
+      .where(sql`${table.historyItemId} is not null`),
     delegationTurn: uniqueIndex("session_realtime_entries_delegation_turn_uq")
       .on(table.turnId)
       .where(sql`${table.kind} = 'delegation_call' and ${table.turnId} is not null`),
@@ -6180,6 +6217,10 @@ export const files = pgTable(
     privateOwnerSubjectIds: text("private_owner_subject_ids").array().default(sql`CASE
       WHEN nullif(current_setting('opengeni.private_file_owner',true),'') IS NULL THEN NULL
       ELSE ARRAY[current_setting('opengeni.private_file_owner',true)] END`),
+    /** The person the file belongs to: only they can share or limit it. */
+    ownerSubjectId: text("owner_subject_id").default(sql`coalesce(
+      nullif(current_setting('opengeni.private_file_owner',true),''),
+      nullif(current_setting('opengeni.initiating_human_subject_id',true),''))`),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -6194,6 +6235,8 @@ export const files = pgTable(
     sha256: text("sha256"),
     bucket: text("bucket").notNull(),
     objectKey: text("object_key").notNull(),
+    /** An app-shot's capture (AppShotCapture); written with the upload, never changed. */
+    appShot: jsonb("app_shot"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -9649,6 +9692,12 @@ export const sessionEvents = pgTable(
     // code; a plain column keeps the usage idempotency lookup indexable under
     // row-level security, where the payload expression index cannot be used.
     usageSourceKey: text("usage_source_key"),
+    // Filled by a BEFORE INSERT OR UPDATE OF payload trigger from
+    // payload ->> 'name' for agent.toolCall.created rows (migration 0889).
+    // Never written by application code. Rows written before 0889 keep NULL;
+    // readers fall back to the payload only then, so the presented-tool filter
+    // does not detoast every excluded call's arguments.
+    toolName: text("tool_name"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9656,6 +9705,11 @@ export const sessionEvents = pgTable(
       columns: [table.workspaceId, table.turnAttemptId],
       foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
     }).onDelete("restrict"),
+    // A deleted attempt's FK probe has no session_id. Avoid scanning every
+    // event in its workspace once for each attempt in the deleted chat.
+    attemptReference: index("session_events_workspace_attempt_idx")
+      .on(table.workspaceId, table.turnAttemptId)
+      .where(sql`${table.turnAttemptId} is not null`),
     sessionSequence: uniqueIndex("session_events_workspace_session_sequence_idx").on(
       table.workspaceId,
       table.sessionId,
@@ -9698,6 +9752,9 @@ export const sessionEvents = pgTable(
     usageSourceKey: index("session_events_usage_source_key_idx")
       .on(table.workspaceId, table.turnId, table.usageSourceKey)
       .where(sql`${table.usageSourceKey} is not null`),
+    modelFactPage: index("session_events_model_fact_page_idx")
+      .on(table.workspaceId, table.sessionId, table.turnId, table.occurredAt, table.id)
+      .where(sql`${table.type} = 'agent.model.usage'`),
     commandOutputPage: index("session_events_command_output_page_idx")
       .on(
         table.workspaceId,
@@ -9957,6 +10014,10 @@ export const sessionHistoryItems = pgTable(
       table.sessionId,
       table.position,
     ),
+    // Receipt proofs page newest-first within one turn, not the whole session.
+    turnPositionIdx: index("session_history_items_turn_position_idx")
+      .on(table.turnId, table.position)
+      .where(sql`${table.turnId} IS NOT NULL`),
   }),
 );
 
@@ -10368,6 +10429,12 @@ export const sandboxLeases = pgTable(
     rotationReason: text("rotation_reason", {
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
+    // A chat or workspace deletion ended this compute lease's group: its
+    // sandbox is deleted without a workspace capture (0861).
+    groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
+    // The agent gateway reported the current compute sandbox asleep since then;
+    // warm time does not accrue while it sleeps (0861).
+    computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
     // these remain bare UUIDs here rather than generating a stricter wrong FK.
@@ -10675,6 +10742,11 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     blocking: index("sandbox_workspace_mutation_admissions_blocking_idx")
       .on(table.leaseId, table.workspaceGeneration)
       .where(sql`${table.settledAt} is null`),
+    // Session-wide pending-writer checks start from this (normally empty) set
+    // instead of probing every attempt the session ever ran (migration 0879).
+    unsettledSession: index("sandbox_workspace_mutation_admissions_unsettled_session_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.settledAt} is null`),
     attempt: index("sandbox_workspace_mutation_admissions_attempt_idx").on(
       table.workspaceId,
       table.attemptId,
@@ -10894,6 +10966,11 @@ export const sandboxRetainedProcesses = pgTable(
     reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
       withTimezone: true,
     }),
+    // The oldest reconciler that can reach this process (migration 0840).
+    // Docker and local commands under the in-sandbox supervisor are 2: a
+    // worker built before that supervisor would look for them in its own
+    // memory and settle a live command as lost, so its claim skips them.
+    reconcilerVersion: smallint("reconciler_version").notNull().default(1),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -11581,6 +11658,7 @@ export const sandboxPtySessions = pgTable(
 // ONE source of truth for each CHECK.
 export const enrollmentExposureValues = ["whole-machine"] as const;
 export const enrollmentStatusValues = ["active", "revoked"] as const;
+export const enrollmentKindValues = ["machine", "sandbox"] as const;
 export const enrollmentOsValues = ["linux", "macos", "windows"] as const;
 export const sandboxKindValues = ["modal", "selfhosted"] as const;
 export const agentUpdateStatusValues = [
@@ -11616,8 +11694,18 @@ export const enrollments = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
-    // The agent's ed25519 public key (the machine identity).
-    pubkey: text("pubkey").notNull(),
+    // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
+    // Opengeni compute sandbox (migration 0858): bound to its sandbox group,
+    // reached through the agent gateway, with no key or bearer, and never
+    // listed, offered, attached or granted as a machine.
+    kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),
+    sandboxGroupId: uuid("sandbox_group_id"),
+    // The highest owner epoch the agent gateway accepted for a sandbox
+    // enrollment; null for machines.
+    linkEpoch: bigint("link_epoch", { mode: "number" }),
+    // The agent's ed25519 public key (the machine identity). Null exactly for
+    // sandbox enrollments, which hold no credential.
+    pubkey: text("pubkey"),
     exposure: text("exposure", { enum: enrollmentExposureValues })
       .notNull()
       .default("whole-machine"),
@@ -11707,6 +11795,10 @@ export const enrollments = pgTable(
     agentUpdateTargetVersion: text("agent_update_target_version"),
     agentUpdateExpectedBinarySha256: text("agent_update_expected_binary_sha256"),
     agentUpdateErrorCode: text("agent_update_error_code"),
+    agentUpdateBlockers: jsonb("agent_update_blockers")
+      .$type<Array<{ kind: string; count: number }>>()
+      .notNull()
+      .default([]),
     agentUpdateRetryable: boolean("agent_update_retryable").notNull().default(false),
     agentUpdateRolledBack: boolean("agent_update_rolled_back").notNull().default(false),
     agentUpdateConnectionInstanceId: text("agent_update_connection_instance_id"),
@@ -11738,6 +11830,17 @@ export const enrollments = pgTable(
       .where(sql`${table.authorityScope} = 'user'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    sandboxGroup: index("enrollments_sandbox_group_idx")
+      .on(table.workspaceId, table.sandboxGroupId)
+      .where(sql`${table.kind} = 'sandbox'`),
+    kindValid: check("enrollments_kind_check", sql`${table.kind} in ('machine', 'sandbox')`),
+    sandboxBinding: check(
+      "enrollments_sandbox_binding_check",
+      sql`(${table.kind} = 'machine' and ${table.sandboxGroupId} is null
+          and ${table.pubkey} is not null and ${table.linkEpoch} is null)
+        or (${table.kind} = 'sandbox' and ${table.sandboxGroupId} is not null
+          and ${table.pubkey} is null and ${table.authorityScope} = 'workspace')`,
+    ),
     authorityShape: check(
       "enrollments_authority_shape_check",
       sql`(
@@ -12835,6 +12938,17 @@ export const usageEvents = pgTable(
       table.eventType,
       table.occurredAt,
     ),
+    workspaceMetricPage: index("usage_events_workspace_metric_page_idx").on(
+      table.workspaceId,
+      table.eventType,
+      table.occurredAt,
+      table.id,
+    ),
+    workspaceMetricSource: index("usage_events_workspace_metric_source_idx").on(
+      table.workspaceId,
+      table.eventType,
+      table.sourceResourceId,
+    ),
     accountMetric: index("usage_events_account_metric_idx").on(
       table.accountId,
       table.eventType,
@@ -12885,6 +12999,50 @@ export const usageEvents = pgTable(
  * Per model-call Insights facts. Additive observability only — never the billing
  * ledger. Written after an authoritative `agent.model.usage` emit.
  */
+export const modelCallFactReconciliationProgress = pgTable(
+  "model_call_fact_reconciliation_progress",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    checkpoint:
+      jsonb("checkpoint").$type<import("./model-call-fact-reconciliation").ModelFactCheckpoint>(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    checkpointObject: check(
+      "model_call_fact_reconciliation_progress_checkpoint_check",
+      sql`${table.checkpoint} is null or jsonb_typeof(${table.checkpoint}) = 'object'`,
+    ),
+  }),
+);
+
+export const modelCallFactReconciliationCandidates = pgTable(
+  "model_call_fact_reconciliation_candidates",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    sourceKey: text("source_key").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    batchId: uuid("batch_id"),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.turnId, table.sourceKey] }),
+    ready: index("model_fact_reconciliation_ready_idx")
+      .on(table.workspaceId, table.occurredAt, table.turnId, table.sourceKey)
+      .where(sql`${table.batchId} is null`),
+    batch: index("model_fact_reconciliation_batch_idx").on(table.workspaceId, table.batchId),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
 export const modelCallFacts = pgTable(
   "model_call_facts",
   {
@@ -13161,7 +13319,9 @@ export const hostExportOutbox = pgTable(
         'openai', 'azure', 'codex-subscription', 'supergrok-subscription',
         'opengeni-gateway', 'workspace-gateway', 'organization-gateway',
         'openrouter', 'workspace-openrouter', 'organization-openrouter',
-        'opper', 'workspace-opper', 'organization-opper', 'registry'
+        'opper', 'workspace-opper', 'organization-opper', 'organization-openai',
+        'organization-azure-openai',
+        'registry'
       ))
       and (${table.toolFamily} is null or ${table.toolFamily} ~
         '^(custom|integration:[a-z0-9]([a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$')`,
@@ -15066,10 +15226,21 @@ export const organizationModelProviderConnections = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    /** Azure OpenAI only: non-secret `https://<resource>.openai.azure.com/openai/v1`. */
+    endpoint: text("endpoint"),
     claudeUsageSnapshot:
       jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
@@ -15091,7 +15262,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15109,6 +15280,10 @@ export const organizationModelProviderConnections = pgTable(
       "organization_model_provider_connections_actor_chk",
       sql`octet_length(${table.updatedBySubjectId}) between 1 and 1024`,
     ),
+    endpointCheck: check(
+      "organization_model_provider_connections_endpoint_chk",
+      sql`(${table.providerKind} = 'azure_openai') = (${table.endpoint} is not null) and (${table.endpoint} is null or ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+    ),
   }),
 );
 
@@ -15120,12 +15295,22 @@ export const organizationModelProviderConnectionOperations = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
     resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
     resultVersion: integer("result_version").notNull(),
+    resultEndpoint: text("result_endpoint"),
     resultCreatedAt: timestamp("result_created_at", {
       withTimezone: true,
     }).notNull(),
@@ -15142,7 +15327,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",
@@ -15156,6 +15341,10 @@ export const organizationModelProviderConnectionOperations = pgTable(
       "organization_model_provider_connection_operations_request_hash_chk",
       sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`,
     ),
+    endpointCheck: check(
+      "organization_model_provider_connection_operations_endpoint_chk",
+      sql`(${table.providerKind} = 'azure_openai') = (${table.resultEndpoint} is not null) and (${table.resultEndpoint} is null or ${table.resultEndpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+    ),
   }),
 );
 
@@ -15167,7 +15356,15 @@ export const organizationModelProviderCustomModels = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
@@ -15193,7 +15390,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",

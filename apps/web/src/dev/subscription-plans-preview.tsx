@@ -5,9 +5,9 @@ import { SubscriptionPlans } from "@/components/organization/subscription-plans"
 import { PlanSeats, SeatLimitNotice } from "@/components/organization/plan-seats";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
-import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
-import { SettingRowGroup } from "@/components/ui/setting-row";
-import type { BillingSummary } from "@/types";
+import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
+import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import type { BillingSummary } from "@opengeni/react/app/types";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */
 export const previewPlans: BillingSubscriptionCatalog["plans"] = [
@@ -61,6 +61,7 @@ export function previewPlan(key: string): BillingPlanBalance {
     status: "active",
     creditGrantedMicros: item.monthlyCreditMicros,
     creditRemainingMicros: key === "pro" ? 73_450_000 : item.monthlyCreditMicros,
+    creditScoped: key === "free",
     periodResetAt: "2026-11-01T10:00:00Z",
     seatsUsed: key === "pro" ? 7 : 5,
     seatLimit: item.seatLimit,
@@ -112,7 +113,18 @@ export function SubscriptionPlansPreview() {
     balance: {
       accountId: "00000000-0000-4000-8000-000000000001",
       balanceMicros: plan.creditRemainingMicros + 25_000_000,
-      generalBalanceMicros: plan.creditRemainingMicros + 25_000_000,
+      generalBalanceMicros: (plan.creditScoped ? 0 : plan.creditRemainingMicros) + 25_000_000,
+      promotionalCredits: plan.creditScoped
+        ? [
+            {
+              grantId: "00000000-0000-4000-8000-000000000002",
+              label: "Monthly plan credit",
+              remainingMicros: plan.creditRemainingMicros,
+              eligibleModelIds: ["gpt-6-luna", "azure-astra/gpt-6-astra"],
+              planCredit: true,
+            },
+          ]
+        : [],
       currency: "usd",
       updatedAt: "2026-10-16T14:00:00Z",
       plan,

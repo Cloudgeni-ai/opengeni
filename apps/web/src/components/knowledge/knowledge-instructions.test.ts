@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import type { WorkspaceInstructionPolicyListResponse } from "@opengeni/sdk";
 
-mock.module("@/context", () => ({ useAppContext: () => ({}) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({}) }));
 const { instructionRevisions } = await import("./knowledge-instructions");
 
 const target = { kind: "policy", scope: "global", roleKey: null } as const;

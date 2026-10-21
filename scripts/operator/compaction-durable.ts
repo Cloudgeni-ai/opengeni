@@ -13,7 +13,7 @@ import {
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
 import type { Settings } from "@opengeni/config";
 

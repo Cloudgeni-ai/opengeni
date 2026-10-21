@@ -1,4 +1,4 @@
-import { isAnalyticsAction, type AnalyticsAction } from "./analytics-actions";
+import { isAnalyticsAction, type AnalyticsAction } from "@opengeni/react/ui/analytics-actions";
 
 /** Content-free product facts. Never derive a label from user text or request bodies. */
 export type JourneyProperties = Record<string, string | number | boolean>;

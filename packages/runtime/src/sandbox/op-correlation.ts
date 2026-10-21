@@ -37,8 +37,8 @@ interface ToolCallCorrelation {
    * observers distinguish a completed transfer from its earlier cancellation
    * delegation; only this completed handoff releases the turn fence. */
   onDurableOpOwnershipTransferred?: (opId: string) => void;
-  /** Trusted provider-local proof that preflight rejected this exact command
-   * before physical dispatch. Remote error codes/text are never this proof. */
+  /** Local preflight or exact zero-frame terminal proof releases this command's
+   * custody. Remote error codes/text alone are never this proof. */
   onRemoteOperationNotDispatched?: (opId: string) => void;
   /** Pins cancellation/observation to the exact backend selected for this op. */
   onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
@@ -150,8 +150,10 @@ export function notifyDurableOpOwnershipTransferred(opId: string): void {
   storage.getStore()?.onDurableOpOwnershipTransferred?.(opId);
 }
 
-/** Provider-owned local preflight proof only: no physical command was issued.
- * Never call this based on an RPC error or an uncertain observation outcome. */
+/** Release exact operation custody after local preflight prevented dispatch,
+ * or the pinned runner proves a terminal operation with no output frames.
+ * The latter may have had effects before spawn cleanup, but nothing remains
+ * live. An RPC error alone or an uncertain observation is never proof. */
 export function notifyRemoteOperationNotDispatched(opId: string): void {
   storage.getStore()?.onRemoteOperationNotDispatched?.(opId);
 }

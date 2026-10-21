@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   installOpenGeniModalSnapshotPolicy,
   terminateModalSandboxById,

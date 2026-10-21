@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/worker-bundle",
-  "version": "4.0.4",
+  "version": "4.3.1",
   "description": "Opengeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
   "license": "Apache-2.0",
   "repository": {
@@ -48,7 +48,7 @@
     "start": "bun src/index.ts",
     "start:artifact-materializer": "bun src/artifact-materializer-entry.ts",
     "start:artifact-outbox": "bun src/artifact-outbox-entry.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts && bun scripts/build-workflow-bundle.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
@@ -64,6 +64,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/core": "workspace:*",
     "@opengeni/db": "workspace:*",
+    "@opengeni/decisions": "workspace:*",
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",

@@ -77,6 +77,10 @@ hostname = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+# Windows: Chrome finds the attached-browser bridge through the per-user registry.
+[target.'cfg(windows)'.dependencies]
+opengeni-agent-windows-ffi = { path = "../opengeni-agent-windows-ffi" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }

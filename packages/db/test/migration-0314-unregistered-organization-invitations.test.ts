@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   acceptOrganizationInvitation,
@@ -318,7 +318,7 @@ describe("migration 0314 unregistered organization invitations", () => {
           grant.workspaceId === initialWorkspaceId &&
           grant.permissions.includes("sessions:create") &&
           grant.permissions.includes("connections:read") &&
-          !grant.permissions.includes("connections:write") &&
+          grant.permissions.includes("connections:write") &&
           !grant.permissions.includes("workspace:admin"),
       ),
     ).toBe(true);

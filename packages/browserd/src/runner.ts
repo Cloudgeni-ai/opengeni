@@ -18,6 +18,15 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
 import {
+  BROWSER_SHARED_NETWORK_NOTICE,
+  browserNetworkIsolationScript,
+  freeLoopbackPort,
+  hostNamespaceResolvConf,
+  isolatedChromeLaunch,
+  linuxBrowserNetworkIsolation,
+  type BrowserNetworkIsolationTools,
+} from "./browser-network-isolation";
+import {
   readLinuxManagedBrowserIdentity,
   type LinuxManagedBrowserIdentity,
 } from "./linux-process-identity";
@@ -111,7 +120,8 @@ export type AgentBrowserRunnerOptions = {
    * own desktop a windowed managed browser shows up in front of them, takes
    * focus and joins the Dock; an offscreen browser is the same real browser
    * and profile in Chrome's new headless mode, presenting the host display's
-   * geometry and an ordinary User-Agent. Supported on macOS. */
+   * geometry and an ordinary User-Agent. Supported on macOS, and on Linux
+   * hosts without a graphical display, where no window can open. */
   offscreen?: boolean;
   browserExecutablePath?: string;
   /** macOS lifecycle-preserving background launcher. Defaults to the packaged
@@ -139,6 +149,10 @@ export type AgentBrowserRunnerOptions = {
    * when a user service manager is reachable. Defaults to on; tests disable it
    * to exercise the plain launch. */
   systemdScope?: boolean;
+  /** Launch a managed Linux browser in its own network namespace when the
+   * machine supports it. Defaults to on; tests disable it to exercise the
+   * plain launch. */
+  networkIsolation?: boolean;
 };
 
 export type OwnedManagedBrowserProcess = {
@@ -179,6 +193,9 @@ export class AgentBrowserJsonRunner {
   private readonly managedBrowserExecutable: string | null;
   private readonly chromeStderrDrainPaths: readonly string[];
   private readonly browserScope: LinuxBrowserScope | null;
+  /** Set when this managed browser shares the machine's network because
+   * isolating it is unavailable here; shown once to the agent at launch. */
+  readonly networkNotice: string | null;
   private readonly recoveredProcess: OwnedManagedBrowserProcess | null;
   private readonly headlessManaged: boolean;
   private readonly daemonRunDirectory: string;
@@ -214,6 +231,7 @@ export class AgentBrowserJsonRunner {
         : (options.browserExecutablePath ?? null));
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
     this.browserScope = browserLaunch?.scope ?? null;
+    this.networkNotice = browserLaunch?.networkNotice ?? null;
     this.recoveredProcess = options.recoverOwnedProcess ?? null;
     this.headlessManaged = !windowedBrowser(options) && !options.provider;
     this.daemonRunDirectory = dirname(this.daemonPidFile);
@@ -458,8 +476,23 @@ export class AgentBrowserJsonRunner {
       }
       const daemonLive = await assertDaemonIdentity(daemon);
       if (!this.recoveredBrowserClosed) {
-        if (daemonLive && (await processParentPid(this.recoveredProcess.pid)) !== daemon.pid)
-          throw daemonLineageUnavailable();
+        if (daemonLive) {
+          // A browser that already shut down, for example at the controller's
+          // own close request, has no lineage left to prove; its receipt
+          // alone shows that it exited.
+          let parent: number | null = null;
+          let lineageError: unknown = null;
+          try {
+            parent = await processParentPid(this.recoveredProcess.pid);
+          } catch (error) {
+            lineageError = error;
+          }
+          if (
+            parent !== daemon.pid &&
+            (await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) !== "exited"
+          )
+            throw lineageError ?? daemonLineageUnavailable();
+        }
         await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
         // Preserve a proved stop for the same cleanup retry; a missing macOS
         // PID still cannot authorize a fresh exact-directory launch.
@@ -651,7 +684,9 @@ export class AgentBrowserJsonRunner {
 
   private async cleanupChromeStderrDrain(): Promise<void> {
     await Promise.all(
-      this.chromeStderrDrainPaths.map(async (path) => await rm(path, { force: true })),
+      this.chromeStderrDrainPaths.map(
+        async (path) => await rm(path, { force: true, recursive: true }),
+      ),
     );
   }
 }
@@ -702,8 +737,8 @@ async function cleanupStaleChromeLaunchers(directory: string): Promise<void> {
     throw error;
   }
   for (const name of names) {
-    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo)$/iu.test(name)) {
-      await rm(join(directory, name), { force: true });
+    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo|d|resolv\.conf)$/iu.test(name)) {
+      await rm(join(directory, name), { force: true, recursive: true });
     }
   }
 }
@@ -720,6 +755,7 @@ type ManagedBrowserLaunch = {
   backgroundBrowserExecutable?: string;
   cleanupPaths?: readonly string[];
   scope?: LinuxBrowserScope | null;
+  networkNotice?: string | null;
 };
 
 /** One transient systemd user scope per managed Linux browser launch. All
@@ -766,12 +802,21 @@ async function managedBrowserLaunch(
   if (process.platform === "linux" && !options.provider) {
     const executable = configured ?? (await linuxChromeExecutable());
     if (executable) {
-      return await chromeStderrDrainWrapper(
+      const [scopeLauncher, isolation, fixedArguments] = await Promise.all([
+        options.systemdScope === false ? null : linuxUserScopeLauncher(),
+        options.networkIsolation === false ? null : linuxBrowserNetworkIsolation(),
+        windowedBrowser(options) ? [] : linuxHeadlessChromeArguments(executable),
+      ]);
+      const launch = await chromeStderrDrainWrapper(
         options.profileDirectory,
         executable,
-        options.systemdScope === false ? null : await linuxUserScopeLauncher(),
-        windowedBrowser(options) ? [] : await linuxHeadlessChromeArguments(executable),
+        scopeLauncher,
+        fixedArguments,
+        isolation?.kind === "isolated" ? isolation.tools : null,
       );
+      return isolation?.kind === "unavailable"
+        ? { ...launch, networkNotice: BROWSER_SHARED_NETWORK_NOTICE }
+        : launch;
     }
   }
   // Offscreen and headless are the same new-headless Chrome on macOS; both
@@ -821,12 +866,16 @@ async function managedBrowserLaunch(
  * With a reachable systemd user manager the wrapper first re-executes itself
  * through `systemd-run --scope`, which execs in place: the PID agent-browser
  * spawned stays Chrome's PID, and the stderr reader plus every Chrome child
- * start inside the browser's own scope. */
+ * start inside the browser's own scope.
+ *
+ * Where the machine supports it, the wrapper then moves Chrome into its own
+ * network namespace (see browser-network-isolation.ts), again in place. */
 async function chromeStderrDrainWrapper(
   profileDirectory: string,
   executable: string,
   scopeLauncher: LinuxUserScopeLauncher | null,
   fixedArguments: readonly string[] = [],
+  isolation: BrowserNetworkIsolationTools | null = null,
 ): Promise<ManagedBrowserLaunch> {
   await access(executable, constants.X_OK);
   const actualExecutablePath = (await isScriptExecutable(executable)) ? null : executable;
@@ -851,22 +900,49 @@ async function chromeStderrDrainWrapper(
     scope && scopeLauncher ? browserScopeEntry(scopeLauncher, scope.unit, wrapper) : "";
   const fixed = fixedArguments.map((argument) => ` ${shellQuote(argument)}`).join("");
   const trailing = ` ${shellQuote(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT)}`;
+  const state = join(directory, `${id}.d`);
+  const resolvOverride = join(directory, `${id}.resolv.conf`);
+  const cleanupPaths = isolation ? [wrapper, fifo, state, resolvOverride] : [wrapper, fifo];
   try {
     await runProcess(mkfifo, ["-m", "600", fifo]);
-    await writeFile(
-      wrapper,
-      `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@"${trailing} 2>${shellQuote(fifo)}\n`,
-      { mode: 0o700, flag: "wx" },
-    );
+    let script = `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@"${trailing} 2>${shellQuote(fifo)}\n`;
+    if (isolation) {
+      await mkdir(state, { mode: 0o700 });
+      const resolv = await hostNamespaceResolvConf();
+      if (resolv !== null) await writeFile(resolvOverride, resolv, { mode: 0o600, flag: "wx" });
+      const cdpPort = await freeLoopbackPort();
+      script = browserNetworkIsolationScript({
+        tools: isolation,
+        wrapper,
+        stateDirectory: state,
+        cdpPort,
+        resolvOverride: resolv === null ? null : resolvOverride,
+        prologue: scopeEntry,
+        launch: isolatedChromeLaunch({
+          tools: isolation,
+          cdpPort,
+          executable,
+          fixedArguments,
+          trailingArguments: [MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT],
+          stderrFifo: fifo,
+          stderrLog: log,
+          tail,
+          stderrBytes: CHROME_STDERR_DIAGNOSTIC_BYTES,
+        }),
+      });
+    }
+    await writeFile(wrapper, script, { mode: 0o700, flag: "wx" });
     await chmod(wrapper, 0o700);
     return {
       executablePath: wrapper,
       actualExecutablePath,
-      cleanupPaths: [wrapper, fifo],
+      cleanupPaths,
       scope,
     };
   } catch (error) {
-    await Promise.allSettled([rm(wrapper, { force: true }), rm(fifo, { force: true })]);
+    await Promise.allSettled(
+      cleanupPaths.map(async (path) => await rm(path, { force: true, recursive: true })),
+    );
     throw error;
   }
 }

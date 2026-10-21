@@ -31,7 +31,7 @@ export function agentUpdateRequiredForSecretsError(agentVersion: string): ApiHtt
   return new ApiHttpError(422, {
     code: "validation_failed",
     message:
-      `This machine runs Opengeni agent ${agentVersion}, which cannot type saved secrets. ` +
+      `This machine runs connected-machine agent ${agentVersion}, which cannot type saved secrets. ` +
       `Update the machine's agent to ${MINIMUM_AGENT_VERSION_FOR_SECRET_VALUES} or newer ` +
       `(Machines, Update now), then retry. Nothing was typed.`,
     retryable: false,

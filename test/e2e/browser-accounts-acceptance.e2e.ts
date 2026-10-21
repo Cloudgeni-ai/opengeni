@@ -21,11 +21,11 @@ import { migrate } from "@opengeni/db/migrate";
 import { OpenGeniClient } from "@opengeni/sdk";
 import {
   acquireOwnerMigratedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   firefox,
@@ -48,6 +48,7 @@ import {
 } from "./browser-account-finite-review-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import {
+  cancelledWithReplacedDocument,
   DocumentRequestLedger,
   isBrowserCancellation,
   observeChromiumNeutralSessionSetRequestAuthority,
@@ -1131,18 +1132,22 @@ function observeBrowser(page: Page): BrowserProblems {
       });
       return;
     }
-    const documentRequest = isMainFrameDocumentRequest(request);
     const documentReplacedBeforeFailure =
       documents.replaced(request) || documents.replacing(request);
     documents.failed(request);
     const check = (async () => {
       if (isBrowserCancellation(failure)) {
-        // WebKit cancels a superseded document request before it reports the
-        // navigation that superseded it; one protocol round trip delivers it.
-        if (documentRequest && !documents.replaced(request)) {
-          await page.evaluate(() => undefined).catch(() => undefined);
-        }
-        if (documentReplacedBeforeFailure || documents.replaced(request)) {
+        // WebKit and Firefox can cancel a superseded document request, or the
+        // outgoing document's in-flight reads, before they report the
+        // navigation responsible; one protocol round trip delivers it.
+        if (
+          await cancelledWithReplacedDocument(
+            documents,
+            request,
+            documentReplacedBeforeFailure,
+            () => page.evaluate(() => undefined),
+          )
+        ) {
           // Taken down with its document by a reload or navigation: nothing it
           // could still deliver has a document to reach.
           problems.retirementChecks.push(
@@ -5136,6 +5141,87 @@ describe("provider-neutral browser account acceptance", () => {
       );
     }
   });
+
+  test("the strict browser ledger attributes reads a reload took down before reporting it, and nothing else", async () => {
+    // WebKit always, and Firefox usually, reports that a reload cancelled the
+    // outgoing document's in-flight read before Playwright delivers the
+    // reload's document request. Chromium reports neither.
+    const held: Array<() => void> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname.startsWith("/v1/held")) {
+          const { promise, resolve } = Promise.withResolvers<Response>();
+          held.push(() => resolve(new Response("late fixture response")));
+          return promise;
+        }
+        return new Response("<!doctype html><title>Document ledger fixture</title>", {
+          headers: { "content-type": "text/html" },
+        });
+      },
+    });
+    const origin = `http://127.0.0.1:${server.port}`;
+    const engine = requestedEngine as EngineName;
+    const browser = await launchAccountBrowser(engine);
+    try {
+      const reloaded = await browser.newPage();
+      const reloadedProblems = observeBrowser(reloaded);
+      setBrowserPhase(reloadedProblems, "document-ledger-fixture");
+      await reloaded.goto(`${origin}/workspace`);
+      const reloads = 5;
+      for (let iteration = 0; iteration < reloads; iteration += 1) {
+        const dispatched = held.length;
+        await reloaded.evaluate(() => void fetch("/v1/held").catch(() => undefined));
+        while (held.length === dispatched) await Bun.sleep(5);
+        await reloaded.reload({ waitUntil: "domcontentloaded" });
+      }
+      await reloaded.evaluate(() => undefined);
+      await expectNoBrowserProblems(reloadedProblems);
+      const attributed = reloadedProblems.retirementChecks
+        .map((check) => JSON.parse(check) as { pathname: string; result: string })
+        .filter(({ pathname }) => pathname === "/v1/held");
+      expect(attributed).toEqual(
+        Array.from({ length: engine === "chromium" ? 0 : reloads }, () => ({
+          dispatchPhase: "document-ledger-fixture",
+          failure: expect.any(String),
+          method: "GET",
+          pathname: "/v1/held",
+          responsePhase: "document-ledger-fixture",
+          result: "cancelled-with-replaced-document",
+        })),
+      );
+
+      // A cancellation no navigation explains remains a strict failure.
+      const aborted = await browser.newPage();
+      const abortedProblems = observeBrowser(aborted);
+      setBrowserPhase(abortedProblems, "document-ledger-fixture");
+      await aborted.goto(`${origin}/workspace`);
+      const dispatched = held.length;
+      await aborted.evaluate(() => {
+        const controller = new AbortController();
+        (window as { abortHeldRead?: () => void }).abortHeldRead = () => controller.abort();
+        void fetch("/v1/held-aborted", { signal: controller.signal }).catch(() => undefined);
+      });
+      while (held.length === dispatched) await Bun.sleep(5);
+      const failed = aborted.waitForEvent("requestfailed");
+      await aborted.evaluate(() => (window as { abortHeldRead?: () => void }).abortHeldRead?.());
+      await failed;
+      await settlePendingRequestFailureChecks(abortedProblems);
+      expect(abortedProblems.failedRequests).toEqual([
+        expect.stringMatching(
+          new RegExp(
+            `^\\[dispatch=document-ledger-fixture; actor=missing; response=document-ledger-fixture\\] GET ${origin.replaceAll(".", "\\.")}/v1/held-aborted: `,
+            "u",
+          ),
+        ),
+      ]);
+    } finally {
+      for (const release of held) release();
+      await browser.close();
+      await server.stop(true);
+    }
+  }, 60_000);
 
   test("repeated finite review reads finish without native transport cancellation", async () => {
     const reviewAccount = await createActualUser({

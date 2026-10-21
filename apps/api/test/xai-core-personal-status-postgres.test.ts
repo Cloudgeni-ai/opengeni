@@ -26,11 +26,8 @@ import {
   signDelegatedAccessToken,
   type Permission,
 } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { subscriptionCoreXaiProvider } from "../../../packages/db/src/subscription-core-xai-adapter";
 import { encryptEnvironmentValue } from "../../../packages/db/src/environment-crypto";
 import { rawRows } from "../../../packages/db/src/database";

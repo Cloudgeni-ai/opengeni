@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import { SESSION_USAGE_LIMIT_BASIS } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import {
@@ -142,6 +142,8 @@ test("a reached limit refuses the first request and the parallel title request b
     action: "continue",
   } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>);
   const position = spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2);
+  // No explicit workspace recovery adds a discontinuity notice here.
+  const recoveryNotice = spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null);
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
   const check = fresh(
     spyOn(db, "checkSessionUsageLimitAdmission").mockResolvedValue({
@@ -216,6 +218,7 @@ test("a reached limit refuses the first request and the parallel title request b
     prepared.mockRestore();
     suffix.mockRestore();
     position.mockRestore();
+    recoveryNotice.mockRestore();
     operations.mockRestore();
     check.mockRestore();
     allowance.mockRestore();

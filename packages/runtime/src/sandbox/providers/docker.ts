@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
+import { installDurableShellProcesses } from "../durable-shell-process";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
@@ -89,7 +90,7 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
   override async create(...args: Parameters<DockerSandboxClient["create"]>) {
     const session = await super.create(...args);
     rememberOwnedDockerSdkState(session.state);
-    return session;
+    return installDurableShellProcesses(session, "docker");
   }
 
   override async deserializeSessionState(
@@ -139,7 +140,7 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
       options,
     );
     rememberOwnedDockerSdkState(session.state);
-    return session;
+    return installDurableShellProcesses(session, "docker");
   }
 
   /** Exact attach must not call the SDK's ordinary resume when the persisted
@@ -185,7 +186,9 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
       ...(archiveLimits !== undefined ? { archiveLimits } : {}),
     });
     rememberOwnedDockerSdkState(session.state);
-    return session;
+    // Commands run under an in-container supervisor, so any session object
+    // for this container (another turn, worker or the reaper) reaches them.
+    return installDurableShellProcesses(session, "docker");
   }
 }
 

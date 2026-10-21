@@ -13,7 +13,7 @@ import {
 } from "@opengeni/db";
 import { createProviderCallBudget, createVaultProviderRegistry } from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createSecretResolver, createVaultService } from "../src/domain/vaults";
 import {
   LINKED_VAULT_MISS_MAX_AGE_MS,

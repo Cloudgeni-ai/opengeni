@@ -39,7 +39,7 @@ export type SingleModelCallRequest = {
   stop?: readonly string[];
   reasoningEffort?: ReasoningEffort;
   verbosity?: "low" | "medium" | "high";
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
   outputFormat?: SingleModelCallOutputFormat;
   signal?: AbortSignal;
 };

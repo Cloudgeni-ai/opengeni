@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readlink, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type {
   BrowserActionCommand,
@@ -214,6 +214,118 @@ recoveryE2e.each(recoveryCases)(
       }
     }
     if (failures.length) throw new AggregateError(failures, "managed recovery fixture failed");
+  },
+  90_000,
+);
+
+// Distributions install Chromium behind a launcher that prepares the sandbox
+// helper and environment and then execs the browser image (NixOS without it
+// aborts at startup). After the controller and its browser are both lost, the
+// recovered directory must relaunch through that launcher, not the recorded
+// process image.
+recoveryE2e(
+  "a lost controller and browser relaunch the same directory through the browser launcher",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-relaunch-e2e-");
+    const socketRootDirectory = await mkdtemp("/tmp/ogr-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          `<!doctype html><title>Relaunch fixture</title><button id="counter">Counter</button>
+      <script>
+        const render = () => { counter.textContent = 'Counter ' + (localStorage.getItem('count') || '0'); };
+        counter.onclick = () => {
+          localStorage.setItem('count', String(Number(localStorage.getItem('count') || '0') + 1));
+          render();
+        }; render();
+      </script>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    const browser = process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium";
+    // The launcher records its PID (exec keeps it as the browser PID); its
+    // version probe records one too.
+    const launcher = join(directory, "chromium-launcher");
+    const launches = join(directory, "launches");
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      launcher,
+      `#!/bin/sh\necho $$ >> ${quote(launches)}\nexec ${quote(browser)} "$@"\n`,
+      { mode: 0o700 },
+    );
+    const launchedPids = async () =>
+      (await readFile(launches, "utf8")).trim().split("\n").map(Number);
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/`,
+      browserExecutablePath: launcher,
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    let second: BrowserSupervisor | undefined;
+    let controller: ReturnType<typeof Bun.spawn> | undefined;
+    let relaunchedPid: number | undefined;
+    try {
+      controller = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
+          JSON.stringify({ rootDirectory, socketRootDirectory, options }),
+        ],
+        { stdout: "pipe", stderr: "inherit" },
+      );
+      const line = await firstLine(controller.stdout as ReadableStream<Uint8Array>, 30_000);
+      expect((JSON.parse(line) as { names: string[] }).names).toContain("Counter 1");
+      const browserPid = await chromiumProfilePid(profile);
+      expect(await launchedPids()).toContain(browserPid);
+      const daemon = await parentPid(browserPid);
+      const drains = await childPids(browserPid, "tail");
+      for (const pid of [controller.pid, daemon, ...drains, browserPid]) {
+        process.kill(pid, "SIGKILL");
+      }
+      await controller.exited;
+      for (const pid of [daemon, ...drains, browserPid]) await waitForProcessDeath(pid);
+      const inode = (await stat(profile)).ino;
+
+      second = await openManagedRecoverySupervisor(rootDirectory, socketRootDirectory);
+      const { initialUrl, ...recoveryOptions } = options;
+      const recovered = await second.createSession({
+        ...recoveryOptions,
+        recoverExistingWorkingDirectory: true,
+      });
+      expect(recovered.controllerGeneration).toBe(options.controllerGeneration);
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      expect(await launchedPids()).toContain(relaunchedPid);
+      expect((await stat(profile)).ino).toBe(inode);
+      // The relaunched browser serves the recovered session.
+      const page = await second.openTarget(options, initialUrl);
+      expect(semanticNames(page)).toContain("Relaunch fixture");
+      await second.endSession(options, { removeState: true });
+      await waitForProcessDeath(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      if (controller?.exitCode === null) controller.kill("SIGKILL");
+      await second?.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+      await rm(socketRootDirectory, { recursive: true, force: true });
+    }
   },
   90_000,
 );

@@ -231,7 +231,7 @@ Minimal core instruction, proposed:
 
 > Read relevant Skills with `skill_read`. Omit paths to read `SKILL.md`, or pass
 > paths to read exactly those files. Reading does not require a sandbox. To find,
-> install, create, or edit Skills, read the built-in `opengeni-skills` Skill.
+> install, create, or edit Skills, read the built-in `skill-management` Skill.
 
 The built-in Skill explains the lazy management tools, text-only file rules,
 Learning behavior, direct edits versus checkout, history, and source updates.
@@ -345,7 +345,7 @@ that narrowed read. Agent-created schedules inherit or narrow their
 creator's choice; an existing-session schedule cannot override its target.
 Adding a new bundled Skill must not expand an explicit host selection.
 
-This covers `opengeni-skills` as well: do not unconditionally inject management
+This covers `skill-management` as well: do not unconditionally inject management
 guidance outside the selector. Eager `skill_read` remains available even if no
 bundled Skills are selected; an empty index must not advertise a hidden
 management Skill. Learning Off does not itself disable Skill reading or imply

@@ -9,15 +9,10 @@ import {
 } from "@opengeni/db";
 import { OpenAIResponsesModel, tool, type Model } from "@openai/agents";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
-import {
-  acquireSharedTestDatabase,
-  assistantMessage,
-  functionCall,
-  MemoryEventBus,
-  ScriptedModel,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import OpenAI from "openai";
 import { createActivityTestHarness } from "../src/activities";
 import {

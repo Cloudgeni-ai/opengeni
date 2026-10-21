@@ -7,9 +7,9 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { VaultChooser } = await import("./vault-chooser");
-const { TooltipProvider } = await import("@/components/ui/tooltip");
+const { TooltipProvider } = await import("@opengeni/react/ui/tooltip");
 const { buildMockState } = await import("@/dev/secrets-mock/fixtures");
-const { vaultError } = await import("./vault-model");
+const { vaultError } = await import("@opengeni/react/app/components/secrets/vault-model");
 const fixture = buildMockState("managed-test");
 const linked = {
   ...fixture.vaults.find((vault) => vault.source === "onepassword")!,

@@ -5,6 +5,7 @@ import {
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
   type ModelCallTiming,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -121,6 +122,7 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
+  mutate?: SessionEventMutation<"event">,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -796,6 +798,8 @@ export async function recordModelUsageAndDebitCredits(
     observability?: ActivityServices["observability"];
     /** Configured provider id for metric labels; never billing authority. */
     metricProvider?: string;
+    /** The caller retains the response durably and retries the whole transaction. */
+    atomicReceiptPersistence?: boolean;
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
@@ -817,11 +821,13 @@ export async function recordModelUsageAndDebitCredits(
     usageLimitMetrics: input.observability ?? null,
     // A failed task-usage receipt write never loses or replays the response:
     // custody writes it before the next model request or turn completion.
-    receiptCustody: (receipt) =>
-      holdSessionUsageReceipt(
-        { accountId: input.accountId, workspaceId: input.workspaceId },
-        receipt,
-      ),
+    receiptCustody: input.atomicReceiptPersistence
+      ? null
+      : (receipt) =>
+          holdSessionUsageReceipt(
+            { accountId: input.accountId, workspaceId: input.workspaceId },
+            receipt,
+          ),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     debitMetadata: {
       sessionId: input.sessionId,

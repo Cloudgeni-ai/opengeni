@@ -1205,6 +1205,7 @@ describe("configuredModels", () => {
     expect(astra?.capabilities.latencyModes.map(({ id, runnable }) => ({ id, runnable }))).toEqual([
       { id: "standard", runnable: true },
       { id: "fast", runnable: true },
+      { id: "ultrafast", runnable: true },
     ]);
     expect(astra?.capabilities.inputModalities).toEqual(["text", "image"]);
   });
@@ -1928,7 +1929,7 @@ describe("turn execution policy V1", () => {
     };
     const newer = resolveTurnExecutionPolicyV1(current, input);
     expect(newer.definitionVersion).toBe(
-      "sha256:e5abc1c2cc619db0827f47241011aa90eeca0fe700071973b64f9ed3c32d7952",
+      "sha256:3728b7c579458cf7f853d0d2bf24942b93b56d793e432576125c0f8337dc7ab9",
     );
     // The same current definition accepted before the compaction trigger left
     // the digest.

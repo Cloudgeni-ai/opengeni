@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
 import { createOpenGeniText } from "@opengeni/react/messages";
-import { composerTrailingMode, nativeLoadingPhrases } from "../src/timeline/composer-state";
+import {
+  composerAlternateSend,
+  composerTrailingMode,
+  nativeLoadingPhrases,
+} from "../src/timeline/composer-state";
 
 const t = createOpenGeniText();
 
@@ -33,6 +37,26 @@ describe("composer trailing action", () => {
     expect(composerTrailingMode({ ...idle, running: true })).toBe("pause");
     expect(composerTrailingMode({ ...idle, paused: true })).toBe("resume");
     expect(composerTrailingMode({ ...idle, running: true, canPause: false })).toBe("call");
+  });
+});
+
+describe("composer alternate send", () => {
+  const working = { trailing: "send" as const, available: true };
+
+  test("a phone can always queue or steer while the agent works", () => {
+    expect(composerAlternateSend({ ...working, alternateSend: "queue" })).toBe("queue");
+    expect(composerAlternateSend({ ...working, alternateSend: "steer" })).toBe("steer");
+  });
+
+  test("only beside Send, while Send takes its busy path, and when the host offers it", () => {
+    expect(
+      composerAlternateSend({ ...working, alternateSend: "steer", trailing: "pause" }),
+    ).toBeNull();
+    expect(composerAlternateSend({ ...working, alternateSend: null })).toBeNull();
+    expect(composerAlternateSend({ ...working })).toBeNull();
+    expect(
+      composerAlternateSend({ ...working, alternateSend: "steer", available: false }),
+    ).toBeNull();
   });
 });
 

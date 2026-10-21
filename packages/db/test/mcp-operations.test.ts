@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
@@ -40,7 +37,10 @@ import {
   confirmExternalIdentityLink,
   revokeExternalIdentityLink,
 } from "../src/external-identity-links";
-import { captureExternalLinkTurnAuthority } from "../src/external-link-work";
+import {
+  captureExternalLinkTurnAuthority,
+  getExternalLinkTurnAuthorizationInTransaction,
+} from "../src/external-link-work";
 import type { ExternalLinkWorkSnapshot } from "@opengeni/contracts/external-identities";
 
 let shared: SharedTestDatabase;
@@ -711,6 +711,11 @@ test("cached results deny suspended membership, changed membership revision, and
 
 test("cached linked receipts are denied immediately after canonical link revocation", async () => {
   const scope = await fixture({ linked: true });
+  const readLinkedAuthorization = () =>
+    withRlsContext(client.db, scope, (tx) =>
+      getExternalLinkTurnAuthorizationInTransaction(tx, scope, scope.turnId),
+    );
+  expect(await readLinkedAuthorization()).toMatchObject({ authorized: true });
   const op = operation();
   await command(scope, "capture", op);
   const claim = await command(scope, "claim_read", { operationId: op.operationId });
@@ -728,6 +733,7 @@ test("cached linked receipts are denied immediately after canonical link revocat
     subjectId: actor.effectiveSubjectId,
     expectedRevision: actor.linkRevision,
   });
+  expect(await readLinkedAuthorization()).toMatchObject({ authorized: false });
   await expect(command(scope, "read", { operationId: op.operationId })).rejects.toThrow();
   await expect(
     command(scope, "settle_observation", {

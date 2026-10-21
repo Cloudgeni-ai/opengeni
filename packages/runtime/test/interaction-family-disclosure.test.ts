@@ -10,7 +10,7 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import {
   LazyToolModelProvider,

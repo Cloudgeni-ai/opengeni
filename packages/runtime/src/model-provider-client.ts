@@ -18,6 +18,7 @@ import {
   responsesTransport,
   OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   withResponsesContinuationAdmission,
+  withModelTransportObservation,
 } from "@opengeni/network/responses-websocket";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
@@ -35,6 +36,8 @@ import {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
+  OrganizationOpenAIUnavailableError,
+  OrganizationAzureOpenAIUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
   WorkspaceOpperUnavailableError,
@@ -130,7 +133,11 @@ export function buildOpenAIClientFromSettings(
           streamIdleTimeoutModelFetch(
             providerId,
             modelStreamIdlePolicy(settings),
-            instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
+            instrumentedModelFetch(
+              providerId,
+              openAIResponsesFetch(settings),
+              settings.openaiResponsesWebSocketEnabled,
+            ),
           ),
         ),
       },
@@ -150,7 +157,11 @@ export function buildOpenAIClientFromSettings(
         streamIdleTimeoutModelFetch(
           providerId,
           modelStreamIdlePolicy(settings),
-          instrumentedModelFetch(providerId, openAIResponsesFetch(settings)),
+          instrumentedModelFetch(
+            providerId,
+            openAIResponsesFetch(settings),
+            settings.openaiResponsesWebSocketEnabled,
+          ),
         ),
       ),
     },
@@ -373,12 +384,38 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
   }) as typeof fetch;
 }
 
+/**
+ * Send the key as Azure OpenAI's documented `api-key` header instead of the
+ * SDK's bearer, the same authentication the setup check uses, so a verified
+ * organization deployment is called exactly as it was checked.
+ */
+function azureApiKeyHeaderFetch(inner: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    const authorization = headers.get("authorization");
+    if (authorization && /^bearer /iu.test(authorization)) {
+      headers.set("api-key", authorization.slice("bearer ".length));
+      headers.delete("authorization");
+    }
+    return await inner(input, { ...init, headers });
+  }) as typeof fetch;
+}
+
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   if (
     (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
     !provider.apiKey?.trim()
   ) {
     throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+  }
+  // A missing or revoked organization connection fails closed; it never
+  // falls back to the deployment's own Azure or OpenAI credentials.
+  if (provider.kind === "direct-openai-organization" && !provider.apiKey?.trim()) {
+    throw new OrganizationOpenAIUnavailableError();
+  }
+  if (provider.kind === "direct-azure-organization" && !provider.apiKey?.trim()) {
+    throw new OrganizationAzureOpenAIUnavailableError();
   }
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const scopedCredentialProvider =
@@ -476,6 +513,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                 settings.codexResponsesWebSocketEnabled
                   ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
                   : globalThis.fetch,
+                settings.codexResponsesWebSocketEnabled,
               ),
             ),
           },
@@ -550,7 +588,17 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                           instrumentedModelFetch(provider.id, globalThis.fetch),
                           gatewayPolicies,
                         )
-                      : instrumentedModelFetch(provider.id, openAIResponsesFetch(settings)),
+                      : provider.kind === "direct-azure-organization"
+                        ? instrumentedModelFetch(
+                            provider.id,
+                            azureApiKeyHeaderFetch(openAIResponsesFetch(settings)),
+                            settings.openaiResponsesWebSocketEnabled,
+                          )
+                        : instrumentedModelFetch(
+                            provider.id,
+                            openAIResponsesFetch(settings),
+                            settings.openaiResponsesWebSocketEnabled,
+                          ),
                 ),
               ),
             },
@@ -568,7 +616,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   return client;
 }
 
-export function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
+export function instrumentedModelFetch(
+  provider: string,
+  inner: typeof fetch,
+  transportReportsDispatch = false,
+): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
@@ -580,7 +632,6 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
-    recordModelTransportDispatched(started);
     // A request whose bearer a subscription core leased is admitted by its
     // custody as the last awaited step before the fetch, then settled from
     // its outcome; any other request passes straight through.
@@ -598,9 +649,21 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
             await recordModelTransportStarted();
             replacementSignal.throwIfAborted();
             requestInit?.signal?.throwIfAborted();
-            recordModelTransportDispatched(performance.now());
+            if (!transportReportsDispatch) recordModelTransportDispatched(performance.now());
           },
-          () => inner(input, requestInit),
+          () => {
+            // No awaited admission remains between this notification and fetch
+            // entry. Dispatch-triggered preparation must not run ahead of the
+            // credential custody check above.
+            if (transportReportsDispatch) {
+              return withModelTransportObservation(
+                () => recordModelTransportDispatched(performance.now()),
+                () => inner(input, requestInit),
+              );
+            }
+            recordModelTransportDispatched(performance.now());
+            return inner(input, requestInit);
+          },
         );
       } catch (error) {
         await current.failed();

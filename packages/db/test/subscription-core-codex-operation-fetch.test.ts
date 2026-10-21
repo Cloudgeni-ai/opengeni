@@ -6,7 +6,7 @@ import {
 } from "../src/subscription-core-codex-operations";
 import type { Database } from "../src/database";
 import type { CodexFetch } from "@opengeni/codex";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as requests from "../src/subscription-core-codex-requests";
 
 const db = {} as Database;

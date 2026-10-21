@@ -47,13 +47,10 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  startTestMcpServer,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import postgres from "postgres";
 import {
@@ -1682,6 +1679,8 @@ describe("connections routes", () => {
       authorization: await bearer(workspace, "subject-a", [
         "connections:read",
         "connections:write",
+        // Workspace model-provider keys are a settings action.
+        "capabilities:manage",
       ]),
       "content-type": "application/json",
     };
@@ -1698,6 +1697,24 @@ describe("connections routes", () => {
         operationId,
       });
 
+    // A Member can connect their own accounts but not set the workspace's model provider.
+    const memberDenied = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-member", [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: body("gateway-member", randomUUID()),
+      },
+    );
+    expect(memberDenied.status).toBe(403);
+    expect(await memberDenied.text()).toContain("capabilities:manage");
+
     const firstOperationId = randomUUID();
     const first = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
       method: "POST",
@@ -1712,6 +1729,27 @@ describe("connections routes", () => {
         metadata: Record<string, unknown>;
       };
     };
+    // Nor replace or disconnect the workspace's provider key someone else set.
+    const memberAuthorization = await bearer(workspace, "subject-member", [
+      "connections:read",
+      "connections:write",
+    ]);
+    const memberRotate = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      {
+        method: "PATCH",
+        headers: { authorization: memberAuthorization, "content-type": "application/json" },
+        body: JSON.stringify({ credential: { apiKey: "gateway-member-rotate" } }),
+      },
+    );
+    expect(memberRotate.status).toBe(403);
+    expect(await memberRotate.text()).toContain("capabilities:manage");
+    const memberDisconnect = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      { method: "DELETE", headers: { authorization: memberAuthorization } },
+    );
+    expect(memberDisconnect.status).toBe(403);
+    expect(await memberDisconnect.text()).toContain("capabilities:manage");
     expect(
       firstConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
     ).toBeUndefined();
@@ -1999,6 +2037,7 @@ describe("connections routes", () => {
       authorization: await bearer(workspace, "subject-a", [
         "connections:read",
         "connections:write",
+        "capabilities:manage",
       ]),
       "content-type": "application/json",
     };

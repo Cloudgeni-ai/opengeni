@@ -50,7 +50,8 @@ import {
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import * as opengeniDb from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
@@ -929,7 +930,7 @@ describe("API helpers", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "browser-safe-503",
       },
@@ -954,7 +955,7 @@ describe("API helpers", () => {
     });
     const body = (await response.json()) as { error: { requestId: string; message: string } };
     expect(response.status).toBe(500);
-    expect(body.error.message).toBe("Opengeni could not complete the request.");
+    expect(body.error.message).toBe("The workspace could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
@@ -1686,7 +1687,7 @@ describe("API helpers", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toContain("Opengeni could not initialize configured.example");
+    expect(message).toContain("the workspace could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1712,7 +1713,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because Opengeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because the workspace could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
@@ -2212,7 +2213,10 @@ describe("GET /v1/config/client", () => {
     expect(
       (await app.request("/v1/config/client", { headers: { cookie: "unrelated=expired" } })).status,
     ).toBe(200);
-    expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
+    expect(
+      (await app.request("/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111"))
+        .status,
+    ).toBe(401);
     expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
   });
 
@@ -2238,7 +2242,10 @@ describe("GET /v1/config/client", () => {
     expect(bootstrap.status).toBe(200);
     expect(ClientConfig.parse(await bootstrap.json()).auth.mode).toBe("managedSession");
     expect(authReads).toBe(0);
-    const scoped = await app.request("/v1/config/client?workspaceId=workspace", { headers });
+    const scoped = await app.request(
+      "/v1/config/client?workspaceId=11111111-1111-4111-8111-111111111111",
+      { headers },
+    );
     expect(scoped.status).toBe(409);
     expect(authReads).toBe(1);
   });

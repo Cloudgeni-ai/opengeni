@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "4.0.4",
+  "version": "4.3.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -166,6 +166,10 @@
       "types": "./src/session-final-reply.ts",
       "default": "./src/session-final-reply.ts"
     },
+    "./session-history": {
+      "types": "./src/session-history.ts",
+      "default": "./src/session-history.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -265,6 +269,10 @@
     "./session-list-entries": {
       "types": "./src/session-list-entries.ts",
       "default": "./src/session-list-entries.ts"
+    },
+    "./workspace-control-event": {
+      "types": "./src/workspace-control-event.ts",
+      "default": "./src/workspace-control-event.ts"
     }
   },
   "publishConfig": {
@@ -272,7 +280,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

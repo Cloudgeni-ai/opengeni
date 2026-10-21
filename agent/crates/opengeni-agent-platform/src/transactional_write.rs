@@ -29,13 +29,39 @@ pub fn begin(
 ) -> PlatformResult<Box<dyn TransactionalWrite>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        unix::begin(path, request)
+        unix::begin(path, request, false)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (path, request);
         Err(PlatformError::Unsupported(
             "transactional fs write requires Linux or macOS".into(),
+        ))
+    }
+}
+
+/// Begin a transaction whose staged content has no name until it is
+/// published (Linux `O_TMPFILE`), for a caller that runs as a user who may
+/// write the destination's directory. Such a user could swap a named staging
+/// file between verification and publication; an unnamed one cannot be
+/// reached, and publication links the verified descriptor itself.
+///
+/// # Errors
+/// Everywhere but Linux, and on a filesystem without `O_TMPFILE`, it fails
+/// closed as unsupported.
+pub(crate) fn begin_unnamed(
+    path: &Path,
+    request: &v1::FsWriteBegin,
+) -> PlatformResult<Box<dyn TransactionalWrite>> {
+    #[cfg(target_os = "linux")]
+    {
+        unix::begin(path, request, true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, request);
+        Err(PlatformError::Unsupported(
+            "unnamed transactional staging requires Linux".into(),
         ))
     }
 }
@@ -75,15 +101,28 @@ mod unix {
         Ok(Mode::from_raw_mode(u16::try_from(bits).map_err(io)?.into()))
     }
 
-    fn open_dir(parent: &File, name: &std::ffi::OsStr) -> PlatformResult<File> {
-        fs::openat(
-            parent,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(File::from)
-        .map_err(|_| {
+    fn open_dir(parent: &File, name: &std::ffi::OsStr, create: bool) -> PlatformResult<File> {
+        let open = || {
+            fs::openat(
+                parent,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+        };
+        let opened = match open() {
+            Err(rustix::io::Errno::NOENT) if create => {
+                // mkdirat is exclusive. If another creator wins, the subsequent
+                // no-follow open still requires an actual directory, not a link.
+                match fs::mkdirat(parent, name, Mode::from_raw_mode(0o777)) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(io(error)),
+                }
+                open()
+            }
+            result => result,
+        };
+        opened.map(File::from).map_err(|_| {
             unsupported("transactional write parent must be an accessible non-symlink directory")
         })
     }
@@ -93,7 +132,7 @@ mod unix {
     // works only on the resulting physical path: traversal never follows a
     // symlink, so a symlink swapped in later fails closed, and commit re-checks
     // the same physical parent. The destination name itself is never resolved.
-    fn physical_parent(path: &Path) -> PlatformResult<(PathBuf, File, OsString)> {
+    fn physical_parent(path: &Path, create: bool) -> PlatformResult<(PathBuf, File, OsString)> {
         if !path.is_absolute() {
             return Err(unsupported("transactional path must be absolute"));
         }
@@ -115,19 +154,48 @@ mod unix {
             .file_name()
             .ok_or_else(|| unsupported("transactional destination must name a file"))?;
         let parent = path.parent().ok_or_else(|| unsupported("missing parent"))?;
-        let physical = std::fs::canonicalize(parent)
-            .map_err(|_| {
-                unsupported("transactional write parent must be an existing accessible directory")
-            })?
-            .join(name);
-        let (dir, name) = self::parent(&physical)?;
+        let mut ancestor = parent;
+        let mut missing = Vec::new();
+        let mut physical = loop {
+            match std::fs::canonicalize(ancestor) {
+                Ok(resolved) => break resolved,
+                Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                    // A dangling link is not a missing directory. Do not create
+                    // its target or reinterpret its spelling as a new directory.
+                    if std::fs::symlink_metadata(ancestor).is_ok() {
+                        return Err(unsupported(
+                            "transactional write parent must be an existing accessible directory",
+                        ));
+                    }
+                    missing.push(
+                        ancestor
+                            .file_name()
+                            .ok_or_else(|| unsupported("missing parent"))?,
+                    );
+                    ancestor = ancestor
+                        .parent()
+                        .ok_or_else(|| unsupported("missing parent"))?;
+                }
+                Err(_) => {
+                    return Err(unsupported(
+                        "transactional write parent must be an existing accessible directory",
+                    ))
+                }
+            }
+        };
+        for component in missing.into_iter().rev() {
+            physical.push(component);
+        }
+        physical.push(name);
+        let (dir, name) = self::parent(&physical, create)?;
         Ok((physical, dir, name))
     }
 
     // Traverse without following any symlink, then retain the directory handle.
-    // Parent creation is deliberately unsupported: it has visible side effects
-    // that cannot be rolled back safely when other actors also use those paths.
-    fn parent(path: &Path) -> PlatformResult<(File, OsString)> {
+    // Explicitly requested parents are ordinary mkdir/umask creations. They stay
+    // after cancellation: another actor may already be using them. Commit only
+    // opens existing parents and never repairs a removed or substituted path.
+    fn parent(path: &Path, create: bool) -> PlatformResult<(File, OsString)> {
         if !path.is_absolute() {
             return Err(unsupported("transactional path must be absolute"));
         }
@@ -149,7 +217,7 @@ mod unix {
         {
             match component {
                 Component::RootDir | Component::CurDir => {}
-                Component::Normal(name) => dir = open_dir(&dir, name)?,
+                Component::Normal(name) => dir = open_dir(&dir, name, create)?,
                 _ => {
                     return Err(unsupported(
                         "transactional paths may not contain parent traversal",
@@ -161,6 +229,10 @@ mod unix {
         if dir.metadata().map_err(io)?.mode() & 0o2000 != 0 {
             return Err(unsupported("setgid parent directories are not supported"));
         }
+        // The directory is not replaced. Its macOS ACLs, flags and attributes
+        // remain in place and the kernel enforces them during create/rename.
+        // Inherited unsupported ACLs on the staged file still fail regular().
+        #[cfg(target_os = "linux")]
         no_xattrs(&dir)?;
         Ok((dir, name))
     }
@@ -197,8 +269,9 @@ mod unix {
 
     fn no_xattrs(file: &File) -> PlatformResult<()> {
         let mut attributes = file.list_xattr().map_err(io)?;
-        // macOS automatically adds this kernel-owned attribute to files and
-        // directories. Replacement also requires identical bytes on both inodes.
+        // macOS assigns provenance to each inode. Keep whatever the OS assigns
+        // to the replacement; copying, stripping or requiring equality with the
+        // previous inode would misrepresent its origin or reject ordinary edits.
         #[cfg(target_os = "macos")]
         let unsupported_attributes = attributes.any(|name| name != "com.apple.provenance");
         #[cfg(target_os = "linux")]
@@ -222,21 +295,14 @@ mod unix {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    fn preserve_provenance(base: &File, staged: &File) -> PlatformResult<()> {
-        if base.get_xattr("com.apple.provenance").map_err(io)?
-            != staged.get_xattr("com.apple.provenance").map_err(io)?
-        {
-            return Err(unsupported(
-                "replacement cannot preserve macOS provenance metadata",
-            ));
-        }
-        Ok(())
+    fn regular(file: &File) -> PlatformResult<Metadata> {
+        regular_with_links(file, 1)
     }
 
-    fn regular(file: &File) -> PlatformResult<Metadata> {
+    // Unnamed staged content has no link until it is published.
+    fn regular_with_links(file: &File, links: u64) -> PlatformResult<Metadata> {
         let meta = file.metadata().map_err(io)?;
-        if !meta.is_file() || meta.nlink() != 1 || meta.mode() & 0o7000 != 0 {
+        if !meta.is_file() || meta.nlink() != links || meta.mode() & 0o7000 != 0 {
             return Err(unsupported("transactional destination must be a single-link regular file without special mode bits"));
         }
         no_xattrs(file)?;
@@ -288,12 +354,21 @@ mod unix {
         Ok((bytes, hash.finalize().to_hex().to_string()))
     }
 
+    /// Where the staged content lives until publication.
+    enum Stage {
+        /// `content` in a private directory next to the destination.
+        Named { name: String, dir: File },
+        /// An unnamed (`O_TMPFILE`) inode only this transaction's descriptor
+        /// reaches; publication links that descriptor.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        Unnamed,
+    }
+
     struct Staged {
         path: std::path::PathBuf,
         parent: File,
         name: OsString,
-        stage_name: String,
-        stage_dir: File,
+        stage: Stage,
         content: File,
         base: Option<(File, Metadata)>,
         request: v1::FsWriteBegin,
@@ -305,14 +380,36 @@ mod unix {
         fn drop(&mut self) {
             // Only our exact private names, relative to pinned handles. Never
             // sweep other transactions or interpret an orphan as a resumable op.
-            let _ = fs::unlinkat(&self.stage_dir, "content", AtFlags::empty());
-            let _ = fs::unlinkat(&self.parent, self.stage_name.as_str(), AtFlags::REMOVEDIR);
+            // Unnamed content vanishes with its descriptor.
+            if let Stage::Named { name, dir } = &self.stage {
+                let _ = fs::unlinkat(dir, "content", AtFlags::empty());
+                let _ = fs::unlinkat(&self.parent, name.as_str(), AtFlags::REMOVEDIR);
+            }
+        }
+    }
+
+    fn private_stage_dir(parent: &File) -> PlatformResult<(String, File)> {
+        let name = format!(".opengeni-write-{}", uuid::Uuid::new_v4());
+        fs::mkdirat(parent, name.as_str(), Mode::from_raw_mode(0o700)).map_err(io)?;
+        let opened = open_dir(parent, std::ffi::OsStr::new(&name), false).and_then(|dir| {
+            // A directory-only inherited ACL can expose staging even when content
+            // inherits no ACL. Verify privacy before creating or accepting bytes.
+            no_xattrs(&dir)?;
+            Ok(dir)
+        });
+        match opened {
+            Ok(dir) => Ok((name, dir)),
+            Err(error) => {
+                let _ = fs::unlinkat(parent, name.as_str(), AtFlags::REMOVEDIR);
+                Err(error)
+            }
         }
     }
 
     pub(super) fn begin(
         path: &Path,
         request: &v1::FsWriteBegin,
+        unnamed: bool,
     ) -> PlatformResult<Box<dyn TransactionalWrite>> {
         let valid_digest = |value: &str| {
             value.len() == 64
@@ -333,7 +430,8 @@ mod unix {
         if request.mode & !0o777 != 0 {
             return Err(unsupported("special file modes are not supported"));
         }
-        let (path, parent, name) = physical_parent(path)?;
+        let (path, parent, name) =
+            physical_parent(path, request.create_parents && request.expected_absent)?;
         let base = match fs::openat(
             &parent,
             &name,
@@ -363,45 +461,24 @@ mod unix {
                 ))
             }
         };
-        let stage_name = format!(".opengeni-write-{}", uuid::Uuid::new_v4());
-        fs::mkdirat(&parent, stage_name.as_str(), Mode::from_raw_mode(0o700)).map_err(io)?;
-        let stage_dir = match open_dir(&parent, std::ffi::OsStr::new(&stage_name)) {
-            Ok(dir) => dir,
-            Err(error) => {
-                let _ = fs::unlinkat(&parent, stage_name.as_str(), AtFlags::REMOVEDIR);
-                return Err(error);
-            }
-        };
         let mode = if request.mode == 0 {
             0o666
         } else {
             request.mode
         };
-        let content = match fs::openat(
-            &stage_dir,
-            "content",
-            OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            ordinary_mode(mode)?,
-        ) {
-            Ok(fd) => File::from(fd),
-            Err(error) => {
-                let _ = fs::unlinkat(&parent, stage_name.as_str(), AtFlags::REMOVEDIR);
-                return Err(io(error));
-            }
-        };
+        let (stage, content) = stage_content(&parent, unnamed, ordinary_mode(mode)?)?;
         let staged = Staged {
             path,
             parent,
             name,
-            stage_name,
-            stage_dir,
+            stage,
             content,
             base,
             request: request.clone(),
             bytes: 0,
             published: false,
         };
-        let new_meta = regular(&staged.content)?;
+        let new_meta = staged.staged_meta()?;
         if let Some(base) = &staged.base {
             let meta = &base.1;
             if meta.uid() != new_meta.uid() || meta.gid() != new_meta.gid() {
@@ -410,10 +487,198 @@ mod unix {
                 ));
             }
             fs::fchmod(&staged.content, ordinary_mode(meta.mode() & 0o777)?).map_err(io)?;
-            #[cfg(target_os = "macos")]
-            preserve_provenance(&base.0, &staged.content)?;
         }
         Ok(Box::new(staged))
+    }
+
+    fn stage_content(parent: &File, unnamed: bool, mode: Mode) -> PlatformResult<(Stage, File)> {
+        if unnamed {
+            return Ok((Stage::Unnamed, unnamed_content(parent, mode)?));
+        }
+        let (stage_name, stage_dir) = private_stage_dir(parent)?;
+        match fs::openat(
+            &stage_dir,
+            "content",
+            OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode,
+        ) {
+            Ok(fd) => Ok((
+                Stage::Named {
+                    name: stage_name,
+                    dir: stage_dir,
+                },
+                File::from(fd),
+            )),
+            Err(error) => {
+                let _ = fs::unlinkat(parent, stage_name.as_str(), AtFlags::REMOVEDIR);
+                Err(io(error))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unnamed_content(parent: &File, mode: Mode) -> PlatformResult<File> {
+        // Without O_EXCL the inode may later be linked into the directory.
+        match fs::openat(
+            parent,
+            ".",
+            OFlags::TMPFILE | OFlags::RDWR | OFlags::CLOEXEC,
+            mode,
+        ) {
+            Ok(fd) => Ok(File::from(fd)),
+            Err(rustix::io::Errno::OPNOTSUPP | rustix::io::Errno::ISDIR) => Err(unsupported(
+                "this filesystem cannot stage a transactional write unnamed (O_TMPFILE)",
+            )),
+            Err(error) => Err(io(error)),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn unnamed_content(_parent: &File, _mode: Mode) -> PlatformResult<File> {
+        Err(unsupported("unnamed transactional staging requires Linux"))
+    }
+
+    impl Staged {
+        fn staged_meta(&self) -> PlatformResult<Metadata> {
+            match self.stage {
+                Stage::Named { .. } => regular(&self.content),
+                Stage::Unnamed => regular_with_links(&self.content, 0),
+            }
+        }
+
+        /// Make the staged content the destination. A named stage is renamed
+        /// into place. Unnamed content is linked through its own descriptor, so
+        /// exactly the verified inode is published: directly under the
+        /// destination name for a creation (no-replace), else under a fresh
+        /// name that is then atomically exchanged with the destination and
+        /// checked, the previous file put back if anything else arrived.
+        fn publish(&mut self, flags: RenameFlags) -> PlatformResult<()> {
+            let conflict = |error: rustix::io::Errno| {
+                if error == rustix::io::Errno::EXIST {
+                    failure("WRITE_CONFLICT", "destination appeared before commit")
+                } else {
+                    io(error)
+                }
+            };
+            match &self.stage {
+                Stage::Named { dir, .. } => {
+                    fs::renameat_with(dir, "content", &self.parent, &self.name, flags)
+                        .map_err(conflict)
+                }
+                Stage::Unnamed => self.publish_unnamed(),
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn publish_unnamed(&mut self) -> PlatformResult<()> {
+            use std::os::fd::AsRawFd as _;
+
+            // The calling thread's own descriptor table entry: always
+            // reachable by that thread, whatever identity it runs as.
+            let descriptor = format!("/proc/thread-self/fd/{}", self.content.as_raw_fd());
+            let link = |name: &std::ffi::OsStr| {
+                fs::linkat(
+                    fs::CWD,
+                    descriptor.as_str(),
+                    &self.parent,
+                    name,
+                    AtFlags::SYMLINK_FOLLOW,
+                )
+            };
+            if self.request.expected_absent {
+                return link(&self.name).map_err(|error| {
+                    if error == rustix::io::Errno::EXIST {
+                        failure("WRITE_CONFLICT", "destination appeared before commit")
+                    } else {
+                        io(error)
+                    }
+                });
+            }
+            // A replacement has no single call that links a descriptor over an
+            // existing name, so the verified inode gets a fresh private name
+            // and is exchanged with the destination. That name is reachable by
+            // the identity this write runs as until the exchange, so the
+            // exchange is followed by proof, through our own descriptor and the
+            // destination name, that the published file is exactly the verified
+            // inode with exactly the verified bytes. Anything else is put back,
+            // and a put-back that cannot be confirmed is an unknown outcome,
+            // never a clean conflict.
+            let fresh = OsString::from(format!(".opengeni-publish-{}", uuid::Uuid::new_v4()));
+            link(&fresh).map_err(io)?;
+            #[cfg(test)]
+            window::run(&window::BEFORE_EXCHANGE, &fresh);
+            if let Err(error) = fs::renameat_with(
+                &self.parent,
+                &fresh,
+                &self.parent,
+                &self.name,
+                RenameFlags::EXCHANGE,
+            ) {
+                let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+                return Err(io(error));
+            }
+            if self.published_verified() {
+                // The fresh name now holds the previous destination.
+                let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+                return Ok(());
+            }
+            #[cfg(test)]
+            window::run(&window::BEFORE_RESTORE, &fresh);
+            let restored = fs::renameat_with(
+                &self.parent,
+                &fresh,
+                &self.parent,
+                &self.name,
+                RenameFlags::EXCHANGE,
+            )
+            .is_ok()
+                && self.base.as_ref().is_some_and(|(_, previous)| {
+                    fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(
+                        |named| {
+                            named.st_ino == previous.ino()
+                                && i128::from(named.st_dev) == i128::from(previous.dev())
+                        },
+                    )
+                });
+            if restored {
+                let _ = fs::unlinkat(&self.parent, &fresh, AtFlags::empty());
+                return Err(failure(
+                    "WRITE_CONFLICT",
+                    "staged content changed before publication; the previous file was restored",
+                ));
+            }
+            Err(failure(
+                "WRITE_OUTCOME_UNKNOWN",
+                &format!(
+                    "staged content changed before publication and the previous file could not be confirmed restored; inspect the destination and {}",
+                    fresh.to_string_lossy()
+                ),
+            ))
+        }
+
+        /// Whether the destination name now holds exactly the verified inode,
+        /// and that inode exactly the verified bytes.
+        #[cfg(target_os = "linux")]
+        fn published_verified(&mut self) -> bool {
+            let Ok(ours) = self.content.metadata() else {
+                return false;
+            };
+            let named = fs::statat(&self.parent, &self.name, AtFlags::SYMLINK_NOFOLLOW);
+            if !named.is_ok_and(|named| {
+                named.st_ino == ours.ino() && i128::from(named.st_dev) == i128::from(ours.dev())
+            }) {
+                return false;
+            }
+            digest(&mut self.content).is_ok_and(|(bytes, hash)| {
+                Some(bytes) == self.request.content_size && hash == self.request.content_digest
+            })
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        #[allow(clippy::unused_self)]
+        fn publish_unnamed(&mut self) -> PlatformResult<()> {
+            Err(unsupported("unnamed transactional staging requires Linux"))
+        }
     }
 
     impl TransactionalWrite for Staged {
@@ -444,9 +709,9 @@ mod unix {
                     "staged content differs from intended size/digest",
                 ));
             }
-            regular(&self.content)?;
+            self.staged_meta()?;
             self.content.sync_all().map_err(io)?;
-            let (current_parent, _) = parent(&self.path)?;
+            let (current_parent, _) = parent(&self.path, false)?;
             let initial_parent = self.parent.metadata().map_err(io)?;
             let current_parent = current_parent.metadata().map_err(io)?;
             if initial_parent.dev() != current_parent.dev()
@@ -455,8 +720,6 @@ mod unix {
                 return Err(failure("WRITE_CONFLICT", "destination parent changed"));
             }
             if let Some((base, initial)) = &mut self.base {
-                #[cfg(target_os = "macos")]
-                preserve_provenance(base, &self.content)?;
                 let current = fs::openat(
                     &self.parent,
                     &self.name,
@@ -495,19 +758,33 @@ mod unix {
             } else {
                 RenameFlags::empty()
             };
-            fs::renameat_with(&self.stage_dir, "content", &self.parent, &self.name, flags)
-                .map_err(|error| {
-                    if error == rustix::io::Errno::EXIST {
-                        failure("WRITE_CONFLICT", "destination appeared before commit")
-                    } else {
-                        io(error)
-                    }
-                })?;
+            self.publish(flags)?;
             // Rename is the commit point. Do not turn a subsequent cleanup or
             // directory-sync failure into a retryable pre-commit error. This is
             // atomic visibility, not a durable receipt across power/process loss.
             self.published = true;
             Ok(())
+        }
+    }
+
+    /// Test-only actions in the publication window of an unnamed replacement.
+    #[cfg(test)]
+    pub(super) mod window {
+        use std::cell::RefCell;
+        use std::ffi::OsStr;
+
+        type Hook = RefCell<Option<Box<dyn FnMut(&OsStr)>>>;
+        thread_local! {
+            pub(in super::super) static BEFORE_EXCHANGE: Hook = const { RefCell::new(None) };
+            pub(in super::super) static BEFORE_RESTORE: Hook = const { RefCell::new(None) };
+        }
+
+        pub(in super::super) fn run(hook: &'static std::thread::LocalKey<Hook>, fresh: &OsStr) {
+            hook.with(|slot| {
+                if let Some(action) = slot.borrow_mut().as_mut() {
+                    action(fresh);
+                }
+            });
         }
     }
 }
@@ -557,6 +834,7 @@ mod tests {
             let file = std::fs::File::open(path).unwrap();
             file.list_xattr()
                 .unwrap()
+                .filter(|key| key != "com.apple.provenance")
                 .map(|key| {
                     let value = file.get_xattr(&key).unwrap();
                     (key, value)
@@ -623,15 +901,124 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        assert!(begin(&path, &request(b"new", Some(b"old"))).is_err());
+        let mut replacement = begin(&path, &request(b"new", Some(b"old"))).unwrap();
+        replacement.append(b"new").unwrap();
+        replacement.commit(&|| true).unwrap();
+        drop(replacement);
+        assert!(opengeni_agent_files_ffi::has_extended_acl(
+            &std::fs::File::open(dir.path()).unwrap()
+        )
+        .unwrap());
         assert!(std::process::Command::new("/bin/chmod")
             .arg("-N")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn failure_code(error: &PlatformError) -> String {
+        match error {
+            PlatformError::Os { detail, .. } => {
+                detail.get("failure_code").cloned().unwrap_or_default()
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    type RestoreHook = Box<dyn FnMut(&std::path::Path, &std::ffi::OsStr)>;
+
+    /// Run one unnamed replacement of `old` by `new` with actions in its
+    /// publication window; returns the commit result and the destination.
+    #[cfg(target_os = "linux")]
+    fn replace_unnamed_with_window(
+        before_exchange: impl FnMut(&std::path::Path, &std::ffi::OsStr) + 'static,
+        before_restore: Option<RestoreHook>,
+    ) -> (PlatformResult<()>, tempfile::TempDir, std::path::PathBuf) {
+        use super::unix::window;
+        let dir = tempdir();
+        let path = dir.path().join("document");
+        std::fs::write(&path, b"old").unwrap();
+        let mut write = begin_unnamed(&path, &request(b"new", Some(b"old"))).unwrap();
+        write.append(b"new").unwrap();
+        let root = dir.path().to_path_buf();
+        let mut exchange = before_exchange;
+        window::BEFORE_EXCHANGE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |fresh| exchange(&root, fresh)));
+        });
+        let root = dir.path().to_path_buf();
+        window::BEFORE_RESTORE.with(|slot| {
+            *slot.borrow_mut() = before_restore.map(|mut restore| {
+                Box::new(move |fresh: &std::ffi::OsStr| restore(&root, fresh))
+                    as Box<dyn FnMut(&std::ffi::OsStr)>
+            });
+        });
+        let result = write.commit(&|| true);
+        window::BEFORE_EXCHANGE.with(|slot| *slot.borrow_mut() = None);
+        window::BEFORE_RESTORE.with(|slot| *slot.borrow_mut() = None);
+        (result, dir, path)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn leftover_publish_names(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".opengeni-publish-"))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unnamed_replacement_publishes_only_verified_bytes() {
+        // Untouched window: the verified bytes are published, nothing is left.
+        let (result, dir, path) = replace_unnamed_with_window(|_, _| {}, None);
+        result.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(leftover_publish_names(dir.path()), Vec::<String>::new());
+
+        // The private name is written in place before the exchange: same inode,
+        // other bytes. The previous file is restored; a clean conflict.
+        let (result, dir, path) = replace_unnamed_with_window(
+            |root, fresh| std::fs::write(root.join(fresh), b"tampered").unwrap(),
+            None,
+        );
+        assert_eq!(failure_code(&result.unwrap_err()), "WRITE_CONFLICT");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(leftover_publish_names(dir.path()), Vec::<String>::new());
+
+        // Another inode is put under the private name before the exchange.
+        let (result, dir, path) = replace_unnamed_with_window(
+            |root, fresh| {
+                let other = root.join("other");
+                std::fs::write(&other, b"new").unwrap();
+                std::fs::rename(&other, root.join(fresh)).unwrap();
+            },
+            None,
+        );
+        assert_eq!(failure_code(&result.unwrap_err()), "WRITE_CONFLICT");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        assert_eq!(leftover_publish_names(dir.path()), Vec::<String>::new());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unnamed_replacement_with_an_unconfirmed_restore_is_an_unknown_outcome() {
+        // Tampered before the exchange, and the private name (now holding the
+        // previous file) moved away before the put-back: never a clean conflict.
+        let (result, dir, _path) = replace_unnamed_with_window(
+            |root, fresh| std::fs::write(root.join(fresh), b"tampered").unwrap(),
+            Some(Box::new(|root, fresh| {
+                std::fs::rename(root.join(fresh), root.join("moved")).unwrap();
+            })),
+        );
+        let error = result.unwrap_err();
+        assert_eq!(failure_code(&error), "WRITE_OUTCOME_UNKNOWN");
+        assert_eq!(std::fs::read(dir.path().join("moved")).unwrap(), b"old");
     }
 
     #[test]
@@ -740,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_spelling_parent_traversal_and_missing_parent_fail_closed() {
+    fn directory_spelling_parent_traversal_and_unrequested_missing_parent_fail_closed() {
         use std::os::unix::fs::symlink;
         let dir = tempdir();
         let path = dir.path().join("document");
@@ -758,10 +1145,194 @@ mod tests {
         assert!(begin(&alias, &request(b"new", Some(b"old"))).is_err());
         let missing = dir.path().join("missing");
         let mut create = request(b"new", None);
-        create.create_parents = true;
+        create.create_parents = false;
         assert!(begin(&missing.join("document"), &create).is_err());
         assert!(!missing.exists());
         assert_eq!(std::fs::read(path).unwrap(), b"old");
+    }
+
+    #[test]
+    fn requested_parents_are_created_once_and_survive_cancel_without_publishing() {
+        let dir = tempdir();
+        let path = dir.path().join("new/nested/document");
+        let mut edit = request(b"new", Some(b"old"));
+        edit.create_parents = true;
+        assert!(begin(&path, &edit).is_err());
+        assert!(!dir.path().join("new").exists());
+        let mut req = request(b"new", None);
+        req.create_parents = true;
+        let mut write = begin(&path, &req).unwrap();
+        assert!(path.parent().unwrap().is_dir());
+        assert!(!path.exists());
+        write.append(b"new").unwrap();
+        // A concurrent user of a newly-created parent must not lose their work
+        // when our staged file is cancelled or fails its final authority check.
+        let other = path.parent().unwrap().join("other");
+        std::fs::write(&other, b"concurrent").unwrap();
+        assert!(write.commit(&|| false).is_err());
+        drop(write);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&other).unwrap(), b"concurrent");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        let mut write = begin(&path, &req).unwrap();
+        write.append(b"new").unwrap();
+        write.commit(&|| true).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn requested_parents_resolve_existing_alias_once_and_reject_substitution() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir();
+        let physical = dir.path().join("physical");
+        std::fs::create_dir(&physical).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&physical, &alias).unwrap();
+        let mut req = request(b"new", None);
+        req.create_parents = true;
+        let mut write = begin(&alias.join("new/nested/document"), &req).unwrap();
+        write.append(b"new").unwrap();
+        write.commit(&|| true).unwrap();
+        drop(write);
+        assert_eq!(
+            std::fs::read(physical.join("new/nested/document")).unwrap(),
+            b"new"
+        );
+
+        let mut write = begin(&alias.join("swapped/document"), &req).unwrap();
+        write.append(b"new").unwrap();
+        std::fs::rename(physical.join("swapped"), physical.join("moved")).unwrap();
+        symlink(physical.join("new"), physical.join("swapped")).unwrap();
+        assert!(write.commit(&|| true).is_err());
+        drop(write);
+        assert!(!physical.join("new/document").exists());
+
+        symlink(dir.path().join("absent"), dir.path().join("dangling")).unwrap();
+        assert!(begin(&dir.path().join("dangling/child/document"), &req).is_err());
+        assert!(!dir.path().join("absent").exists());
+        assert!(begin(&dir.path().join("missing/../escape/document"), &req).is_err());
+        assert!(!dir.path().join("missing").exists());
+
+        let mut removed = begin(&dir.path().join("removed/document"), &req).unwrap();
+        removed.append(b"new").unwrap();
+        std::fs::rename(dir.path().join("removed"), dir.path().join("retired")).unwrap();
+        assert!(removed.commit(&|| true).is_err());
+        assert!(
+            !dir.path().join("removed").exists(),
+            "commit must not recreate a removed parent"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn creation_in_a_standard_mac_home_acl_preserves_the_parent_acl() {
+        let dir = tempdir();
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "group:everyone deny delete"])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let path = dir.path().join("document");
+        let mut write = begin(&path, &request(b"new", None)).unwrap();
+        write.append(b"new").unwrap();
+        write.commit(&|| true).unwrap();
+        drop(write);
+        assert_eq!(std::fs::read(path).unwrap(), b"new");
+        let acl = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(String::from_utf8(acl.stdout)
+            .unwrap()
+            .contains("group:everyone deny delete"));
+        assert!(std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn inherited_directory_acl_cannot_expose_private_staging() {
+        let dir = tempdir();
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "group:everyone allow list,search,directory_inherit"])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(begin(&dir.path().join("document"), &request(b"private", None)).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(std::process::Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacement_accepts_provenance_from_an_external_writer() {
+        use xattr::FileExt as _;
+        let Ok(node) = std::env::var("OPENGENI_TEST_PROVENANCE_WRITER") else {
+            eprintln!("SKIP: set OPENGENI_TEST_PROVENANCE_WRITER to a provenance-tagged Node binary for the real macOS origin test");
+            return;
+        };
+        let dir = tempdir();
+        let path = dir.path().join("document");
+        assert!(std::process::Command::new(node)
+            .args(["-e", "require('fs').writeFileSync(process.argv[1], 'old')"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let base = std::fs::File::open(&path).unwrap();
+        let origin = base.get_xattr("com.apple.provenance").unwrap();
+        assert!(
+            origin.is_some(),
+            "fixture writer must produce real kernel provenance"
+        );
+        let mut write = begin(&path, &request(b"new", Some(b"old"))).unwrap();
+        let stage = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".opengeni-write-")
+            })
+            .unwrap()
+            .path()
+            .join("content");
+        let staged_origin = std::fs::File::open(stage)
+            .unwrap()
+            .get_xattr("com.apple.provenance")
+            .unwrap();
+        // macOS may assign the same provenance to both processes when they
+        // share a responsible application. Publication must retain the staged
+        // inode's OS-assigned value whether it matches the base or not.
+        write.append(b"new").unwrap();
+        write.commit(&|| true).unwrap();
+        drop(write);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(
+            std::fs::File::open(&path)
+                .unwrap()
+                .get_xattr("com.apple.provenance")
+                .unwrap(),
+            staged_origin
+        );
+        // No protected metadata was rewritten on the original inode.
+        assert_eq!(base.get_xattr("com.apple.provenance").unwrap(), origin);
     }
 
     #[test]

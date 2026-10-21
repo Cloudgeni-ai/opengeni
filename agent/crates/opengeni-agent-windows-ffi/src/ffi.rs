@@ -6,6 +6,11 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
 
+pub(crate) fn continuous_millis() -> u64 {
+    // SAFETY: GetTickCount64 takes no pointers and has no preconditions.
+    unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() }
+}
+
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS,

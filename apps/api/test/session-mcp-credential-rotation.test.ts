@@ -26,12 +26,9 @@ import {
   type SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import { listOwnConnectionAccountsForGrant, type ApiRouteDeps } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 import { OpenGeniClient } from "@opengeni/sdk";

@@ -114,8 +114,9 @@ export function tryParseJson(text: string): unknown {
 
 /**
  * The canonical credit-death sentence. Credit exhaustion is the one failure a
- * user can fix themselves — the copy must say what happened (empty balance),
- * what to do (add credits), and what is safe (nothing was lost). Crucially it
+ * user can fix themselves — the copy must say what happened (the remaining
+ * credit does not cover this model, though it may cover others), what to do
+ * (choose a covered model or add credits), and what is safe (nothing was lost). Crucially it
  * must NOT say "send a message to revive": a revive turn burns credits the
  * workspace no longer has.
  */
@@ -290,22 +291,25 @@ function isComposerCreditRefusal(error: Error): boolean {
 
 /**
  * Does this failure/completion payload (or raw error string) mean the
- * workspace ran out of Opengeni credits? Matches the engine's
- * "insufficient Opengeni credits" text (case-insensitive, substring — it
- * arrives both bare and wrapped in "Activity task failed: …") and the
+ * workspace ran out of credits? Matches the engine's "insufficient workspace
+ * credits" text, and the older "insufficient Opengeni credits" wording in
+ * existing history (case-insensitive, substring — it arrives both bare and
+ * wrapped in "Activity task failed: …") and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */
+const CREDIT_EXHAUSTION_TEXT = /insufficient (?:workspace|opengeni) credits/i;
+
 export function isCreditExhaustion(
   input: { error?: string | null; detail?: string | null; segmentLimit?: string | null } | string,
 ): boolean {
   if (typeof input === "string") {
-    return input.toLowerCase().includes("insufficient opengeni credits");
+    return CREDIT_EXHAUSTION_TEXT.test(input);
   }
   if (input.segmentLimit === "budget_exhausted") {
     return true;
   }
   for (const text of [input.error, input.detail]) {
-    if (typeof text === "string" && text.toLowerCase().includes("insufficient opengeni credits")) {
+    if (typeof text === "string" && CREDIT_EXHAUSTION_TEXT.test(text)) {
       return true;
     }
   }
@@ -376,6 +380,10 @@ export function presentFailure(
   if (databaseFailure) {
     return { reason: t("lib.format.theServiceEncounteredADatabase"), safetyRefusal: false };
   }
+  // Failures the server identifies by code read in the host's language; the
+  // stored (and model-facing) English text stays on the event.
+  const coded = typeof payload.code === "string" ? CODED_FAILURE_TEXT[payload.code] : undefined;
+  if (coded) return { reason: coded(t), safetyRefusal: false };
   const text = (key: string): string | null => {
     const value = payload[key];
     return typeof value === "string" && value.trim() ? value : null;
@@ -413,3 +421,12 @@ export function presentFailure(
     safetyRefusal: false,
   };
 }
+
+const capacityRecoveryExhausted = (t: OpenGeniText) => t("lib.format.capacityRecoveryExhausted");
+
+/** Server failure codes whose recorded text is operator English, not end-user copy. */
+const CODED_FAILURE_TEXT: Readonly<Record<string, ((t: OpenGeniText) => string) | undefined>> = {
+  codex_capacity_recovery_exhausted: capacityRecoveryExhausted,
+  xai_capacity_recovery_exhausted: capacityRecoveryExhausted,
+  claude_capacity_recovery_exhausted: capacityRecoveryExhausted,
+};

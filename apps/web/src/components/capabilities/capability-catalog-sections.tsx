@@ -1,21 +1,21 @@
 import { GlobeIcon, Loader2Icon, PlugIcon, SearchIcon } from "lucide-react";
 
-import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
-import { LoadErrorState } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
+import { LoadErrorState } from "@opengeni/react/app/components/common";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Input } from "@opengeni/react/ui/input";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
   capabilityFilterLabel,
   capabilityItemKindLabel,
   type CapabilityFilter,
   type ConnectionHealth,
-} from "@/lib/capabilities";
+} from "@opengeni/react/app/lib/capabilities";
 import type { ListViewState } from "@/lib/load-state";
-import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem } from "@/types";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
 

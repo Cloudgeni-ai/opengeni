@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL } from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { ScheduleNotFoundError, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import {
   deleteLegacyMaintenanceSchedules,
@@ -215,6 +215,7 @@ describe("internal maintenance jobs", () => {
       workflow: { start: async () => undefined, signalWithStart: async () => undefined } as never,
     });
     expect(Object.fromEntries(cadences.map((c) => [c.job, c.periodMs]))).toEqual({
+      "subscription-usage-retention": 60_000,
       "session-workflow-wake-dispatcher": 10_000,
       "knowledge-indexing": KNOWLEDGE_INDEXING_PERIOD_MS,
       "site-auth-maintenance": SITE_AUTH_MAINTENANCE_PERIOD_MS,

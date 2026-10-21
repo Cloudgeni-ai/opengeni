@@ -2,14 +2,14 @@ import { useRouterState } from "@tanstack/react-router";
 import { SmartphoneIcon } from "lucide-react";
 import { useState } from "react";
 
-import { Notice } from "@/components/ui/notice";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   currentPhoneAppPlatform,
   dismissOpenInAppBanner,
   isAppOpenablePath,
   openInAppBannerDismissed,
   openInAppUrl,
-} from "@/lib/open-in-app";
+} from "@opengeni/react/app/lib/open-in-app";
 
 /**
  * On a phone browser, sessions and workspaces offer to open in the phone app.

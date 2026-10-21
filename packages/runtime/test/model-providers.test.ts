@@ -39,7 +39,7 @@ import {
   xaiSubscriptionFetch,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import OpenAI from "openai";
 import {
   buildModelInstance,

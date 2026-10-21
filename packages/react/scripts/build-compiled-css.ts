@@ -21,13 +21,24 @@ const effectiveTokensPath = join(stylesRoot, "effective-tokens.css");
 const checkOnly = process.argv.includes("--check");
 
 // The visualization assets are raw CSS/HTML for a sandboxed iframe, not class
-// names, and the inline exclusions are prose words from comments and
-// identifiers that Tailwind would otherwise compile into unused utilities.
+// names; tests and fixtures never ship; and the inline exclusions are prose
+// words from comments and identifiers that Tailwind would otherwise compile
+// into unused utilities. `src/app` (the session app `SessionApp` renders) is
+// included, so its utilities ship scoped like every other component's, and so
+// are the plain stylesheets its components import (connect and setup cards,
+// This computer, capability cards): an embed needs only this one file.
 const input = `@import "tailwindcss/theme.css" layer(theme);
 @import "./index.css";
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./responsive.css";
+@import "./app.css";
+@import "./connect.css";
+@import "./this-computer.css";
+@import "../src/app/components/capabilities/session-capability-card.css";
 @source "../src";
+@source not "../src/**/*.test.ts";
+@source not "../src/**/*.test.tsx";
+@source not "../src/**/*.dom-fixture.tsx";
 @source not "../src/components/artifacts/visualization-assets";
 @source not "../src/components/artifacts/visualization-assets.gen.ts";
 @source not inline("blur collapse filter lowercase ring");
@@ -74,10 +85,22 @@ function hasScopedRuleAncestor(rule: Rule): boolean {
   return false;
 }
 
+/**
+ * Whether the selector only matches inside an `og-root` (or, for token
+ * contexts, on an ancestor that `:has()` one). A root named inside `:not()`
+ * does not scope it: `button:not(.og-root textarea)` still matches every
+ * button on the host page.
+ */
 function containsRoot(selector: Selector): boolean {
   let found = false;
   selector.walkClasses((className) => {
-    if (className.value === "og-root") found = true;
+    if (className.value !== "og-root") return;
+    let parent = className.parent as { type: string; value?: string; parent?: unknown } | undefined;
+    while (parent) {
+      if (parent.type === "pseudo" && parent.value === ":not") return;
+      parent = parent.parent as typeof parent;
+    }
+    found = true;
   });
   return found;
 }
@@ -427,7 +450,7 @@ export function scopeSelectors(css: string): string {
         return [selectorParser.selector({ value: "", nodes: [scope.clone()] })];
       }
       if (isTokenContext(selector)) return tokenContextTargets(selector);
-      return rootAndDescendant(selector);
+      return rootAndDescendant(isScopedBase ? selector : lowerRootSpecificity(selector));
     });
     const unique = new Map(scoped.map((selector) => [selector.toString(), selector]));
     parsed.removeAll();

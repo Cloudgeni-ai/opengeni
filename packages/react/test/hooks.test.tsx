@@ -4,7 +4,7 @@
    DOM globals are registered exactly once for the bun test process slice that
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { act as reactAct } from "react";
 import { startTransition, Suspense, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
@@ -44,7 +44,7 @@ import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 function makeEvent(
   sequence: number,
@@ -931,48 +931,51 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
-  test("queue Steer stays bridged into chat until the replacement turn starts", async () => {
-    const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
-    let current = queueSnapshot([turn], { version: 5 });
-    const client = fakeClient({
-      getQueue: async () => current,
-      steerQueueItem: async () => {
-        current = queueSnapshot([], { version: 6 });
-        return {
-          receipt: promptReceipt(turn.id, "queue.steer"),
-          snapshot: current,
-        };
-      },
-    });
-    const hook = await renderHook(
-      (events: SessionEvent[]) =>
-        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
-      [] as SessionEvent[],
-    );
-    await flush();
+  test.each(["turn.started", "turn.superseded"])(
+    "queue Steer stays bridged into chat until %s",
+    async (terminalType) => {
+      const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
+      let current = queueSnapshot([turn], { version: 5 });
+      const client = fakeClient({
+        getQueue: async () => current,
+        steerQueueItem: async () => {
+          current = queueSnapshot([], { version: 6 });
+          return {
+            receipt: promptReceipt(turn.id, "queue.steer"),
+            snapshot: current,
+          };
+        },
+      });
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        [] as SessionEvent[],
+      );
+      await flush();
 
-    await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
-    expect(hook.result.current.acceptedSteers).toEqual([
-      expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
-    ]);
+      await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
+      expect(hook.result.current.acceptedSteers).toEqual([
+        expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
+      ]);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toHaveLength(1);
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toHaveLength(1);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-      {
-        ...makeEvent(11, "turn.started", { triggerEventId: turn.triggerEventId }),
-        turnId: turn.id,
-      },
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toEqual([]);
-    await hook.unmount();
-  });
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+        {
+          ...makeEvent(11, terminalType, { triggerEventId: turn.triggerEventId }),
+          turnId: turn.id,
+        },
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toEqual([]);
+      await hook.unmount();
+    },
+  );
 
   test("a delayed older GET cannot overwrite a newer mutation snapshot", async () => {
     const old = queueSnapshot([fakeTurn({ id: "old" })], { version: 1 });
@@ -2953,6 +2956,157 @@ describe("useComposer queue-vs-steer", () => {
     const input = steered[0] as { text: string; clientEventId?: string };
     expect(input.text).toBe("do this immediately");
     expect(typeof input.clientEventId).toBe("string");
+    await hook.unmount();
+  });
+
+  test("busySend steer with offerQueue makes a busy Send a Steer and offers Queue; idle Send, paused Send and sendToQueue still queue", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    let destination: "chat" | "queue" = "queue";
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => destination,
+          busySend: "steer",
+          offerQueue: true,
+        }),
+      undefined,
+    );
+    expect(hook.result.current.busySend).toBe("steer");
+    expect(hook.result.current.singleSend).toBe(false);
+    expect(hook.result.current.alternateSend).toBe("queue");
+
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendToQueue?.("after the turn")).toBe(true),
+    );
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("alternate queues")).toBe(true),
+    );
+    destination = "chat";
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
+    destination = "queue";
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+
+    expect(calls).toEqual([
+      { delivery: "steer", text: "busy" },
+      { delivery: "send", text: "after the turn" },
+      { delivery: "send", text: "alternate queues" },
+      { delivery: "send", text: "idle" },
+      { delivery: "send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("busySend steer alone is one Send: no alternate, busy Send steers, paused Send waits", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => "queue",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.singleSend).toBe(true);
+    expect(hook.result.current.alternateSend).toBeNull();
+    expect(hook.result.current.sendAlternate).toBeUndefined();
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+    expect(calls).toEqual([
+      { delivery: "steer", text: "busy" },
+      { delivery: "send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("in queue mode the alternate beside Send is Steer and steers", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          sendDestination: () => "queue",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.alternateSend).toBe("steer");
+    await flushing(async () => expect(await hook.result.current.send("queued")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("steered")).toBe(true),
+    );
+    expect(calls).toEqual([
+      { delivery: "send", text: "queued" },
+      { delivery: "steer", text: "steered" },
+    ]);
     await hook.unmount();
   });
 
@@ -5404,6 +5558,8 @@ describe("useComposer durable draft and control binding", () => {
 
 describe("session hook concurrent target ownership", () => {
   test("a suspended target transition leaves the committed session fully interactive", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const turn = fakeTurn({
@@ -5509,6 +5665,8 @@ describe("session hook concurrent target ownership", () => {
   });
 
   test("a suspended target render cannot retarget a committed draft callback", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const draftA: ComposerDraft = {
@@ -6009,7 +6167,7 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
     // The shared read is released one task after its last reader leaves.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush(0);
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

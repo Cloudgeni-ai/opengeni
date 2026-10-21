@@ -16,6 +16,7 @@ import {
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   subscriptionCoreCodexAppsRequestAuth,
+  getSessionTitleOperation,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -160,6 +161,7 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  independentSessionTitles?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
   fetchKnowledgeSource?:
@@ -513,17 +515,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     selectedFirstPartyMcpTools,
     firstPartyPermissions: effectiveFirstPartyPermissions,
   });
+  const needsTitle = shouldRequestMissingSessionTitle({
+    agentConfig: session.agent,
+    title: session.title,
+    titleSource: session.titleSource,
+    firstPartyMcpTools: selectedFirstPartyMcpTools,
+    firstPartyMcpPermissions: effectiveFirstPartyPermissions,
+  });
+  const activeTitle =
+    deps.independentSessionTitles && needsTitle
+      ? await getSessionTitleOperation(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        })
+      : null;
   const titleToolPlan = sessionTitleToolPlan({
     agentConfig: session.agent,
     tools: turnTools,
     selectedFirstPartyMcpTools,
-    shouldRequestTitle: shouldRequestMissingSessionTitle({
-      agentConfig: session.agent,
-      title: session.title,
-      titleSource: session.titleSource,
-      firstPartyMcpTools: selectedFirstPartyMcpTools,
-      firstPartyMcpPermissions: effectiveFirstPartyPermissions,
-    }),
+    shouldRequestTitle: needsTitle && (!activeTitle || activeTitle.sourceTurnId === turn.id),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
@@ -743,6 +754,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     getEnvironment: async () => {
       const prepared = eventing.preparedTools;
       if (!prepared) return null;
+      prepared.startDeferredPreparation?.();
       return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
     },
   });
@@ -752,7 +764,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
-    // Opengeni's Jev key pays for these calls whatever model billing the
+    // The deployment's decision-model account pays whatever model billing the
     // workspace uses; record them per workspace so the cost stays visible.
     recordUsage: async (usage) => {
       const shared = {
@@ -764,20 +776,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         turnId: turn.id,
         turnAttemptId: input.attemptId,
       };
-      await recordUsageEvent(db, {
-        ...shared,
-        eventType: "code_search.jev_input_tokens",
-        quantity: usage.jevInputTokens,
-        unit: "tokens",
-        idempotencyKey: `usage:code_search.jev_input_tokens:${input.attemptId}:${usage.operationId}`,
-      });
-      await recordUsageEvent(db, {
-        ...shared,
-        eventType: "code_search.jev_cost",
-        quantity: Math.round(usage.jevCostUsd * 1_000_000),
-        unit: "usd_micros",
-        idempotencyKey: `usage:code_search.jev_cost:${input.attemptId}:${usage.operationId}`,
-      });
+      if (usage.decisionInputTokens !== null)
+        await recordUsageEvent(db, {
+          ...shared,
+          eventType: "code_search.decision_input_tokens",
+          quantity: usage.decisionInputTokens,
+          unit: "tokens",
+          idempotencyKey: `usage:code_search.decision_input_tokens:${input.attemptId}:${usage.operationId}`,
+        });
+      const costEvent = usage.costSources.includes("estimate")
+        ? "decision_estimated_cost"
+        : "decision_cost";
+      if (usage.decisionCostUsd !== null)
+        await recordUsageEvent(db, {
+          ...shared,
+          eventType: `code_search.${costEvent}`,
+          quantity: Math.round(usage.decisionCostUsd * 1_000_000),
+          unit: "usd_micros",
+          idempotencyKey: `usage:code_search.${costEvent}:${input.attemptId}:${usage.operationId}`,
+        });
     },
     workspace: async () => {
       throwIfWorkerShuttingDown();
@@ -1107,7 +1124,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
         localMcpServers,
-        ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
+        ...(deferNonEagerToolPreparation
+          ? {
+              deferNonEagerUntilToolDemand: true,
+              deferredPreparationStart: "provider-dispatch" as const,
+            }
+          : {}),
         onPreparationPhase: (measurement) => {
           recordToolPreparationPhase(observability, {
             ...measurement,

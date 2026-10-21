@@ -5,7 +5,7 @@ import {
   checkoutTabReturnUrl,
   startCreditCheckout,
   waitForCheckoutCredits,
-} from "./credit-checkout";
+} from "@opengeni/react/app/lib/credit-checkout";
 import { parseCheckoutSessionId } from "./checkout-session-id";
 
 const status = (state: "pending" | "granted", checkout: "open" | "complete" | "expired") => ({
@@ -87,6 +87,7 @@ describe("credit checkout", () => {
         promotionCode: "LAUNCH100",
         tab: tab as unknown as Window,
         origin: "https://app.test",
+        navigate: () => {},
       },
     );
     expect(createBillingCheckout.mock.calls[0]).toEqual([
@@ -131,6 +132,31 @@ describe("credit checkout", () => {
     );
   });
 
+  test("an embed that opens checkout beside itself waits for it like a tab", async () => {
+    const createBillingCheckout = mock(async () => ({
+      checkoutSessionId: "cs_test_3",
+      url: "https://checkout.stripe.test/c/pay/cs_test_3",
+    }));
+    const navigate = mock((_url: string) => undefined);
+    const started = await startCreditCheckout(
+      { createBillingCheckout, getBillingCheckout: mock() } as never,
+      {
+        accountId: "account-1",
+        workspaceId: "ws",
+        promotionCode: "LAUNCH100",
+        tab: null,
+        origin: "https://app.test",
+        navigate,
+        navigateOpensBeside: true,
+      },
+    );
+    expect(started.inNewTab).toBe(true);
+    expect(navigate.mock.calls).toEqual([["https://checkout.stripe.test/c/pay/cs_test_3"]]);
+    expect(
+      (createBillingCheckout.mock.calls[0] as unknown as [{ successUrl: string }])[0].successUrl,
+    ).toBe("https://app.test/checkout-complete.html?checkout=success");
+  });
+
   test("a refused code closes the tab it opened", async () => {
     const createBillingCheckout = mock(async () => {
       throw new Error("That code isn't valid or has expired.");
@@ -143,6 +169,7 @@ describe("credit checkout", () => {
         promotionCode: "NOPE",
         tab: tab as unknown as Window,
         origin: "https://app.test",
+        navigate: () => {},
       }),
     ).rejects.toThrow("That code isn't valid");
     expect(tab.close).toHaveBeenCalledTimes(1);

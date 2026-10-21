@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
@@ -13,8 +13,8 @@ import {
   creditsModelForCheckout,
   includedDefaultModel,
   preferredConnectedModelId,
-} from "./model-access-onboarding";
-import { isPaymentRequiredError } from "./model-access";
+} from "@opengeni/react/app/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@opengeni/react/app/lib/model-access";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,

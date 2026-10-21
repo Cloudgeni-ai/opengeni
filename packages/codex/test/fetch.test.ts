@@ -15,6 +15,7 @@ import {
   classifyCodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  warmCodexResponsesConnection,
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
   parseCodexUsageHeaders,
@@ -368,9 +369,7 @@ describe("codexSubscriptionFetch", () => {
   });
 
   test("sends the session_id affinity header when the context carries a sessionId", async () => {
-    // The backend's sticky cache-routing key: without it, byte-identical
-    // resends miss the prompt cache ~50% (measured shard lottery); with it
-    // they pin to the warm shard. Must ride EVERY request of the session.
+    // Existing library callers retain their per-session affinity fallback.
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
     await codexRequestStorage.run(ctx({ sessionId: "11111111-2222-4333-8444-555555555555" }), () =>
@@ -383,6 +382,33 @@ describe("codexSubscriptionFetch", () => {
     expect(headers.get("session_id")).toBe("11111111-2222-4333-8444-555555555555");
   });
 
+  test("shared affinity changes only the header, including the credential-refresh retry", async () => {
+    const { base, captures } = baseRecorder([401, 200, 200]);
+    const fetchImpl = codexSubscriptionFetch(base);
+    const input = [{ role: "user", content: "Keep this exact prefix." }];
+    for (const sessionId of ["session-a", "session-b"]) {
+      await codexRequestStorage.run(ctx({ sessionId, cacheAffinityKey: "shared-cohort" }), () =>
+        fetchImpl("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "m",
+            instructions: "Unchanged",
+            input,
+            prompt_cache_key: sessionId,
+          }),
+        }),
+      );
+    }
+    expect(captures).toHaveLength(3);
+    for (const [index, capture] of captures.entries()) {
+      expect(new Headers(capture.init?.headers).get("session_id")).toBe("shared-cohort");
+      const body = JSON.parse(String(capture.init?.body));
+      expect(body.prompt_cache_key).toBe(index < 2 ? "session-a" : "session-b");
+      expect(body.instructions).toBe("Unchanged");
+      expect(body.input).toEqual(input);
+    }
+  });
+
   test("omits the session_id header when the context has none (legacy behavior)", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
@@ -393,6 +419,28 @@ describe("codexSubscriptionFetch", () => {
       }),
     );
     expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
+  });
+
+  test("WebSocket pre-open uses the same shared affinity as dispatch", async () => {
+    const { base, captures } = baseRecorder();
+    const warmed: Headers[] = [];
+    const transport = Object.assign(base, {
+      warm: (_url: string, headers: HeadersInit) => warmed.push(new Headers(headers)),
+    });
+    await codexRequestStorage.run(
+      ctx({ sessionId: "session-a", cacheAffinityKey: "cohort" }),
+      async () => {
+        await warmCodexResponsesConnection(transport, "https://chatgpt.com/backend-api");
+        expect(captures).toHaveLength(0);
+        await codexSubscriptionFetch(transport)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: "{}",
+        });
+      },
+    );
+    expect(warmed).toHaveLength(1);
+    expect(warmed[0]!.get("session_id")).toBe("cohort");
+    expect(new Headers(captures[0]!.init?.headers).get("session_id")).toBe("cohort");
   });
 
   test("advertises remote compaction v2 beta features and turn metadata", async () => {
@@ -2381,6 +2429,50 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
         headers: { "content-type": "text/event-stream", ...headers },
       });
   }
+
+  test("joins each durable reading before returning a response, without replacing a provider response on telemetry failure", async () => {
+    const persisted: number[] = [];
+    const fetchImpl = codexSubscriptionFetch(
+      usageBase(200, {
+        "x-codex-primary-used-percent": "55",
+        "x-codex-primary-limit-window-seconds": "18000",
+        "x-codex-secondary-used-percent": "12",
+        "x-codex-secondary-limit-window-seconds": "604800",
+      }),
+    );
+    const request = () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: true }),
+      });
+    await codexRequestStorage.run(
+      ctx({
+        persistUsageHeaders: async (snapshot) => {
+          await Promise.resolve();
+          persisted.push(snapshot.primaryUsedPercent);
+        },
+      }),
+      async () => {
+        for (let index = 1; index <= 3; index++) {
+          const response = await request();
+          expect(response.status).toBe(200);
+          expect(persisted).toHaveLength(index);
+        }
+      },
+    );
+    for (const persistUsageHeaders of [
+      async () => {
+        throw new Error("fixture rejected persistence");
+      },
+      () => {
+        throw new Error("fixture synchronous persistence failure");
+      },
+    ]) {
+      await codexRequestStorage.run(ctx({ persistUsageHeaders }), async () => {
+        expect((await request()).status).toBe(200);
+      });
+    }
+  });
 
   test("fires onUsageHeaders on the OK path with the parsed snapshot", async () => {
     const seen: CodexUsageHeaderSnapshot[] = [];

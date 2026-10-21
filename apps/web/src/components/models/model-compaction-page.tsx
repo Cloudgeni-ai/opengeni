@@ -1,11 +1,11 @@
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useId, useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { TextInput } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
-import { useAppContext } from "@/context";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { TextInput } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import {
   filterModelGroups,
   groupModelsByProvider,
@@ -13,7 +13,7 @@ import {
   MODEL_LIST_SEARCH_AT,
   ModelSearchField,
 } from "./model-list";
-import { ModelsFormPage } from "./models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import type { OrganizationModelDefaultsState } from "./use-organization-model-defaults";
 
 /* ----------------------------------------------------------------------------

@@ -1,4 +1,8 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
+import { AccountGroupHeading } from "@/components/models/subscription-account-ui";
+import { ModelsRefreshControl } from "./models-refresh-control";
+import { OrganizationCodexDetailPrefetch } from "@/components/models/use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -11,9 +15,11 @@ import {
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
+import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
+import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
   ModelAccountSettingValues,
-  OrganizationModelProviderKind,
+  OrganizationModelCatalogProviderKind,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
@@ -58,7 +64,7 @@ import {
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
 import { ModelCompactionPage } from "./model-compaction-page";
-import { SettingNavRow } from "@/components/ui/setting-row";
+import { SettingNavRow } from "@opengeni/react/ui/setting-row";
 import {
   ConnectAudienceFields,
   EVERYONE,
@@ -75,7 +81,7 @@ import {
   organizationReachLabel,
   useModelsNavigation,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import {
   GATEWAYS,
   OrganizationModelsList,
@@ -111,26 +117,27 @@ import {
 import { useOrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRowGroup } from "@/components/ui/setting-row";
-import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
-import { useAppContext } from "@/context";
-import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { billingClassForModel, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
 import {
   accountKey,
   accountKeyOf,
   connectStepOf,
   type GatewayId,
+  type WorkspaceGatewayId,
   type ModelsView,
-} from "@/lib/models-route";
+} from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
   AccountRuleLocksPage,
@@ -163,10 +170,12 @@ import { compactionSummary } from "./model-compaction-page";
    -------------------------------------------------------------------------- */
 
 /** The organization connection kind behind each API-key provider. */
-const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
+const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelCatalogProviderKind> = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  openai: "openai",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 };
@@ -214,6 +223,8 @@ export function useOrganizationModelAccounts({
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
     openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
     opper: useOrganizationProviderConnection(organizationGateway("opper")),
+    openai: useOrganizationProviderConnection(organizationGateway("openai")),
+    azure_openai: useOrganizationProviderConnection(organizationGateway("azure_openai")),
     anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
     claude_subscription: useOrganizationProviderConnection({
       ...organizationGateway("claude_subscription", claudeEnabled),
@@ -332,11 +343,14 @@ export function WorkspaceModelsPageBody({
     canManage: canManageConnections,
     enabled: claudeEnabled,
   });
-  const workspaceGateway = (id: GatewayId, enabled = true) => ({
+  // A shared workspace's provider key decides what every session runs on: a
+  // setting. Members connect their own accounts instead.
+  const canManageWorkspaceKeys = canManageConnections && (personal || canManageSettings);
+  const workspaceGateway = (id: WorkspaceGatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
-    canManageConnection: canManageConnections,
+    canManageConnection: canManageWorkspaceKeys,
     canManageCustomModels: canManageSettings,
     onConnectionChange: connectionChanged,
     enabled,
@@ -345,6 +359,21 @@ export function WorkspaceModelsPageBody({
     vercel: useProviderConnection(workspaceGateway("vercel")),
     openrouter: useProviderConnection(workspaceGateway("openrouter")),
     opper: useProviderConnection(workspaceGateway("opper")),
+    // OpenAI and Azure OpenAI keys are the organization's here; a workspace's
+    // own key is a direct connection (OpenAI and Azure OpenAI below). Hidden,
+    // reads nothing.
+    openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "openai",
+      enabled: false,
+    }),
+    azure_openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "azure_openai",
+      enabled: false,
+    }),
     anthropic: useProviderConnection(workspaceGateway("anthropic")),
     claude_subscription: useProviderConnection({
       ...workspaceGateway("claude_subscription", claudeEnabled),
@@ -564,7 +593,7 @@ export function WorkspaceModelsPageBody({
       );
     }
     return (GATEWAYS as readonly string[]).includes(provider)
-      ? gateways[provider as GatewayId].connected
+      ? canManageWorkspaceKeys && gateways[provider as GatewayId].connected
       : false;
   };
   const providerLoading = (provider: string): boolean =>
@@ -768,6 +797,8 @@ export function WorkspaceModelsPageBody({
         {workspacePage &&
         personal &&
         canManageConnections &&
+        provider !== "openai" &&
+        provider !== "azure_openai" &&
         (GATEWAYS as readonly string[]).includes(provider) ? (
           // An organization key can't reach a Personal workspace, so a key for
           // your own chats here is connected for this workspace instead.
@@ -1081,7 +1112,10 @@ export function WorkspaceModelsPageBody({
         state={orgGateways[key.id]}
         labels={labels}
         footnote={
-          organizationAdmin && canManageConnections ? (
+          organizationAdmin &&
+          canManageConnections &&
+          key.id !== "openai" &&
+          key.id !== "azure_openai" ? (
             <WorkspaceKeyFootnote
               title={orgGateways[key.id].config.title}
               workspaceName={workspaceName}
@@ -1109,6 +1143,7 @@ export function WorkspaceModelsPageBody({
         {scopePicker}
         <OrganizationModelsList
           client={client}
+          organizationId={organizationId}
           organizationDefaults={organizationAdmin ? organizationDefaults : null}
           accountRules={organizationAdmin ? accountRules : null}
           modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
@@ -1163,6 +1198,8 @@ export function WorkspaceModelsPageBody({
       listedOrgGateways.length,
       readyOrgKeys.length,
     ];
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]!;
+    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
@@ -1218,11 +1255,14 @@ export function WorkspaceModelsPageBody({
             }
             accounts={
               <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
-                <OpenGeniCreditsRow
-                  credits={credits}
-                  workspaceId={anchorWorkspaceId}
-                  workspaceName={workspaceName}
-                  scope={labels.everyone}
+                {subscriptionsListed > 0 ? (
+                  <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+                ) : null}
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
                 />
                 <CodexAccountRows
                   codex={codex}
@@ -1230,7 +1270,14 @@ export function WorkspaceModelsPageBody({
                   organization={codexPool}
                   onKeptForPeople={reportKeptForPeople}
                 />
-                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
                 {claudeEnabled ? (
                   <ClaudeAccountRows
                     claude={claude}
@@ -1238,6 +1285,16 @@ export function WorkspaceModelsPageBody({
                     organization={claudePool}
                   />
                 ) : null}
+                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {payAsYouGoListed > 0 ? (
+                  <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+                ) : null}
+                <OpenGeniCreditsRow
+                  credits={credits}
+                  workspaceId={anchorWorkspaceId}
+                  workspaceName={workspaceName}
+                  scope={labels.everyone}
+                />
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}
@@ -1281,6 +1338,30 @@ export function WorkspaceModelsPageBody({
                       workspaceId={workspaceId}
                       canManage={canManageConnections && organizationAdmin}
                       onConnectionChange={connectionChanged}
+                    />
+                  </Section>
+                ) : null}
+                {workspacePage ? (
+                  <Section
+                    title="Voice"
+                    description={
+                      personal
+                        ? "Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens."
+                        : `How each voice model sounds and listens in this workspace. Anything not set here follows ${possessive(organizationName)} defaults.`
+                    }
+                  >
+                    <ElevenLabsVoiceConnection
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      canManage={canManageWorkspaceKeys}
+                      organizationName={organizationName}
+                      onConnectionChange={connectionChanged}
+                    />
+                    <RealtimeVoiceSettingsRows
+                      key={`voice-settings:${workspaceId}`}
+                      workspaceId={workspaceId}
+                      canManage={canManageSettings}
+                      organizationName={organizationName}
                     />
                   </Section>
                 ) : null}
@@ -1334,6 +1415,17 @@ export function WorkspaceModelsPageBody({
   return (
     <ModelsListLabelProvider value={listLabel}>
       <div ref={root} className="min-w-0">
+        {!key && !view ? <ModelsRefreshControl client={client} /> : null}
+        {organizationAdmin
+          ? orgCodex.accounts.map((candidate) => (
+              <OrganizationCodexDetailPrefetch
+                key={candidate.id}
+                client={client}
+                organizationId={orgId}
+                account={candidate}
+              />
+            ))
+          : null}
         {page}
       </div>
     </ModelsListLabelProvider>
@@ -1697,7 +1789,9 @@ type ConnectChoice =
   | "supergrok"
   | "vercel"
   | "openrouter"
-  | "opper";
+  | "opper"
+  | "openai"
+  | "azure_openai";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1815,6 +1909,8 @@ export function ConnectPickerPage({
               (choice.id === "vercel" ||
                 choice.id === "openrouter" ||
                 choice.id === "opper" ||
+                choice.id === "openai" ||
+                choice.id === "azure_openai" ||
                 choice.id === "anthropic" ||
                 choice.id === "claude_subscription")
                 ? onOpenConnected?.(choice.id)

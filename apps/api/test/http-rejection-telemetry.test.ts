@@ -178,7 +178,7 @@ describe("HTTP rejection telemetry", () => {
 describe("API request middleware", () => {
   test("counts and logs a rejected request while the client still receives the envelope", async () => {
     const { createApp } = await import("../src/app");
-    const { testSettings } = await import("@opengeni/testing");
+    const { testSettings } = await import("@opengeni/testing/settings");
     const settings = testSettings();
     const observability = createObservability(
       { ...settings, observabilityStructuredLogs: false, observabilityMetricsEnabled: true },

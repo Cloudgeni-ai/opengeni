@@ -10,16 +10,11 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  startProcess,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   type Browser,
@@ -370,7 +365,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           { apiBaseUrl, workspaceId, taskId: task.id },
         );
       // Each schedule is its own page; Edit is a form page whose Agent learning
-      // controls live under Advanced.
+      // controls live under Settings.
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/schedules`);
       await page.getByRole("link", { name: task.name, exact: true }).waitFor();
       await page
@@ -380,7 +375,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       const knowledgeMode = page.getByRole("combobox", { name: "Knowledge", exact: true });
       const openLearning = async () => {
         await page.getByRole("heading", { level: 1, name: "Edit schedule", exact: true }).waitFor();
-        await page.getByRole("button", { name: /^Advanced/ }).click();
+        await page.getByRole("button", { name: /^Settings / }).click();
       };
       await openLearning();
       await knowledgeMode.selectOption("review_first");

@@ -113,15 +113,11 @@ import {
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import { reconcilePendingParentSystemUpdates } from "../../apps/worker/src/activities/parent-wake";
-import {
-  ScriptedModel,
-  functionCall,
-  latestStatus,
-  startTestMcpServer,
-  startTestServices,
-  testSettings,
-  type TestServices,
-} from "@opengeni/testing";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { latestStatus } from "@opengeni/testing/assertions";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
 
 async function setSessionStatus(
   db: Database,
@@ -2727,6 +2723,7 @@ describe("worker activities integration", () => {
       { type: "user.message", payload: { text: "read repo" } },
     ]);
     const sandboxExecCalls: Array<Record<string, unknown>> = [];
+    let launcherRuns = 0;
     const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -2744,6 +2741,10 @@ describe("worker activities integration", () => {
             },
             execCommand: async (args: Record<string, unknown>) => {
               sandboxExecCalls.push(args);
+              // A fresh box has no staged repository setup program yet: the
+              // first launcher run reports it missing, so the runtime stages it.
+              if (String(args.cmd).includes("opengeni_setup_program=") && launcherRuns++ === 0)
+                return { status: 86, output: "__OPENGENI_SETUP_PROGRAM_MISSING__\n" };
               return { status: 0, output: "" };
             },
           }),
@@ -2763,15 +2764,37 @@ describe("worker activities integration", () => {
 
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls.length).toBeGreaterThan(3);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
-    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+    // Client installation is independent of the ordered seed/renewal/clone
+    // chain. Locate the operations, not their absolute exec positions; loading
+    // the client bytes can let the token seed reach the sandbox first.
+    const clientInstall = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes("fs.constants.X_OK"),
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
-      'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    const tokenSeed = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes('printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"'),
     );
-    const chunks = sandboxExecCalls.slice(2).flatMap(({ cmd }) => {
+    expect(clientInstall).toBeGreaterThanOrEqual(0);
+    expect(tokenSeed).toBeGreaterThanOrEqual(0);
+    // Compare booleans so a failed assertion never prints a command's bearer.
+    expect(
+      String(sandboxExecCalls[clientInstall]?.cmd).includes("OPENGENI_CODEMODE_TOKEN_SEED"),
+    ).toBe(false);
+    expect(
+      String(sandboxExecCalls[tokenSeed]?.cmd).includes(
+        "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+      ),
+    ).toBe(true);
+    const launchers = sandboxExecCalls.flatMap(({ cmd }, index) =>
+      String(cmd).includes("opengeni_setup_program=") ? [index] : [],
+    );
+    // Missing program, staged once, then the same one-command launcher again.
+    expect(launchers).toHaveLength(2);
+    expect(launchers[0]).toBeGreaterThan(tokenSeed);
+    const launcher = String(sandboxExecCalls[launchers[0]!]?.cmd);
+    expect(launcher).toContain("opengeni_setup_program='/workspace/.opengeni/setup-programs-");
+    expect(launcher).toContain('exec /bin/sh "$opengeni_setup_program"');
+    expect(String(sandboxExecCalls[launchers[1]!]?.cmd)).toBe(launcher);
+    const chunks = sandboxExecCalls.slice(launchers[0]!).flatMap(({ cmd }) => {
       const match = String(cmd).match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
       return match ? [match[1]!] : [];
     });
@@ -2781,16 +2804,24 @@ describe("worker activities integration", () => {
       "start_repository_clone '/workspace/repos/git.example.com/team/fixture.git'",
     );
     expect(cloneCommand).toContain(
-      'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
+      'repository_git -C "$tmp" fetch --depth 1 --no-tags origin "$ref"',
     );
+    expect(cloneCommand).not.toContain("--filter=blob:none");
     expect(cloneCommand).toContain("x-access-token");
-    const cloneExecution = sandboxExecCalls.findIndex(({ cmd }) =>
-      String(cmd).includes("exec /bin/sh '/tmp/opengeni/repository-setup-payloads/"),
+    // The persisted program never carries this turn's credential seeds.
+    expect(cloneCommand).not.toMatch(/export OPENGENI_GIT_[A-Z0-9_]*TOKEN_SEED=/u);
+    const install = sandboxExecCalls.findIndex(({ cmd }) =>
+      /mv -f '\/workspace\/\.opengeni\/setup-programs-[0-9a-f]+\/[0-9a-f]{64}\.sh\.[^']+\.tmp' '\/workspace\/\.opengeni\/setup-programs-/u.test(
+        String(cmd),
+      ),
     );
-    expect(cloneExecution).toBeGreaterThan(2);
-    expect(String(sandboxExecCalls.at(-1)?.cmd)).toContain(
-      "rm -f '/tmp/opengeni/repository-setup-payloads/",
-    );
+    expect(install).toBeGreaterThan(launchers[0]!);
+    expect(install).toBeLessThan(launchers[1]!);
+    expect(
+      sandboxExecCalls.some(({ cmd }) =>
+        String(cmd).includes("/tmp/opengeni/repository-setup-payloads/"),
+      ),
+    ).toBe(false);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
@@ -3934,7 +3965,7 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {
+  test("scheduled dispatch and its retry skip without a chat while the workspace is paused", async () => {
     const grant = await testGrant(dbClient.db);
     await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
@@ -3965,6 +3996,8 @@ describe("worker activities integration", () => {
       metadata: {},
     });
     const workflowWakes: unknown[] = [];
+    const model = new ScriptedModel([{ outputText: "should not run" }]);
+    const balanceBefore = await getBillingBalance(dbClient.db, grant.accountId);
     const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -3975,11 +4008,11 @@ describe("worker activities integration", () => {
       wakeSessionWorkflow: async (input) => {
         workflowWakes.push(input);
       },
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "ok" }]),
-      }),
+      runtime: createProductionAgentRuntime({ model }),
     });
     const producerKey = `paused-fire:${crypto.randomUUID()}`;
+    const sessionsBefore = await listSessions(dbClient.db, grant.workspaceId);
+    expect(sessionsBefore).toEqual([]);
 
     const first = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
@@ -3987,6 +4020,8 @@ describe("worker activities integration", () => {
       triggerType: "scheduled",
       producerKey,
     });
+    const firstRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(firstRuns).toHaveLength(1);
     const retry = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId: task.id,
@@ -3994,23 +4029,57 @@ describe("worker activities integration", () => {
       producerKey,
     });
 
-    expect(first.workflowWakeRevision).toBeNull();
-    expect(retry).toMatchObject({
-      sessionId: first.sessionId,
-      workflowWakeRevision: null,
-    });
+    // A workspace Pause skips a new-chat run before any chat exists, and the
+    // retry of the same fire settles on that skipped run.
+    const skipped = { action: "blocked", reason: "scheduled_run_terminal" };
+    expect(first).toEqual(skipped);
+    expect(retry).toEqual(skipped);
     expect(workflowWakes).toHaveLength(0);
-    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
-      status: "queued",
-      effectiveControl: { state: "paused" },
+    expect(await listSessions(dbClient.db, grant.workspaceId)).toHaveLength(sessionsBefore.length);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({
+        id: firstRuns[0]!.id,
+        status: "skipped",
+        error: "scheduled_workspace_paused",
+        sessionId: null,
+        triggerEventId: null,
+      }),
+    ]);
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) => {
+      const [state] = await db.execute(dbSql`
+        select workspace_state,
+          (select count(*)::int from session_turns
+            where workspace_id = ${grant.workspaceId}::uuid) as turns,
+          (select count(*)::int from session_events
+            where workspace_id = ${grant.workspaceId}::uuid) as events,
+          (select count(*)::int from session_system_updates
+            where workspace_id = ${grant.workspaceId}::uuid) as updates
+        from workspace_inference_controls
+        where workspace_id = ${grant.workspaceId}::uuid
+      `);
+      expect(state).toMatchObject({ workspace_state: "paused", turns: 0, events: 0, updates: 0 });
     });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
-    // session.created carries the public "queued" status directly; there is no
-    // separate session.status.changed event before the (withheld) wake.
-    expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
-      status: "queued",
+    expect((await requireScheduledTask(dbClient.db, grant.workspaceId, task.id)).status).toBe(
+      "active",
+    );
+    expect(model.calls).toBe(0);
+    expect((await getBillingBalance(dbClient.db, grant.accountId)).balanceMicros).toBe(
+      balanceBefore.balanceMicros,
+    );
+    const usage = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 100,
     });
-    expect(events.filter((event) => event.type === "session.status.changed")).toHaveLength(0);
+    expect(
+      usage.filter((event) =>
+        ["agent_run.created", "model.tokens", "model.cost"].includes(event.eventType),
+      ),
+    ).toEqual([]);
+    // Occurrence bookkeeping is retained exactly once; it is not model spend.
+    const fired = usage.filter((event) => event.eventType === "scheduled_task.fired");
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ sourceResourceId: firstRuns[0]!.id, quantity: 1 });
   });
 
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
@@ -4748,10 +4817,10 @@ describe("worker activities integration", () => {
     const skipped = (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
       (run) => run.status === "skipped",
     );
-    // The occurrence dispatched while the session was paused records that it
-    // was paused, not merely busy.
+    // The occurrence dispatched while the workspace was paused records that,
+    // not a busy or self-pausing chat.
     expect(skipped.filter((run) => run.error === "scheduled_session_not_idle")).toHaveLength(2);
-    expect(skipped.filter((run) => run.error === "scheduled_session_paused")).toHaveLength(1);
+    expect(skipped.filter((run) => run.error === "scheduled_workspace_paused")).toHaveLength(1);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {

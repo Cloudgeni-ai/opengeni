@@ -81,8 +81,8 @@ export function ThisComputerSetup({
   onOpenChange,
   computer,
   platform,
-  productName,
-  appIcon,
+  productName: desktopProductName,
+  appIcon: desktopAppIcon,
   agentMark,
   labels: given,
   container,
@@ -91,6 +91,10 @@ export function ThisComputerSetup({
   const catalogText = useOpenGeniText();
   const labels = given ?? defaultThisComputerLabels(catalogText);
   const { status } = computer;
+  const serviceBacked = status?.management === "service";
+  const productName = status?.permissionAppName ?? desktopProductName;
+  const appIcon = serviceBacked ? null : desktopAppIcon;
+  const ready = thisComputerReady(status) && !status?.reconnecting;
   const [phase, setPhase] = useState<Phase>("intro");
   const [failure, setFailure] = useState<string | null>(null);
   const [requested, setRequested] = useState<ThisComputerPermissionId | null>(null);
@@ -110,7 +114,7 @@ export function ThisComputerSetup({
       setPhase(
         thisComputerNeedsPermissions(status)
           ? "permissions"
-          : thisComputerReady(status)
+          : ready
             ? "done"
             : status?.busy
               ? "working"
@@ -118,14 +122,14 @@ export function ThisComputerSetup({
       );
     }
     wasOpen.current = open;
-  }, [open, status]);
+  }, [open, status, ready]);
 
   // A download started elsewhere (or before a relaunch) finishes here.
   useEffect(() => {
     if (!open || phase !== "working" || status?.busy) return;
     if (thisComputerNeedsPermissions(status)) setPhase("permissions");
-    else if (thisComputerReady(status)) setPhase("done");
-  }, [open, phase, status]);
+    else if (ready) setPhase("done");
+  }, [open, phase, status, ready]);
 
   // Permissions are granted in System Settings, outside the app.
   const { refresh } = computer;
@@ -136,6 +140,7 @@ export function ThisComputerSetup({
   }, [open, phase, refresh]);
 
   const permissions = thisComputerPermissionSteps(status);
+  const permissionsKnown = permissions.length > 0;
   const missing = nextMissingPermission(status);
   // The step shown: the one just allowed (for a moment), else the next missing.
   const current = justAllowed ?? missing;
@@ -148,28 +153,33 @@ export function ThisComputerSetup({
       return;
     }
     const shown = shownRef.current;
-    if (justAllowed === null && shown !== null && shown !== missing) {
+    if (
+      justAllowed === null &&
+      shown !== null &&
+      status?.permissions?.some((permission) => permission.id === shown && permission.granted)
+    ) {
       setJustAllowed(shown);
       setRequested(null);
       return;
     }
-    if (justAllowed === null) shownRef.current = missing;
-  }, [phase, missing, justAllowed]);
+    if (justAllowed === null && permissionsKnown) shownRef.current = missing;
+  }, [phase, missing, justAllowed, status, permissionsKnown]);
   useEffect(() => {
     if (justAllowed === null) return;
     const timer = window.setTimeout(() => {
       shownRef.current = missing;
       setJustAllowed(null);
-      if (missing === null) setPhase("done");
+      if (missing === null && permissionsKnown && ready) setPhase("done");
     }, ALLOWED_PAUSE_MS);
     return () => window.clearTimeout(timer);
-  }, [justAllowed, missing]);
+  }, [justAllowed, missing, permissionsKnown, ready]);
   // Everything was already allowed (e.g. granted before the steps showed).
   useEffect(() => {
     if (phase === "permissions" && missing === null && justAllowed === null && status) {
-      if (status.state === "connected") setPhase("done");
+      if (status.state === "connected" && !status.reconnecting && permissionsKnown)
+        setPhase("done");
     }
-  }, [phase, missing, justAllowed, status]);
+  }, [phase, missing, justAllowed, status, permissionsKnown]);
 
   const readyNotified = useRef(false);
   useEffect(() => {
@@ -191,7 +201,9 @@ export function ThisComputerSetup({
       setPhase("intro");
       return;
     }
-    setPhase(thisComputerNeedsPermissions(next) ? "permissions" : "done");
+    setPhase(
+      thisComputerNeedsPermissions(next) ? "permissions" : next.reconnecting ? "working" : "done",
+    );
   }
 
   const machineName = status?.machineName ?? "";
@@ -214,7 +226,7 @@ export function ThisComputerSetup({
         {labels.close}
       </button>
     );
-  } else if (phase === "permissions" && current) {
+  } else if (phase === "permissions" && current && permissionsKnown) {
     const index = Math.max(
       0,
       permissions.findIndex((permission) => permission.id === current),
@@ -292,7 +304,21 @@ export function ThisComputerSetup({
             <span className="og-tc-hint">{labels.passwordHint}</span>
           )}
         </div>
-        {waiting && (current === "screenRecording" || current === "inputMonitoring") ? (
+        {serviceBacked ? (
+          <>
+            <p className="og-tc-fine">{catalogText("thisComputer.servicePermissions")}</p>
+            <button
+              type="button"
+              className="og-tc-button og-tc-secondary"
+              disabled={computer.acting}
+              onClick={() =>
+                void (status?.state === "paused" ? computer.resume() : computer.pause())
+              }
+            >
+              {status?.state === "paused" ? labels.resume : labels.pause}
+            </button>
+          </>
+        ) : waiting && (current === "screenRecording" || current === "inputMonitoring") ? (
           <p className="og-tc-fine">{labels.quitHint(productName, system.later)}</p>
         ) : null}
       </>
@@ -332,17 +358,23 @@ export function ThisComputerSetup({
         )}
       </>
     );
-  } else if (phase === "working") {
+  } else if (phase === "working" || (phase === "permissions" && !permissionsKnown)) {
     const progress = status?.setupProgress;
-    title = labels.settingUp(machineName);
-    description = labels.settingUpDetail;
+    title =
+      status?.management === "service"
+        ? catalogText("thisComputer.reconnecting", { machineName })
+        : labels.settingUp(machineName);
+    description =
+      status?.management === "service"
+        ? catalogText("thisComputer.serviceConnecting")
+        : labels.settingUpDetail;
     lead = <ComputerIllustration mark={agentMark} />;
     body = (
       <>
         <div
           className="og-tc-progress"
           role="progressbar"
-          aria-label={labels.settingUp(machineName)}
+          aria-label={title}
           aria-valuemin={0}
           aria-valuemax={100}
           {...(progress === undefined ? {} : { "aria-valuenow": Math.round(progress * 100) })}
@@ -371,7 +403,9 @@ export function ThisComputerSetup({
             </li>
           ))}
         </ul>
-        <p className="og-tc-safety">{labels.safety(platform)}</p>
+        <p className="og-tc-safety">
+          {serviceBacked ? catalogText("thisComputer.existingService") : labels.safety(platform)}
+        </p>
         {failure ? (
           <p className="og-tc-error" role="alert">
             {failure}

@@ -4,6 +4,7 @@ import {
   gitCredentialProviderForRepository,
   defaultRepositoryMountPath,
   mergeResourceRefs as mergeContractResourceRefs,
+  mergeToolRefEager,
   mergeToolRefs,
   normalizeRepositorySubpath,
   normalizeRepositoryTransportUri,
@@ -58,7 +59,11 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
       kind: "mcp",
       id: tool.id,
       ...(optional ? { optional: true } : {}),
-      ...(tool.eager === true ? { eager: true } : {}),
+      ...(tool.eager === true
+        ? { eager: true }
+        : Array.isArray(tool.eager) && tool.eager.length > 0
+          ? { eager: [...new Set(tool.eager)] }
+          : {}),
       ...(tool.allowedTools !== undefined ? { allowedTools: [...new Set(tool.allowedTools)] } : {}),
     });
   }
@@ -549,4 +554,4 @@ function positiveInteger(value: unknown): number | null {
   return null;
 }
 
-export { mergeToolRefs, stableJson };
+export { mergeToolRefEager, mergeToolRefs, stableJson };

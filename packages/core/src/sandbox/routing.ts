@@ -27,6 +27,7 @@ import {
   getSandboxForAttempt,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
+  recordAbandonedDirectConnectedMachineCommand,
   resolvePersonalMachineConnectionForAttempt,
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
@@ -42,7 +43,9 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
+  ComputeSandboxSession,
   isProviderSandboxGoneDuringRoutedOperation,
+  isInSandboxSupervisedProcess,
   makeActiveBackendResolver,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -62,6 +65,7 @@ import {
   type SelfhostedRelayConfig,
   type SelfhostedConnectionBinding,
   type SelfhostedOpStreamDeps,
+  type SelfhostedSessionDeps,
 } from "@opengeni/runtime/sandbox";
 
 type PersistableMutationAdmission = {
@@ -306,6 +310,14 @@ async function resolveSelfhostedConnection(
     },
     authority,
   );
+  return channelAConnectionBinding(services, enrollment);
+}
+
+/** One live enrollment as the exact route a Channel-A request addresses. */
+export function channelAConnectionBinding(
+  services: Pick<ChannelARoutingServices, "settings" | "bus">,
+  enrollment: EnrollmentRecord | null,
+): SelfhostedConnectionBinding | null {
   if (!enrollment?.connectionInstanceId) return null;
   const opStream: SelfhostedOpStreamDeps | undefined =
     services.settings.agentOpStreamEnabled === true &&
@@ -315,15 +327,52 @@ async function resolveSelfhostedConnection(
           transport: new NatsOpStreamTransport(
             async () => services.bus?.getOpStreamConnection?.() ?? null,
           ),
+          ...(enrollment.agentCapabilities.opRelease === true
+            ? { outputReleaseSupported: true }
+            : {}),
+          connectionGeneration: String(enrollment.connectionGeneration),
         }
       : undefined;
   return {
+    // The machine is addressed in the workspace it is enrolled in. A personal
+    // machine its owner allowed in another workspace keeps one connection,
+    // subscribed under its own workspace, so the session's workspace would
+    // address no one.
+    workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
     workspaceRoot: enrollment.workspaceRoot,
     ...(opStream ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+    transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+  };
+}
+
+/** How a direct request (one outside any turn) hands over a command it
+ * abandoned because its machine stopped answering or its agent restarted:
+ * the session's command ledger records it with a stop request bound to the
+ * exact connection and operation, and the reconciler decides its outcome. */
+export function directRequestAbandonCommand(
+  db: Database,
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+): NonNullable<SelfhostedSessionDeps["abandonCommand"]> {
+  return async (command) => {
+    const recorded = await recordAbandonedDirectConnectedMachineCommand(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: command.controlWorkspaceId,
+      enrollmentId: command.enrollmentId,
+      connectionInstanceId: command.connectionInstanceId,
+      opId: command.opId,
+      command: command.command,
+    });
+    return { commandId: recorded.id };
   };
 }
 
@@ -346,9 +395,10 @@ export function wrapChannelABoxWithRouting(
     workspaceId: string;
     sessionId: string;
     resourceSubjectId: string;
-    /** Whose access reaches Connected Machines (see ChannelAMachineAuthority).
-     * Resolved lazily, once, only when a request routes to a machine. Omitted,
-     * the request uses `resourceSubjectId`'s own access. */
+    /** Whose access reaches Connected Machines (see ChannelAMachineAuthority),
+     * and who a workspace write on the cloud home is admitted for. Resolved
+     * lazily, once, only when a request routes to a machine or writes to the
+     * home. Omitted, the request uses `resourceSubjectId`'s own access. */
     machineAuthority?: () => Promise<ChannelAMachineAuthority>;
     homeLease?: {
       sandboxGroupId: string;
@@ -372,6 +422,14 @@ export function wrapChannelABoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
   const homeLease = ids.homeLease;
+  const abandonCommand = directRequestAbandonCommand(db, ids);
+  // A compute home runs the same agent protocol as a Connected Machine, so a
+  // command it abandons enters the same ledger.
+  const homeSession = (
+    established.session instanceof ComputeSandboxSession
+      ? established.session.bindTurn({ abandonCommand })
+      : established.session
+  ) as RoutableBackendSession;
   let machineAuthority: Promise<ChannelAMachineAuthority> | undefined;
   const resolveMachineAuthority = (): Promise<ChannelAMachineAuthority> => {
     machineAuthority ??= ids.machineAuthority
@@ -382,6 +440,13 @@ export function wrapChannelABoxWithRouting(
         });
     return machineAuthority;
   };
+  // Who a workspace write on the cloud home is admitted for. The private-chat
+  // owner check runs against it, so an agent's write is the person's who
+  // started its turn, resolved the same way as its machine access; the
+  // agent's own signing identity owns no chat. A turn no person started keeps
+  // the request's own subject, which a private chat still refuses.
+  const mutationInitiatorSubjectId = async (): Promise<string> =>
+    (await resolveMachineAuthority()).subjectId ?? ids.resourceSubjectId;
   const beforeMutation = homeLease
     ? async ({
         op,
@@ -412,7 +477,7 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           requestId: ids.directRequest.requestId,
           holderId: ids.directRequest.holderId,
-          initiatorSubjectId: ids.resourceSubjectId,
+          initiatorSubjectId: await mutationInitiatorSubjectId(),
           sandboxGroupId: homeLease.sandboxGroupId,
           expectedEpoch: backend.leaseEpoch,
           expectedInstanceId: backend.providerInstanceId,
@@ -481,12 +546,16 @@ export function wrapChannelABoxWithRouting(
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
             providerBinding: boundAdmission.providerBinding ?? null,
+            inSandboxSupervisor: isInSandboxSupervisedProcess(
+              backend.session,
+              retainedProcess.providerSessionId,
+            ),
             ...(backgroundCommand ? { backgroundCommand } : {}),
             owner: {
               kind: "direct",
               requestId: ids.directRequest.requestId,
               holderId: ids.directRequest.holderId,
-              initiatorSubjectId: ids.resourceSubjectId,
+              initiatorSubjectId: await mutationInitiatorSubjectId(),
               sandboxGroupId: homeLease.sandboxGroupId,
               expectedEpoch: backend.leaseEpoch,
               expectedInstanceId: backend.providerInstanceId,
@@ -507,7 +576,7 @@ export function wrapChannelABoxWithRouting(
             sessionId: ids.sessionId,
             requestId: ids.directRequest.requestId,
             holderId: ids.directRequest.holderId,
-            initiatorSubjectId: ids.resourceSubjectId,
+            initiatorSubjectId: await mutationInitiatorSubjectId(),
             sandboxGroupId: homeLease.sandboxGroupId,
             expectedEpoch: backend.leaseEpoch,
             expectedInstanceId: backend.providerInstanceId,
@@ -651,7 +720,7 @@ export function wrapChannelABoxWithRouting(
     : undefined;
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
-    defaultBackend: established.session as RoutableBackendSession,
+    defaultBackend: homeSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
       const authority = await resolveMachineAuthority();
@@ -690,19 +759,20 @@ export function wrapChannelABoxWithRouting(
     relay: relayConfigFromSettings(settings),
     selfhostedTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
     selfhostedExecTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+    selfhostedAbandonCommand: abandonCommand,
     ...(ids.pinnedSelfhosted
       ? {
           pinnedSelfhosted: {
             sandboxId: ids.pinnedSelfhosted.sandboxId,
             epoch: ids.pinnedSelfhosted.epoch,
-            session: established.session as RoutableBackendSession,
+            session: homeSession,
           },
         }
       : {}),
     ...(homeLease
       ? {
           resolveDefaultBackend: async () => ({
-            session: established.session as RoutableBackendSession,
+            session: homeSession,
             sandboxId: null,
             kind: established.backendId,
             leaseEpoch: homeLease.leaseEpoch,
@@ -746,7 +816,7 @@ export function wrapChannelABoxWithRouting(
     },
     bindActiveRouteOnFirstResolve: true,
     defaultResolved: {
-      session: established.session as RoutableBackendSession,
+      session: homeSession,
       sandboxId: null,
       kind: established.backendId,
       ...(homeLease

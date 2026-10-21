@@ -30,6 +30,12 @@ export type ModelPolicyPickerMessages = {
   thinking: string;
   fast: string;
   fastRateHint: string;
+  /** Label for the Standard/Fast/Ultrafast choice shown when a model offers Ultrafast. */
+  speed?: string;
+  standard?: string;
+  ultrafast?: string;
+  /** How Ultrafast counts against a ChatGPT/Codex plan's usage limits. */
+  ultrafastUsageHint?: string;
   codexOnly: string;
   searchLabel?: string;
   searchPlaceholder?: string;
@@ -53,6 +59,10 @@ export const defaultModelPolicyPickerMessages = (t: OpenGeniText): ModelPolicyPi
   thinking: t("modelPickerModel.thinking"),
   fast: t("modelPickerModel.fast"),
   fastRateHint: "2× rate",
+  speed: t("modelPickerModel.speed"),
+  standard: t("modelPolicy.standard"),
+  ultrafast: t("modelPolicy.ultrafast"),
+  ultrafastUsageHint: "8× usage",
   codexOnly: t("modelPickerModel.codexOnlySession"),
   searchLabel: t("modelPickerModel.searchModelsOrProviders"),
   searchPlaceholder: t("modelPickerModel.searchModelsOrProviders2"),
@@ -120,6 +130,9 @@ export function billingClassForMissingSelection(modelId: string): PickerBillingC
   if (modelId.startsWith("workspace-anthropic/")) return "byok";
   if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
   if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
+  // Every organization OpenAI or Azure OpenAI id is an organization-paid model.
+  if (modelId.startsWith("organization-openai/")) return "organization_byok";
+  if (modelId.startsWith("organization-azure-openai/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
   if (modelId.startsWith("workspace-opper/")) return "byok";
@@ -204,9 +217,22 @@ export type ModelPickerThinking = {
   efforts: ReasoningEffort[];
   value: ReasoningEffort;
   showThinking: boolean;
+  /** The single Fast toggle; false when `speeds` replaces it. */
   showFast: boolean;
+  /**
+   * The speed choice for models that offer more than one faster mode
+   * (Standard, Fast, Ultrafast), or null when the Fast toggle (or nothing) applies.
+   */
+  speeds: ModelPickerSpeed[] | null;
   /** The selected row cannot run, so its controls are read-only. */
   disabled: boolean;
+};
+
+export type ModelPickerSpeed = {
+  id: LatencyMode;
+  label: string;
+  /** What the speed costs relative to Standard, or null for Standard. */
+  hint: string | null;
 };
 
 export type ModelPickerMenuView = {
@@ -282,7 +308,7 @@ export function modelPickerMenuView<TIcon>(
     searching: words.length > 0,
     groups,
     matchCount: filtered.length,
-    thinking: selected ? modelPickerThinking(props, selected) : null,
+    thinking: selected ? modelPickerThinking(props, selected, messages) : null,
     unsupportedAttachments,
   };
 }
@@ -290,21 +316,55 @@ export function modelPickerMenuView<TIcon>(
 function modelPickerThinking(
   props: Pick<ModelPickerInput, "effort" | "allowLatencyMode">,
   selected: ClientPickerModelRow,
+  messages: ModelPolicyPickerMessages,
 ): ModelPickerThinking | null {
   const efforts = effortOptionsForModel(selected.catalog);
   const showThinking =
     efforts.length > 1 && selected.catalog.capabilities?.reasoning.runnable !== false;
-  const showFast =
-    props.allowLatencyMode !== false &&
-    runnableLatencyModesForModel(selected.catalog).includes("fast");
-  if (!showThinking && !showFast) return null;
+  const runnable =
+    props.allowLatencyMode === false ? [] : runnableLatencyModesForModel(selected.catalog);
+  const speeds = runnable.includes("ultrafast") ? speedOptions(selected, runnable, messages) : null;
+  const showFast = speeds === null && runnable.includes("fast");
+  if (!showThinking && !showFast && !speeds) return null;
   return {
     efforts,
     value: coerceReasoningEffortForModel(selected.catalog, props.effort),
     showThinking,
     showFast,
+    speeds,
     disabled: !selected.selectable,
   };
+}
+
+function speedOptions(
+  selected: ClientPickerModelRow,
+  runnable: readonly LatencyMode[],
+  messages: ModelPolicyPickerMessages,
+): ModelPickerSpeed[] {
+  const speeds: ModelPickerSpeed[] = [
+    { id: "standard", label: messages.standard ?? "Standard", hint: null },
+  ];
+  if (runnable.includes("fast")) {
+    speeds.push({ id: "fast", label: messages.fast, hint: messages.fastRateHint });
+  }
+  speeds.push({
+    id: "ultrafast",
+    label: messages.ultrafast ?? "Ultrafast",
+    hint: ultrafastHint(selected, messages),
+  });
+  return speeds;
+}
+
+/** Plans count Ultrafast against usage limits; metered routes bill a multiple of the rate. */
+function ultrafastHint(
+  selected: ClientPickerModelRow,
+  messages: ModelPolicyPickerMessages,
+): string | null {
+  if (selected.billingClass === "codex_subscription") return messages.ultrafastUsageHint ?? null;
+  const bps = selected.catalog.capabilities?.latencyModes.find(
+    (mode) => mode.id === "ultrafast",
+  )?.billingMultiplierBps;
+  return bps && bps > 10_000 ? `${bps / 10_000}× rate` : null;
 }
 
 export type ModelPickerChoice = {

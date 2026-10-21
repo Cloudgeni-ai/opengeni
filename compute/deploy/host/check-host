@@ -1,0 +1,25 @@
+#!/bin/sh
+# Run before every agent start (compute-host.service's ExecStartPre): the
+# state volume is the one set up for this host, and everything the agent
+# is configured with exists.
+set -eu
+fail() { echo "check-host: $*" >&2; exit 1; }
+
+mountpoint -q /var/lib/compute || fail "/var/lib/compute is not a mount point"
+recorded=$(cat /etc/compute/state-volume.uuid 2>/dev/null || true)
+mounted=$(findmnt -no UUID /var/lib/compute)
+[ -n "$recorded" ] || fail "/etc/compute/state-volume.uuid is missing: install.sh records it"
+[ "$recorded" = "$mounted" ] ||
+  fail "/var/lib/compute holds filesystem $mounted, not the state volume $recorded set up for this host"
+for file in /etc/compute/host.pem /etc/compute/host.key /etc/compute/ca.pem \
+  "$COMPUTE_FIRECRACKER" "$COMPUTE_JAILER" "$COMPUTE_KERNEL" /var/lib/compute/base.ext4; do
+  [ -r "$file" ] || fail "$file is missing"
+done
+for name in COMPUTE_STORE COMPUTE_CONTROL COMPUTE_NAME COMPUTE_ADDRESS COMPUTE_ZONE; do
+  eval "value=\${$name:-}"
+  [ -n "$value" ] || fail "$name is not set in /etc/compute/host.env"
+done
+case "$COMPUTE_STORE" in
+  gs://* | az://* | s3://*) ;;
+  *) fail "COMPUTE_STORE must be object storage (gs://, az:// or s3://) in a fleet" ;;
+esac

@@ -4,7 +4,7 @@ import {
   acquireSharedTestDatabase,
   type OwnerMigratedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { readFileSync } from "node:fs";
 import postgres from "postgres";
 import { splitStatements } from "../../../scripts/migration-rls-backfills";

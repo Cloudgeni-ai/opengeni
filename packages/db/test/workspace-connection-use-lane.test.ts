@@ -2,10 +2,11 @@
 // resolve_accepted_connection_use like every other lane - canonical lifecycle
 // fences, live workspace-row validation, and idempotent audit facts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { testSettings } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildConnectionTokenResolver,
   claimSessionWorkForAttempt,
@@ -13,10 +14,12 @@ import {
   createSession,
   initializeSessionStartAtomically,
   resolveAcceptedConnectionUse,
+  withRlsContext,
   type Database,
   type DbClient,
 } from "../src";
 import type { ConnectionBrokerDeps } from "../src/connection-token-resolver";
+import { rawRows } from "../src/database";
 
 const migrationUrl = new URL("../drizzle/0279_workspace_connection_use_lane.sql", import.meta.url);
 
@@ -134,7 +137,289 @@ function useInput(fixture: Fixture, connectionId: string) {
   };
 }
 
+async function withinTestDeadline<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("connection lock test did not progress")), 2_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function holdValidation(fixture: Fixture, input: ReturnType<typeof useInput>) {
+  const ready = Promise.withResolvers<number>();
+  const release = Promise.withResolvers<void>();
+  const done = withRlsContext(db, fixture, async (tx) => {
+    expect((await resolveAcceptedConnectionUse(tx, input)).status).toBe("authorized");
+    const [row] = await rawRows<{ pid: number }>(tx, sql`select pg_backend_pid() as pid`);
+    ready.resolve(row!.pid);
+    await release.promise;
+  });
+  void done.catch(ready.reject);
+  return { ready: ready.promise, release: release.resolve, done };
+}
+
+async function waitForBlocker(holderPid: number, waiterPid?: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  do {
+    const [row] = await admin<{ waiting: boolean }[]>`
+      select exists (select 1 from pg_stat_activity
+        where datname = current_database()
+          and (${waiterPid ?? null}::int is null or pid = ${waiterPid ?? null})
+          and ${holderPid} = any(pg_blocking_pids(pid))) as waiting`;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  } while (Date.now() < deadline);
+  throw new Error("expected a competing operation to wait for the validation lock");
+}
+
 describe("workspace connection use lane (migration 0279)", () => {
+  test("the rolling shared-lock migration preserves the hardened resolver", async () => {
+    const source = await readFile(
+      new URL("../drizzle/0876_connection_validation_shared_locks.sql", import.meta.url),
+      "utf8",
+    );
+    expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(source).not.toMatch(/\b(?:ALTER|DROP) TABLE\b/u);
+    if (!available) return;
+    const [row] = await admin<{ definition: string; definer: boolean; config: string[] }[]>`
+      select pg_get_functiondef(oid) as definition, prosecdef as definer, proconfig as config
+      from pg_proc where oid = 'resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)'::regprocedure`;
+    expect(row?.definer).toBe(true);
+    expect(row?.config.some((value) => value.startsWith("search_path=pg_catalog,"))).toBe(true);
+    expect(row?.definition.match(/FOR SHARE;/gu)).toHaveLength(4);
+    expect(row?.definition).not.toMatch(/FOR (?:NO KEY )?UPDATE;/u);
+    expect(row?.definition).toContain(
+      "pg_advisory_xact_lock_shared(hashtextextended('workspace-control:'",
+    );
+    expect(row?.definition).toContain(
+      "pg_advisory_xact_lock(hashtextextended(p_physical_request_id::text, 0))",
+    );
+  });
+
+  test("independent validations share the lifecycle rows while a validator is still open", async () => {
+    if (!available) return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    const holder = holdValidation(fixture, useInput(fixture, connection.id));
+    let readers: Promise<unknown> | undefined;
+    try {
+      await holder.ready;
+      readers = Promise.all(
+        Array.from({ length: 6 }, () =>
+          resolveAcceptedConnectionUse(db, useInput(fixture, connection.id)),
+        ),
+      );
+      const results = await withinTestDeadline(readers);
+      expect(results).toEqual(
+        Array.from({ length: 6 }, () => expect.objectContaining({ status: "authorized" })),
+      );
+    } finally {
+      holder.release();
+      await Promise.allSettled([holder.done, ...(readers ? [readers] : [])]);
+    }
+  });
+
+  test("parallel connection validation benchmark", async () => {
+    if (!available || process.env.OPENGENI_BENCH_CONNECTION_LOCKS !== "1") return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    const samples = [];
+    for (const holdMs of [0, 20]) {
+      for (let sample = 0; sample < 5; sample++) {
+        const started = performance.now();
+        const latencies: number[] = [];
+        await Promise.all(
+          Array.from({ length: 8 }, () =>
+            withRlsContext(db, fixture, async (tx) => {
+              const callStarted = performance.now();
+              expect(
+                (await resolveAcceptedConnectionUse(tx, useInput(fixture, connection.id))).status,
+              ).toBe("authorized");
+              latencies.push(performance.now() - callStarted);
+              // Opt-in synthetic post-validation application delay, not provider work.
+              if (holdMs) await Bun.sleep(holdMs);
+            }),
+          ),
+        );
+        samples.push({ holdMs, wallMs: performance.now() - started, latencies });
+      }
+    }
+    console.log("connection-lock-benchmark", JSON.stringify(samples));
+  });
+
+  for (const mutation of ["session", "turn", "attempt", "connection"] as const) {
+    test(`${mutation} changes wait for validation and fence the next use`, async () => {
+      if (!available) return;
+      const fixture = await claimedTurnFixture();
+      const connection = await insertWorkspaceConnection(fixture);
+      const holder = holdValidation(fixture, useInput(fixture, connection.id));
+      let writer: Promise<unknown> | undefined;
+      try {
+        const pid = await holder.ready;
+        writer = (async () => {
+          if (mutation === "session")
+            await admin`update sessions set status = 'cancelled' where id = ${fixture.sessionId}`;
+          else if (mutation === "turn")
+            await admin`update session_turns set execution_generation = execution_generation + 1 where id = ${fixture.turnId}`;
+          else if (mutation === "attempt")
+            await admin`update session_turn_attempts set state = 'closed', outcome = 'completed', closed_at = now() where id = ${fixture.attemptId}`;
+          else await admin`update connections set status = 'revoked' where id = ${connection.id}`;
+        })();
+        // Handle a setup failure without leaving an unobserved rejected writer.
+        void writer.catch(() => {});
+        await waitForBlocker(pid);
+      } finally {
+        holder.release();
+        await holder.done;
+        await writer;
+      }
+      expect(
+        await resolveAcceptedConnectionUse(db, useInput(fixture, connection.id)),
+      ).toMatchObject({
+        status: "denied",
+        reason:
+          mutation === "connection" ? "connection_status_inactive" : "session_identity_changed",
+      });
+    });
+
+    test(`validation rereads a committed ${mutation} change after waiting`, async () => {
+      if (!available) return;
+      const fixture = await claimedTurnFixture();
+      const connection = await insertWorkspaceConnection(fixture);
+      const ready = Promise.withResolvers<number>();
+      const release = Promise.withResolvers<void>();
+      const writer = admin.begin(async (tx) => {
+        if (mutation === "session")
+          await tx`update sessions set status = 'cancelled' where id = ${fixture.sessionId}`;
+        else if (mutation === "turn")
+          await tx`update session_turns set execution_generation = execution_generation + 1 where id = ${fixture.turnId}`;
+        else if (mutation === "attempt")
+          await tx`update session_turn_attempts set state = 'closed', outcome = 'completed', closed_at = now() where id = ${fixture.attemptId}`;
+        else await tx`update connections set status = 'revoked' where id = ${connection.id}`;
+        const [row] = await tx<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        ready.resolve(row!.pid);
+        await release.promise;
+      });
+      void writer.catch(ready.reject);
+      let reader: ReturnType<typeof resolveAcceptedConnectionUse> | undefined;
+      try {
+        const pid = await ready.promise;
+        reader = resolveAcceptedConnectionUse(db, useInput(fixture, connection.id));
+        await waitForBlocker(pid);
+      } finally {
+        release.resolve();
+        await writer;
+      }
+      expect(await reader).toMatchObject({
+        status: "denied",
+        reason:
+          mutation === "connection" ? "connection_status_inactive" : "session_identity_changed",
+      });
+    });
+  }
+
+  test("new validators queue behind a waiting control mutation", async () => {
+    if (!available) return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    const holder = holdValidation(fixture, useInput(fixture, connection.id));
+    const writerPid = Promise.withResolvers<number>();
+    const writerReady = Promise.withResolvers<void>();
+    const writerRelease = Promise.withResolvers<void>();
+    const readerPid = Promise.withResolvers<number>();
+    let writer: Promise<unknown> | undefined;
+    let reader: ReturnType<typeof resolveAcceptedConnectionUse> | undefined;
+    try {
+      const holderPid = await holder.ready;
+      writer = admin.begin(async (tx) => {
+        const [row] = await tx<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        writerPid.resolve(row!.pid);
+        await tx`select pg_advisory_xact_lock(hashtextextended('workspace-control:' || ${fixture.workspaceId}::text, 0))`;
+        await tx`update sessions set status = 'cancelled' where id = ${fixture.sessionId}`;
+        writerReady.resolve();
+        await writerRelease.promise;
+      });
+      void writer.catch((error) => {
+        writerPid.reject(error);
+        writerReady.reject(error);
+      });
+      const pid = await writerPid.promise;
+      await waitForBlocker(holderPid, pid);
+      reader = withRlsContext(db, fixture, async (tx) => {
+        const [row] = await rawRows<{ pid: number }>(tx, sql`select pg_backend_pid() as pid`);
+        readerPid.resolve(row!.pid);
+        return resolveAcceptedConnectionUse(tx, useInput(fixture, connection.id));
+      });
+      void reader.catch(readerPid.reject);
+      await waitForBlocker(pid, await readerPid.promise);
+      holder.release();
+      await withinTestDeadline(writerReady.promise);
+      await waitForBlocker(pid, await readerPid.promise);
+    } finally {
+      holder.release();
+      writerRelease.resolve();
+      await Promise.allSettled([holder.done, ...(writer ? [writer] : [])]);
+    }
+    expect(await reader).toEqual({ status: "denied", reason: "session_identity_changed" });
+  });
+
+  test("duplicate physical requests still serialize and write only one audit fact", async () => {
+    if (!available) return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    const input = useInput(fixture, connection.id);
+    const holder = holdValidation(fixture, input);
+    let replay: ReturnType<typeof resolveAcceptedConnectionUse> | undefined;
+    try {
+      const pid = await holder.ready;
+      replay = resolveAcceptedConnectionUse(db, input);
+      await waitForBlocker(pid);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+    expect((await replay)?.status).toBe("authorized");
+    const [audit] = await admin<{ count: number }[]>`select count(*)::int as count
+      from connection_use_audit_facts where physical_request_id = ${input.physicalRequestId}`;
+    expect(audit?.count).toBe(1);
+    await expect(
+      resolveAcceptedConnectionUse(db, { ...input, serverId: "different" }),
+    ).rejects.toMatchObject({ cause: { code: "23505" } });
+  });
+
+  test("connection use keeps one tenant scope for the linked-turn lookup", async () => {
+    if (!available) return;
+    const fixture = await claimedTurnFixture();
+    const connection = await insertWorkspaceConnection(fixture);
+    const driver = (db as unknown as { $client: postgres.Sql }).$client;
+    const previous = driver.options.debug;
+    const queries: string[] = [];
+    const samples: { statements: number; ms: number }[] = [];
+    driver.options.debug = (_connection, query) => queries.push(query);
+    try {
+      for (let i = 0; i < 12; i++) {
+        queries.length = 0;
+        const started = performance.now();
+        const resolution = await resolveAcceptedConnectionUse(db, useInput(fixture, connection.id));
+        samples.push({ statements: queries.length, ms: performance.now() - started });
+        expect(resolution.status).toBe("authorized");
+        expect(queries.filter((query) => /^begin\b/i.test(query))).toHaveLength(1);
+        expect(queries).toHaveLength(5);
+        expect(queries.some((query) => /^savepoint\b/i.test(query))).toBe(false);
+      }
+      if (process.env.OPENGENI_BENCH_CONNECTION_USE === "1")
+        console.log("connection-use", JSON.stringify({ samples, queries }));
+    } finally {
+      driver.options.debug = previous;
+    }
+  });
+
   test("declares one rolling redefinition with the workspace lane and re-pinned posture", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

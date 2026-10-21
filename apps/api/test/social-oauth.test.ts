@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { isRlsScopeSetup } from "@opengeni/testing/rls-scope-fake";
 import { HTTPException } from "hono/http-exception";
 import { PgDialect } from "drizzle-orm/pg-core";

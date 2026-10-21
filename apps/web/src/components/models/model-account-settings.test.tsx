@@ -3,6 +3,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ModelAccountSettingsOverview, ModelAccountPreferences } from "@opengeni/sdk";
+import {
+  clearSharedQueries,
+  invalidateSharedQueries,
+  retainSharedQueries,
+} from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Sharing subscriptions, against a mocked client: the organization's rules,
@@ -93,9 +98,10 @@ const client = {
   ),
 };
 const toastError = mock((_message: string) => undefined);
+let subject: string | null = "owner";
 
-mock.module("@/context", () => ({
-  useAppContext: () => ({ client, authSession: { user: { id: "owner" } } }),
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => ({ client, authSession: subject ? { user: { id: subject } } : null }),
 }));
 mock.module("sonner", () => ({ toast: { error: toastError, success: mock(() => undefined) } }));
 
@@ -120,7 +126,13 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Let the prior test's retention-release task finish before reusing its client.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  clearSharedQueries(client);
+  subject = "owner";
   canEdit = true;
   for (const fn of Object.values(client)) fn.mockClear();
   toastError.mockClear();
@@ -248,6 +260,154 @@ test("personal fallback permission does not opt a person in", async () => {
       personalFallbackOptIn: true,
       expectedVersion: 2,
     });
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("personal preference revisits retain reads and global Refresh invalidates them", async () => {
+  const release = retainSharedQueries(client);
+  const first = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  await first.cleanup();
+  const second = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  try {
+    expect(client.getModelAccountPreferences).toHaveBeenCalledTimes(1);
+    expect(
+      second.container.querySelector('[role="switch"]')?.getAttribute("aria-disabled"),
+    ).not.toBe("true");
+    await act(async () => {
+      await invalidateSharedQueries(client, ["model-settings"]);
+    });
+    expect(client.getModelAccountPreferences).toHaveBeenCalledTimes(2);
+  } finally {
+    await second.cleanup();
+    release();
+  }
+});
+
+test("saving a personal preference updates other readers and a revisit with the saved version", async () => {
+  const release = retainSharedQueries(client);
+  const first = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  const second = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  await act(async () =>
+    (first.container.querySelector('[role="switch"]') as HTMLButtonElement).click(),
+  );
+  expect(second.container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe(
+    "true",
+  );
+  await first.cleanup();
+  await second.cleanup();
+  const next = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  try {
+    expect(client.getModelAccountPreferences).toHaveBeenCalledTimes(1);
+    expect(next.container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    await act(async () =>
+      (next.container.querySelector('[role="switch"]') as HTMLButtonElement).click(),
+    );
+    expect(client.updateModelAccountPreferences).toHaveBeenLastCalledWith("acme", {
+      personalFallbackOptIn: false,
+      expectedVersion: 3,
+    });
+  } finally {
+    await next.cleanup();
+    release();
+  }
+});
+
+test("a human change on the same client cannot adopt another person's preference or late save", async () => {
+  const release = retainSharedQueries(client);
+  let finish!: (value: ModelAccountPreferences) => void;
+  client.updateModelAccountPreferences.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  try {
+    await act(async () =>
+      (view.container.querySelector('[role="switch"]') as HTMLButtonElement).click(),
+    );
+    subject = "another-human";
+    await view.rerender(<PersonalFallbackPreference organizationId="acme" allowed />);
+    expect(client.getModelAccountPreferences).toHaveBeenCalledTimes(2);
+    await act(async () => finish({ personalFallbackOptIn: true, version: 3 }));
+    expect(view.container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe(
+      "false",
+    );
+    subject = null;
+    await view.rerender(<PersonalFallbackPreference organizationId="acme" allowed />);
+    expect(view.container.textContent).toBe("");
+    expect(client.getModelAccountPreferences).toHaveBeenCalledTimes(2);
+  } finally {
+    await view.cleanup();
+    release();
+  }
+});
+
+test("a failed preference save invalidates the retained value and reports the failure", async () => {
+  client.updateModelAccountPreferences.mockRejectedValueOnce(new Error("conflict"));
+  const view = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  try {
+    await act(async () =>
+      (view.container.querySelector('[role="switch"]') as HTMLButtonElement).click(),
+    );
+    expect(toastError).toHaveBeenCalledWith(
+      "Couldn’t save your account preference. Reload and try again.",
+    );
+    expect(client.getModelAccountPreferences).toHaveBeenCalledTimes(2);
+    expect(view.container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe(
+      "false",
+    );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("clearing the client cache fences a personal preference save already in flight", async () => {
+  let finish!: (value: ModelAccountPreferences) => void;
+  client.updateModelAccountPreferences.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  try {
+    await act(async () =>
+      (view.container.querySelector('[role="switch"]') as HTMLButtonElement).click(),
+    );
+    await act(async () => clearSharedQueries(client));
+    await act(async () => finish({ personalFallbackOptIn: true, version: 3 }));
+    expect(view.container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe(
+      "false",
+    );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("loading a personal preference keeps its setting row in place", async () => {
+  let finish!: (value: ModelAccountPreferences) => void;
+  client.getModelAccountPreferences.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = await render(<PersonalFallbackPreference organizationId="acme" allowed />);
+  try {
+    const row = view.container.querySelector('[data-slot="setting-row"]');
+    const control = view.container.querySelector('[role="switch"]');
+    expect(view.container.textContent).toContain("Fall back to my account");
+    expect(control?.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => finish({ personalFallbackOptIn: true, version: 2 }));
+    expect(view.container.querySelector('[data-slot="setting-row"]') === row).toBe(true);
+    const loadedControl = view.container.querySelector('[role="switch"]');
+    expect(loadedControl?.getAttribute("aria-checked")).toBe("true");
+    expect(loadedControl?.getAttribute("aria-disabled")).not.toBe("true");
   } finally {
     await view.cleanup();
   }

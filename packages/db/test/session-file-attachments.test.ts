@@ -1,5 +1,5 @@
 import { beforeAll, afterAll, test, expect } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   bootstrapWorkspace,
@@ -38,7 +38,15 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
-async function fixture(managed = false, startPrivate = false) {
+const appShot = {
+  app: "Terminal",
+  bundleId: "com.apple.Terminal",
+  title: "build — zsh",
+  capturedAt: "2026-10-20T09:15:00.000Z",
+  platform: "macos" as const,
+  text: "error: missing semicolon",
+};
+async function fixture(managed = false, startPrivate = false, withAppShot = false) {
   const id = crypto.randomUUID();
   const access = managed
     ? await ensureManagedAccessForUser(client.db, {
@@ -76,6 +84,7 @@ async function fixture(managed = false, startPrivate = false) {
       bucket: "test",
       objectKey: crypto.randomUUID(),
       expiresAt: new Date(Date.now() + 60000),
+      ...(withAppShot ? { appShot } : {}),
     });
     return completeFileUpload(client.db, grant.workspaceId!, uploaded.uploadId);
   });
@@ -150,6 +159,13 @@ test("accepted session attachment is readable by another viewer without publishi
     sandboxBackend: "none",
   });
   expect(await f.read(viewer, other.id)).toEqual([]);
+});
+
+test("an accepted app-shot reads back with its stored capture", async () => {
+  const f = await fixture(false, false, true);
+  await withSessionRlsActorContext(f.owner, f.accept);
+  const [file] = await f.read(f.grant.subjectId);
+  expect(file?.appShot).toEqual(appShot);
 });
 test("inherited human and arbitrary file IDs do not mint attachment grants", async () => {
   const f = await fixture();

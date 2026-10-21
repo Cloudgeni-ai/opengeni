@@ -23,10 +23,10 @@ import {
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createSandboxLeaseActivities,
   type HistoricalModalSandboxLifecycleProbeFn,
@@ -51,13 +51,16 @@ const SETTINGS = testSettings({
   sandboxLeaseReaperPeriodMs: 30_000,
 });
 
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("worker-ended-epoch-setup-uncertainty");
+  shared = await acquireRestrictedRuntimeTestDatabase(
+    "worker-ended-epoch-setup-uncertainty",
+    "public",
+  );
   if (!shared) throw new Error("Real PostgreSQL required for ended-epoch setup regressions");
   admin = shared.admin;
   client = createDb(shared.appUrl);

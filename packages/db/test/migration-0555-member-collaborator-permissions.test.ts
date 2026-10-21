@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { readFileSync } from "node:fs";
 import postgres from "postgres";
 import {
@@ -16,6 +16,13 @@ const rollout = [
   "0555_member_collaborator_permissions.sql",
   "0556_member_collaborator_permissions_backfill_index.sql",
   "0557_member_collaborator_permissions_backfill.sql",
+] as const;
+// 0865-0867 replace this rollout's preset and writer guard; hold them back so
+// this test keeps observing the 0555 contract it pins.
+const later = [
+  "0865_member_teammate_permissions.sql",
+  "0866_member_teammate_permissions_backfill_index.sql",
+  "0867_member_teammate_permissions_backfill.sql",
 ] as const;
 // Everything a Viewer has that the post-0516 Member lacked, plus the caller's
 // own desktop consent and artifact creation/publishing for every member.
@@ -58,7 +65,8 @@ beforeAll(async () => {
     name text primary key,
     applied_at timestamptz not null default now()
   )`;
-  await owner`insert into schema_migrations (name) select unnest(${[...rollout]}::text[])`;
+  await owner`insert into schema_migrations (name)
+    select unnest(${[...rollout, ...later]}::text[])`;
   await migrate(owned.ownerUrl);
 }, 900_000);
 
@@ -209,7 +217,13 @@ test("named members gain collaborator reads; custom sets and old writers stay co
     where tgrelid = 'workspace_memberships'::regclass and not tgisinternal
     order by tgname`;
   expect(triggers.map(({ name }) => name)).toEqual([
+    "allowance_membership_delete",
+    "allowance_membership_insert",
+    "allowance_membership_update",
     "normalize_legacy_member_connection_read_0516",
+    // 0888 commit-only session list hints.
+    "workspace_memberships_list_change",
+    "workspace_memberships_list_update",
   ]);
 
   const read = () =>

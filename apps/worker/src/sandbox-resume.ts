@@ -63,6 +63,8 @@ import {
 } from "@opengeni/db";
 import {
   captureWorkspaceArchiveForStorage,
+  ComputeSandboxSession,
+  type ComputeTurnDeps,
   disposeWorkspaceArchive,
   type VerifiedWorkspaceArchivePayload,
   describeLegacyNativeSnapshotArchive,
@@ -181,6 +183,10 @@ export type SandboxResumeServices = {
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
   /** Live fanout for background commands a provider loss settled. */
   bus?: EventBus | null;
+  /** One turn's journal, background-command ledger and metering, bound onto a
+   * compute box's agent session before the turn receives it. Other backends
+   * ignore it. */
+  computeTurn?: ComputeTurnDeps;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -188,6 +194,16 @@ export type SandboxResumeServices = {
     leaseEpoch: number;
   }) => Promise<void>;
 };
+
+/** A compute box's agent session, bound with the turn's own deps. The binding
+ * shares the box's live state; only the turn-scoped hooks differ. */
+function bindComputeTurn(
+  established: EstablishedSandboxSession,
+  turn: ComputeTurnDeps | undefined,
+): EstablishedSandboxSession {
+  if (!turn || !(established.session instanceof ComputeSandboxSession)) return established;
+  return { ...established, session: established.session.bindTurn(turn) as never };
+}
 
 export type ResumeBoxIds = {
   accountId: string;
@@ -948,6 +964,13 @@ async function persistWarmWorkspaceSnapshot(
         backend: lease.backend,
         liveInstance: capturePolicy?.liveInstance ?? null,
       });
+      reportSkipped(lease.backend, "capture_policy");
+      return false;
+    }
+    if (!force && capturePolicy.warmCheckpoints === "forced_only") {
+      // The provider persists the live sandbox itself: reading it for a
+      // periodic recovery point would only cost a capture (and on compute,
+      // keep the sandbox awake).
       reportSkipped(lease.backend, "capture_policy");
       return false;
     }
@@ -1791,6 +1814,11 @@ async function resumeBoxForTurnOnce(
             }
           : {}),
         backendOverride: ids.backend as never,
+        createIdentity: {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+        },
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         ...(services.logicalFallbackSettings
@@ -2083,7 +2111,11 @@ async function resumeBoxForTurnOnce(
       };
       await services.onSpawnedSandboxPublished?.();
       throwIfReleasedOrCancelled();
-      return { established, leaseEpoch: committed.lease.leaseEpoch, release };
+      return {
+        established: bindComputeTurn(established, services.computeTurn),
+        leaseEpoch: committed.lease.leaseEpoch,
+        release,
+      };
     } catch (error) {
       if (published) {
         // The published warm box stays for the replacement attempt to resume
@@ -2244,7 +2276,11 @@ async function resumeBoxForTurnOnce(
       );
     }
     throwIfReleasedOrCancelled();
-    return { established, leaseEpoch, release };
+    return {
+      established: bindComputeTurn(established, services.computeTurn),
+      leaseEpoch,
+      release,
+    };
   } catch (error) {
     await release();
     recordSandboxWarmingTimeout(services.sandboxMetrics, error);

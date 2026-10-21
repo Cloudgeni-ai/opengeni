@@ -22,8 +22,8 @@
 // three-step (two tool calls -> final reply) rounds, not a one-shot response.
 
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing";
-import { testSettings } from "@opengeni/testing";
+import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { Manifest } from "@openai/agents/sandbox";
 import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import { buildOpenGeniAgent, runAgentStream, createSandboxClientForBackend } from "../src/index";

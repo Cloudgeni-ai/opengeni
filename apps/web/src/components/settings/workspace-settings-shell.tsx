@@ -1,13 +1,13 @@
 import {
   type WorkspaceSettingsSection,
   type WorkspaceManagementLocation,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 export {
   workspaceManagementLocation,
   workspaceSettingsSectionFromSearch,
   type WorkspaceSettingsSection,
   type WorkspaceManagementLocation,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 export { WORKSPACE_SETTINGS_COPY } from "./settings-rail";
 import { useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";

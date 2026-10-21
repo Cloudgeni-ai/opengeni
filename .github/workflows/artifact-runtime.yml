@@ -91,12 +91,12 @@ jobs:
             runner: ubuntu-24.04
             platform: linux/amd64
             bun_archive: bun-linux-x64-musl.zip
-            bun_sha256: 83b5f12fd258dd8d4fdcaea65ede954366aa717dab399e20093ecab280d54e7a # bun-v1.4.0
+            bun_sha256: 6e9ea98554ea0d05efda5840ae292618aaa3adefd66b0853520c5c86a37eac9c # bun-v1.4.3
           - target: linux-arm64-musl
             runner: ubuntu-24.04-arm
             platform: linux/arm64
             bun_archive: bun-linux-aarch64-musl.zip
-            bun_sha256: 576300ce33ff16ffcd455bf178c2f095f9df845c6cc3d0284ba1c96ca0e80473 # bun-v1.4.0
+            bun_sha256: 8de8a0003cc2707bb555887e3d450e24e1edf3f605f491393e89ed61a8853420 # bun-v1.4.3
     steps:
       - name: Check out exact source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6

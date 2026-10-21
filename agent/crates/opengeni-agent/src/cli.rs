@@ -16,6 +16,8 @@
 //! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
 //!   `--purge`) delete credentials + deactivate the enrollment.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// The Opengeni self-hosted agent: run your own machine as a first-class Opengeni
@@ -53,10 +55,10 @@ pub enum Command {
     /// Install if needed and keep the agent running in the background across
     /// logouts and reboots. This is the normal post-connect command.
     Start(StartArgs),
-    /// Stop the always-on background agent.
+    /// Pause the background agent, including across logins, until start resumes it.
     Stop(ServiceScopeArgs),
     /// Show whether the background agent is installed and running.
-    Status(ServiceScopeArgs),
+    Status(ServiceStatusArgs),
     /// Advanced service management (install/uninstall/start/stop/status).
     Service(ServiceArgs),
     /// Print the operating-system permissions this agent holds for screen
@@ -114,6 +116,13 @@ pub struct RunArgs {
     /// The virtual-desktop framebuffer geometry `WIDTHxHEIGHT`.
     #[arg(long, default_value = "1280x800")]
     pub virtual_geometry: String,
+
+    /// Run inside an Opengeni compute sandbox, as its guest init starts the
+    /// agent: the link file names the enrollment and the loopback address of
+    /// the sandbox's host. No enrollment, renewal, update or service
+    /// installation happens in this mode.
+    #[arg(long, value_name = "LINK_FILE")]
+    pub compute: Option<std::path::PathBuf>,
 }
 
 /// Arguments for the `enroll` subcommand.
@@ -173,10 +182,10 @@ pub enum ServiceAction {
     Uninstall(ServiceScopeArgs),
     /// Start the installed service.
     Start(ServiceScopeArgs),
-    /// Stop the running service.
+    /// Pause the service, including automatic login startup, until start resumes it.
     Stop(ServiceScopeArgs),
     /// Report the service status.
-    Status(ServiceScopeArgs),
+    Status(ServiceStatusArgs),
 }
 
 /// Arguments for `service install`.
@@ -219,6 +228,16 @@ pub struct ServiceScopeArgs {
     pub system: bool,
 }
 
+/// Read-only service inspection, including whether a pause survives login.
+#[derive(Debug, Default, clap::Args)]
+pub struct ServiceStatusArgs {
+    #[command(flatten)]
+    pub scope: ServiceScopeArgs,
+    /// Print structured status for desktop hosts without changing the service.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Arguments for the `update` subcommand.
 #[derive(Debug, Default, clap::Args)]
 pub struct UpdateArgs {
@@ -228,7 +247,7 @@ pub struct UpdateArgs {
     pub check: bool,
 
     /// Override the release base URL (defaults to the enrolled value /
-    /// `https://get.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
+    /// `https://app.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
     #[arg(long, env = "OPENGENI_INSTALL_BASE_URL")]
     pub base_url: Option<String>,
 
@@ -364,7 +383,8 @@ pub struct CodemodeCallArgs {
     /// Generated path, model name, or `server.tool` identity from `codemode list`.
     pub tool: String,
 
-    /// Tool arguments as one JSON object. Defaults to `{}`.
+    /// Tool arguments as a JSON object, `-` to read stdin, or `@path` to read a
+    /// UTF-8 JSON file. Defaults to `{}`; stdin is read only when requested.
     #[arg(default_value = "{}")]
     pub arguments: String,
 
@@ -372,6 +392,13 @@ pub struct CodemodeCallArgs {
     /// `structuredContent` as JSON is omitted.
     #[arg(long)]
     pub full: bool,
+
+    /// Save the result's single image (such as a browser screenshot) at this
+    /// path; an existing file is never overwritten. Without it, images are
+    /// written to a private temporary file. Either way the printed result
+    /// names the file instead of carrying base64 pixels, unless --full is set.
+    #[arg(long, value_name = "PATH")]
+    pub save_image: Option<PathBuf>,
 }
 
 /// Arguments for the `permissions` subcommand.
@@ -536,6 +563,22 @@ mod tests {
             Some(Command::Service(args)) => assert_eq!(args.action.label(), "status"),
             other => panic!("expected service, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn structured_service_status_is_explicit_and_read_only() {
+        let cli = Cli::parse_from(["opengeni-agent", "service", "status", "--json"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceArgs {
+                action: ServiceAction::Status(ServiceStatusArgs { json: true, .. })
+            }))
+        ));
+        let cli = Cli::parse_from(["opengeni-agent", "status"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status(ServiceStatusArgs { json: false, .. }))
+        ));
     }
 
     #[test]
@@ -757,6 +800,36 @@ mod tests {
             }
             other => panic!("expected codemode call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codemode_call_accepts_explicit_input_sources_and_keeps_default_arguments() {
+        for source in ["-", "@arguments with spaces.json"] {
+            let cli = Cli::parse_from([
+                "opengeni-agent",
+                "codemode",
+                "call",
+                "demo.write",
+                source,
+                "--full",
+            ]);
+            let Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::Call(args),
+            })) = cli.command
+            else {
+                panic!("codemode call")
+            };
+            assert_eq!(args.arguments, source);
+            assert!(args.full);
+        }
+        let cli = Cli::parse_from(["opengeni-agent", "codemode", "call", "demo.write"]);
+        let Some(Command::Codemode(CodemodeArgs {
+            action: CodemodeAction::Call(args),
+        })) = cli.command
+        else {
+            panic!("codemode call")
+        };
+        assert_eq!(args.arguments, "{}");
     }
 
     #[test]

@@ -27,7 +27,7 @@ const englishText = createOpenGeniText();
    the right words given the dispatch logic lives in JSX.
    -------------------------------------------------------------------------- */
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser
@@ -959,9 +959,7 @@ function timelineEventAt(
 }
 
 function turnSummaryTriggers(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll("button")).filter((button) =>
-    /\d+ steps?/.test(button.textContent ?? ""),
-  );
+  return Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-og-work-header]"));
 }
 
 function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
@@ -1998,6 +1996,30 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("unconfigured computer offers never turn event URLs or variables into a terminal setup fallback", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://example.test/install?command=curl",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use my computer",
+            requiredVariables: ["OPENGENI_ENROLL_TOKEN"],
+          },
+        })}
+      />,
+    );
+    expect(r.container.textContent).toContain("This app hasn't enabled computer setup here");
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(r.container.textContent).not.toContain("OPENGENI_ENROLL_TOKEN");
+    await r.unmount();
+  });
+
   test("lets the authenticated host render setup inline and preserves the fallback", async () => {
     const row = authNeededItem();
     const custom = await renderComponent(
@@ -2275,8 +2297,8 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(r.container.textContent).not.toContain("Narration: one fixture needs a quick patch.");
 
     const trigger = turnSummaryTrigger(r.container);
-    expect(trigger?.textContent).toContain("2 steps");
-    expect(trigger?.textContent).toContain("2 commands");
+    // Duration only: steps and commands are not counted.
+    expect(trigger?.textContent).toBe("6s");
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -2334,7 +2356,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
     expect(r.container.textContent).toContain("Waiting: child still running");
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -2472,7 +2494,7 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(visibleOutcome?.isConnected).toBe(true);
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -3807,9 +3829,9 @@ describe("StartupPhaseRow", () => {
       );
       await flush();
       expect(r.container.textContent).toContain("Ready.");
-      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
-        (candidate) => candidate.textContent?.includes("Preparation"),
-      );
+      // The startup-only turn folds behind its duration.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("6s");
       expect(summary?.getAttribute("aria-expanded")).toBe("false");
       await act(async () => summary?.click());
       await flush();
@@ -3891,9 +3913,9 @@ describe("StartupPhaseRow", () => {
       );
       await flush();
       expect(r.container.textContent).toContain("Continued.");
-      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
-        (candidate) => candidate.textContent?.includes("Preparation"),
-      );
+      // The startup-only turn folds behind its compaction facet.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("compacted");
       if (summary?.getAttribute("aria-expanded") === "false") {
         await act(async () => summary.click());
         await flush();

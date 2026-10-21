@@ -120,6 +120,34 @@ import "@opengeni/react/compiled.css";
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
 ```
 
+To give people one Send and nothing to learn, pass `busySend: "steer"`:
+
+```tsx
+<SessionConversation sessionId={sessionId} composerOptions={{ busySend: "steer" }} />
+// OpenGeniChat: conversationProps={{ composerOptions: { busySend: "steer" } }}
+```
+
+A message sent while the agent works is then read as soon as it can, usually
+within seconds. There is no Queue choice beside Send and no Queue or Steer
+words; a message sent while the workstream is paused waits and shows as a
+waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+
+An open conversation marks itself read for the signed-in person while they can
+see it: its timeline is on screen, the page is visible, the window is focused,
+and it shows the live end of the conversation. Each delivered reply, question
+or failure is acknowledged once (never per streamed token) through
+`updateSessionAttention` with `acknowledgedThroughSequence`, so a late request
+never hides a newer reply. Unread state, and notifications your server derives
+from it (for example a `turn.completed` webhook that skips sessions where
+`session.unread` is false), then leave out replies the person already watched.
+A timeline your layout hides (for example a collapsed bar that keeps only the
+composer), a background tab, or an unfocused window acknowledges nothing. Pass
+`readAcknowledgement={false}` when viewing must not count as reading. Behind
+`createSessionProxyHandler` this uses its `PUT …/attention` route, which
+accepts only `{ unread: false }`. Custom layouts around
+`useSessionConversation` call `useSessionReadAcknowledgement` (from
+`@opengeni/react/session`) with their own `active` signal.
+
 Bearer-token apps pass `headers` (a function runs per request) or a custom
 `fetch`; a `client` passed with `baseUrl` replaces the one the component
 creates:
@@ -159,6 +187,13 @@ voice model answers and hands work to the agent in the same chat, and the
 transcript lands in the timeline. It stays hidden when no model is available,
 when the proxy sets `realtimeVoice: false`, or when you pass
 `realtimeVoice={false}`. The voice code loads lazily on first display.
+The voice button never names the voice model (the model menu does, when
+shown), and neither does the React Native call screen. To name the action
+after your assistant, set its text through `messages`: on the web,
+`"realtime.realtimeControl.startVoice": "Talk to Ava"`, with
+`"realtime.realtimeControl.tryVoiceAgain"` and
+`"realtime.realtimeControl.talkLiveWithTheAgent"` for the retry label and the
+idle hint; on React Native, `"native.timeline.messages.startACall"`.
 
 The working indicator before the first reply says "Thinking…". Pass
 `genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
@@ -399,15 +434,18 @@ typing; the sync indicator remains pending until server acknowledgement. Failed
 independent edits stay visible, and retry cannot overwrite newer overlapping
 edits. The same component is used in the dock and full-page artifact view;
 dimensions and values remain authoritative in the SDK Worker.
-The console supplies an XLSX Download action in both dock and full-page views.
-Custom hosts can supply `download(signal): Promise<Blob>` on the spreadsheet
-surface, or `downloadSpreadsheet(opened, signal): Promise<Blob>` on
-`EditableArtifactView`. Use the authenticated artifact SDK to pin the saved native
-head, materialize XLSX, poll its job, and download its bytes; never return the
-original imported file. Forward the abort signal through every request. The
-control waits for live sync without pending edits, shows progress and retryable
-errors, and cancels on teardown or revoked access. Omit the callback when the host
-does not support export; other modalities do not gain an unsupported download.
+The console supplies a Download action for every editable artifact in both dock
+and full-page views: documents export DOCX, spreadsheets XLSX, and presentations
+PPTX. Custom hosts can supply `download(signal): Promise<Blob>` on the document,
+spreadsheet, or presentation surface, or `downloadArtifact(opened, signal):
+Promise<Blob>` on `EditableArtifactView` (the older spreadsheet-only
+`downloadSpreadsheet` still works). Use the authenticated artifact SDK to pin the
+saved native head, materialize the modality's Office format, poll its job, and
+download its bytes; never return the original imported file. Forward the abort
+signal through every request. The control waits for live sync with no pending or
+still-submitting edits, shows progress and retryable errors, and cancels on
+teardown or revoked access. Omit the callback when the host does not support
+export.
 Double-click a sheet tab or focus it and press F2 to rename it. Enter/Save submits
 the canonical `sheet.rename` command; Escape/Cancel discards an unsent name.
 Validation and failed submissions keep the name editor open. Pending cell edits
@@ -505,6 +543,14 @@ Tailwind runtime variables are initialized per element only inside those roots.
 Independent package defaults inherit without replacing host `--og-*` values;
 derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
+
+`compiled.css` covers the documented embeddable components. The
+`@opengeni/react/ui/*` subpaths are first-party building blocks for the
+Opengeni web app, not a documented public API, and `compiled.css` does not
+style them. A host that imports them anyway must compile them through the
+Tailwind source bridge below. Some use Tailwind's `dark:` variant, which
+follows the host's own `dark` variant (Tailwind's default is the operating
+system's color scheme), not `data-og-theme`.
 
 The original Tailwind v4 bridge remains available for hosts that intentionally
 want Opengeni utilities compiled into their own Tailwind entry:
@@ -668,11 +714,16 @@ const norwegian: OpenGeniMessages = {
 
 - Keys are stable, typed identifiers. `englishMessages` is the complete default
   catalog: export it to your translation tooling as is.
-- Templates use single-brace parameters (`"Start voice with {model}"`); a
+- Templates use single-brace parameters (`"Move queued prompt {index} up"`); a
   translation must keep the same parameters.
+- Text that names the product uses `{product}`, filled from `productName`
+  (default "Opengeni"). Pass `productName="Acme"` to `OpenGeniProvider` and the
+  components say Acme there; your own translations can use `{product}` too.
 - Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
   `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
-  supplies the forms it needs. `_other` is always required.
+  supplies the forms it needs. `_other` is always required. Where the runtime
+  has no `Intl.PluralRules` (Hermes on React Native), 1 uses `_one` and every
+  other count `_other`; no polyfill is needed.
 - `locale` also sets the language of the dates, times and numbers the
   components format.
 - Missing keys fall back to an outer provider, then English, never to a raw key.
@@ -752,6 +803,46 @@ custom layouts, use `useSessionRealtime`, `useRealtimeModelSelection`,
 wrappers remain the recommended path. Concurrent catalog reads are deduplicated
 per client and workspace, and successful results are reused for a short bounded
 window so embedded controls can remount without refetching.
+
+Voice models that hold a conversation in one fixed language (catalog entries
+with `languages`, such as Eleven Realtime) listen and reply in the person's
+language. By default that is the `OpenGeniProvider` locale, else the browser's
+language; the model menu's Language page stores another choice on the device
+(`useRealtimeLanguagePreference`). Custom layouts pass
+`useRealtimeModelSelection().languageFor(model)` as `useSessionRealtime`'s
+`language` and `voiceSettingsFor(model, hostSettings)` as its `voiceSettings`
+(and both to `prestartSessionRealtime`).
+
+The voice, conversation language and turn eagerness are configurable wherever
+the selected model offers them (see the catalog entry's `voices`/`customVoice`,
+`languages` and `turnEagerness`; settings a model does not offer are ignored).
+To set them for every voice session in a workspace, save them once with the
+SDK; Settings > Models > Voice edits the same setting:
+
+```ts
+await client.updateWorkspaceSettings(workspaceId, {
+  realtimeVoice: {
+    "workspace-elevenlabs/eleven_realtime_v1_max": {
+      voice: "<ElevenLabs voice id>",
+      language: "no",
+      turnEagerness: "high",
+    },
+  },
+});
+```
+
+For Eleven Realtime, the voice is one of the built-in names in the catalog
+entry's `voices` or the id of a voice in the ElevenLabs account's My Voices. A
+voice from the ElevenLabs voice library must be added to My Voices first;
+otherwise ElevenLabs rejects it and voice fails to start with
+`ELEVENLABS_REALTIME_VOICE_UNAVAILABLE`.
+
+To set them per session instead, pass `voiceSettings` to the stock control,
+for example `<OpenGeniChat conversationProps={{ realtimeVoiceProps: {
+voiceSettings: { voice: "<ElevenLabs voice id>", language: "no" } } }} />`, or
+to `SessionRealtimeControl`, `useSessionRealtime` or `prestartSessionRealtime`
+(SDK controllers take `getVoiceSettings`). Each set field overrides the
+workspace's value; a language the person picks in the voice menu overrides both.
 
 The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
@@ -990,6 +1081,38 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- History is conversation-first: windowed reads exclude a turn's steps
+  (`SESSION_EVENT_STEP_TYPES`: tool calls, tool outputs, reasoning and command
+  output deltas, and the model request and usage rows of each model call) but
+  keep presented tool results such as images and published files, and the
+  model request rows up to a turn's first model response (its startup phases).
+  Each turn with unloaded steps gets a `turn-steps` timeline item, which
+  readable work rows render when opened. Opening a turn reads its newest
+  `SESSION_TURN_STEP_PAGE_SIZE` steps, and "Show earlier steps" pages back.
+  Live steps go to per-turn stores outside the conversation window, so a long
+  turn never evicts the conversation. A collapsed live turn keeps its latest
+  `SESSION_TURN_LIVE_STEP_TAIL` steps, an opened turn keeps every step, and
+  steps of turns nobody has open are limited to
+  `SESSION_STEP_BROWSER_MAX_BYTES`. `replay: "full"` still reads everything.
+  Turnless step rows (PTY and background command output) are not part of the
+  conversation window either: the sandbox terminal reads its own newest
+  1,000 PTY and command-output rows by type the first time it is shown for a
+  session, and live output keeps streaming in. When `useSessionEvents` rejoins
+  the stream past unread terminal output (opening a chat, returning from a
+  hidden tab or from history) or a burst overflows its live tail, the terminal
+  reads its newest page again. That signal comes from this package's
+  `useSessionEvents`; a terminal fed with `events` from elsewhere reads its
+  history only when opened.
+- The package and the Opengeni server can be upgraded in either order. A
+  server that applies the conversation filter says so in the
+  `X-OpenGeni-Conversation-Filter` response header
+  (`SESSION_EVENT_CONVERSATION_FILTER_VERSION`). Without it, history reads keep
+  tool calls and model bookkeeping and drop non-presented calls in the browser,
+  so an older server that ignores `presentedToolCalls` loses no image,
+  published file or Skill card. The header is read through `listEventPage`:
+  a client without it (for example a host proxy exposing only `listEvents`)
+  always uses that fallback. `createEmbeddedSessionClient` keeps
+  `listEventPage` when the base client has it.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
   The live working set is at most 16 MiB or 20,000 events. One event larger than
@@ -1006,10 +1129,19 @@ state remains application-owned; durable draft and session state remain in
   or session change clears that failure. Loading older rows alone does not
   resolve a failed newer read. Late failures from a previous session are ignored.
   A host that discards the promise must handle its own rejected request.
-- `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
+- `useComposer(sessionId, { sendExtras, effectiveControl, busySend })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction
-  directly in chat and supersedes the current direction. Resume is always an
+  directly in chat, and a running turn reads it as soon as it can, usually
+  within seconds, without cutting off running tools. With `busySend: "steer"`,
+  `send()` steers while a turn is running or prompts wait (it still queues
+  while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
+  Send queueing. `alternateSend` names the other choice while Send takes that
+  busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
+  beside Send exactly when it is not `null`. Under `busySend: "steer"` there is
+  no other choice unless `offerQueue: true` is set (`singleSend` is then
+  false): `alternateSend` stays `null`, Cmd/Ctrl+Enter sends, and the stock
+  surfaces use `SingleSendWording` for queue-free copy. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. Draft reads retry transient

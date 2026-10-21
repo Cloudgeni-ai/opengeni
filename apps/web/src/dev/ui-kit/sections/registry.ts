@@ -121,6 +121,7 @@ export const SECTION_KEYS = [
   "page-connected-agents",
   "page-service-accounts",
   "page-models",
+  "page-models-cache",
   "page-schedules",
   "page-schedule-form",
   "page-knowledge",
@@ -873,6 +874,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Which models a workspace can use and who pays for them, with the account page.",
     usedOn: "Workspace settings, Organization settings",
     load: () => import("./page-models"),
+  },
+  {
+    key: "page-models-cache",
+    group: "Pages",
+    title: "Models loading and cache",
+    purpose: "Production Models components with an in-memory API fixture.",
+    usedOn: "Settings > Models",
+    load: () => import("./page-models-cache"),
   },
   {
     key: "page-schedules",

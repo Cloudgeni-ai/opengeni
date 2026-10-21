@@ -48,6 +48,36 @@ describe("failure presentation", () => {
   });
   const refusal =
     "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+  test("a coded capacity-recovery failure reads in the host's language, not server English", () => {
+    const stored =
+      "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.";
+    for (const code of [
+      "codex_capacity_recovery_exhausted",
+      "xai_capacity_recovery_exhausted",
+      "claude_capacity_recovery_exhausted",
+    ]) {
+      const payload = {
+        error: stored,
+        code,
+        recovery: "user_message",
+        recoveryExhausted: true,
+        retryable: false,
+      };
+      const before = JSON.stringify(payload);
+      expect(presentFailure(englishText, payload).reason).toBe(
+        "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
+      );
+      const norwegian = createOpenGeniText({
+        locale: "nb",
+        messages: { "lib.format.capacityRecoveryExhausted": "Abonnementet er tomt for kapasitet." },
+      });
+      expect(presentFailure(norwegian, payload)).toEqual({
+        reason: "Abonnementet er tomt for kapasitet.",
+        safetyRefusal: false,
+      });
+      expect(JSON.stringify(payload)).toBe(before);
+    }
+  });
   test("exposes the actual reason in legacy exhausted-retry failures", () => {
     expect(
       presentFailure(englishText, {
@@ -139,6 +169,8 @@ describe("tryParseJson", () => {
 
 describe("isCreditExhaustion", () => {
   test("matches the engine error text, bare and wrapped, case-insensitively", () => {
+    expect(isCreditExhaustion("insufficient workspace credits")).toBe(true);
+    expect(isCreditExhaustion("Activity task failed: insufficient workspace credits")).toBe(true);
     expect(isCreditExhaustion("insufficient Opengeni credits")).toBe(true);
     expect(isCreditExhaustion("Activity task failed: insufficient Opengeni credits")).toBe(true);
     expect(isCreditExhaustion("INSUFFICIENT OPENGENI CREDITS")).toBe(true);

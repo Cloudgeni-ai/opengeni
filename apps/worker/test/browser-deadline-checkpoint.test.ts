@@ -10,9 +10,9 @@ import {
 import { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
 import {
   acquireOwnerMigratedTestDatabase,
-  testSettings,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   BrowserControlRequestError,
   type BrowserControlClient,

@@ -52,6 +52,7 @@ import {
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver } from "@opengeni/runtime";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
+import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -81,16 +82,20 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
-import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
+import {
+  ActiveRouteDispatchBoundary,
+  checkpointHistoryBeforeProviderDispatch,
+} from "./provider-dispatch-barrier";
 import {
   assertProviderOverloadRecoveryActive,
   providerRecoveryCountAfterModelRequestPhase,
+  sandboxRouteTransitionCode,
 } from "./errors";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
-import { codexWorkspaceMetricKey } from "./codex";
+import { codexCacheAffinityKey, codexWorkspaceMetricKey } from "./codex";
 import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
@@ -110,10 +115,11 @@ import {
   assertTurnModelConnection,
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
+  prepareCoreCodexTurnEntitlements,
 } from "./codex-core-capacity";
 import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
-import { prepareGovernanceAndModel } from "./governance-model";
+import { preferenceSnapshotHumanSubjectId, prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
 import {
@@ -143,10 +149,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
-import {
-  isAuxiliaryProviderDispatch,
-  runAuxiliaryProviderDispatch,
-} from "../auxiliary-provider-dispatch";
+import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
@@ -167,6 +170,7 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.persistUsageHeaders ? { persistUsageHeaders: context.persistUsageHeaders } : {}),
     ...(requests
       ? {
           beforeProviderDispatch: async (
@@ -286,9 +290,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       connectionCredentials,
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
+      startSessionTitleWorkflow,
     } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
+    let codexEntitlementPreparation: Promise<number> | undefined;
     // Temporal cancellation is not the only way an activity loses ownership:
     // a database attempt fence or workflow abandonment can finalize the logical
     // turn while the SDK cancellation signal remains open. Bind sandbox
@@ -482,22 +488,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
-    // Diagnostic only: a timing observer can never fence or fail a request.
-    const observeProviderDispatch = () => {
-      // Titles and generated images run these checks too, but are separate calls.
-      if (isAuxiliaryProviderDispatch()) return;
-      try {
-        eventing.providerDispatchObserver?.();
-      } catch {
-        // Metrics emission must never affect a model call.
-      }
-    };
     const assertRecoveryWindow = () =>
       assertProviderOverloadRecoveryActive({
         failureCode: attempt.providerRecoveryPolicyCode,
         providerRecoveryCount: attempt.providerRecoveryCount,
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
+    const activeRoute = new ActiveRouteDispatchBoundary({
+      session: () =>
+        sandboxState.resolvedSandbox?.established.session as
+          | { assertActiveRouteContinuable?: () => Promise<void> }
+          | undefined,
+      isRouteTransition: (error) => sandboxRouteTransitionCode(error) !== null,
+    });
     const checkpointBeforeProviderDispatch = async () => {
       assertRecoveryWindow();
       await awaitModelCallAdmission();
@@ -505,6 +508,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
+        activeRoute,
       });
       assertRecoveryWindow();
     };
@@ -533,6 +537,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         media,
         claimedResult,
         acknowledgeLostAttemptOwnership,
+        startCodexEntitlementPreparation: (turn) => {
+          if (cancellationSignal?.aborted) return;
+          codexEntitlementPreparation ??= prepareCoreCodexTurnEntitlements({
+            db,
+            settings,
+            input,
+            turn,
+            observability,
+          });
+          // This is a hint. The original placement-stage read remains the
+          // authority and retries if this preparation could not finish.
+          void codexEntitlementPreparation.catch(() => undefined);
+        },
       });
       if ("exit" in claimed) return claimed.exit;
       if (!eventing.publish || !eventing.settle) {
@@ -645,6 +662,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Gated on the codex-billed predicate — non-codex turns never touch this.
           {
             const capacityDeps: CapacityPhaseDeps = {
+              codexEntitlementPreparation,
               input,
               settings,
               db,
@@ -850,13 +868,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
-                    // Backend sticky cache-routing key — the SAME id as the body's
-                    // prompt_cache_key (set from input.sessionId for codex turns),
-                    // so routing and cache key agree. Without this header on the
-                    // wire, byte-identical resends hit the prompt cache ~50%
-                    // (per-request shard lottery = prod's measured 48.6% on sol);
-                    // with it, resends pin to the warm shard (Codex CLI parity).
                     sessionId: input.sessionId,
+                    cacheAffinityKey: codexCacheAffinityKey(
+                      input.workspaceId,
+                      preferenceSnapshotHumanSubjectId(turn),
+                      input.sessionId,
+                    ),
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
                     resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
@@ -864,6 +881,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       providerTurn.latestCodexUsage = snapshot;
                       creditGuard.observe(snapshot);
                     }, // latest wins; flushed once in finally
+                    persistUsageHeaders: async (snapshot) => {
+                      if (!coreCodex) return;
+                      await recordCoreCodexUsageReading({
+                        db,
+                        core: coreCodex,
+                        lease: leases.codex,
+                        usage: snapshot,
+                        credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+                      });
+                    },
                     beforeProviderDispatch: async (request) => {
                       if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
                       await assertCodexDispatchAdmission(
@@ -871,7 +898,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         () => leases.codex.assertCurrentForDispatch(),
                       );
                       if (coreCodex && request) await coreCodex.requests!.reserve(request);
-                      observeProviderDispatch();
                     },
                     ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
@@ -1205,9 +1231,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       }),
                     },
                   ]);
-                  // SuperGrok places bytes on the wire immediately after this
-                  // awaited audit returns.
-                  if (event.phase === "started") observeProviderDispatch();
                   attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
                     attempt.providerRecoveryCount,
                     event.phase,
@@ -1698,6 +1721,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           });
           const toolRuntime = await prepareTurnToolRuntime({
+            independentSessionTitles: !!startSessionTitleWorkflow,
             vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
@@ -2076,6 +2100,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability,
             entitlements,
             startVideoGenerationWorkflow,
+            startSessionTitleWorkflow,
+            sessionTitleExpectedCurrent: { title: session.title, source: session.titleSource },
             cancellationSignal,
             runtimeCancellationSignal,
             activityContext,
@@ -2181,6 +2207,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         acknowledgeRecoveryQuiescence,
       });
     } finally {
+      if (codexEntitlementPreparation) await Promise.allSettled([codexEntitlementPreparation]);
       await finalizeTurnAttempt({
         turnFinalizationTimeoutMs,
         requestWorkerDrain,

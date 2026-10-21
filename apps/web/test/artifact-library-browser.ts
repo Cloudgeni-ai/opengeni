@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 import AxeBuilder from "@axe-core/playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 const port = await freePort();
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -55,6 +56,19 @@ try {
             siteHtml: string[];
           },
       );
+    // New artifact drafts its prompt in the new-chat composer (nothing is sent)
+    // and opens it; the test then returns to the library where it was.
+    const newArtifact = async (draft: string) => {
+      await page.getByRole("button", { name: "New artifact", exact: true }).click();
+      await page.getByRole("heading", { name: "New chat", exact: true }).waitFor();
+      assert.equal((await activity()).prompts.at(-1), draft);
+      await page.evaluate(() =>
+        (
+          Reflect.get(window, "artifactLibraryRouter") as { history: { back(): void } }
+        ).history.back(),
+      );
+      await page.getByRole("button", { name: "New artifact", exact: true }).waitFor();
+    };
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const outside: string[] = [];
@@ -89,11 +103,7 @@ try {
     await page.locator('[data-slot="content-page"]').evaluate((element) => {
       element.scrollTop = 0;
     });
-    await page.getByRole("button", { name: "New artifact", exact: true }).click();
-    assert.equal(
-      (await activity()).prompts.at(-1),
-      "Help me create a workspace artifact. Ask what I want to make before creating it.",
-    );
+    await newArtifact("Create a workspace artifact: ");
     // The gallery (default) shows a Site as a still: sandboxed with no scripts, no network.
     // Activate this card's viewport gate explicitly, rather than relying on the
     // preceding image scroll to happen to bring a nearby Site into view too.
@@ -169,11 +179,7 @@ try {
     await page.getByRole("radio", { name: "Gallery", exact: true }).click();
     await page.getByRole("tab", { name: "Images", exact: true }).click();
     assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 2);
-    await page.getByRole("button", { name: "New artifact", exact: true }).click();
-    assert.equal(
-      (await activity()).prompts.at(-1),
-      "Help me create a workspace image. Ask what it should contain before creating it.",
-    );
+    await newArtifact("Create a workspace image: ");
     await page.getByRole("link", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     const imageBounds = await page
@@ -239,7 +245,7 @@ try {
     await page.getByRole("button", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     assert.equal(await page.getByRole("link", { name: "Artifacts", exact: true }).count(), 0);
-    assert.equal(await page.getByRole("button", { name: "Browse session artifacts" }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "Back to session artifacts" }).count(), 1);
     const embeddedScroll = await page.locator('[data-slot="content-page"]').evaluate((element) => {
       const bottom = element.getBoundingClientRect().bottom;
       const overflows = element.scrollHeight > element.clientHeight;
@@ -257,7 +263,7 @@ try {
       assert.ok(embeddedScroll.scrollTop > 0, "bottom image and padding remain reachable");
     }
     await page.screenshot({ path: `${output}/embedded-${suffix}.png`, fullPage: true });
-    await page.getByRole("button", { name: "Browse session artifacts" }).click();
+    await page.getByRole("button", { name: "Back to session artifacts" }).click();
     await page.getByRole("heading", { name: "Session artifacts" }).waitFor();
     await page
       .getByRole("button", { name: "More actions for Product analytics", exact: true })

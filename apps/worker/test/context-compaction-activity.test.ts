@@ -47,13 +47,10 @@ import {
   SUMMARY_PREFIX,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  ScriptedModel,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { createActivityTestHarness } from "../src/activities";
 import {
   isContextWindowExceeded,

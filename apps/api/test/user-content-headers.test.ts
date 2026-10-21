@@ -63,8 +63,9 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
  */
 const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: number }> = {
   "mcp/files.ts": { calls: 1, withUserContentOptions: 1 },
-  // Browser-controller upload/download authorities and encrypted profile archives.
-  "routes/browser-sessions.ts": { calls: 3, withUserContentOptions: 0 },
+  // Browser-controller upload/download authorities, encrypted profile archives
+  // and the sandbox import of a saved browser recording.
+  "routes/browser-sessions.ts": { calls: 4, withUserContentOptions: 0 },
   "routes/documents.ts": { calls: 1, withUserContentOptions: 1 },
   "routes/files.ts": { calls: 2, withUserContentOptions: 2 },
   "routes/knowledge.ts": { calls: 1, withUserContentOptions: 1 },

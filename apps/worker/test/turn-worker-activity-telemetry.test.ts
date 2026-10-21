@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { GracefulShutdownPeriodExpiredError, NativeConnection, Worker } from "@temporalio/worker";
 import { createOpenGeniWorker } from "../src";
 import { TurnLifecycleMetrics } from "../src/observability-metrics";

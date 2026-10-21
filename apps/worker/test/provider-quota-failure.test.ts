@@ -5,7 +5,7 @@ import {
   buildOpenAIClientFromSettings,
   CompactionProviderResponseError,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   agentRunFailurePayload,
   compactionFailureReasonFromError,
@@ -393,8 +393,8 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     expect(agentRunFailurePayload(new Error("ENOSPC: Disk quota exceeded"))).toEqual({
       error: "ENOSPC: Disk quota exceeded",
     });
-    expect(agentRunFailurePayload(new Error("insufficient Opengeni credits"))).toEqual({
-      error: "insufficient Opengeni credits",
+    expect(agentRunFailurePayload(new Error("insufficient workspace credits"))).toEqual({
+      error: "insufficient workspace credits",
     });
   });
 });

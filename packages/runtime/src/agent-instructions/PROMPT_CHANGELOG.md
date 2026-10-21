@@ -1,5 +1,65 @@
 # Modular prompt changelog
 
+A Word, Excel, PDF or PowerPoint file the user sends to be changed is now
+edited in the sandbox with ordinary tools (python-docx, openpyxl, pandoc,
+LibreOffice), checked and published, and so is a new file the user asks for in
+such a format unless the artifact export tool lists that format. Before, the
+routing sentence sent "a document or file (for example a DOCX or PDF)" to native
+document artifacts and forbade a sandbox DOCX, but stock deployments export only
+spreadsheet XLSX, and deployments without the artifact materializer export
+nothing. An agent asked for a Word or Excel file built a native artifact and
+then reported that export was unavailable, and a sent DOCX or XLSX the importer
+could not read was returned unchanged. In the everyday-task benchmark these
+cases failed on every run, while the comparison agent passed them with
+python-docx and openpyxl. Native artifacts still serve requested documents,
+edits to existing artifacts and long deliverables. The `documents`,
+`spreadsheets` and `presentations` Skills gain a short procedure for these
+files, and the goal continuation's report clause excludes them from the native
+report contract. Both compositions change identically; legacy prompt digests
+are refreshed for this reviewed change.
+
+Written pieces the person asks for (briefs, letters, plans, reports) are
+answered in chat. A document Artifact is created only when the person asks for
+a document or file (for example a DOCX or PDF), asks to edit an existing
+document, or the result is too long to read comfortably in chat (several
+pages). The earlier "or clearly meant to be kept or shared" let agents build a
+document for any requested brief, which took several times longer than a chat
+answer and left only a link in the conversation. The `documents` Skill
+description and its routing paragraph, and the goal continuation's report
+clause, say the same. Both compositions change identically; legacy prompt
+digests are refreshed for this reviewed change.
+
+The `goal_set` tool description now opens with when a goal is warranted: a
+long-running objective that needs several turns or continued autonomous work,
+while a short or single-step request is answered directly. The old opening,
+"Create a goal when this session has none", read as a rule to create a goal
+whenever none existed, so agents wrapped one-step edits in goal_set and
+goal_complete. The rest of the description, the goals instruction module and
+both compositions are unchanged.
+
+Agent-facing text no longer names the product, so an embedding product's agent
+only ever sees and repeats its own product's name. Bundled Skills take neutral
+names (`documents`, `spreadsheets`, `presentations`, `sites`, `visualize`,
+`secrets`, `schedules`, `projects`, `skill-management`, `video-generation`), and
+the instructions that point at them use those names. "Inline in the Opengeni
+console" is now "inline in the chat", and the native-capability check asks
+whether the workspace already provides a capability. Both compositions change
+identically; legacy prompt digests are refreshed for this reviewed change. The
+default identity, provenance markers such as `[Opengeni internal updates]`,
+the `opengeni__` tool namespace and Codemode identifiers are unchanged.
+
+The CAPTCHA rule moved from the secrets doctrine into the descriptions of the
+two interaction entry tools, `browser_open` and `computer_open`. The secrets
+block renders only with the `secrets` capability and runtime reference
+resolution, and never in the legacy composition, so an agent that could drive a
+browser without that block had no CAPTCHA guidance, refused challenges and
+handed them to the user. The entry tools are visible from the first request of
+every session with browser or computer tools, in both compositions, so the same
+sentence now reaches every such agent and no agent without those tools. The
+secrets block is one line shorter. `browser_auth` and `interaction_request_human`
+keep their existing CAPTCHA clauses, where the agent decides to sign in or hand
+over.
+
 The secrets doctrine now states one rule for every tool: a secret reference
 resolves wherever it is written, including Opengeni's own tools, and an escaped
 reference is passed on unresolved for later work such as schedule prompts,
@@ -135,11 +195,27 @@ rule turned one search into several sequential round trips, so the rule now
 says a found tool stays callable by name and that several capabilities can be
 searched in one response or loaded together through `names`.
 
+Compact discovery. Search loads its strongest match and leaves alternatives as
+descriptors. An explicitly configured decision model can select definitions for
+ambiguous queries; strong matches skip that inference. Exact ties and queries
+without resource evidence stay compact and require exact-name loading. The
+instructions distinguish loaded tools from suggestions and use the existing list tool for an on-demand group
+directory. Definitions and receipts are frozen after the originating result,
+never inserted into a changing earlier prompt or top-level tool block.
+Native Responses routes retain hosted client search and real loaded functions;
+ordinary search receipts and `tool_invoke` apply to the existing generic routes.
+
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
-+ A tool found with `tool_search` stays callable by its exact name for the rest of the session; search again only if its input schema is no longer in context.
++ Describe the action, resource and useful context in `tool_search`; it loads the strongest match, with optional decision-model selection for ambiguous searches.
++ Check the match: ranking is not certainty.
++ Native search returns loaded function definitions directly.
++ In ordinary search receipts, `schemasLoaded: true` means `tools` have loaded schemas but `suggestions` are unloaded alternatives; with `schemasLoaded: false`, load chosen exact names with `tool_search({query: '', names: [...]})` before calling them.
++ Known exact names bypass ranking and inference.
++ Once its schema is in context, call the tool by name or through `tool_invoke` where available; do not rediscover it unless its schema is no longer in context.
 + When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.
-+ If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.
++ Use `tool_list({view: 'groups'})` for a compact directory, then list an exact returned `group`.
++ If search misses, browse the relevant groups and follow `nextCursor` until covered, then load chosen exact names with `tool_search`.
 + `namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.
 + Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.
 + Use an attached image-generation tool when the user requests generated images or edits.
@@ -240,10 +316,10 @@ with credentials and stall on logins, so the block explicitly grants autonomy:
 use references everywhere they execute, follow the login ladder (saved
 session, saved login plus TOTP, enroll the agent's own 2FA, email or SMS codes
 through connected tools, create the account with a generated password when
-account creation is allowed), always solve CAPTCHAs, never ask for secret
-values in chat, use the ready ask card from a missing-secret error, and hand
-the browser over only for push approvals or hardware keys. It is at most six
-lines under its heading; playbooks live in the `opengeni-secrets` Skill. Clause
+account creation is allowed), never ask for secret values in chat, use the
+ready ask card from a missing-secret error, and hand the browser over only for
+push approvals or hardware keys. It is at most six
+lines under its heading; playbooks live in the `secrets` Skill. Clause
 gating: the `secret_search` sentence and the Skill pointer need
 `secret_search` (the Skill pointer also needs Skills); the 2FA-enrollment and
 account-creation rungs need `secret_save`; the ask-card sentence needs the
@@ -257,11 +333,10 @@ so "never request credentials in chat" comes with the supported alternative.
 + To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
-+ Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.
 + Never ask for passwords, keys or codes in chat or in a plain text question.
 + Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.
 + Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.
-+ For playbooks, read the `opengeni-secrets` skill.
++ For playbooks, read the `secrets` Skill.
 + For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.
 ```
 
@@ -354,8 +429,7 @@ When a named tool is proven absent, only the clauses naming it change:
 - Secrets: the `secret_search` sentence and the Skill pointer need
   `secret_search`; the 2FA-enrollment and account-creation rungs of the login
   ladder need `secret_save`; the push-approval and hardware-key handoff line
-  needs `interaction_request_human`. The reference, CAPTCHA and never-ask
-  rules stay.
+  needs `interaction_request_human`. The reference and never-ask rules stay.
 
 Tool discovery, media, accepted user/workspace/Skill instructions, active-goal
 continuation input, and the Codemode/code-search/Git-binding attempt

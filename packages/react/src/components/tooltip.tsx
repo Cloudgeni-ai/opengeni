@@ -1,5 +1,5 @@
 /**
- * Token-styled Radix tooltip — SDK counterpart to apps/web `components/ui/tooltip`.
+ * Token-styled Radix tooltip — counterpart to `src/ui/tooltip`.
  * Portals copy `--og-*` tokens so embeds keep the host theme outside `.og-root`.
  *
  * Background/foreground are applied as inline styles (not only Tailwind
@@ -8,6 +8,7 @@
  * tips and look like a blank white bubble.
  */
 import { Tooltip as TooltipPrimitive } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import {
   createContext,
   useContext,
@@ -21,6 +22,8 @@ import {
 
 import { cn } from "../lib/cn";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+
+const TooltipContainedPortal = containedPortal(TooltipPrimitive.Portal);
 
 type TooltipSourceContextValue = {
   source: HTMLElement | null;
@@ -104,7 +107,7 @@ function TooltipContent({
   const portalStyle = usePortalTokenStyle(source?.source ?? null);
 
   return (
-    <TooltipPrimitive.Portal>
+    <TooltipContainedPortal>
       <TooltipPrimitive.Content
         data-slot="tooltip-content"
         sideOffset={sideOffset}
@@ -126,7 +129,7 @@ function TooltipContent({
           }}
         />
       </TooltipPrimitive.Content>
-    </TooltipPrimitive.Portal>
+    </TooltipContainedPortal>
   );
 }
 

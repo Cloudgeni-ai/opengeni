@@ -1410,8 +1410,17 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 ## Messages, the turn queue, and steering
 
 Messages sent while a turn is running **queue by default** — visible,
-editable, reorderable, and deletable until the worker claims them. Steering is
-the explicit alternative: deliver now by interrupting the running turn.
+editable, reorderable, and deletable until the worker claims them, and they run
+after the whole running turn. Steering is the explicit alternative: the running
+turn reads the message within seconds and nothing in progress is killed. A
+model answer still being written is cut short (its completed text stays), short
+tool calls finish, and long command or session waits return early while the
+work keeps running. The turn then hands over (`turn.superseded` with reason
+`steer`, `atModelStep: true` and, when an answer was cut short, `cutOffText`)
+and the Steer runs next with the full history. The session screens show it
+only as the person's message, and the queue snapshot does not list it.
+`steerQueueItem` with `interrupt: true` on the turn that `steerMessage`
+returned stops the running attempt now instead, including tool calls in flight.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1420,9 +1429,17 @@ await client.sendMessage(workspaceId, sessionId, {
   clientEventId: crypto.randomUUID(),
 });
 
-// Steer: send + promote to the queue front + interrupt the running turn.
-await client.steerMessage(workspaceId, sessionId, {
+// Steer: send + promote to the queue front; read within seconds.
+const steered = await client.steerMessage(workspaceId, sessionId, {
   text: "Stop — prod is paging, look at that first",
+  clientEventId: crypto.randomUUID(),
+});
+
+// Hard interrupt: stop the running attempt for that Steer now, including
+// tool calls in flight (rarely needed; the Steer is read within seconds).
+await client.steerQueueItem(workspaceId, sessionId, steered.turn.id, {
+  expectedTurnVersion: steered.turn.version,
+  interrupt: true,
   clientEventId: crypto.randomUUID(),
 });
 

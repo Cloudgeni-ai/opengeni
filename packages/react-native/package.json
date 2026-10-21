@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react-native",
-  "version": "4.0.4",
+  "version": "4.3.1",
   "description": "React Native and Expo kit for Opengeni agents: the native session timeline, composer adapters, voice dictation, and realtime voice calls (CallKit) on the same SDK controllers as the web.",
   "license": "Apache-2.0",
   "repository": {
@@ -12,6 +12,8 @@
     "dist",
     "src",
     "ios",
+    "android/build.gradle",
+    "android/src",
     "expo-module.config.json",
     "README.md",
     "app.plugin.js",
@@ -61,7 +63,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsrs --noEmit -p tsconfig.json",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

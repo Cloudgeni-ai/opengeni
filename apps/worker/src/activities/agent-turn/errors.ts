@@ -25,6 +25,7 @@ import {
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpServiceUnavailableError,
+  isFirstPartyMcpSetupUnavailableError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -118,6 +119,8 @@ import {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+  FIRST_PARTY_MCP_SETUP_RETRY_MS,
   MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
   MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
@@ -135,7 +138,8 @@ export {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
-export function providerRecoveryLimit(failureCode: unknown): number {
+export function providerRecoveryLimit(failureCode: unknown): number | undefined {
+  if (failureCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE) return undefined;
   return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
 }
 /**
@@ -200,6 +204,17 @@ export function providerRecoveryResult(input: {
   const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
   const window = windowedRecoveryPolicy(input.failureCode);
   const limit = providerRecoveryLimit(input.failureCode);
+  if (limit === undefined) {
+    return {
+      status: "recovering",
+      continueDelayMs: Math.max(
+        FIRST_PARTY_MCP_SETUP_RETRY_MS,
+        Number.isFinite(input.retryAfterMs) && (input.retryAfterMs ?? 0) > 0
+          ? Math.ceil(input.retryAfterMs!)
+          : 0,
+      ),
+    };
+  }
   const exhausted = (
     reason: "deadline" | "retry_limit" | "invalid_clock",
   ): Extract<ProviderRecoveryResult, { status: "exhausted" }> => ({
@@ -410,7 +425,7 @@ export function automaticRecoveryUnavailableFailure<
   });
   return {
     ...failure,
-    error: `${subject}. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.`,
+    error: `${subject}. This turn couldn't be retried automatically. Try again, or send a message to continue.`,
     retryable: false,
     automaticRecovery: "unavailable",
     lastRetryableError: failure.error,
@@ -774,14 +789,14 @@ function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>):
 function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
   return (
     sqlState !== null &&
-    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["57P01", "57P02", "57P03"].includes(sqlState))
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
   );
 }
 
 function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
   return (
     sqlState !== null &&
-    (sqlState.startsWith("08") || ["57P01", "57P02", "57P03"].includes(sqlState))
+    (sqlState.startsWith("08") || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
   );
 }
 
@@ -851,7 +866,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
       input.providerRecovery.providerRecoveryCount <= 0 ||
       input.providerRecovery.providerRecoveryCount >
-        providerRecoveryLimit(input.providerRecovery.failureCode) ||
+        (providerRecoveryLimit(input.providerRecovery.failureCode) ?? Infinity) ||
       !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode) ||
       !validProviderOverloadRecoveryDelay(
         input.providerRecovery.failureCode,
@@ -1705,6 +1720,13 @@ export function providerRecoveryCode(
   if (
     failure.code === "mcp_transport_unavailable" &&
     failure.retryable &&
+    isFirstPartyMcpSetupUnavailableError(error)
+  ) {
+    return FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
+  }
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
     isMcpServiceUnavailableError(error)
   ) {
     return MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE;
@@ -1886,7 +1908,7 @@ function baseAgentRunFailurePayload(
     const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
     const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
     return {
-      error: "Opengeni encountered a database error.",
+      error: "A database error occurred.",
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
@@ -2239,7 +2261,7 @@ function baseAgentRunFailurePayload(
     if (isExactStatuslessUpstreamConnectivityMessage(message)) {
       return {
         error:
-          "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+          "An upstream service could not be reached. The same turn will retry after a short delay.",
         code: "upstream_connectivity_unavailable",
         retryable: true,
       };

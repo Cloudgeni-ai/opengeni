@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   applyCreditLedgerEntry,
@@ -66,6 +66,7 @@ async function account(eligible = false) {
       operationId: crypto.randomUUID(),
       requestFingerprint: "a".repeat(64),
       trialCreditsEnabled: true,
+      trialCreditModelIds: ["model-a"],
     })
   ).organizationId;
 }
@@ -296,7 +297,7 @@ test("concurrent sweeps enroll every organization once but only trial orgs get a
   expect(receipt.idempotency_key).toBe(
     `plan-credit:free:${eligible}:${new Date().toISOString().slice(0, 7)}`,
   );
-  expect((await getBillingBalance(client.db, eligible)).balanceMicros).toBe(20 * M); // trial + current month
+  expect((await getBillingBalance(client.db, eligible)).balanceMicros).toBe(10 * M); // current month, no signup bonus
   expect(await maintainSubscriptionPlans(client.db)).toMatchObject({
     examinedAccounts: 0,
     grantedFreePeriods: 0,
@@ -403,7 +404,7 @@ test("an expired current-anniversary Free receipt is not reissued, and a prior i
   await maintainSubscriptionPlans(client.db);
   await endPeriod(id);
   await maintainSubscriptionPlans(client.db);
-  expect((await getBillingBalance(client.db, id)).balanceMicros).toBe(10 * M); // trial only
+  expect((await getBillingBalance(client.db, id)).balanceMicros).toBe(0); // no signup bonus and no rollover
   expect(await listSubscriptionPlanMaintenanceAccounts(client.db)).not.toContain(id);
   const prior = await account(true);
   const month = new Date();
@@ -424,7 +425,7 @@ test("an expired current-anniversary Free receipt is not reissued, and a prior i
   });
   const result = await maintainSubscriptionPlans(client.db);
   expect(result.grantedFreePeriods).toBe(1);
-  expect((await getBillingBalance(client.db, prior)).balanceMicros).toBe(20 * M);
+  expect((await getBillingBalance(client.db, prior)).balanceMicros).toBe(10 * M);
   const [count] =
     await shared.admin`select count(*)::int n from plan_credit_periods where account_id = ${prior} and expired_at is null`;
   expect(count!.n).toBe(1);

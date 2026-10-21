@@ -9,12 +9,14 @@ import {
   screen,
   shell,
   WebContentsView,
+  type BrowserWindow,
   type ContextMenuParams,
   type WebContents,
 } from "electron";
 
 import type { DesktopAppConfig } from "./config";
 import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
+import { routeNewWindow, routePopupNavigation } from "./popup-routing";
 import { MainFrameLoad } from "./reachability";
 import { MIN_SIZE, placeWindow, type Placement, type SavedWindow } from "./window-placement";
 
@@ -373,7 +375,11 @@ export class MainWindow {
     return view;
   }
 
-  /** Only the account's own server loads in its view; everything else opens in the browser. */
+  /**
+   * Only the account's own server loads in its view; everything else opens in
+   * the browser. A blank window the page reserves for a sign-in or connect
+   * flow is kept hidden until it navigates (see `popup-routing.ts`).
+   */
   private guardNavigation(contents: WebContents, baseUrl: string | null): void {
     const stays = (url: string) =>
       baseUrl ? sameOrigin(url, baseUrl) : url.startsWith(`${LOCAL_ORIGIN}/`);
@@ -388,10 +394,62 @@ export class MainWindow {
       openExternalSafely(url);
     });
     contents.setWindowOpenHandler(({ url }) => {
+      if (routeNewWindow(url, baseUrl) === "placeholder") {
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            show: false,
+            title: this.config.productName,
+            autoHideMenuBar: true,
+            backgroundColor: nativeTheme.shouldUseDarkColors
+              ? this.config.background.dark
+              : this.config.background.light,
+            ...(process.platform === "linux" ? { icon: this.config.appIconPath } : {}),
+          },
+        };
+      }
+      openExternalSafely(url);
+      return { action: "deny" };
+    });
+    if (baseUrl) {
+      contents.on("did-create-window", (popup) => this.guardPopup(popup, contents, baseUrl));
+    }
+    contents.on("will-attach-webview", (event) => event.preventDefault());
+  }
+
+  /**
+   * A window the account's page opened blank. Its first destination decides
+   * what it is: the account's own page shows here; a provider's page opens in
+   * the browser, and the placeholder closes, which the page reads as the
+   * window having closed while it keeps waiting for the server.
+   */
+  private guardPopup(popup: BrowserWindow, opener: WebContents, baseUrl: string): void {
+    const contents = popup.webContents;
+    const route = (event: Electron.Event, url: string) => {
+      const destination = routePopupNavigation(url, baseUrl);
+      if (destination === "blank") return;
+      if (destination === "app") {
+        if (!popup.isVisible()) popup.show();
+        return;
+      }
+      event.preventDefault();
+      openExternalSafely(url);
+      if (!popup.isVisible()) popup.destroy();
+    };
+    contents.on("will-navigate", route);
+    contents.on("will-redirect", route);
+    contents.setWindowOpenHandler(({ url }) => {
       openExternalSafely(url);
       return { action: "deny" };
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
+    contents.on("context-menu", (_event, params) => this.contextMenu(contents, params));
+    // A placeholder the page never used goes with the page.
+    const closeUnused = () => {
+      if (!popup.isDestroyed() && !popup.isVisible()) popup.destroy();
+    };
+    opener.once("destroyed", closeUnused);
+    popup.once("closed", () => opener.removeListener("destroyed", closeUnused));
   }
 
   private contextMenu(contents: WebContents, params: ContextMenuParams): void {

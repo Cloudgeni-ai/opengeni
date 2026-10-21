@@ -18,12 +18,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
@@ -262,7 +259,7 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(names).not.toContain("list_models");
   });
 
-  test("typed 422s: goal conflict, instructions alias conflict, explicit tool conflict", async () => {
+  test("typed 422s: goal conflict, instructions alias conflict", async () => {
     if (!available) return;
     const grant = await fixture();
     const target = app();
@@ -280,11 +277,28 @@ describe("agent configuration on create (real PostgreSQL)", () => {
       agent: { instructions: "b" },
     });
     expect(alias.json.details.code).toBe("agent_config_conflict");
+  });
+
+  test("a client's explicit tool of a capability that is off is narrowed away, not refused", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
     const explicit = await create(target, grant, {
       firstPartyMcpTools: ["goal_set"],
       agent: { capabilities: "none" },
     });
-    expect(explicit.json.details.code).toBe("agent_config_conflict");
+    expect(explicit.status).toBe(202);
+    expect(explicit.json.firstPartyMcpTools).not.toContain("goal_set");
+    // A client built before a tool moved under a capability keeps offering it:
+    // the session is still created, without that tool.
+    const stale = await create(target, grant, {
+      firstPartyMcpTools: ["set_session_title", "connected_machine_enable_screen_control"],
+      agent: { capabilities: { from: "all", workspaceAdmin: false } },
+    });
+    expect(stale.status).toBe(202);
+    expect(stale.json.firstPartyMcpTools).toContain("set_session_title");
+    expect(stale.json.firstPartyMcpTools).not.toContain("connected_machine_enable_screen_control");
+    expect(stale.json.agent.capabilities.workspaceAdmin).toBe(false);
   });
 
   test("a goal implies goals; instructions alias writes the session instructions", async () => {

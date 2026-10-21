@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
@@ -1536,7 +1536,7 @@ describe("session realtime ledger", () => {
     });
   });
 
-  test("delegation uses canonical Steer against an already-running ordinary turn", async () => {
+  test("delegation uses canonical Steer against an already-running ordinary turn, read at its next model step", async () => {
     const value = await fixture();
     const connection = await claimInitial(value);
     await complete(value, connection.claimed.connection);
@@ -1602,10 +1602,13 @@ describe("session realtime ledger", () => {
         delivery: "steer",
         replacedTurnId: foreground.turnId,
         replacedAttemptId: attemptId,
-        interruptionCount: 1,
+        interruptionCount: 0,
+        deferredUntilModelStep: true,
       },
     });
-    expect(facts.interruption).toMatchObject({ attemptId, kind: "steer", state: "pending" });
+    // Like every Steer, the running turn reads it at its next model step
+    // instead of being interrupted.
+    expect(facts.interruption).toBeUndefined();
     expect(facts.session?.activeTurnId).toBe(foreground.turnId);
   });
 

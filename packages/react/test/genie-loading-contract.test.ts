@@ -22,8 +22,8 @@ test("loading declarations do not expose the private renderer dependency", async
   try {
     const compiler = Bun.spawn({
       cmd: [
-        process.execPath,
-        resolve(import.meta.dir, "../../../node_modules/typescript/bin/tsc"),
+        "node",
+        resolve(import.meta.dir, "../../../node_modules/tsrs/bin/tsrs"),
         "--ignoreConfig",
         "--noCheck",
         "--declaration",

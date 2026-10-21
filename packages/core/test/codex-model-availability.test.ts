@@ -5,7 +5,7 @@ import {
   withCodexCatalogProvider,
 } from "@opengeni/config";
 import type { CodexAccountStatus, CodexCredentialForRun, Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   loadCodexAccountsLackingModel,
   loadWorkspaceCodexModelAvailability,

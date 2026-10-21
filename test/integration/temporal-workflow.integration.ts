@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { ApplicationFailure } from "@temporalio/activity";
 import { NativeConnection, Worker } from "@temporalio/worker";
-import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { waitFor } from "@opengeni/testing/process";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,

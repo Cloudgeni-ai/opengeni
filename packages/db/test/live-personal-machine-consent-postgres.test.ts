@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
@@ -14,11 +14,16 @@ import {
   ensureManagedAccessForUser,
   getSandbox,
   getSandboxForAttempt,
+  getSessionMachineAccess,
+  transitionSessionVisibility,
   initializeSessionStartAtomically,
+  isSessionEventPersistenceError,
   recoverSessionDispatch,
   resolvePersonalMachineConnectionForAttempt,
   resolvePersonalMachineRouteForAttempt,
   setActiveSandbox,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   withRlsContext,
   type DbClient,
 } from "../src/index";
@@ -51,6 +56,8 @@ async function fixture() {
   const memberUser = `machine-member-${crypto.randomUUID()}`;
   const owner = `user:${ownerUser}`;
   const member = `user:${memberUser}`;
+  await shared.admin`insert into auth_users(id, name, email)
+    values (${ownerUser}, 'Alex Owner', ${`${ownerUser}@example.test`})`;
   const access = await ensureManagedAccessForUser(client.db, {
     userId: ownerUser,
     email: `${ownerUser}@example.test`,
@@ -85,6 +92,8 @@ async function fixture() {
     values (${accountId}, ${workspaceId}, ${member}, 'member', '["sessions:read","sessions:create","sessions:control"]'::jsonb)`;
   await shared.admin`insert into session_tenancy_activations(account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'machine-consent-test')`;
+  await shared.admin`insert into organization_private_session_settings(account_id, enabled, version)
+    values (${accountId}, true, 1) on conflict (account_id) do update set enabled = true`;
   const machines = await app.begin(async (tx) => {
     await tx`select set_config('opengeni.account_id', ${accountId}, true),
       set_config('opengeni.workspace_id', ${workspaceId}, true), set_config('opengeni.subject_id', ${owner}, true)`;
@@ -119,6 +128,168 @@ async function claim(workspaceId: string, sessionId: string) {
 }
 
 describe("live personal machine consent under FORCE RLS", () => {
+  test("machine explanation follows chat visibility, not machine discovery or a foreign tenant", async () => {
+    const f = await fixture();
+    const session = await createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await setActiveSandbox(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: session.id,
+      subjectId: f.owner,
+      expectedEpoch: session.activeEpoch,
+      targetSandboxId: f.sandboxId,
+    });
+    const explanation = (subjectId: string, accountId = f.accountId, sessionId = session.id) =>
+      getSessionMachineAccess(client.db, {
+        accountId,
+        workspaceId: f.workspaceId,
+        sessionId,
+        subjectId,
+      });
+    expect(await explanation(f.owner)).toMatchObject({
+      sandboxId: f.sandboxId,
+      machineName: "Build machine",
+      ownerName: "Alex Owner",
+      isOwner: true,
+      queuedTurnBlocked: false,
+    });
+    expect(await explanation(f.member)).toMatchObject({ isOwner: false, queuedTurnBlocked: false });
+    expect(await getSandbox(client.db, { ...f, subjectId: f.member }, f.sandboxId)).toBeNull();
+    expect(await explanation(f.member, crypto.randomUUID())).toBeNull();
+    expect(await explanation(f.member, f.accountId, crypto.randomUUID())).toBeNull();
+    expect(await explanation(`user:outsider-${crypto.randomUUID()}`)).toBeNull();
+    await transitionSessionVisibility(client.db, {
+      workspaceId: f.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: f.owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(await explanation(f.member)).toBeNull();
+    expect(await explanation(f.owner)).toMatchObject({ isOwner: true });
+    await transitionSessionVisibility(client.db, {
+      workspaceId: f.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: f.owner,
+      targetVisibility: "workspace_shared",
+      expectedAuthorityEpoch: 2,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(await explanation(f.member)).toMatchObject({ isOwner: false });
+    await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspaceId} and subject_id = ${f.member}`;
+    expect(await explanation(f.member)).toBeNull();
+  });
+
+  test("a member cannot inherit the chat owner's personal machine without consent", async () => {
+    const f = await fixture();
+    const session = await createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    expect(
+      await setActiveSandbox(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.owner,
+        expectedEpoch: session.activeEpoch,
+        targetSandboxId: f.sandboxId,
+      }),
+    ).toMatchObject({ swapped: true });
+    await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.member, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          sessionId: session.id,
+          subjectId: f.member,
+          actor: { type: "human", subjectId: f.member },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Member follow-up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      ),
+    );
+    let rejected: unknown;
+    try {
+      await claim(f.workspaceId, session.id);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(isSessionEventPersistenceError(rejected)).toBe(true);
+    if (!isSessionEventPersistenceError(rejected)) throw new Error("expected claim rejection");
+    expect(rejected.details).toMatchObject({ stage: "session_attempts.claim", sqlState: "42501" });
+    const queryError = rejected.cause as {
+      query: string;
+      cause: { message: string; where: string };
+    };
+    expect(queryError.query).toStartWith('insert into "session_turn_attempts"');
+    expect(queryError.cause.message).toBe("only the personal machine owner may attach it");
+    expect(queryError.cause.where).toContain("admit_session_attempt_personal_machine()");
+    expect(
+      await shared.admin`select id from session_turn_attempts where session_id = ${session.id}`,
+    ).toHaveLength(0);
+    const [queued] =
+      await shared.admin`select id, status, initiating_human_subject_id from session_turns where session_id = ${session.id}`;
+    expect(queued).toMatchObject({ status: "queued", initiating_human_subject_id: f.member });
+    for (const subjectId of [f.owner, f.member]) {
+      expect(
+        await getSessionMachineAccess(client.db, { ...f, sessionId: session.id, subjectId }),
+      ).toMatchObject({ queuedTurnBlocked: true, isOwner: subjectId === f.owner });
+    }
+
+    // Changing to a workspace machine fixes the actual permission problem;
+    // replaying the claim alone must never borrow the previous owner's identity.
+    const [workspaceMachine] = await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${f.accountId}, true),
+        set_config('opengeni.workspace_id', ${f.workspaceId}, true), set_config('opengeni.subject_id', ${f.owner}, true)`;
+      return await tx`select sandbox_id from finalize_scoped_enrollment(
+        ${f.accountId}::uuid, ${f.workspaceId}::uuid, 'workspace',
+        ${`ed25519:shared-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Shared build machine', false)`;
+    });
+    expect(
+      await setActiveSandbox(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.member,
+        expectedEpoch: session.activeEpoch + 1,
+        targetSandboxId: workspaceMachine!.sandbox_id,
+      }),
+    ).toMatchObject({ swapped: true });
+    expect(
+      await getSessionMachineAccess(client.db, {
+        ...f,
+        sessionId: session.id,
+        subjectId: f.member,
+      }),
+    ).toBeNull();
+    const started = await claim(f.workspaceId, session.id);
+    expect(started.turnId).toBe(queued!.id);
+  });
   for (const starter of ["owner", "member", "service"] as const) {
     test(`owner click admits the ${starter} turn and replacement attempt without borrowing identity`, async () => {
       const f = await fixture();

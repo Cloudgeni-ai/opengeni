@@ -1,5 +1,30 @@
 # @opengeni/xai-subscription
 
+## 4.3.1
+
+### Patch Changes
+
+- Updated dependencies [d1de8b4]
+  - @opengeni/network@4.3.0
+
+## 4.2.0
+
+### Patch Changes
+
+- @opengeni/network@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- @opengeni/network@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- @opengeni/network@4.1.0
+
 ## 4.0.4
 
 ### Patch Changes

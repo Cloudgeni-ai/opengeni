@@ -335,6 +335,74 @@ describe("SDK-backed editable document", () => {
     await rendered.unmount();
   });
 
+  test("downloads DOCX only after typed text has been submitted", async () => {
+    const fake = new FakeDocumentSession();
+    const apply = fake.applyDocumentCommands.bind(fake);
+    let release!: () => void;
+    fake.applyDocumentCommands = async (batch) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return apply(batch);
+    };
+    const downloads: AbortSignal[] = [];
+    const saved: string[] = [];
+    const oldCreate = URL.createObjectURL;
+    const oldRevoke = URL.revokeObjectURL;
+    const oldClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = () => "blob:test";
+    URL.revokeObjectURL = () => {};
+    HTMLAnchorElement.prototype.click = function () {
+      saved.push(this.download);
+    };
+    const rendered = await renderComponent(
+      <EditableDocumentArtifactSurface
+        session={fake as unknown as EditableArtifactSession}
+        title="Plan: 2027"
+        layout="continuous"
+        viewportHeight={240}
+        download={async (signal) => {
+          downloads.push(signal);
+          return new Blob(["docx"]);
+        }}
+      />,
+    );
+    try {
+      await flush(20);
+      const download = [...rendered.container.querySelectorAll("button")].find((candidate) =>
+        candidate.textContent?.includes("Download"),
+      )!;
+      expect(download.disabled).toBe(false);
+      expect(download.title).toBe("Download document as DOCX");
+
+      const editor = rendered.container.querySelector<HTMLElement>(
+        `[data-og-paragraph="${PARAGRAPH_ID}"]`,
+      )!;
+      editor.textContent = "Alpha 😀 strong omega";
+      await actRun(() => {
+        editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        // Same event turn: the edit is submitting but not yet an SDK pending transaction.
+        download.click();
+      });
+      expect(downloads).toHaveLength(0);
+      expect(download.disabled).toBe(true);
+
+      await actRun(() => release());
+      await flush(20);
+      expect(fake.commands).toHaveLength(1);
+      expect(download.disabled).toBe(false);
+      await actRun(() => download.click());
+      await flush();
+      expect(downloads).toHaveLength(1);
+      expect(saved).toEqual(["Plan_ 2027.docx"]);
+    } finally {
+      await rendered.unmount();
+      URL.createObjectURL = oldCreate;
+      URL.revokeObjectURL = oldRevoke;
+      HTMLAnchorElement.prototype.click = oldClick;
+    }
+  });
+
   test("starts an empty durable document through the SDK allocator", async () => {
     const fake = new FakeDocumentSession(null);
     const rendered = await renderComponent(

@@ -48,7 +48,7 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { SkillSaveInput } from "@opengeni/contracts";
 import { stableJson, skillReviewHumanInput, type SkillReviewReference } from "@opengeni/contracts";
 import {

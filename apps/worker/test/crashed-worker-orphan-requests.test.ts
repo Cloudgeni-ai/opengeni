@@ -10,22 +10,21 @@ import postgres from "postgres";
 import { type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGeneration,
+  advanceWorkspaceGenerationForDirectRequest,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   enrollRetainedCommandContainment,
   initializeSessionStartAtomically,
   readLease,
+  reapStaleLeaseHolders,
   retainWorkspaceMutationProcess,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
 import {
@@ -271,8 +270,96 @@ async function crashedAttemptFixture(
 
 type Fixture = Awaited<ReturnType<typeof crashedAttemptFixture>>;
 
+/** A Files/Terminal style API request on a warm Modal box whose API process
+ * died mid-operation: its admission was never settled and its direct holder
+ * stopped heartbeating. The real holder reaper then removes the holder. */
+async function deadApiRequestFixture(options: { persistence?: "snapshot_directory" | "tar" } = {}) {
+  const [account] = await admin<{ id: string }[]>`
+    insert into managed_accounts (name) values ('dead-api-request') returning id`;
+  const [workspace] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${account!.id}, 'dead-api-request')
+    returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id)
+    values (${workspace!.id}, ${account!.id})`;
+  const ids = { accountId: account!.id, workspaceId: workspace!.id };
+  const session = await createSession(db, {
+    ...ids,
+    initialMessage: "edit files from the browser",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await initializeSessionStartAtomically(db, {
+    ...ids,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const requestId = crypto.randomUUID();
+  const holderId = `direct:${requestId}`;
+  const instanceId = `box-${crypto.randomUUID()}`;
+  const [lease] = await admin<{ id: string }[]>`
+    insert into sandbox_leases (account_id, workspace_id, sandbox_group_id, liveness, refcount,
+      turn_holders, viewer_holders, instance_id, backend, lease_epoch, resume_backend_id,
+      resume_state, expires_at)
+    values (${ids.accountId}, ${ids.workspaceId}, ${session.sandboxGroupId}, 'warm', 1, 0, 0,
+      ${instanceId}, 'modal', ${EPOCH}, 'modal',
+      ${JSON.stringify({
+        backendId: "modal",
+        sessionState: {
+          providerState: {
+            sandboxId: instanceId,
+            ...((options.persistence ?? "snapshot_directory") === "tar"
+              ? {}
+              : { workspacePersistence: options.persistence ?? "snapshot_directory" }),
+          },
+        },
+      })}::text::jsonb,
+      now() + interval '10 minutes')
+    returning id`;
+  await admin`insert into sandbox_lease_holders
+    (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
+    values (${ids.accountId}, ${lease!.id}, ${ids.workspaceId}, 'direct', ${holderId},
+      ${session.id}, now())`;
+  const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
+    ...ids,
+    sessionId: session.id,
+    requestId,
+    holderId,
+    initiatorSubjectId: "subject:dead-api-request",
+    sandboxGroupId: session.sandboxGroupId,
+    expectedEpoch: EPOCH,
+    expectedInstanceId: instanceId,
+    routeTargetId: null,
+    routeEpoch: 0,
+    operation: "writeFile",
+  });
+  // The API process died: no settlement, no release, no more heartbeats.
+  await admin`update sandbox_lease_holders set last_heartbeat_at = now() - interval '10 minutes'
+    where lease_id = ${lease!.id} and holder_id = ${holderId}`;
+  const reaped = await reapStaleLeaseHolders(db, {
+    workspaceId: ids.workspaceId,
+    viewerHolderTtlMs: SETTINGS.sandboxViewerHolderTtlMs,
+    idleGraceMs: 0,
+  });
+  expect(reaped.reapedDirect).toBe(1);
+  await admin`update sandbox_leases set expires_at = now() - interval '1 second'
+    where id = ${lease!.id}`;
+  return {
+    ...ids,
+    sessionId: session.id,
+    instanceId,
+    leaseId: lease!.id,
+    sandboxGroupId: session.sandboxGroupId,
+    orphanId: admission.id,
+  };
+}
+
 /** Move every durable idleness fact of the fixture's group back in time. */
-async function idleFor(fixture: Fixture, minutes: number) {
+async function idleFor(fixture: Pick<Fixture, "workspaceId" | "leaseId">, minutes: number) {
   const ago = `${minutes} minutes`;
   await admin`update session_turns set finished_at = now() - ${ago}::interval
     where workspace_id = ${fixture.workspaceId} and finished_at is not null`;
@@ -285,7 +372,7 @@ async function idleFor(fixture: Fixture, minutes: number) {
     where id = ${fixture.leaseId}`;
 }
 
-async function drain(fixture: Fixture) {
+async function drain(fixture: Pick<Fixture, "workspaceId" | "sandboxGroupId" | "instanceId">) {
   const spy = terminateSpy();
   const probes: string[] = [];
   const activities = createSandboxLeaseActivities(services(), {
@@ -311,7 +398,7 @@ async function drain(fixture: Fixture) {
   return { result, persisted: spy.persisted, probes };
 }
 
-async function orphanRow(fixture: Fixture) {
+async function orphanRow(fixture: Pick<Fixture, "orphanId">) {
   const [row] = await admin<{ provider_outcome: string | null; settled_at: Date | null }[]>`
     select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
     where id = ${fixture.orphanId}`;
@@ -610,5 +697,35 @@ describe("requests left by a crashed worker", () => {
       }),
     ).toBeNull();
     expect((await orphanRow(held)).settled_at).toBeNull();
+  }, 60_000);
+
+  test("a request whose API process died no longer pins the zero-holder drain", async () => {
+    const fixture = await deadApiRequestFixture();
+    // The reaper removed the dead holder but left its request open: before,
+    // that request refused every capture of this box.
+    expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
+      liveness: "draining",
+      refcount: 0,
+    });
+    expect((await orphanRow(fixture)).settled_at).toBeNull();
+    const { result, persisted, probes } = await drain(fixture);
+    expect(probes).toEqual([]);
+    expect(persisted).toEqual([true]);
+    expect(result.status).toBe("terminated");
+    expect(await readLease(db, fixture.workspaceId, fixture.sandboxGroupId)).toMatchObject({
+      liveness: "cold",
+      archiveComplete: true,
+    });
+    const orphan = await orphanRow(fixture);
+    expect(orphan.provider_outcome).toBe("rejected");
+    expect(orphan.settled_at).not.toBeNull();
+  }, 60_000);
+
+  test("a tar-style capture of a running box keeps a dead API request as a blocker", async () => {
+    const fixture = await deadApiRequestFixture({ persistence: "tar" });
+    const { result, persisted } = await drain(fixture);
+    expect(persisted).toEqual([]);
+    expect(result.status).toBe("skipped");
+    expect((await orphanRow(fixture)).settled_at).toBeNull();
   }, 60_000);
 });

@@ -2,17 +2,17 @@ import { expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client, Connection } from "@temporalio/client";
 import postgres from "postgres";
+import { acquireRestrictedRuntimeTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort, startTestServices } from "@opengeni/testing/compose";
 import {
-  acquireRestrictedRuntimeTestDatabase,
-  freePort,
   startE2eWorkerTopology,
   startProcess,
-  startTestServices,
   waitFor,
   type StartedE2eWorkerTopology,
   type StartedProcess,
-} from "@opengeni/testing";
+} from "@opengeni/testing/process";
 
 // Task usage limits across a real crash and repeated wakes: a real API process,
 // real control and turn worker processes, PostgreSQL in the restricted runtime
@@ -132,6 +132,7 @@ test("a worker crash and repeated wakes at the task usage limit never replay or 
     }),
   };
   let api: StartedProcess | undefined;
+  let temporal: Connection | undefined;
   const generations: StartedE2eWorkerTopology[] = [];
   const startWorkers = async (phase: "hold" | "answer") => {
     const topology = await startE2eWorkerTopology({
@@ -247,6 +248,19 @@ test("a worker crash and repeated wakes at the task usage limit never replay or 
 
     // Wake 2: crash the answering generation and start another. Its wake
     // dispatcher and maintenance run, but nothing at the limit is dispatched.
+    // The session reads idle before its workflow finishes the trailing
+    // bookkeeping activities. A SIGKILL inside that window strands an
+    // activity until its two-minute start-to-close retry, which is the
+    // platform's crash-recovery bound but longer than this quiet-phase check,
+    // so crash only once the run has closed.
+    temporal = await Connection.connect({ address: stack.temporalHost });
+    const workflow = new Client({ connection: temporal }).workflow.getHandle(
+      `session-${sessionId}`,
+    );
+    await waitFor(async () => (await workflow.describe()).status.name !== "RUNNING", {
+      timeoutMs: 60_000,
+      describe,
+    });
     await crash(generations.at(-1)!);
     await startWorkers("answer");
     await Bun.sleep(15_000);
@@ -294,6 +308,7 @@ test("a worker crash and repeated wakes at the task usage limit never replay or 
     expect(count(final, "turn.failed")).toBe(0);
     expect((await usage()).status).toBe("within");
   } finally {
+    await temporal?.close();
     for (const topology of generations) {
       await Bun.write(
         `${receiptDir}/workers-${generations.indexOf(topology)}.log`,

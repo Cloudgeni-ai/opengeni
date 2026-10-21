@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { createDb, createManagedOrganization, type DbClient } from "../src";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 const migration = readFileSync(
   new URL("../drizzle/0331_managed_organization_creation.sql", import.meta.url),

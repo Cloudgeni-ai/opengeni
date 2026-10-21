@@ -26,6 +26,9 @@ export type BrowserTextTarget = {
   title: string;
   url: string;
   selected?: boolean | undefined;
+  controllerGeneration?: string | undefined;
+  targetGeneration?: string | undefined;
+  documentGeneration?: string | null | undefined;
 };
 
 export type BrowserTextObservation = {
@@ -129,6 +132,14 @@ function quoted(value: string): string {
   return JSON.stringify(value);
 }
 
+/** Longest form field value shown inline; browser_read mode=dom returns more. */
+const SHOWN_VALUE_MAX_CHARS = 2_000;
+
+function shownValue(value: string): string {
+  if (value.length <= SHOWN_VALUE_MAX_CHARS) return `value=${quoted(value)}`;
+  return `value=${quoted(`${value.slice(0, SHOWN_VALUE_MAX_CHARS)}…`)} valueChars=${value.length}`;
+}
+
 export function browserNodeLine(node: BrowserTextNode, allRefs: boolean, baseDepth = 0): string {
   const parts = [`${"  ".repeat(Math.max(0, node.depth - baseDepth))}- ${node.role}`];
   if (node.name) parts.push(quoted(node.name));
@@ -136,7 +147,7 @@ export function browserNodeLine(node: BrowserTextNode, allRefs: boolean, baseDep
     parts.push(`[${node.ref}]`);
   }
   if (node.value !== undefined && node.value !== "") {
-    parts.push(typeof node.value === "string" ? `value=${quoted(node.value)}` : "value=<redacted>");
+    parts.push(typeof node.value === "string" ? shownValue(node.value) : "value=<redacted>");
   }
   if (node.description) parts.push(`description=${quoted(node.description)}`);
   for (const state of node.states ?? []) if (shownState(node.role, state)) parts.push(state);
@@ -229,20 +240,72 @@ export function browserObservationText(
   }
   if (view.sourceKind === "none") {
     lines.push("No accessibility view is available for this tab.");
+  } else if (view.sourceKind === "diff") {
+    lines.push(
+      nodes.length === 0 && !view.removedRefCount
+        ? "No element changed since your last reading of this page; its refs are still valid."
+        : "Changed elements since your last reading of this page; elements not listed are unchanged and keep their refs:",
+    );
+    for (const node of nodes) lines.push(browserNodeLine(node, allRefs, node.depth));
   } else {
-    if (view.sourceKind === "diff") lines.push("Changed elements:");
     const base = shallowestDepth(nodes);
     for (const node of nodes) lines.push(browserNodeLine(node, allRefs, base));
   }
   const notes = [
-    view.omittedNodeCount
+    view.omittedNodeCount && view.sourceKind !== "diff"
       ? `${plural(view.omittedNodeCount, "element")} not shown${omittedRegionText(view.omittedRegions)}`
       : null,
-    view.removedRefCount ? `${plural(view.removedRefCount, "earlier element")} removed` : null,
+    view.removedRefCount
+      ? `${plural(view.removedRefCount, "element")} from your last reading ${view.removedRefCount === 1 ? "is" : "are"} gone or no longer listed`
+      : null,
     view.clippedFieldCount ? `${plural(view.clippedFieldCount, "long field")} clipped` : null,
   ].filter((entry): entry is string => entry !== null);
   if (notes.length) lines.push(`(${notes.join("; ")})`);
   return lines.join("\n");
+}
+
+/**
+ * The part of a page reading that differs from the reading of the same page
+ * the model last saw, for the outline an action returns. A ref names the same
+ * element for as long as its document lives, so the model keeps acting on the
+ * refs it holds and reads only what the action changed: filling one field
+ * returns that field, not the whole form again, and an action that changed
+ * nothing says so. The whole outline is kept whenever a diff would not help
+ * or could mislead: another tab, page or document, a page without an outline,
+ * or a reading in which most of what the model saw changed.
+ */
+export function browserObservationDiff<Observation extends BrowserTextObservation>(
+  base: BrowserTextObservation,
+  next: Observation,
+): Observation | null {
+  if (
+    base.agentView.sourceKind !== "snapshot" ||
+    next.agentView.sourceKind !== "snapshot" ||
+    base.target.id !== next.target.id ||
+    base.target.url !== next.target.url ||
+    base.target.controllerGeneration !== next.target.controllerGeneration ||
+    base.target.targetGeneration !== next.target.targetGeneration ||
+    (base.target.documentGeneration ?? null) !== (next.target.documentGeneration ?? null)
+  )
+    return null;
+  // Indentation is relative to the view it was listed in, not the element.
+  const content = ({ depth: _depth, ...node }: BrowserTextNode) => JSON.stringify(node);
+  const earlier = new Map(base.agentView.nodes.map((node) => [node.ref, content(node)]));
+  const changed = next.agentView.nodes.filter((node) => earlier.get(node.ref) !== content(node));
+  const listed = new Set(next.agentView.nodes.map((node) => node.ref));
+  const gone = base.agentView.nodes.filter((node) => !listed.has(node.ref)).length;
+  const size = Math.max(base.agentView.nodes.length, next.agentView.nodes.length);
+  if ((changed.length + gone) * 2 > size) return null;
+  const { omittedRegions: _regions, ...view } = next.agentView;
+  return {
+    ...next,
+    agentView: {
+      ...view,
+      sourceKind: "diff",
+      nodes: changed.map((node) => ({ ...node, depth: 0 })),
+      ...(gone > 0 ? { removedRefCount: gone } : {}),
+    },
+  };
 }
 
 export type BrowserTextResolvedTarget = {
@@ -336,8 +399,10 @@ export function browserOpenText(output: {
   observation?: BrowserTextObservation | undefined;
   attachedProfile?: AttachedProfileText | undefined;
   otherAttachedProfiles?: readonly AttachedProfileText[] | undefined;
+  notice?: string | undefined;
 }): string {
   const lines = [browserSessionLine(output.session)];
+  if (output.notice) lines.push(output.notice);
   if (output.attachedProfile) {
     lines.push(`Attached Chrome profile: ${attachedProfileText(output.attachedProfile)}`);
   }
@@ -366,7 +431,11 @@ export function browserTabsText(output: {
   const lines = [
     `BrowserSession ${output.browserSessionId} has ${plural(output.targets.length, "tab")}:`,
   ];
-  for (const target of output.targets) lines.push(browserTargetLine(target));
+  // The observation starts with its tab's own line, so list that tab once.
+  const observedId = output.mutationObservation?.target.id;
+  for (const target of output.targets) {
+    if (target.id !== observedId) lines.push(browserTargetLine(target));
+  }
   if (output.mutationObservation) lines.push(browserObservationText(output.mutationObservation));
   return lines.join("\n");
 }

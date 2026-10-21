@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   claimSessionWorkForAttempt,
   createDb,

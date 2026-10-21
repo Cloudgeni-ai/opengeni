@@ -24,7 +24,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   catalog: TCatalog;
 };
 
-export type LatencyModeId = "standard" | "priority" | "fast";
+export type LatencyModeId = "standard" | "priority" | "fast" | "ultrafast";
 
 const BILLING_CLASS_LABELS = (t: OpenGeniText): Record<PickerBillingClass, string> => ({
   opengeni_credits: t("modelPolicy.models"),
@@ -60,7 +60,9 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   if (
     model.provider === "organization-gateway" ||
     model.provider === "organization-openrouter" ||
-    model.provider === "organization-opper"
+    model.provider === "organization-opper" ||
+    model.provider === "organization-openai" ||
+    model.provider === "organization-azure-openai"
   ) {
     return "organization_byok";
   }
@@ -162,6 +164,9 @@ export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[
 export function labelLatencyMode(t: OpenGeniText, mode: LatencyModeId): string {
   if (mode === "fast") {
     return t("modelPolicy.fast");
+  }
+  if (mode === "ultrafast") {
+    return t("modelPolicy.ultrafast");
   }
   if (mode === "priority") {
     return t("modelPolicy.priority");
@@ -294,6 +299,12 @@ function organizationProviderPayerSummary(t: OpenGeniText, model: ClientModel): 
   if (model.provider === "organization-opper") {
     return t("modelPolicy.billedToTheOrganizationOpper");
   }
+  if (model.provider === "organization-openai") {
+    return t("modelPolicy.billedToTheOrganizationOpenai");
+  }
+  if (model.provider === "organization-azure-openai") {
+    return t("modelPolicy.billedToTheOrganizationAzureOpenai");
+  }
   if (model.provider === "organization-gateway") {
     return t("modelPolicy.billedToTheOrganizationVercel");
   }
@@ -338,21 +349,26 @@ function withoutTrailingQualifiers(name: string): string {
   return words.join(" ");
 }
 
+/**
+ * Older published Site hosts list bare `{ id }` rows. A row without readiness
+ * or availability is one the server offers, so it is ready and selectable.
+ */
 export function projectPickerRows(
   t: OpenGeniText,
   models: WorkspaceModelCatalogModel[],
 ): PickerModelRow[] {
   return models
-    .filter((catalog) => catalog.credentialReadiness.status === "ready")
+    .filter((catalog) => (catalog.credentialReadiness?.status ?? "ready") === "ready")
     .map((catalog) => {
       const billingClass = billingClassForModel(catalog);
+      const selectable = catalog.availability?.selectable ?? true;
       return {
         id: catalog.id,
         label: modelDisplayName(catalog),
         ...compactLabel(catalog),
         billingClass,
         billingClassLabel: billingClassLabel(t, billingClass),
-        selectable: catalog.availability.selectable,
+        selectable,
         fundingHint:
           catalog.creditFunding === "promotional"
             ? t("modelPolicy.freeCredits")
@@ -361,9 +377,9 @@ export function projectPickerRows(
               : catalog.creditFunding === "unavailable"
                 ? t("modelPolicy.needsCredits")
                 : undefined,
-        unavailableReason: catalog.availability.selectable
+        unavailableReason: selectable
           ? null
-          : availabilityReasonLabel(t, catalog.availability.reason),
+          : availabilityReasonLabel(t, catalog.availability?.reason ?? null),
         provider: catalog.provider,
         providerLabel: catalog.providerLabel,
         catalog,

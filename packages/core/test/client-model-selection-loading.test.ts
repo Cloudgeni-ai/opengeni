@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { EMPTY_ORGANIZATION_MODEL_DEFAULTS } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { requireLimit } from "../src/billing/limits";
 import * as codexAvailability from "../src/codex-model-availability";
 import {
@@ -33,6 +33,7 @@ describe("fresh model admission versus live discovery", () => {
     typeof spyOn<typeof opengeniDb, "getWorkspaceConnectionModelRestrictions">
   >;
   let policy: ReturnType<typeof spyOn<typeof opengeniDb, "getWorkspaceModelPolicy">>;
+  let metadata: ReturnType<typeof spyOn<typeof opengeniDb, "listConnectionsMetadata">>;
   let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getBillingBalance">>;
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
 
@@ -42,6 +43,7 @@ describe("fresh model admission versus live discovery", () => {
       async (_db, _workspace, _subject, _claude, coreRestrictions) => coreRestrictions ?? {},
     );
     policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
+    metadata = spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]);
     availability = mock(async () => ({}));
     balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
       accountId: context.accountId,
@@ -77,7 +79,7 @@ describe("fresh model admission versus live discovery", () => {
       ),
       balance,
       allowance,
-      spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
+      metadata,
       spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
         vercel_gateway: [],
         openrouter: [],
@@ -223,6 +225,59 @@ describe("fresh model admission versus live discovery", () => {
     expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
     expect(loaded.claudeConnections?.claude_subscription?.active).toBe(false);
     expect(restrictions.mock.calls[0]?.[3]).toEqual(snapshot);
+  });
+
+  const poolDb = { transaction() {} } as unknown as opengeniDb.Database;
+
+  test("a pool-backed invocation shares even empty public metadata with restrictions", async () => {
+    await loadWorkspaceModelSelectionInput(poolDb, settings, context);
+    expect(metadata).toHaveBeenCalledTimes(1);
+    expect(metadata).toHaveBeenCalledWith(poolDb, context.workspaceId, null);
+    expect(restrictions.mock.calls[0]?.[5]).toBeInstanceOf(Promise);
+    expect(await restrictions.mock.calls[0]?.[5]).toEqual([]);
+  });
+
+  test("minimal custom ports keep the independent restriction fallback", async () => {
+    await loadWorkspaceModelSelectionInput(db, settings, context);
+    expect(metadata).toHaveBeenCalledTimes(1);
+    expect(restrictions.mock.calls[0]?.[5]).toBeUndefined();
+  });
+
+  test("transaction handles finish the input batch before reading catalog metadata", async () => {
+    const transaction = { transaction() {}, rollback() {} } as unknown as opengeniDb.Database;
+    let restrictionsFinished = false;
+    restrictions.mockImplementation(async () => {
+      await Promise.resolve();
+      restrictionsFinished = true;
+      return {};
+    });
+    metadata.mockImplementation(async () => {
+      expect(restrictionsFinished).toBe(true);
+      return [];
+    });
+    await loadWorkspaceModelSelectionInput(transaction, settings, context);
+    expect(metadata).toHaveBeenCalledTimes(1);
+    expect(restrictions.mock.calls[0]?.[5]).toBeUndefined();
+  });
+
+  test("metadata failure preserves input-error precedence and requests the original restriction fallback", async () => {
+    const catalogFailure = new Error("metadata unavailable");
+    const inputFailure = new Error("restrictions unavailable");
+    metadata.mockRejectedValue(catalogFailure);
+    restrictions.mockRejectedValue(inputFailure);
+    await expect(loadWorkspaceModelSelectionInput(poolDb, settings, context)).rejects.toBe(
+      inputFailure,
+    );
+    expect(await restrictions.mock.calls[0]?.[5]).toBeUndefined();
+  });
+
+  test("a successful restriction fallback cannot hide catalog metadata failure", async () => {
+    const catalogFailure = new Error("metadata unavailable");
+    metadata.mockRejectedValue(catalogFailure);
+    await expect(loadWorkspaceModelSelectionInput(poolDb, settings, context)).rejects.toBe(
+      catalogFailure,
+    );
+    expect(await restrictions.mock.calls[0]?.[5]).toBeUndefined();
   });
 
   describe("on Claude's core route", () => {

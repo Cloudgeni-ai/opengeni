@@ -2,7 +2,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
 import * as runAdmission from "../src/billing/agent-run-admission";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withClaudeConnectionCatalog } from "@opengeni/config";
 import {
   assertGoalResumeAllowed,
@@ -136,7 +136,7 @@ test("Resume pauses a credit model when the workspace turned Opengeni credits of
     allowedModels: null,
     allowCreditModels: false,
   } as never);
-  await expect(value.resume()).rejects.toThrow("Opengeni credits are turned off");
+  await expect(value.resume()).rejects.toThrow("Credits are turned off");
   expect(value.admission).not.toHaveBeenCalled();
 });
 
@@ -177,8 +177,8 @@ test("a host funding denial is neutral about the host's private balance and poli
 });
 
 for (const [denial, pausedReason, message] of [
-  ["insufficient_credits", "credits", "Insufficient Opengeni credits"],
-  ["allowance_exhausted", "allowance", "usage allowance exhausted"],
+  ["insufficient_credits", "credits", "Insufficient workspace credits"],
+  ["allowance_exhausted", "allowance", "Usage allowance exhausted"],
   ["monthly_model_cost_limit", "budget", "spending limit reached"],
   ["monthly_agent_run_limit", "usage_limit", "agent run limit reached"],
 ] as const) {

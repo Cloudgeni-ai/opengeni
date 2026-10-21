@@ -1,14 +1,14 @@
-import { newSessionPersonalResourceAttachment } from "../src/lib/personal-resource-attachments";
-import { FailedSessionBanner } from "../src/components/session/failed-session-banner";
+import { newSessionPersonalResourceAttachment } from "@opengeni/react/app/lib/personal-resource-attachments";
+import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
 import { SessionChrome, type UseTurnQueueResult } from "@opengeni/react";
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { PersonalResourceAttachmentSurface as PersonalResourceAttachmentControl } from "../src/components/personal-resource-attachment-surface";
+import { PersonalResourceAttachmentSurface as PersonalResourceAttachmentControl } from "@opengeni/react/app/components/personal-resource-attachment-surface";
 import type {
   PersonalResourceAttachmentController,
   PersonalResourceNotice,
-} from "../src/lib/use-personal-resource-attachment";
+} from "@opengeni/react/app/lib/use-personal-resource-attachment";
 import "../src/styles.css";
 
 const connectedMachine = {

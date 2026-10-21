@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { Workspace } from "@/types";
+import type { Workspace } from "@opengeni/react/app/types";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
@@ -22,7 +22,7 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
 }));
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     clientConfig: { auth: { mode: "managedSession" } },
     authSession: { user: { id: managedUserId, emailVerified } },
@@ -64,7 +64,7 @@ mock.module("@/context", () => ({
   }),
 }));
 
-mock.module("@/components/rail/rail-context", () => ({
+mock.module("@opengeni/react/app/components/rail/rail-context", () => ({
   useRail: () => ({
     workspaceId,
     collapsed,
@@ -81,7 +81,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const { SwitcherBlock, useNewOrganizationMenuItem } = await import("./switcher-block");
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
-  await import("@/components/ui/dropdown-menu");
+  await import("@opengeni/react/ui/dropdown-menu");
 
 function AccountMenuProbe() {
   const newOrganization = useNewOrganizationMenuItem();

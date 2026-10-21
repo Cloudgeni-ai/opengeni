@@ -7,6 +7,7 @@ import {
   resourceMountPath,
   readTurnExecutionPolicyV1,
   readTurnServingPolicyV1,
+  renderAppShotForModel,
   type FileAsset,
   type ResourceRef,
 } from "@opengeni/contracts";
@@ -151,6 +152,7 @@ export type TurnInputOptions = {
   codemodeContinuationNote?: string;
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
+  workspaceRecoveryNote?: string;
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
@@ -621,12 +623,19 @@ export function createModelHistoryAttachmentProjector(
           resolvedFileIds.has(ref.fileId) &&
           currentFile === undefined;
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
+        // An app-shot's window text belongs to the message it was sent with
+        // and comes from the file's immutable capture, so it renders the same
+        // on every turn. It follows the file's authority like the pixels do.
+        const appShot = currentFile?.appShot
+          ? [{ type: "input_text", text: renderAppShotForModel(ref.fileId, currentFile.appShot) }]
+          : [];
         if (!attachment || attachment.kind !== "image") {
           return [
             {
               type: "input_text",
               text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
             },
+            ...appShot,
           ];
         }
         const bound = attachmentImageBound(original);
@@ -634,6 +643,7 @@ export function createModelHistoryAttachmentProjector(
         return [
           { type: "input_text", text: attachmentReceiptText(ref) + (bounded?.note ?? "") },
           { type: "input_image", image: bounded?.image ?? attachment.dataUrl },
+          ...appShot,
         ];
       });
       const clone: Record<string, unknown> = {
@@ -716,6 +726,7 @@ export async function turnInput(
     options.mcpAvailabilityNote,
     options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
+    options.workspaceRecoveryNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {

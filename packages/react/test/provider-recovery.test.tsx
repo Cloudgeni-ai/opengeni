@@ -266,3 +266,24 @@ test("an embedded conversation shows the live retry status above the composer", 
     await view.unmount();
   }
 });
+
+test("internal MCP outage notice waits automatically without a finite attempt budget", async () => {
+  for (const payload of [
+    { code: "first_party_mcp_setup_unavailable", retryable: true, continueDelayMs: 30_000 },
+    {
+      code: "first_party_mcp_setup_unavailable",
+      retryable: true,
+      databaseFailureCode: "db_failure",
+    },
+  ]) {
+    const facts = parseProviderRecovery(payload);
+    expect(facts).toMatchObject({ attempt: null, maxAttempts: null, modelRoute: false });
+    const view = await renderComponent(<ProviderRecoveryNotice recovery={facts} />);
+    expect(view.container.textContent).toContain(
+      "Opengeni’s tool service is temporarily unavailable",
+    );
+    expect(view.container.textContent).toContain("retrying automatically");
+    expect(view.container.textContent).not.toContain("of 5");
+    await view.unmount();
+  }
+});

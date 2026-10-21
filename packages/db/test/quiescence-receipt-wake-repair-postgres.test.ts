@@ -1,15 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSessionAttemptActivityRef,
   initializeSessionStartAtomically,
   markSessionAttemptQuiesced,
+  mutateWorkspaceControlInTransaction,
+  peekSessionWork,
+  reconcileSessionAttemptQuiescence,
   repairMissingQuiescenceReceiptWakes,
   requestSessionTurnRecovery,
   mutateSessionControlInTransaction,
+  withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
@@ -135,6 +140,74 @@ async function repairAll() {
   } while (cursor);
 }
 
+/** Whether the deployment-wide inventory currently discovers this session. */
+async function discovered(sessionId: string) {
+  let after: { workspaceId: string; sessionId: string } | null = null;
+  for (;;) {
+    const rows: { workspace_id: string; session_id: string }[] = await shared.admin`
+      select workspace_id::text, session_id::text
+      from opengeni_private.list_quiescence_receipt_wake_repairs_v1(
+        100, ${after?.workspaceId ?? null}::uuid, ${after?.sessionId ?? null}::uuid)
+    `;
+    if (rows.some((row) => row.session_id === sessionId)) return true;
+    if (rows.length < 100) return false;
+    const last = rows.at(-1)!;
+    after = { workspaceId: last.workspace_id, sessionId: last.session_id };
+  }
+}
+
+async function ageDeliveredWake(sessionId: string) {
+  await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision,
+    updated_at = now() - interval '20 minutes' where session_id = ${sessionId}`;
+}
+
+async function sessionControl(
+  target: { accountId: string; workspaceId: string; subjectId: string; sessionId: string },
+  action: "pause" | "resume",
+) {
+  await withWorkspaceSubjectSessionActivityRls(
+    client.db,
+    target.workspaceId,
+    target.subjectId,
+    (db) =>
+      mutateSessionControlInTransaction(db, {
+        accountId: target.accountId,
+        workspaceId: target.workspaceId,
+        sessionId: target.sessionId,
+        operationKey: crypto.randomUUID(),
+        action,
+        actor: { type: "human", subjectId: target.subjectId },
+      }),
+  );
+}
+
+/** Pause has parked the quiesced turn exactly as the workflow does: idle
+ * projection, same `recovering` logical turn and active-turn pointer. */
+async function parkedUnderPause() {
+  const parked = await strandedRecovery({
+    closedSecondsAgo: 300,
+    wakeDeliveredSecondsAgo: 1_200,
+    quiesce: true,
+  });
+  await sessionControl(parked, "pause");
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set status = 'idle' where id = ${parked.sessionId}`;
+  });
+  await ageDeliveredWake(parked.sessionId);
+  return parked;
+}
+
+async function statusOf(sessionId: string) {
+  const [row] = await shared.admin<{ session_status: string; turn_status: string }[]>`
+    select session.status as session_status, turn.status as turn_status
+    from sessions session
+    join session_turns turn on turn.id = session.active_turn_id
+    where session.id = ${sessionId}
+  `;
+  return row;
+}
+
 describe("missing quiescence-receipt wake repair", () => {
   test("a stranded interrupted attempt gets one wake, then is paced", async () => {
     const stranded = await strandedRecovery({
@@ -198,33 +271,197 @@ describe("missing quiescence-receipt wake repair", () => {
     expect((await wakeOf(recentlyWoken.sessionId)).pending).toBe(false);
   });
 
-  test("a durable receipt does not turn intentional Pause into abandoned work", async () => {
+  test("a paused stale recovering projection is parked once, then left for Resume", async () => {
     const paused = await strandedRecovery({
       closedSecondsAgo: 300,
       wakeDeliveredSecondsAgo: 1_200,
       quiesce: true,
     });
-    await withWorkspaceSubjectSessionActivityRls(
-      client.db,
-      paused.workspaceId,
-      paused.subjectId,
-      (db) =>
-        mutateSessionControlInTransaction(db, {
-          accountId: paused.accountId,
-          workspaceId: paused.workspaceId,
-          sessionId: paused.sessionId,
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-          actor: { type: "human", subjectId: paused.subjectId },
-        }),
-    );
-    await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision,
-      updated_at = now() - interval '20 minutes' where session_id = ${paused.sessionId}`;
+    await sessionControl(paused, "pause");
+    await ageDeliveredWake(paused.sessionId);
+    expect(await statusOf(paused.sessionId)).toEqual({
+      session_status: "recovering",
+      turn_status: "recovering",
+    });
+    // The receipt is durable but the projection still says `recovering`: the
+    // wake routes the turn through DB-only projection settlement, not admission.
+    expect(await discovered(paused.sessionId)).toBe(true);
+    await repairAll();
+    expect(await wakeOf(paused.sessionId)).toEqual({
+      pending: true,
+      reason: "turn_recovery_repair",
+    });
+    const peek = await peekSessionWork(client.db, paused.workspaceId, paused.sessionId);
+    expect(peek).toEqual({ kind: "cancellation-wait", attemptId: paused.attemptId });
+    const workflowId = `session-${paused.sessionId}`;
+    const ref = await getSessionAttemptActivityRef(client.db, {
+      accountId: paused.accountId,
+      workspaceId: paused.workspaceId,
+      sessionId: paused.sessionId,
+      attemptId: paused.attemptId,
+      temporalWorkflowId: workflowId,
+    });
+    expect(ref?.quiesced).toBe(true);
+    const parked = await reconcileSessionAttemptQuiescence(client.db, {
+      accountId: paused.accountId,
+      workspaceId: paused.workspaceId,
+      sessionId: paused.sessionId,
+      attemptId: paused.attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: ref!.workflowRunId,
+      temporalActivityId: ref!.activityId,
+      activitySettled: true,
+    });
+    expect(parked.action).toBe("quiesced");
+    // Pause preserves the logical turn; only the projection parked.
+    expect(await statusOf(paused.sessionId)).toEqual({
+      session_status: "idle",
+      turn_status: "recovering",
+    });
+    await ageDeliveredWake(paused.sessionId);
+    expect(await discovered(paused.sessionId)).toBe(false);
     await repairAll();
     expect((await wakeOf(paused.sessionId)).pending).toBe(false);
-    const [turn] =
-      await shared.admin`select status from session_turns where session_id = ${paused.sessionId}`;
-    expect(turn!.status).toBe("recovering");
+  });
+
+  test("Pause-parked turns leave discovery and return after Resume", async () => {
+    const parked = await parkedUnderPause();
+    expect(await discovered(parked.sessionId)).toBe(false);
+    await repairAll();
+    expect((await wakeOf(parked.sessionId)).pending).toBe(false);
+    expect(await statusOf(parked.sessionId)).toEqual({
+      session_status: "idle",
+      turn_status: "recovering",
+    });
+
+    // Resume commits its own wake for the preserved turn.
+    await sessionControl(parked, "resume");
+    expect((await wakeOf(parked.sessionId)).pending).toBe(true);
+    expect((await peekSessionWork(client.db, parked.workspaceId, parked.sessionId)).kind).toBe(
+      "runnable",
+    );
+    // If that wake is delivered but lost, ordinary rediscovery repairs it.
+    await ageDeliveredWake(parked.sessionId);
+    expect(await discovered(parked.sessionId)).toBe(true);
+    await repairAll();
+    expect(await wakeOf(parked.sessionId)).toEqual({
+      pending: true,
+      reason: "turn_recovery_repair",
+    });
+  });
+
+  test("ancestor and workspace Pause park descendants with the override algebra", async () => {
+    const child = await parkedUnderPause();
+    // Selected Resume on the child advances its subtree override.
+    await sessionControl(child, "resume");
+    await ageDeliveredWake(child.sessionId);
+    const parent = await createSession(client.db, {
+      accountId: child.accountId,
+      workspaceId: child.workspaceId,
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+      initialMessage: "parent",
+    });
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set parent_session_id = ${parent.id}, root_session_id = ${parent.id}
+        where id = ${child.sessionId}`;
+    });
+    expect(await discovered(child.sessionId)).toBe(true);
+    // A newer ancestor Pause is not defeated by the child's older override.
+    await sessionControl({ ...child, sessionId: parent.id }, "pause");
+    await ageDeliveredWake(child.sessionId);
+    expect(await discovered(child.sessionId)).toBe(false);
+    await sessionControl({ ...child, sessionId: parent.id }, "resume");
+    await ageDeliveredWake(child.sessionId);
+    expect(await discovered(child.sessionId)).toBe(true);
+
+    await withWorkspaceRls(client.db, child.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+          accountId: child.accountId,
+          workspaceId: child.workspaceId,
+          actor: { type: "human", subjectId: child.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    await ageDeliveredWake(child.sessionId);
+    expect(await discovered(child.sessionId)).toBe(false);
+  });
+
+  test("admission blocks and sandbox setup markers are durable waits, not lost wakes", async () => {
+    const blocked = await strandedRecovery({
+      closedSecondsAgo: 300,
+      wakeDeliveredSecondsAgo: 1_200,
+      quiesce: true,
+    });
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set status = 'requires_action', admission_block = ${tx.json({
+        reason: "database_claim_rejected",
+        sqlState: null,
+        retryPolicy: "explicit_recheck",
+        blockedAt: new Date().toISOString(),
+        attemptId: crypto.randomUUID(),
+        fence: { lastSequence: 1, controlVersion: 1 },
+        previousStatus: "recovering",
+      })} where id = ${blocked.sessionId}`;
+    });
+    expect(await discovered(blocked.sessionId)).toBe(false);
+
+    const markers = {
+      sandboxSetupOutcomeUnknown: (turnId: string, attemptId: string) => ({
+        version: 1,
+        turnId,
+        attemptId,
+        reason: "sandbox_command_start_outcome_unknown",
+      }),
+      sandboxSetupRecoveryExhausted: (turnId: string, attemptId: string) => ({
+        version: 1,
+        turnId,
+        attemptId,
+        reason: "sandbox_command_start_recovery_exhausted",
+        setupOutcome: "not_started",
+        providerRecoveryCount: 5,
+      }),
+    };
+    for (const [key, marker] of Object.entries(markers)) {
+      const waiting = await strandedRecovery({
+        closedSecondsAgo: 300,
+        wakeDeliveredSecondsAgo: 1_200,
+        quiesce: true,
+      });
+      const [turn] = await shared.admin<{ id: string }[]>`
+        select active_turn_id::text as id from sessions where id = ${waiting.sessionId}`;
+      await shared.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`update session_turns
+          set metadata = coalesce(metadata, '{}'::jsonb) || ${tx.json({
+            [key]: marker(turn!.id, waiting.attemptId),
+          })}
+          where id = ${turn!.id}`;
+      });
+      expect((await peekSessionWork(client.db, waiting.workspaceId, waiting.sessionId)).kind).toBe(
+        "admission-blocked",
+      );
+      expect(await discovered(waiting.sessionId)).toBe(false);
+      // A malformed marker does not block admission, so it stays discoverable.
+      await shared.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`update session_turns set metadata = jsonb_set(metadata, ${[key, "attemptId"]}::text[], '""')
+          where id = ${turn!.id}`;
+      });
+      expect((await peekSessionWork(client.db, waiting.workspaceId, waiting.sessionId)).kind).toBe(
+        "runnable",
+      );
+      expect(await discovered(waiting.sessionId)).toBe(true);
+    }
   });
 
   test("the inventory is the dispatcher's private capability", async () => {

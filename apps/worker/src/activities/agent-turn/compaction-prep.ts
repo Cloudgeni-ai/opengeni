@@ -443,20 +443,22 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       attemptId: input.attemptId,
     });
     if (!pending) return null;
-    if (
-      !(await eventing.settle({
-        events: [
-          {
-            type: "turn.superseded",
-            payload: { reason: "steer", deferredUntilCompaction: true },
-          },
-          { type: "session.status.changed", payload: { status: "queued" } },
-        ],
-        turnStatus: "superseded",
-        sessionStatus: "queued",
-        activeTurnId: null,
-      }))
-    ) {
+    const settled = await eventing.settle({
+      events: [
+        {
+          type: "turn.superseded",
+          payload: { reason: "steer", deferredUntilCompaction: true },
+        },
+        { type: "session.status.changed", payload: { status: "queued" } },
+      ],
+      turnStatus: "superseded",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      requirePendingSteer: true,
+    });
+    // Withdrawn between the read and the locked settlement: keep working.
+    if (settled === "pending_steer_withdrawn") return null;
+    if (!settled) {
       return claimedResult({ status: "cancelled" });
     }
     // Metrics currently group user-directed supersession with cancellation;
@@ -938,6 +940,7 @@ export async function runPostAgentCompaction(
       const deferredSteer = await settleDeferredSteerAfterCompaction();
       if (deferredSteer) return { exit: deferredSteer };
       observability.error("context compaction failed", {
+        error: compactError,
         sessionId: input.sessionId,
         turnId: attempt.turnId,
         ...safeErrorDiagnostic(compactError),

@@ -13,12 +13,9 @@ import {
   type ScheduledTaskAdmissionRefusalReason,
 } from "@opengeni/db";
 import type { ScheduledTask } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { reconcileExhaustedScheduledTasks } from "../src/scheduled-task-lifecycle";
 import { scheduledTaskBlockerNoticeKey } from "../src/scheduled-task-blockers";
 
@@ -50,8 +47,20 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-/** A daily schedule that keeps reusing one chat. */
-async function scheduleInChat(): Promise<{ task: ScheduledTask; sessionId: string }> {
+const hourly: ScheduledTask["schedule"] = {
+  type: "interval",
+  everySeconds: 3_600,
+};
+
+/** A schedule (daily unless given) that keeps reusing one chat. */
+async function scheduleInChat(
+  schedule: ScheduledTask["schedule"] = {
+    type: "calendar",
+    hour: 7,
+    minute: 0,
+    timeZone: "UTC",
+  },
+): Promise<{ task: ScheduledTask; sessionId: string }> {
   const session = await createSession(client.db, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
@@ -70,7 +79,7 @@ async function scheduleInChat(): Promise<{ task: ScheduledTask; sessionId: strin
     ...workspace,
     name: "Daily review",
     status: "active",
-    schedule: { type: "cron", cron: "0 7 * * *", timeZone: "UTC" },
+    schedule,
     temporalScheduleId: `schedule-${crypto.randomUUID()}`,
     runMode: "reusable_session",
     overlapPolicy: "skip",
@@ -169,8 +178,8 @@ test("a run no later run can get past pauses the schedule and tells its owner on
   );
 });
 
-test("runs refused for a reason that may clear tell the owner after a streak, once, without pausing", async () => {
-  const { task, sessionId } = await scheduleInChat();
+test("an hourly schedule's runs refused for a reason that may clear tell the owner after a streak, once, without pausing", async () => {
+  const { task, sessionId } = await scheduleInChat(hourly);
   await refuse(task, "insufficient_credits", true);
   await review();
   await refuse(task, "insufficient_credits", true);
@@ -194,4 +203,57 @@ test("runs refused for a reason that may clear tell the owner after a streak, on
   await refuse(task, "insufficient_credits", true);
   await review();
   expect(await notices(sessionId)).toHaveLength(1);
+});
+
+test("a daily schedule tells its owner on the first refused run, once, without pausing", async () => {
+  const { task, sessionId } = await scheduleInChat();
+  await refuse(task, "insufficient_credits", true);
+  await review();
+  const posted = await notices(sessionId);
+  expect(posted).toHaveLength(1);
+  expect(posted[0]?.payload).toMatchObject({
+    title: "Schedule needs attention",
+  });
+  expect(String(posted[0]?.payload.body)).toContain(
+    "The last scheduled run was skipped because the workspace is out of credits.",
+  );
+  expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
+    "active",
+  );
+  await refuse(task, "insufficient_credits", true);
+  await review();
+  expect(await notices(sessionId)).toHaveLength(1);
+});
+
+test("a one-time schedule whose only run fails tells its owner before it retires", async () => {
+  const { task, sessionId } = await scheduleInChat({
+    type: "once",
+    runAt: new Date(Date.now() - 60_000).toISOString(),
+    timeZone: "UTC",
+  });
+  await refuse(task, "insufficient_credits", true);
+  await review();
+
+  // Reviewed first, then retired in the same pass; the notice stays.
+  const posted = await notices(sessionId);
+  expect(posted.map((event) => event.type)).toEqual(["session.notification.posted"]);
+  expect(String(posted[0]?.payload.body)).toContain("It has no more runs scheduled.");
+  expect((await getScheduledTask(client.db, workspace.workspaceId, task.id))?.status).toBe(
+    "paused",
+  );
+  expect(
+    (await getScheduledTaskBlockers(client.db, workspace.workspaceId, [task.id])).get(task.id),
+  ).toMatchObject({ state: "paused", reason: "insufficient_credits" });
+  await review();
+  expect(await notices(sessionId)).toHaveLength(1);
+
+  // Someone resumes it: the notice is withdrawn.
+  await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+    status: "active",
+  });
+  await review();
+  expect((await notices(sessionId)).map((event) => event.type)).toEqual([
+    "session.notification.posted",
+    "session.notification.withdrawn",
+  ]);
 });

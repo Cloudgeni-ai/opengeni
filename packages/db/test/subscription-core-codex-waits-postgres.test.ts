@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
@@ -8,15 +8,18 @@ import {
   initializeSessionStartAtomically,
   materializeGoalContinuation,
   claimSessionWorkForAttempt,
+  claimCodexResetRedemption,
   claimSubscriptionCapacityWakeDeliveries,
   abandonSubscriptionCapacityWakeDelivery,
   codexSubscriptionAuthorityV2ForAcceptanceInTransaction,
+  completeSubscriptionCoreCodexResetRedemption,
   countSubscriptionCoreCodexTurnRefusals,
   createDb,
   createSession,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   evaluateSubscriptionCoreCodexPlacement,
+  fenceCodexResetRedemptionSend,
   getSubscriptionCoreCodexCapacityWaitForSession,
   markSubscriptionCapacityWakeDelivered,
   mutateSessionControlInTransaction,
@@ -33,6 +36,7 @@ import {
   retrySubscriptionCapacityWakeDelivery,
   submitHumanPromptInTransaction,
   subscriptionCoreCodexCapacityWaitRef,
+  subscriptionCoreCodexResetAuthority,
   subscriptionCoreCodexReselectionPoints,
   subscriptionCoreTurnActor,
   touchSubscriptionCoreCodexBinding,
@@ -157,16 +161,21 @@ async function enableCodexCutover(accountId: string, enabled = true): Promise<vo
     on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
-async function sharedConnection(org: Org, label: string): Promise<string> {
+async function sharedConnection(
+  org: Org,
+  label: string,
+  options: { managedBy?: string } = {},
+): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, plan_type, provider_state, expires_at
+      provider_account_id, plan_type, provider_state, expires_at, managed_by_workspace_id
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
       'shared', 'organization', ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false })}::jsonb,
-      ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz
+      ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
+      ${options.managedBy ?? null}::uuid
     ) returning id::text as id`;
   for (const workspaceId of [org.personalWorkspaceId, org.sharedWorkspaceId]) {
     await shared!.admin`
@@ -600,6 +609,122 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         evaluation: { kind: "run" },
       }),
     ).toEqual({ action: "stale", events: [] });
+  });
+
+  test("a redeemed reset credit resumes a turn parked on a stale weekly window without a usage read", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    // Reset credits are redeemed from the workspace that manages the connection.
+    const connectionId = await sharedConnection(org, "reset-weekly", {
+      managedBy: org.sharedWorkspaceId,
+    });
+    // The last usage reading: the five-hour window has room, the weekly one is
+    // spent until next week, and a refusal stored the same deadline.
+    const weeklyReset = Date.now() + 5 * 86_400_000;
+    await shared!.admin`
+      insert into subscription_connection_quota (
+        account_id, connection_id, quota, observed_refresh_generation, revision
+      ) values (${org.accountId}::uuid, ${connectionId}::uuid, ${shared!.admin.json({
+        windows: [
+          { id: "primary", usedPercent: 12, resetsAt: Date.now() + 3_600_000, status: "ok" },
+          { id: "secondary", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+        ],
+        modelCooldowns: {},
+        exhaustedUntil: weeklyReset,
+        exhaustedKind: "quota",
+        exhaustedClaim: { until: weeklyReset, observedAt: Date.now(), windowIds: ["secondary"] },
+        source: "usage_endpoint",
+      })}::jsonb, 1, 1)`;
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: new Date(weeklyReset),
+    });
+    const armed = await arm(turn, new Date(weeklyReset));
+    if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+
+    // The owner redeems a reset credit for the connection.
+    const attemptId = crypto.randomUUID();
+    const claimed = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      claimCodexResetRedemption(
+        client!.db,
+        {
+          id: attemptId,
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          credentialId: connectionId,
+          subjectId: org.ownerSubjectId,
+          browserSessionHash: "browser-owner",
+          creditId: "credit-weekly",
+          confirmationExpiresAt: new Date(Date.now() + 300_000),
+          claimHolderId: crypto.randomUUID(),
+        },
+        subscriptionCoreCodexResetAuthority,
+      ),
+    );
+    if (claimed.kind !== "claimed") throw new Error(`claim returned ${claimed.kind}`);
+    const ledger = {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      attemptId,
+      claimHolderId: claimed.attempt.claimHolderId!,
+    };
+    const fenced = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      fenceCodexResetRedemptionSend(
+        client!.db,
+        {
+          ...ledger,
+          credentialId: connectionId,
+          subjectId: org.ownerSubjectId,
+          browserSessionHash: "browser-owner",
+        },
+        subscriptionCoreCodexResetAuthority,
+      ),
+    );
+    if (fenced.kind !== "ready") throw new Error(`fence returned ${fenced.kind}`);
+    const completed = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
+      completeSubscriptionCoreCodexResetRedemption(client!.db, { ...ledger, outcome: "reset" }),
+    );
+    expect(completed.wake).toEqual({
+      accountId: org.accountId,
+      reason: "codex_reset_credit_redeemed",
+    });
+
+    // The readings taken before the reset no longer describe the account.
+    const [stored] = await shared!.admin<{ quota: Record<string, unknown> }[]>`
+      select quota from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
+    expect(stored!.quota).toMatchObject({
+      windows: [
+        { id: "primary", usedPercent: null, resetsAt: null, status: "unknown" },
+        { id: "secondary", usedPercent: null, resetsAt: null, status: "unknown" },
+      ],
+      exhaustedUntil: null,
+      exhaustedKind: null,
+    });
+    expect(stored!.quota.exhaustedClaim).toBeUndefined();
+
+    // The wake reaches the waiter, and with no fresh usage reading its
+    // re-evaluation places the turn instead of waiting until next week.
+    await wakeSubscriptionCoreCodexCapacityWaiters(client!.db, completed.wake!);
+    expect(await waiterRows(turn)).toEqual([
+      { waiter_id: armed.waiter.waiterId, generation: "1", wake_revision: "2", observed: "1" },
+    ]);
+    expect(await evaluate(turn)).toMatchObject({ kind: "run", connectionId });
+    const resumed = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: 1,
+      evaluatedWakeRevision: 2,
+      evaluation: { kind: "run" },
+    });
+    expect(resumed.action).toBe("resumed");
+    expect(await rowState(turn)).toMatchObject({
+      session_status: "recovering",
+      turn_status: "recovering",
+    });
   });
 
   test("arming refuses a stale attempt and a disabled cutover", async () => {

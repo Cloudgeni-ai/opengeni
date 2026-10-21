@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { computerRuntimeConfig } from "../src/main";
+import { computerRuntimeConfig, defaultMaxBrowserSessions, machineMemoryBytes } from "../src/main";
 
 test("desktop configuration selects CUA on Mac and Windows without changing the Linux host desktop", () => {
   expect(computerRuntimeConfig({}, "darwin")).toEqual({
@@ -220,3 +220,142 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
     if (timer) clearTimeout(timer);
   }
 }
+
+test("the default browser limit follows machine memory", () => {
+  const GiB = 1024 ** 3;
+  expect(defaultMaxBrowserSessions(7.8 * GiB)).toBe(13);
+  expect(defaultMaxBrowserSessions(16 * GiB)).toBe(27);
+  expect(defaultMaxBrowserSessions(48 * GiB)).toBe(81);
+  expect(defaultMaxBrowserSessions(62 * GiB)).toBe(105);
+  expect(defaultMaxBrowserSessions(86.4 * GiB)).toBe(147);
+  expect(defaultMaxBrowserSessions(2 * GiB)).toBe(8);
+  expect(defaultMaxBrowserSessions(Number.NaN)).toBe(64);
+});
+
+test("a container's own memory limit bounds the machine memory", () => {
+  const GiB = 1024 ** 3;
+  const limits = (values: Record<string, string>) => (path: string) => {
+    const value = values[path];
+    if (value === undefined) throw new Error("ENOENT");
+    return value;
+  };
+  expect(machineMemoryBytes(64 * GiB, limits({}))).toBe(64 * GiB);
+  expect(
+    machineMemoryBytes(64 * GiB, limits({ "/sys/fs/cgroup/memory.max": `${8 * GiB}\n` })),
+  ).toBe(8 * GiB);
+  expect(machineMemoryBytes(64 * GiB, limits({ "/sys/fs/cgroup/memory.max": "max\n" }))).toBe(
+    64 * GiB,
+  );
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({ "/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712" }),
+    ),
+  ).toBe(64 * GiB);
+});
+
+test("a nested cgroup or a tighter ancestor bounds the machine memory", () => {
+  const GiB = 1024 ** 3;
+  const limits = (values: Record<string, string>) => (path: string) => {
+    const value = values[path];
+    if (value === undefined) throw new Error("ENOENT");
+    return value;
+  };
+  const v2Mount = (root: string, at = "/sys/fs/cgroup") =>
+    `23 41 0:21 ${root} ${at} rw,nosuid,nodev,noexec,relatime shared:12 - cgroup2 cgroup2 rw,nsdelegate\n`;
+  const v1Mounts =
+    "30 25 0:26 / /sys/fs/cgroup/cpu,cpuacct rw,nosuid shared:10 - cgroup cgroup rw,cpu,cpuacct\n" +
+    "31 25 0:27 / /sys/fs/cgroup/memory rw,nosuid shared:11 - cgroup cgroup rw,memory\n";
+  // cgroup v2: the process's own nested limit.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/system.slice/agent.service\n",
+        "/proc/self/mountinfo": v2Mount("/"),
+        "/sys/fs/cgroup/system.slice/agent.service/memory.max": `${2 * GiB}\n`,
+        "/sys/fs/cgroup/system.slice/memory.max": "max\n",
+      }),
+    ),
+  ).toBe(2 * GiB);
+  // cgroup v2: an ancestor's limit is tighter than the process's own.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/user.slice/user-1000.slice/session.scope\n",
+        "/proc/self/mountinfo": v2Mount("/"),
+        "/sys/fs/cgroup/user.slice/user-1000.slice/session.scope/memory.max": "max\n",
+        "/sys/fs/cgroup/user.slice/memory.max": `${12 * GiB}\n`,
+      }),
+    ),
+  ).toBe(12 * GiB);
+  // cgroup v2 mounted from a non-root cgroup, at another mount point.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/tenant/service\n",
+        "/proc/self/mountinfo": v2Mount("/tenant", "/run/cg"),
+        "/run/cg/service/memory.max": `${2 * GiB}\n`,
+        "/sys/fs/cgroup/service/memory.max": "max\n",
+      }),
+    ),
+  ).toBe(2 * GiB);
+  // The mount's own directory is the hierarchy root as the process sees it.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/tenant/service\n",
+        "/proc/self/mountinfo": v2Mount("/tenant"),
+        "/sys/fs/cgroup/memory.max": `${5 * GiB}\n`,
+      }),
+    ),
+  ).toBe(5 * GiB);
+  // cgroup v1: the memory controller's hierarchy.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "5:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n",
+        "/proc/self/mountinfo": v1Mounts,
+        "/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes": `${3 * GiB}\n`,
+        "/sys/fs/cgroup/memory/docker/memory.limit_in_bytes": "9223372036854771712\n",
+      }),
+    ),
+  ).toBe(3 * GiB);
+  // A membership outside what a mount shows is not described by that mount.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/../../elsewhere\n",
+        "/proc/self/mountinfo": v2Mount("/"),
+        "/sys/fs/cgroup/elsewhere/memory.max": `${1 * GiB}\n`,
+        "/sys/fs/cgroup/memory.max": `${1 * GiB}\n`,
+      }),
+    ),
+  ).toBe(64 * GiB);
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/other/service\n",
+        "/proc/self/mountinfo": v2Mount("/tenant"),
+        "/sys/fs/cgroup/memory.max": `${1 * GiB}\n`,
+      }),
+    ),
+  ).toBe(64 * GiB);
+  // Escaped mount points are decoded.
+  expect(
+    machineMemoryBytes(
+      64 * GiB,
+      limits({
+        "/proc/self/cgroup": "0::/svc\n",
+        "/proc/self/mountinfo": v2Mount("/", "/run/my\\040cgroup"),
+        "/run/my cgroup/svc/memory.max": `${4 * GiB}\n`,
+      }),
+    ),
+  ).toBe(4 * GiB);
+});

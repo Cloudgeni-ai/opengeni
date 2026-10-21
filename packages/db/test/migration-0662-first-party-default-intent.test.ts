@@ -5,7 +5,7 @@ import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { appendSessionEvents, createDb, createSession, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 

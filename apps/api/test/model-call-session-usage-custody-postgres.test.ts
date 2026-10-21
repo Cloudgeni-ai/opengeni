@@ -13,9 +13,9 @@ import {
 import * as runtimeModelCall from "@opengeni/runtime/model-call";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  testSettings,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import * as rls from "../src/access-grant-rls";
 import { PendingUsageSettlements } from "../src/model-calls/pending-usage-settlements";
 import { createModelCallService } from "../src/model-calls/service";

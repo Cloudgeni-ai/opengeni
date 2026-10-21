@@ -36,6 +36,7 @@ import {
   ToolGatewayBlockedError,
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
+  ToolGatewaySchemaCompilationError,
   ToolGatewayOutputValidationError,
   ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
@@ -468,7 +469,7 @@ export function prepareToolGatewayDefinitions(
   definitions: readonly ToolGatewayDefinition[],
 ): PreparedToolGatewayDefinitions {
   const paths = allocateToolPaths(definitions);
-  const schemaValidators = createSchemaValidators("first_error");
+  let schemaValidators: SchemaValidators | undefined;
   let diagnosticValidators: SchemaValidators | undefined;
   const compiled = definitions.map((definition, index): CompiledDefinition => {
     const {
@@ -491,6 +492,34 @@ export function prepareToolGatewayDefinitions(
       ...entryInput,
       codemodePath: paths[index],
     });
+    // Compilation used to snapshot these at preparation. Keep that boundary
+    // even though the compiler is now reached only by a call to this tool.
+    const inputSchema = structuredClone(entry.inputSchema);
+    const outputSchema = entry.outputSchema ? structuredClone(entry.outputSchema) : null;
+    let validators:
+      | {
+          input: ValidateFunction<unknown>;
+          output: ValidateFunction<unknown> | null;
+        }
+      | undefined;
+    let compilationFailure: ToolGatewaySchemaCompilationError | undefined;
+    const compile = () => {
+      if (validators) return validators;
+      if (compilationFailure) throw compilationFailure;
+      try {
+        const compiler = (schemaValidators ??= createSchemaValidators("first_error"));
+        // Compile both before argument admission, authorization or execution.
+        // A broken output schema must never fail after a side effect has run.
+        validators = {
+          input: compileCatalogSchema(compiler, inputSchema),
+          output: outputSchema ? compileCatalogSchema(compiler, outputSchema) : null,
+        };
+        return validators;
+      } catch (error) {
+        compilationFailure = new ToolGatewaySchemaCompilationError(error);
+        throw compilationFailure;
+      }
+    };
     let diagnoseInput: ValidateFunction<unknown> | undefined;
     return {
       entry,
@@ -499,15 +528,17 @@ export function prepareToolGatewayDefinitions(
       effectAuthorityDigest,
       preflightCall,
       lifecycle,
-      validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
+      get validateInput() {
+        return compile().input;
+      },
       diagnoseInput: () =>
         (diagnoseInput ??= compileCatalogSchema(
           (diagnosticValidators ??= createSchemaValidators("all_errors")),
-          entry.inputSchema,
+          inputSchema,
         )),
-      validateOutput: entry.outputSchema
-        ? compileCatalogSchema(schemaValidators, entry.outputSchema)
-        : null,
+      get validateOutput() {
+        return compile().output;
+      },
     };
   });
   return new PreparedToolGatewayDefinitions(compiled);

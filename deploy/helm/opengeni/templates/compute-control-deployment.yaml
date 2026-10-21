@@ -1,0 +1,272 @@
+{{- if .Values.computeControl.enabled }}
+{{- include "opengeni.computeControl.assert" . }}
+{{- $cc := .Values.computeControl }}
+{{- if $cc.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "opengeni.computeControl.serviceAccountName" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+  {{- with $cc.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.computeControl.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+spec:
+  replicas: {{ $cc.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: compute-control
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: compute-control
+      annotations:
+        # Replicas reload keys, TLS material and the database password only
+        # at start; a new database.passwordRevision rolls them.
+        opengeni.ai/compute-control-settings: {{ toJson (dict "keys" $cc.keys "tls" $cc.hostsTls "apiTls" $cc.apiTls "link" $cc.link "db" $cc.database) | sha256sum | trunc 16 | quote }}
+    spec:
+      serviceAccountName: {{ include "opengeni.computeControl.serviceAccountName" . }}
+      enableServiceLinks: false
+      {{- with (include "opengeni.priorityClassName" (dict "root" . "explicit" $cc.priorityClassName "tier" "control")) }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Its secrets are mounted 0440: the group makes them its own.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+        {{- with $cc.podSecurityContext }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if $cc.database.provision }}
+      initContainers:
+        # Waits until the role the database Job makes can log in with this
+        # pod's password and its schema exists. The Job runs beside this
+        # Deployment, so the service starts once its database is ready
+        # rather than failing until then, and after a new password only
+        # once the role has it.
+        - name: database
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cc.database.existingSecret }}
+                  key: {{ $cc.database.passwordKey }}
+            - name: COMPUTE_CONTROL_DATABASE
+              value: {{ include "opengeni.computeControl.databaseSettings" . | quote }}
+          command:
+            - /bin/sh
+            - -c
+            # The schema is a plain identifier (see opengeni.computeControl.assert).
+            - |
+              until out=$(psql -X -d "$COMPUTE_CONTROL_DATABASE" -tAq -c "select 1 from pg_namespace where nspname = '{{ $cc.database.schema }}'" 2>&1) &&
+                printf '%s\n' "$out" | grep -qx 1; do
+                echo "waiting for the database: ${out:-no schema {{ $cc.database.schema }} yet}"
+                sleep 2
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      {{- end }}
+      containers:
+        - name: compute-control
+          image: {{ include "opengeni.computeControl.image" . | quote }}
+          imagePullPolicy: {{ $cc.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          args:
+            - serve
+            - --api=0.0.0.0:{{ $cc.service.apiPort }}
+            - --hosts=0.0.0.0:8443
+            {{- with ($cc.metrics).port }}
+            - --metrics-listen=0.0.0.0:{{ int64 . }}
+            {{- end }}
+            {{- with ($cc.metrics).hostsTo }}
+            - --host-metrics-to={{ . }}
+            {{- end }}
+            - --connections={{ $cc.database.connections }}
+            - --host-authority=/etc/compute/tls
+            - --host-url={{ $cc.hostUrl }}
+            {{- range $cc.hostsTls.extraNames }}
+            - --host-name={{ . }}
+            {{- end }}
+            {{- with $cc.hostIdentity.gcpProject }}
+            - --gce-project={{ . }}
+            - --gce-host-account={{ $cc.hostIdentity.gcpAccount }}
+            {{- end }}
+            {{- if $cc.apiTls.secretName }}
+            - --api-tls-cert=/etc/compute/api-tls/tls.crt
+            - --api-tls-key=/etc/compute/api-tls/tls.key
+            {{- end }}
+            {{- if $cc.link.existingSecret }}
+            - --link-key=/etc/compute/link/{{ $cc.link.key }}
+            {{- range $cc.link.previousKeys }}
+            - --link-previous-key=/etc/compute/link/{{ . }}
+            {{- end }}
+            - --link-issuer={{ $cc.link.issuer }}
+            {{- end }}
+            {{- range $team, $url := $cc.teamLinks }}
+            - --team-link={{ $team }}={{ $url }}
+            {{- end }}
+            - --keys-file=/etc/compute/keys/keys
+            - --operator-team={{ $cc.operatorTeam }}
+            - --archive={{ $cc.archive }}
+            - --image={{ $cc.defaultImage }}
+            - --disk-mib={{ $cc.diskMib }}
+            {{- range $name, $id := $cc.storedImages }}
+            - --stored-image={{ $name }}={{ $id }}
+            {{- end }}
+            {{- if $cc.gcpGroup }}
+            - --gcp-group={{ $cc.gcpGroup }}
+            {{- if not $cc.scaling.hostMemoryMib }}
+            {{- fail "computeControl.scaling.hostMemoryMib is required with computeControl.gcpGroup (the Terraform module's host_memory_mib output)" }}
+            {{- end }}
+            - --scale-host-memory-mib={{ int64 $cc.scaling.hostMemoryMib }}
+            - --scale-min={{ int64 $cc.scaling.min }}
+            - --scale-max={{ int64 $cc.scaling.max }}
+            {{- end }}
+            {{- range $cc.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: RUST_LOG
+              value: info
+            {{- if $cc.database.urlKey }}
+            - name: COMPUTE_CONTROL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cc.database.existingSecret }}
+                  key: {{ $cc.database.urlKey }}
+            {{- else }}
+            - name: COMPUTE_CONTROL_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $cc.database.existingSecret }}
+                  key: {{ $cc.database.passwordKey }}
+            - name: COMPUTE_CONTROL_DATABASE
+              value: {{ include "opengeni.computeControl.databaseSettings" . | quote }}
+            {{- end }}
+            {{- with $cc.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $cc.service.apiPort }}
+            - name: hosts
+              containerPort: 8443
+            {{- with ($cc.metrics).port }}
+            - name: metrics
+              containerPort: {{ int64 . }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml $cc.resources | nindent 12 }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/compute/tls
+              readOnly: true
+            - name: keys
+              mountPath: /etc/compute/keys
+              readOnly: true
+            {{- if $cc.apiTls.secretName }}
+            - name: api-tls
+              mountPath: /etc/compute/api-tls
+              readOnly: true
+            {{- end }}
+            {{- if $cc.link.existingSecret }}
+            - name: link
+              mountPath: /etc/compute/link
+              readOnly: true
+            {{- end }}
+            {{- with $cc.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $cc.hostsTls.secretName }}
+            defaultMode: 0440
+        - name: keys
+          secret:
+            secretName: {{ $cc.keys.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $cc.keys.key }}
+                path: keys
+        {{- if $cc.apiTls.secretName }}
+        - name: api-tls
+          secret:
+            secretName: {{ $cc.apiTls.secretName }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if $cc.link.existingSecret }}
+        - name: link
+          secret:
+            secretName: {{ $cc.link.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ $cc.link.key }}
+                path: {{ $cc.link.key }}
+              {{- range $cc.link.previousKeys }}
+              - key: {{ . }}
+                path: {{ . }}
+              {{- end }}
+        {{- end }}
+        {{- with $cc.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $cc.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cc.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cc.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

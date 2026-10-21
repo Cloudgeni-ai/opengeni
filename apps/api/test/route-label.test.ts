@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp, routeLabel } from "../src/app";
 import {
@@ -12,7 +12,11 @@ import {
 const ID = "5f0c1a2b-3c4d-4e5f-8a6b-7c8d9e0f1a2b";
 
 function labelledApp() {
-  const settings = testSettings({ authRequired: true, accessKey: "route-label-test-key" });
+  const settings = testSettings({
+    authRequired: true,
+    accessKey: "route-label-test-key",
+    observabilityMetricsEnabled: true,
+  });
   const observability = createObservability(settings, { component: "api" });
   // Request logs are not under test; keep the whole-table sweep quiet.
   observability.info = () => undefined;
@@ -32,7 +36,7 @@ function labelledApp() {
     workflowClient: {} as never,
     managedAuth: null,
   });
-  return { app, labels };
+  return { app, labels, observability };
 }
 
 async function labelFor(
@@ -47,6 +51,25 @@ async function labelFor(
 }
 
 describe("HTTP route labels", () => {
+  test("records actual response status classes through the API middleware", async () => {
+    const subject = labelledApp();
+    const healthy = await subject.app.request("/healthz");
+    const rejected = await subject.app.request(`/v1/workspaces/${ID}/sessions`);
+    expect(healthy.status).toBe(200);
+    expect(rejected.status).toBeGreaterThanOrEqual(400);
+    expect(rejected.status).toBeLessThan(500);
+    const counts = (await subject.observability.prometheusMetrics())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_http_request_duration_seconds_count{"));
+    expect(counts).toHaveLength(2);
+    expect(counts.find((line) => line.includes('route="/healthz"'))).toContain(
+      'status_class="2xx"',
+    );
+    expect(
+      counts.find((line) => line.includes('route="/v1/workspaces/:workspaceId/sessions"')),
+    ).toContain('status_class="4xx"');
+  });
+
   test("labels previously unknown product routes with their registered template", async () => {
     const subject = labelledApp();
     const cases: Array<[string, string, string]> = [

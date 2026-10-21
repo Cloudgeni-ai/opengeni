@@ -17,11 +17,8 @@ import {
 } from "@opengeni/db";
 import { createProviderCallBudget, VaultProviderError } from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const DELEGATION_SECRET = randomBytes(32).toString("hex");

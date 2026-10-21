@@ -17,12 +17,9 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import {
-  testSettings,
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
 import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
@@ -49,6 +46,7 @@ import {
 } from "@opengeni/runtime";
 import {
   listFleet,
+  buildFleetContextForSession,
   provisionSandbox,
   runOnSandbox,
   swapActiveSandbox,
@@ -527,6 +525,27 @@ async function seedPersonalMachineChat(sandboxBackend: "none" | "selfhosted") {
 }
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
+  test("command custody remains independent of a personal-machine human subject", async () => {
+    if (!available) return;
+    const { ctx } = await seedFleet();
+    const commandAttempt = {
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+    };
+    const built = await buildFleetContextForSession(
+      { db },
+      {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId,
+        commandAttempt,
+      },
+    );
+    expect(built.commandAttempt).toEqual(commandAttempt);
+    expect(built.subjectId).toBeUndefined();
+    expect(built.attemptAuthority).toBeUndefined();
+  });
   test("a personal Connected Machine remains operational from another authorized workspace", async () => {
     if (!available) return;
     const {
@@ -550,6 +569,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       code: "personal_machine_permission_required",
     });
     expect(refused.reason).toContain("its owner has not allowed this chat");
+    expect(refused.reason).toContain("capability_authorization_request");
     expect(refused.reason).not.toContain("Failed query");
     const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
       kind: "exec",
@@ -557,6 +577,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
     expect(refusedRun.ok).toBe(false);
     expect(refusedRun.reason).toContain("its owner has not allowed this chat");
+    expect(refusedRun.code).toBe("personal_machine_permission_required");
     await allowThisChat();
     const withoutAttempt: FleetContext = {
       accountId: ctx.accountId,
@@ -755,6 +776,30 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const noHome = await swapActiveSandbox(services, ctx, "session");
     expect(noHome.swapped).toBe(false);
     expect(noHome.code).toBe("unsupported_backend_context");
+    // Staying on the machine is the answer, not a sandbox that does not exist.
+    expect(noHome.reason).toBe(
+      "This session has no managed sandbox of its own, so there is nothing to swap back to. Keep working on the current machine, or swap to another machine's sandboxes_list id.",
+    );
+    expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.activeSandboxId).toBe(
+      sandbox.id,
+    );
+  }, 60_000);
+
+  test("a machine-home session without a managed sandbox stays on its machine instead of swapping back", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({ sandboxBackend: "selfhosted" });
+    const machineOnly = {
+      ...services,
+      settings: testSettings({ ...services.settings, sandboxBackend: "selfhosted" }),
+    };
+    expect((await swapActiveSandbox(machineOnly, ctx, sandbox.id)).swapped).toBe(true);
+    for (const target of ["session", "default"]) {
+      const back = await swapActiveSandbox(machineOnly, ctx, target);
+      expect(back).toMatchObject({ swapped: false, code: "unsupported_backend_context" });
+      expect(back.reason).toBe(
+        "This deployment has no managed session sandbox, so there is nothing to swap back to. Keep working on the current machine, or swap to another machine's sandboxes_list id.",
+      );
+    }
     expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.activeSandboxId).toBe(
       sandbox.id,
     );

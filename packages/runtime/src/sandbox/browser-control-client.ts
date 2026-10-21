@@ -2,6 +2,8 @@ import {
   ComputerNativeCommand,
   ComputerNativeReceipt,
   ComputerOperationReceipt,
+  parseInteractionDriverDiagnostic,
+  type InteractionDriverDiagnostic,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -19,6 +21,10 @@ import {
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
@@ -49,6 +55,9 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
+  type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
+  type BrowserRecordingSummary as BrowserRecordingSummaryValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDomReadRequest as BrowserDomReadRequestValue,
@@ -272,6 +281,8 @@ export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   observation: BrowserObservationValue;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
+  /** A plain line about how the controller launched this browser. */
+  notice?: string;
 };
 
 export type PlacementComputerSessionReference = {
@@ -526,6 +537,9 @@ export class BrowserControlRequestError extends Error {
   constructor(
     readonly status: number,
     readonly error: InteractionErrorValue,
+    /** Operator-only context the controller sent beside a driver failure;
+     * logged, never shown to callers. */
+    readonly diagnostic: InteractionDriverDiagnostic | null = null,
   ) {
     super(error.message);
     this.retryable = error.retryable;
@@ -539,9 +553,20 @@ export class BrowserControlUnsupportedError extends Error {
 function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
   return new BrowserControlRequestError(409, {
     code: "unsupported",
-    message: `browser controller does not support ${feature}; update the placement's controller image to match this Opengeni release`,
+    message: `browser controller does not support ${feature}; update the placement's controller image to match this release`,
     retryable: false,
   });
+}
+
+/** The controller's route table rejected a request before dispatch: its image
+ *  predates this route. Distinct from a missing target or session. */
+function isLegacyRouteMiss(error: unknown): boolean {
+  return (
+    error instanceof BrowserControlRequestError &&
+    error.status === 404 &&
+    error.error.code === "resource_not_found" &&
+    error.error.message === "route not found"
+  );
 }
 
 /** Install one placement-stable admin credential and start the pinned controller. */
@@ -722,6 +747,7 @@ export class BrowserControlClient {
       ...returnedReference,
       observation: BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
+      ...creationNotice(data.notice),
     };
   }
 
@@ -1879,6 +1905,65 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
+  async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("recordings"),
+        token: this.controlToken,
+        body: BrowserRecordingStartRequest.parse({ targetId }),
+      });
+    } catch (error) {
+      // A controller older than browser recording has no such route; say so
+      // instead of surfacing a bare "route not found".
+      if (isLegacyRouteMiss(error)) throw browserControllerCompatibilityError("browser recording");
+      throw error;
+    }
+    return BrowserRecordingSummary.parse(data);
+  }
+
+  async recording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path(`recordings/${id}`),
+        token: this.viewToken,
+      }),
+    );
+  }
+
+  async stopRecording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${id}/stop`),
+        token: this.controlToken,
+        body: {},
+      }),
+    );
+  }
+
+  async exportRecording(
+    requestInput: BrowserRecordingExportRequestValue,
+  ): Promise<BrowserRecordingExportReceiptValue> {
+    const request = BrowserRecordingExportRequest.parse(requestInput);
+    const receipt = BrowserRecordingExportReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${request.recordingId}/exports`),
+        token: this.controlToken,
+        body: request,
+      }),
+    );
+    if (receipt.recordingId !== request.recordingId) {
+      throw new BrowserControlProtocolError("browser controller returned another recording");
+    }
+    return receipt;
+  }
+
   async openTarget(url?: string): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
@@ -1902,17 +1987,38 @@ export class BrowserControlSessionClient {
         }),
       );
     } catch (error) {
-      // An older controller can refuse the new route before dispatch. Never
-      // fall back to another mutation after an uncertain open outcome.
+      // A controller image older than this release has no such route. Its
+      // route table rejects the request before dispatch, so no tab was opened
+      // and the original open route is safe to use instead. Every other
+      // failure, including an uncertain open outcome, is never re-sent.
+      if (!isLegacyRouteMiss(error)) throw error;
+      const opened = await this.openTarget(url);
       if (
-        error instanceof BrowserControlRequestError &&
-        error.status === 404 &&
-        error.error.code === "resource_not_found" &&
-        error.error.message === "route not found"
+        opened.target.browserSessionId !== this.reference.browserSessionId ||
+        opened.target.controllerGeneration !== this.reference.controllerGeneration
       ) {
-        throw browserControllerCompatibilityError("metadata-only tab opening");
+        throw new BrowserControlProtocolError(
+          "browser controller opened a tab for another session binding",
+        );
       }
-      throw error;
+      let targets: BrowserTargetValue[];
+      try {
+        targets = await this.listTargets();
+      } catch {
+        // The tab is open. A raw inventory error (for example a missing or
+        // re-tokened session) would let a caller's recovery replay the open.
+        throw new BrowserControlRequestError(409, {
+          code: "outcome_unknown",
+          message:
+            "browser tab was opened, but the tab list could not be read; list tabs before opening it again",
+          retryable: false,
+        });
+      }
+      response = {
+        browserSessionId: this.reference.browserSessionId,
+        controllerGeneration: this.reference.controllerGeneration,
+        targets,
+      };
     }
     if (
       response.browserSessionId !== this.reference.browserSessionId ||
@@ -2021,12 +2127,7 @@ export class BrowserControlSessionClient {
     } catch (error) {
       // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
       // route response from a missing target/session; neither is safe to retry.
-      if (
-        error instanceof BrowserControlRequestError &&
-        error.status === 404 &&
-        error.error.code === "resource_not_found" &&
-        error.error.message === "route not found"
-      ) {
+      if (isLegacyRouteMiss(error)) {
         throw browserControllerCompatibilityError("focused DOM reads");
       }
       throw error;
@@ -2851,7 +2952,15 @@ function parseEnvelope(body: string, status: number): unknown {
   if (value.ok === true && status >= 200 && status < 300 && "data" in value) return value.data;
   if (value.ok === false && status >= 400 && status <= 599) {
     const parsed = InteractionError.safeParse(value.error);
-    if (parsed.success) throw new BrowserControlRequestError(status, parsed.data);
+    if (parsed.success) {
+      throw new BrowserControlRequestError(
+        status,
+        parsed.data,
+        parsed.data.code === "driver_failed"
+          ? parseInteractionDriverDiagnostic(value.diagnostic)
+          : null,
+      );
+    }
   }
   throw new BrowserControlProtocolError("browser controller response envelope is invalid");
 }
@@ -2891,6 +3000,14 @@ function creationTargets(
     targets.push(parsed.data);
   }
   return { targets };
+}
+
+/** A launch notice is advisory text; an older controller omits it and a
+ * malformed one is dropped rather than failing a browser that did launch. */
+function creationNotice(value: unknown): { notice?: string } {
+  if (typeof value !== "string") return {};
+  const notice = value.replace(/\s+/gu, " ").trim();
+  return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {

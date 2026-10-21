@@ -12,12 +12,9 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { submitComposerDraftForRequest } from "../src/application/composer-submit";
 import { saveHumanComposerDraft } from "../src/application/session-commands";
 import { normalizeResources } from "../src/domain/resources";
@@ -356,8 +353,8 @@ describe("established-session composer drafts", () => {
       initialMessage: "initial",
       resources: [],
       metadata: {},
-      model: "gpt-5.6-sol",
-      reasoningEffort: "medium",
+      model: "previous-model",
+      reasoningEffort: "low",
       latencyMode: "standard",
       sandboxBackend: "none",
     });
@@ -431,6 +428,9 @@ describe("established-session composer drafts", () => {
       receipt: { operationKey: clientEventId },
       turn: { resources: [hostRepository] },
     });
+    const [stored] = await shared!.admin`
+      select model, reasoning_effort as "reasoningEffort" from sessions where id = ${session.id}`;
+    expect(stored).toEqual({ model: saved.model, reasoningEffort: saved.reasoningEffort });
 
     const replay = await submitComposerDraftForRequest(
       deps,

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
@@ -8,12 +8,14 @@ import {
   createDb,
   createOrganizationInvitation,
   createSession,
+  claimSessionWorkForAttempt,
   ensureManagedAccessForUser,
   forkSessionContent,
   getSessionForSubject,
   listSessionIdsInGroup,
   listSessionDiscoverySummaries,
   listSessionsForSubject,
+  listWorkspaceBackgroundCommandsForSubject,
   mutateSessionControlInTransaction,
   releaseLeaseHolder,
   submitHumanPromptInTransaction,
@@ -98,6 +100,148 @@ async function organization() {
 }
 
 type Org = Awaited<ReturnType<typeof organization>>;
+
+test("workspace commands preserve private audiences, host scope and complete pagination", async () => {
+  const org = await organization();
+  const own = await createSession(client.db, sessionInput(org, org.owner, ""));
+  const visible = await createSession(client.db, sessionInput(org, org.owner, ""));
+  await makePrivate(org, own.id);
+  const seed = async (sessionId: string, count: number) => {
+    await shared.admin`insert into session_background_commands (
+      account_id, workspace_id, session_id, provider, control_workspace_id,
+      enrollment_id, connection_instance_id, op_id, command_preview
+    ) select ${org.accountId}, ${org.workspaceId}, ${sessionId}, 'connected_machine',
+      ${org.workspaceId}, gen_random_uuid(), 'workspace-command-test', gen_random_uuid()::text,
+      'bun run watch' from generate_series(1, ${count}::int)`;
+  };
+  await seed(own.id, 1);
+  await seed(visible.id, 101);
+  const first = await listWorkspaceBackgroundCommandsForSubject(client.db, org.workspaceId, {
+    subjectId: org.member,
+  });
+  expect(first.commands).toHaveLength(100);
+  expect(first.commands.every((command) => command.sessionId === visible.id)).toBe(true);
+  expect(first.nextCursor).not.toBeNull();
+  const second = await listWorkspaceBackgroundCommandsForSubject(
+    client.db,
+    org.workspaceId,
+    { subjectId: org.member },
+    first.nextCursor!,
+  );
+  expect(second.commands).toHaveLength(1);
+  expect(second.nextCursor).toBeNull();
+  expect(new Set([...first.commands, ...second.commands].map((command) => command.id)).size).toBe(
+    101,
+  );
+  const scope = { kind: "scoped" as const, sessionIds: [own.id], rootSessionIds: [] };
+  expect(
+    (
+      await listWorkspaceBackgroundCommandsForSubject(client.db, org.workspaceId, {
+        subjectId: org.member,
+        authorizationScope: scope,
+      })
+    ).commands,
+  ).toEqual([]);
+  const ownerRead = await listWorkspaceBackgroundCommandsForSubject(client.db, org.workspaceId, {
+    subjectId: org.owner,
+    authorizationScope: scope,
+  });
+  expect(ownerRead.commands.map((command) => command.sessionId)).toEqual([own.id]);
+  await shared.admin`delete from workspace_memberships where workspace_id=${org.workspaceId} and subject_id=${org.member}`;
+  await expect(
+    listWorkspaceBackgroundCommandsForSubject(client.db, org.workspaceId, {
+      subjectId: org.member,
+    }),
+  ).rejects.toThrow();
+});
+
+test("workspace command metadata uses the launch machine and includes archived chats", async () => {
+  const org = await organization();
+  const session = await createSession(client.db, sessionInput(org, org.owner, ""));
+  await updateSessionTitle(client.db, {
+    workspaceId: org.workspaceId,
+    sessionId: session.id,
+    title: "Preview server",
+    source: "user",
+  });
+  const enrollmentId = crypto.randomUUID();
+  await shared.admin`insert into enrollments (id, account_id, workspace_id, pubkey)
+    values (${enrollmentId}, ${org.accountId}, ${org.workspaceId}, ${crypto.randomUUID()})`;
+  await shared.admin`insert into sandboxes (account_id, workspace_id, enrollment_id, name, kind)
+    values (${org.accountId}, ${org.workspaceId}, ${enrollmentId}, 'Original build computer', 'selfhosted')`;
+  await shared.admin`insert into session_background_commands (
+    account_id, workspace_id, session_id, provider, control_workspace_id,
+    enrollment_id, connection_instance_id, op_id, command_preview
+  ) values (${org.accountId}, ${org.workspaceId}, ${session.id}, 'connected_machine',
+    ${org.workspaceId}, ${enrollmentId}, 'launch-connection', 'launch-command', 'bun run dev')`;
+  await shared.admin`insert into session_pins (account_id, workspace_id, session_id, subject_id, archived, archived_at)
+    values (${org.accountId}, ${org.workspaceId}, ${session.id}, ${org.member}, true, now())`;
+  const result = await listWorkspaceBackgroundCommandsForSubject(client.db, org.workspaceId, {
+    subjectId: org.member,
+  });
+  expect(result.commands).toHaveLength(1);
+  expect(result.commands[0]).toMatchObject({
+    sessionTitle: "Preview server",
+    machineName: "Original build computer",
+  });
+  // A retained command has its own launch identity even when the chat has no
+  // active machine pointer. Removal of discovery metadata must not hide work.
+  expect(session.activeSandboxId).toBeNull();
+  await shared.admin`delete from sandboxes where enrollment_id=${enrollmentId}`;
+  expect(
+    (
+      await listWorkspaceBackgroundCommandsForSubject(client.db, org.workspaceId, {
+        subjectId: org.member,
+      })
+    ).commands[0]?.machineName,
+  ).toBeNull();
+});
+
+test("a member's message is claimable after its owner shares a private chat", async () => {
+  const org = await organization();
+  const session = await createSession(client.db, sessionInput(org, org.owner, ""));
+  await makePrivate(org, session.id);
+  const send = () =>
+    withWorkspaceSubjectSessionActivityRls(client.db, org.workspaceId, org.member, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: org.accountId,
+          workspaceId: org.workspaceId,
+          sessionId: session.id,
+          subjectId: org.member,
+          actor: { type: "human", subjectId: org.member },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Member follow-up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      ),
+    );
+  await expect(send()).rejects.toThrow();
+  await transitionSessionVisibility(client.db, {
+    workspaceId: org.workspaceId,
+    sessionId: session.id,
+    actorSubjectId: org.owner,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: crypto.randomUUID(),
+  });
+  const accepted = await send();
+  const claim = await claimSessionWorkForAttempt(client.db, org.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claim.action).toBe("claimed");
+  if (claim.action !== "claimed") throw new Error("member turn was not claimed");
+  expect(claim.turn.id).toBe(accepted.turnId);
+  expect(claim.turn.initiatingHumanSubjectId).toBe(org.member);
+});
 
 function sessionInput(org: Org, subjectId: string, initialMessage: string) {
   return {

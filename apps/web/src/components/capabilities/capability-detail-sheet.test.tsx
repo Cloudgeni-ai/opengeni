@@ -4,17 +4,21 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 
-import type { ConnectionHealth } from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
+import type { ConnectionHealth } from "@opengeni/react/app/lib/capabilities";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
-import { Sheet } from "@/components/ui/sheet";
+import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   ConnectionStatus,
   DEFAULT_CONNECTION_OWNERSHIP,
   DetailBody,
   OwnershipSelector,
   SocialConnectorControls,
-} from "./capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 
 beforeAll(() => {
   GlobalRegistrator.register();

@@ -55,6 +55,19 @@ function unsafePathname(pathname: string): boolean {
 }
 
 function hostWorkspacePath(path: string, workspaceId: string): string {
+  const url = new URL(path, "http://site.invalid");
+  if (url.pathname === "/v1/config/client") {
+    const requested = url.searchParams.getAll("workspaceId");
+    if (
+      requested.length > 1 ||
+      (requested.length === 1 && requested[0] !== "site-host" && requested[0] !== workspaceId)
+    )
+      throw new SiteSessionPathError();
+    // The SDK's scoped config read uses a query, not a workspace path segment.
+    // Both the console bridge and Codemode proxy bind it to their own workspace.
+    if (workspaceId !== "site-host") url.searchParams.set("workspaceId", workspaceId);
+    return url.pathname + url.search;
+  }
   return path.replace("/workspaces/site-host", `/workspaces/${encodeURIComponent(workspaceId)}`);
 }
 
@@ -79,7 +92,7 @@ function siteDataPath(path: string, rewritten: string, workspaceId: string, site
  * refuses frame requests outside the allowlist or to another Site's sessions.
  *
  * `workspaceId` `site-host` checks a path inside the Site without rewriting
- * it. A session list must name `originSiteId=current`; the host binds it to
+ * it. A session list must name `originSiteId=current` or `siteAccessId=current`; the host binds it to
  * its pinned Site, or to no Site at all when the frame has none.
  */
 export function siteSessionPath(
@@ -94,12 +107,23 @@ export function siteSessionPath(
   const rewritten = hostWorkspacePath(path, workspaceId);
   if (SITE_DATA_PATH.test(pathname)) return siteDataPath(path, rewritten, workspaceId, siteId);
   if (match.operation.id !== "sessions.list") return rewritten;
-  // A Site lists only its own conversations. Never widen a Site list to the workspace.
+  // A Site lists only conversations available to it. Never widen to the workspace.
   const url = new URL(rewritten, "http://site.invalid");
   const origins = url.searchParams.getAll("originSiteId");
-  if (origins.length !== 1 || origins[0] !== "current") throw new SiteSessionPathError();
+  const access = url.searchParams.getAll("siteAccessId");
+  const views = url.searchParams.getAll("view");
+  if (
+    views.length > 1 ||
+    (views.length === 1 && views[0] !== "page") ||
+    origins.length + access.length !== 1 ||
+    (origins[0] ?? access[0]) !== "current"
+  )
+    throw new SiteSessionPathError();
   if (workspaceId === "site-host") return path;
-  url.searchParams.set("originSiteId", siteId ?? SITE_NO_ORIGIN_ID);
+  url.searchParams.set(
+    access.length ? "siteAccessId" : "originSiteId",
+    siteId ?? SITE_NO_ORIGIN_ID,
+  );
   return url.pathname + url.search;
 }
 
@@ -263,11 +287,9 @@ const SITE_FRAME_BODY_FIELDS: Readonly<Record<string, readonly string[]>> = Obje
 const SITE_FRAME_EMPTY_ONLY_FIELDS = new Set(["resources", "connectionAccounts"]);
 
 /**
- * Session create fields a Site frame may send. The API starts the session
- * with a minimal Site profile: no tools, servers, connections, permissions,
- * vaults, sandbox or environment choice, resources, Skills, agent overrides,
- * hidden model context, learning overrides, goals, channels, visibility,
- * usage limits or nesting. Metadata keeps only keys outside `_opengeni`.
+ * Session create fields a Site frame may send. Agent/tool choices use the
+ * ordinary viewer's defaults, never a platform-imposed Site profile.
+ * Ownership, settings, approvals and credentials remain host-owned.
  */
 export const SITE_FRAME_SESSION_CREATE_FIELDS: readonly string[] = Object.freeze([
   "initialMessage",

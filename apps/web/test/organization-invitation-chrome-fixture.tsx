@@ -9,8 +9,8 @@ import {
   OrganizationInvitationsMenuItem,
   type OrganizationInvitationsController,
 } from "../src/components/organization-invitations";
-import { Avatar, AvatarFallback } from "../src/components/ui/avatar";
-import { Button } from "../src/components/ui/button";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,15 +18,15 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "../src/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "../src/components/ui/tooltip";
-import { AppearanceProvider, useAppearance } from "../src/lib/appearance";
-import type { OrganizationInvitation } from "../src/types";
+} from "@opengeni/react/ui/tooltip";
+import { AppearanceProvider, useAppearance } from "@opengeni/react/app/lib/appearance";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const displayName = "Ada Lovelace";

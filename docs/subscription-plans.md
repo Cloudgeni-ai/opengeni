@@ -7,7 +7,7 @@ top-ups remain enabled independently. Migrations enroll nobody, change no
 machine-time pricing and configure no Stripe prices. Organizations with no
 plan row retain uncapped seats and their existing credit behavior. Activation
 enrolls all organizations in Free, including embedded organizations; only actual
-verified-signup-trial recipients receive monthly Free credit. Enterprise is
+verified-signup eligibility-receipt holders receive monthly Free credit. Enterprise is
 operator-assigned only.
 
 Migration 0797 is **maintenance**, despite adding only new structures: the
@@ -156,11 +156,47 @@ Wrappers also export `PlanCreditPeriod`, `PlanCreditPeriodInput`, and
 ## Credit accounting
 
 New ledger types are `plan_credit_grant` and `plan_credit_expiry`. Both have
-`workspace_id = NULL` and `eligible_model_ids = NULL`; grants are general credit,
-not scoped promotions. Expiries therefore do not increment workspace allowance
-debit counters. The signup receipt trigger remains the only signup-trial issuer.
+`workspace_id = NULL`. Pro/Max grants and legacy Free grants have
+`eligible_model_ids = NULL` and remain general credit. Starting with migration
+0844, new positive Free monthly grants carry the signup/free-credit model scope.
+Expiries therefore do not increment workspace allowance
+debit counters. Since 0845, the signup receipt trigger records eligibility without money.
 Recurring plan funding deliberately does not fire the signup/coupon/manual
 `credits.granted` acquisition/lifecycle triggers of migration 0566.
+
+### Scoped Free periods (0844 onward)
+
+Free uses the same **live policy** as signup: `signupModelIds`, falling back to
+`defaultModelIds`. The grant stores the issuance list as a fallback; policy changes
+affect existing scoped balances on their next read/admission, and admitted calls
+can settle under their original policy revision. With no runtime policy, the
+actual signup receipt's stored scope supplies the bootstrap list. If neither
+exists, new Free funding fails with `55000` until the operator configures the
+free-credit policy; it never silently grants general credit. Zero-value grants
+have no funding to scope. Pro, Max and Enterprise behavior is unchanged.
+
+Free monthly funding is allocated explicitly through `credit_debit_allocations`
+**before** other eligible promotions, then general credit/top-ups. Uncovered model
+usage (including Claude when absent from the policy), non-model resources and
+voice do not consume this allowance or count it as spendable. The separate signup
+voice benefit is unchanged. General debt, top-up reversals and disputes never
+consume scoped allowance; top-ups still repay general debt first.
+
+Remaining Free allowance is the grant minus its usage allocations. Expiry removes
+that exact remainder and allocates the expiry debit to that grant. Lock-free
+balance reads exclude pending-expiry Free grants from promotional/spendable totals
+before maintenance writes the receipt. Early replacement on Free→Pro/Max expires
+the Free remainder, never the signup promotion; replay cannot refill it. Video
+refunds remain general funds because scoped Free funding never paid for video.
+
+This is a maintenance migration: drain old API and workers, migrate, then start
+the matching readers/writers. **Do not rewrite existing in-period grants**. Their
+NULL scope and accounting remain unchanged until their normal expiry/replacement;
+the next new Free monthly grant gets scoped. No production backfill, policy edit,
+signup-trial removal or Free-eligibility change is part of 0844; the following
+0845 migration replaces new signup bonuses with zero-value eligibility receipts.
+
+### General periods (paid and legacy unrestricted Free)
 
 Remaining allowance is granted minus opening general-credit debt absorbed by
 the grant and net settled usage, floored at zero. `opening_debt_micros` records
@@ -211,15 +247,34 @@ credit; new top-ups repay debt first.
 
 ## Free eligibility and seats
 
-`freePlanCreditEligible` requires the organization's actual verified-signup
-trial grant (`source_type = verified_signup_trial`, canonical human idempotency
-key). Merely verifying an email or creating additional organizations is not
-enough. No historical eligibility backfill is executed by this migration.
-Any production backfill requires a separately authorized, one-human/one-org
-eligibility decision; the maintenance caller must not infer eligibility.
-Disabling the separate signup-trial issuer at activation would make new users
-ineligible under this receipt-based rule; changing that eligibility source needs
-an explicit follow-up design. This PR does not disable the issuer.
+`freePlanCreditEligible` requires the organization's actual canonical signup
+receipt: `type = grant`, `source_type = verified_signup_trial`, and idempotency
+key `verified-signup-trial:v1:<canonical human id>`. Migration 0845 changes new
+receipts to **zero micros**, retaining the original issuer path and identity key
+without a separate signup bonus. Legacy positive trial receipts remain eligible;
+already-issued trial balances are neither changed nor expired by this migration.
+The historical source type is retained for compatibility, not a promise of money.
+
+The existing self-service setup receipt is one per verified human, under its
+canonical lock. Setup retries cannot issue another witness; additional organizations,
+invited users and unverified people cannot obtain one. There is **no backfill**:
+old completed setups with no trial receipt remain ineligible, even on replay.
+
+The old `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` environment flag and
+`set_verified_signup_trial_credits_enabled` runtime switch no longer gate this
+non-monetary witness and cannot restore a bonus. No production config edit is
+required to stop signup money after 0845. Keep subscription plans enabled and
+configure the free-credit model policy for monthly funding; disabling the legacy
+bonus flag is optional and does not disable eligibility. Old switch readings are
+historical compatibility telemetry, not the state of monthly funding.
+
+0845 is rolling and changes no historical rows. The preceding scoped-credit
+0844 migration still requires its documented maintenance rollout. The enabled
+subscription maintenance worker issues the first monthly grant on its next pass
+(normally within 60 seconds), and renews at the existing UTC anniversary. The
+welcome describes monthly funding only after the billing snapshot confirms it;
+it never invents a signup bonus while waiting. Future configured credit amounts
+come from the plan catalog rather than hardcoded welcome copy.
 
 Seats count active/provisioning `user:` subjects plus pending, unexpired
 invitations. A bound invitation reserves the same seat as its matching member,
@@ -245,7 +300,14 @@ when the verified plan's seat usage is at its limit.
 `BillingBalance.plan` is optional/nullable. It is null for unenrolled accounts;
 otherwise it contains `key`, `label`, `status`, `creditGrantedMicros`,
 `creditRemainingMicros`, `creditPendingExpiryMicros`, nullable `periodResetAt`, nullable `seatLimit`,
-`seatsUsed`, `cancelAtPeriodEnd`. Existing balance/general/promotional fields
+`seatsUsed`, `cancelAtPeriodEnd`, optional `creditScoped`. This last field describes
+the granted period, not just current plan state (which can advance before invoice
+payment). Scoped monthly balances also appear in `promotionalCredits` with
+`planCredit: true`, the current covered models, and no voice benefit. This supplies
+catalog `creditFunding: "promotional"`, the picker’s **Free credits** hint and the
+uncovered-model free-credit-gap message without separate client eligibility logic.
+Billing displays the monthly amount once and does not subtract scoped allowance
+from general credit. Existing balance/general/promotional fields
 exclude an ended, unavailable allowance even before its physical expiry row
 is written; `creditPendingExpiryMicros` shows that ledger/projection difference.
 Reads remain lock-free. The next ledger writer settles it under the account

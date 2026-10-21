@@ -54,7 +54,7 @@ diff --git a/src/connection.js b/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -447,10 +466,17 @@
+@@ -447,10 +466,20 @@
      socket.removeAllListeners()
      socket = null
  
@@ -63,7 +63,11 @@ diff --git a/src/connection.js b/src/connection.js
 +    if (initial && !query)
        return reconnect()
  
-     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // A socket error rejects only the queries it sees. A caller can still queue
++    // one (a failed transaction's rollback) before close; it never reached a
++    // backend, so reject it instead of replaying it on the next connection.
++    if (query || sent.length) error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
 +    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
@@ -73,7 +77,7 @@ diff --git a/src/connection.js b/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -561,7 +587,12 @@
+@@ -561,7 +590,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -143,7 +147,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -447,10 +466,17 @@
+@@ -447,10 +466,20 @@
      socket.removeAllListeners()
      socket = null
  
@@ -152,7 +156,11 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 +    if (initial && !query)
        return reconnect()
  
-     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // A socket error rejects only the queries it sees. A caller can still queue
++    // one (a failed transaction's rollback) before close; it never reached a
++    // backend, so reject it instead of replaying it on the next connection.
++    if (query || sent.length) error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
 +    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
@@ -162,7 +170,7 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -561,7 +587,12 @@
+@@ -561,7 +590,12 @@
  
        if (needsTypes) {
          initial.reserve && (initial = null)
@@ -366,6 +374,94 @@ diff --git a/src/queue.js b/src/queue.js
      shift: () => {
        const out = xs[index++]
  
+diff --git a/src/query.js b/src/query.js
+--- a/src/query.js
++++ b/src/query.js
+@@ -23,8 +23,8 @@
+     this.state = null
+     this.statement = null
+
+-    this.resolve = x => (this.active = false, resolve(x))
+-    this.reject = x => (this.active = false, reject(x))
++    this.resolve = x => (this.settled = true, this.active = false, resolve(x))
++    this.reject = x => (this.settled = true, this.active = false, reject(x))
+
+     this.active = false
+     this.cancelled = null
+@@ -50,7 +50,11 @@
+   }
+
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    if (this.cancelPromise) return this.cancelPromise
++    if (this.settled || !this.canceller) return Promise.resolve()
++    const canceller = this.canceller
++    this.canceller = null
++    return this.cancelPromise = canceller(this)
+   }
+
+   simple() {
+@@ -97,8 +101,8 @@
+               return new Promise(r => prev = r)
+             }
+-            this.resolve = () => (this.active = false, resolve({ done: true }))
+-            this.reject = x => (this.active = false, reject(x))
++            this.resolve = () => (this.settled = true, this.active = false, resolve({ done: true }))
++            this.reject = x => (this.settled = true, this.active = false, reject(x))
+           })
+           this.execute()
+           return promise
+         },
+diff --git a/cjs/src/query.js b/cjs/src/query.js
+--- a/cjs/src/query.js
++++ b/cjs/src/query.js
+@@ -23,8 +23,8 @@
+     this.state = null
+     this.statement = null
+
+-    this.resolve = x => (this.active = false, resolve(x))
+-    this.reject = x => (this.active = false, reject(x))
++    this.resolve = x => (this.settled = true, this.active = false, resolve(x))
++    this.reject = x => (this.settled = true, this.active = false, reject(x))
+
+     this.active = false
+     this.cancelled = null
+@@ -50,7 +50,11 @@
+   }
+
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    if (this.cancelPromise) return this.cancelPromise
++    if (this.settled || !this.canceller) return Promise.resolve()
++    const canceller = this.canceller
++    this.canceller = null
++    return this.cancelPromise = canceller(this)
+   }
+
+   simple() {
+@@ -97,8 +101,8 @@
+               return new Promise(r => prev = r)
+             }
+-            this.resolve = () => (this.active = false, resolve({ done: true }))
+-            this.reject = x => (this.active = false, reject(x))
++            this.resolve = () => (this.settled = true, this.active = false, resolve({ done: true }))
++            this.reject = x => (this.settled = true, this.active = false, reject(x))
+           })
+           this.execute()
+           return promise
+         },
+diff --git a/types/index.d.ts b/types/index.d.ts
+--- a/types/index.d.ts
++++ b/types/index.d.ts
+@@ -605,7 +605,7 @@
+     writable(): Promise<Writable>;
+
+     execute(): this;
+-    cancel(): void;
++    cancel(): Promise<void>;
+
+     /**
+      * @deprecated `.stream` has been renamed to `.forEach`
 diff --git a/cjs/src/queue.js b/cjs/src/queue.js
 --- a/cjs/src/queue.js
 +++ b/cjs/src/queue.js

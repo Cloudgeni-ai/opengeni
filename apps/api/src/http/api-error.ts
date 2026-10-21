@@ -175,7 +175,7 @@ export function databaseUnavailableHttpError(error: unknown, method: string): Ap
   const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
   return new ApiHttpError(503, {
     code: "upstream_unavailable",
-    message: "Opengeni is temporarily unavailable. Retry shortly.",
+    message: "The workspace is temporarily unavailable. Retry shortly.",
     retryable: true,
     outcomeUnknown: !safeMethod,
     details: { code: DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE },
@@ -206,7 +206,7 @@ export function databaseContentionHttpError(
   const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
   return new ApiHttpError(503, {
     code: "upstream_unavailable",
-    message: "Opengeni hit transient database contention. Retry shortly.",
+    message: "The workspace hit transient database contention. Retry shortly.",
     retryable: true,
     outcomeUnknown: options.outcomeUnknown ?? !safeMethod,
     details: { code: DATABASE_CONTENTION_ERROR_DETAIL_CODE, sqlState },

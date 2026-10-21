@@ -17,15 +17,17 @@ const offline = () =>
   });
 
 describe("wrong interaction placement message", () => {
-  test("names the swap tool, the exact target and the way back", () => {
+  test("names the swap tool and the exact target, and never asks to swap back", () => {
     const message = wrongInteractionPlacementMessage("7f099792-650d-4356-96c5-e0df3aab4752");
     expect(message).toStartWith(
-      "The requested Connected Machine is not this session's current placement.",
+      "The requested Connected Machine is not the machine this session is working on",
     );
     expect(message).toContain(
-      'if sandbox_swap is available, call it with target "7f099792-650d-4356-96c5-e0df3aab4752"',
+      'call sandbox_swap with target "7f099792-650d-4356-96c5-e0df3aab4752" if it is available, then retry',
     );
-    expect(message).toContain('swap back (target "session") when done');
+    expect(message).toContain("staying on that machine afterwards is fine");
+    expect(message).not.toContain("swap back");
+    expect(message).not.toContain('"session"');
   });
 });
 

@@ -49,8 +49,8 @@ export function categoryForItemType(type: VaultItemType): string {
       throw new VaultProviderError(
         "provider_unavailable",
         type === "passkey"
-          ? "1Password service accounts cannot store passkeys; keep passkeys in an Opengeni vault"
-          : "Creating file items in 1Password from Opengeni is not supported yet",
+          ? "1Password service accounts cannot store passkeys; keep passkeys in a workspace-hosted vault"
+          : "Creating file items in 1Password from here is not supported yet",
       );
   }
 }
@@ -77,7 +77,7 @@ function sdkTypeForKind(kind: VaultFieldKind): string {
   if (kind === "concealed") return "Concealed";
   throw new VaultProviderError(
     "provider_unavailable",
-    "Writing file fields to 1Password from Opengeni is not supported yet",
+    "Writing file fields to 1Password from here is not supported yet",
   );
 }
 
@@ -323,7 +323,7 @@ export function applyWrite(item: SdkItem, write: ProviderWriteItem): SdkItem {
     if (target?.source === "file" || (!target && field.kind === "file")) {
       throw new VaultProviderError(
         "provider_unavailable",
-        "Writing file fields to 1Password from Opengeni is not supported yet",
+        "Writing file fields to 1Password from here is not supported yet",
       );
     }
     if (field.remove) {

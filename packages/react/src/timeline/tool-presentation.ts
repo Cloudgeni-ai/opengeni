@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import { isConnectedMachineOutcomeUnknownOutput, type GitFileDiff } from "@opengeni/sdk";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
   applyPatchOpsFromToolItem,
@@ -8,6 +8,7 @@ import {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
+  retainedToolResultImages,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -18,6 +19,7 @@ import {
 import { invokedToolCall } from "./invoked-tool";
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
+import { toolStepLabel, toolStepPhase, type ToolStepPhase } from "./tool-steps";
 import type { ToolCallItem } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
@@ -120,7 +122,9 @@ export type ToolBody =
       /** Shown instead of the list when it is known to be empty. */
       empty?: string | undefined;
       blocks: Array<{ label: string; value: unknown; failed?: boolean }>;
-    };
+    }
+  /** Nothing to expand: the row says everything a person needs. */
+  | { kind: "none" };
 
 export type ToolListingEntry = {
   key: string;
@@ -156,12 +160,26 @@ export type ToolRowPresentation = {
   chip?: ToolChip | undefined;
   failed?: boolean | undefined;
   cancelled?: boolean | undefined;
+  /**
+   * The preview quotes raw tool detail (command output, an error payload, tool
+   * names), so plain rows leave it out.
+   */
+  detailPreview?: boolean | undefined;
   body: ToolBody;
 };
+
+/**
+ * How much of a tool call a row shows. `full` (the default) shows commands,
+ * arguments, output and diffs; `plain` shows only the plain step, its status
+ * and human-readable results, never raw arguments, output or JSON.
+ */
+export type ToolDetails = "full" | "plain";
 
 export type ToolPresentationContext = {
   /** Host-supplied active compute label ("on <label> · …" preview prefix). */
   computeLabel?: string | null | undefined;
+  /** See `ToolDetails`. Defaults to `full`. */
+  details?: ToolDetails | undefined;
 };
 
 /** Prefix a collapsed preview with the host-supplied active compute label. */
@@ -191,7 +209,7 @@ export function readableToolError(text: string): string {
     value
       .trim()
       .replace(/^An error occurred while running the tool\. Please try again\.\s*(Error:\s*)?/, "")
-      .replace(/^[A-Za-z][\w.-]{0,40} API \d{3}:\s*/, "");
+      .replace(/^(?:[A-Za-z][\w.-]{0,40} )?API \d{3}:\s*/, "");
   let message = stripTransport(text);
   const parsed = tryParseJson(message);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
@@ -230,6 +248,16 @@ export function execPresentation(
     title,
     titleMono: true,
   };
+
+  if (isConnectedMachineOutcomeUnknownOutput(out)) {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      chip: { tone: "bad", text: t("timeline.toolPresentation.outcomeUnknown") },
+      body: { kind: "term", command: null, workdir, output: out, failed: true },
+    };
+  }
 
   // No output event ever arrived: the turn failed before the output insert —
   // most likely a NUL byte in the command output prevented storage.
@@ -835,6 +863,7 @@ function mcpRowPresentation(
       ...(options.quietError
         ? {}
         : {
+            detailPreview: true,
             preview: textPreview(
               truncatePreview(readableToolError(outText), 80) ||
                 errorFallback ||
@@ -1026,12 +1055,13 @@ function computerActPreview(action: ComputerActAction): string | undefined {
  */
 export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const goalPreview = goalToolPreview(item.name, parseToolArgs(item.arguments));
+  const title = toolDisplayName(t, item.name, item.display, callStepPhase(item));
   if (item.status !== "running") {
     const { text: outText, isError } = unwrapMcpOutput(item.output);
     const base = {
       tool: "generic" as const,
       icon: genericToolIconKind(item.name),
-      title: toolDisplayName(t, item.name, item.display),
+      title,
     };
     const args = parseToolArgs(item.arguments);
     // A permission Block is a decision, not a tool failure: say so plainly instead
@@ -1067,7 +1097,7 @@ export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): To
   return mcpRowPresentation(t, item, {
     tool: "generic",
     icon: genericToolIconKind(item.name),
-    title: toolDisplayName(t, item.name, item.display),
+    title,
     runningPreview: goalPreview,
     runningFallback: t("timeline.toolPresentation.running"),
     settledPreview: goalPreview,
@@ -1258,6 +1288,7 @@ export function toolSearchPresentation(t: OpenGeniText, item: ToolCallItem): Too
     ...base,
     iconTone: "muted",
     title: t("timeline.toolPresentation.lookedUpTools"),
+    detailPreview: true,
     cancelled: item.status === "cancelled",
     ...(preview ? { preview: textPreview(preview) } : {}),
     body: {
@@ -1334,7 +1365,7 @@ export function docsSearchPresentation(t: OpenGeniText, item: ToolCallItem): Too
       ? t("timeline.toolPresentation.searchTruncatepreview", {
           truncatePreview: truncatePreview(query, 48),
         })
-      : toolDisplayName(t, item.name, item.display),
+      : toolDisplayName(t, item.name, item.display, callStepPhase(item)),
   };
   if (item.status === "running") {
     return {
@@ -1404,7 +1435,7 @@ export function sessionTitlePresentation(t: OpenGeniText, item: ToolCallItem): T
   const base = {
     tool: "session_title" as const,
     icon: "sessions" as const,
-    title: toolDisplayName(t, item.name, item.display),
+    title: toolDisplayName(t, item.name, item.display, callStepPhase(item)),
   };
   if (item.status === "running") {
     return {
@@ -1495,6 +1526,70 @@ const PRESENTERS_BY_NAME: Record<string, PresentedToolKind> = {
 };
 
 /**
+ * The phase a call's step name reads in. A call that finished with an error
+ * result keeps the ongoing form ("Sending a message" · Error), like a failed one.
+ */
+export function callStepPhase(item: ToolCallItem): ToolStepPhase {
+  if (item.status === "complete" && unwrapMcpOutput(item.output).isError) return "running";
+  return toolStepPhase(item.status);
+}
+
+/**
+ * A row reduced to what a person needs: the plain step, its status and any
+ * human-readable result. Commands, arguments, output, diffs and JSON are left
+ * out, and a row with nothing human left to show does not expand.
+ */
+export function plainToolRow(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  row: ToolRowPresentation,
+  context: Pick<ToolPresentationContext, "computeLabel"> = {},
+): ToolRowPresentation {
+  const { detailPreview: _detailPreview, titleMono: _titleMono, ...rest } = row;
+  const plain: ToolRowPresentation = { ...rest, body: plainBody(row.body) };
+  if (row.detailPreview) delete plain.preview;
+  if (row.tool === "exec" || row.tool === "write_stdin") {
+    const failed =
+      row.iconTone === "failed" || row.chip?.tone === "bad" || item.status === "failed";
+    plain.title = toolStepLabel(t, "runCommand", failed ? "running" : toolStepPhase(item.status));
+    if (isConnectedMachineOutcomeUnknownOutput(item.output)) {
+      // The call has ended, but its effects remain unknown. Keep that verdict
+      // in the chip, with the explanation available without raw command output.
+      return {
+        ...plain,
+        title: toolStepLabel(t, "runCommand", "done"),
+        body: { kind: "note", tone: "error", text: t("toolActionReview.itMayHaveRunCheck") },
+      };
+    }
+    const computeLabel = context.computeLabel ?? null;
+    if (computeLabel) plain.preview = textPreview(computeLabel, row.running);
+    else delete plain.preview;
+    if (row.chip?.tone === "bad") plain.chip = { tone: "bad", text: t("timeline.chip.failed") };
+    else delete plain.chip;
+  } else if (row.tool === "apply_patch") {
+    delete plain.preview;
+  }
+  return plain;
+}
+
+function plainBody(body: ToolBody): ToolBody {
+  switch (body.kind) {
+    case "term":
+    case "patch":
+      return { kind: "none" };
+    case "payloads":
+      return body.note ? { kind: "note", text: body.note } : { kind: "none" };
+    case "listing": {
+      // Mono entries are wire names (disclosed tools); plain rows keep readable hits only.
+      const entries = body.entries.filter((entry) => !entry.mono);
+      return entries.length ? { ...body, entries, blocks: [] } : { kind: "none" };
+    }
+    default:
+      return body;
+  }
+}
+
+/**
  * Resolve the shared presenter for a call with the web registry's precedence
  * (raw.type, exact name, MCP leaf). Tools whose web renderer is richer than the
  * shared model (computer use, media, knowledge receipts, …) resolve to
@@ -1519,12 +1614,61 @@ export function presentedToolKind(item: ToolCallItem): PresentedToolKind {
   return "generic";
 }
 
+/** Presentations whose collapsed row reads correctly from an output preview. */
+const PREVIEW_READABLE_KINDS: ReadonlySet<PresentedToolKind> = new Set([
+  "exec",
+  "write_stdin",
+  "apply_patch",
+  "generic",
+]);
+
+/**
+ * Whether the shared presentation of `item` reads correctly while its output
+ * is a bounded preview (`item.outputPreview`): long strings keep their head and
+ * tail, so an exit code, a tail peek, a patch summary or an error snippet stay
+ * right, and the body is shown only after the exact output is read. Every
+ * other tool needs its exact output first. True for an exact output.
+ */
+export function presentsToolOutputPreview(item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  if (item.outputPreview.shape !== "structured") return false;
+  const shown = invokedToolCall(item);
+  const kind = presentedToolKind(shown);
+  if (!PREVIEW_READABLE_KINDS.has(kind)) return false;
+  if (kind !== "generic") return true;
+  // A generic row draws retained images from its result, and parses JSON
+  // result text whole (an MCP `content[].text` included) for its error flag:
+  // cut JSON would not parse.
+  if (hasCutJsonText(shown.output, 0)) return false;
+  return retainedToolResultImages(shown.output).images.length === 0;
+}
+
+const OUTPUT_PREVIEW_OMISSION = / characters omitted from this preview\]…\n/u;
+
+function hasCutJsonText(value: unknown, depth: number): boolean {
+  if (typeof value === "string") {
+    return /^\s*[[{]/u.test(value) && OUTPUT_PREVIEW_OMISSION.test(value);
+  }
+  if (depth >= 4 || value === null || typeof value !== "object") return false;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  return children.some((child) => hasCutJsonText(child, depth + 1));
+}
+
 export function toolRowPresentation(
   t: OpenGeniText,
   item: ToolCallItem,
   context: ToolPresentationContext = {},
 ): ToolRowPresentation {
   item = invokedToolCall(item);
+  const row = presentedToolRow(t, item, context);
+  return context.details === "plain" ? plainToolRow(t, item, row, context) : row;
+}
+
+function presentedToolRow(
+  t: OpenGeniText,
+  item: ToolCallItem,
+  context: ToolPresentationContext,
+): ToolRowPresentation {
   switch (presentedToolKind(item)) {
     case "exec":
       return execPresentation(t, item, context);

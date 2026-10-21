@@ -10,6 +10,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@openai/agents-core/.bun-tag-2da6ec976600e880 b/.bun-tag-2da6ec976600e880
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@openai/agents-core/.bun-tag-34013d846a17e8af b/.bun-tag-34013d846a17e8af
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@openai/agents-core/.bun-tag-36e825f6e7410141 b/.bun-tag-36e825f6e7410141
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -2713,7 +2716,7 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.js b/dist/shims/mcp-server/node.js
-index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c7281247610fe01 100644
+index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949fc0f8b78 100644
 --- a/dist/shims/mcp-server/node.js
 +++ b/dist/shims/mcp-server/node.js
 @@ -35,6 +35,8 @@ var __importStar = (this && this.__importStar) || (function () {
@@ -2735,7 +2738,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              throw error;
          }
          throw (0, mcpLogging_1.sanitizeMcpTransportError)(error, endpoint, operation);
-@@ -573,6 +576,215 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
+@@ -573,6 +576,236 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
      }
  }
  exports.NodeMCPServerSSE = NodeMCPServerSSE;
@@ -2844,12 +2847,33 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
 +    if (era !== 'legacy') {
 +        return;
 +    }
++    rememberLegacyEra(endpoint);
++}
++function rememberLegacyEra(endpoint) {
++    legacyEraByEndpoint.delete(endpoint);
 +    if (legacyEraByEndpoint.size >= LEGACY_ERA_MEMORY_MAX_ENTRIES) {
 +        const oldest = legacyEraByEndpoint.keys().next().value;
 +        legacyEraByEndpoint.delete(oldest);
 +    }
 +    legacyEraByEndpoint.set(endpoint, Date.now());
 +}
++// A server can answer the `server/discover` probe yet send 2025-era results
++// without the `resultType` that protocol revision 2026-07-28 requires. Every
++// result from it then fails validation, so in practice it is a 2025-era
++// server: auto negotiation reconnects it over the 2025 handshake (and
++// remembers that, like any legacy verdict) instead of losing its results.
++function isModernEraResultMismatch(clientModule, client, error) {
++    try {
++        return (client.getProtocolEra() === 'modern' &&
++            clientModule.SdkError.isInstance(error) &&
++            error.code === clientModule.SdkErrorCode.InvalidResult &&
++            error.data?.violation === 'missing-resultType');
++    }
++    catch {
++        return false;
++    }
++}
++const LEGACY_ERA_RECONNECT = Symbol('legacy-era-reconnect');
 +function validateMaxListPages(value) {
 +    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
 +        throw new errors_1.UserError('maxListPages must be a positive integer.');
@@ -2951,7 +2975,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
  class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHttp {
      session = null;
      _cacheDirty = true;
-@@ -581,6 +793,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -581,6 +814,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      serverInitializeResult = null;
      clientSessionTimeoutSeconds;
      timeout;
@@ -2959,7 +2983,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      params;
      _name;
      transport = null;
-@@ -590,18 +803,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -590,18 +824,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      connectionStateVersion = 0;
      constructor(params) {
          super(params);
@@ -2991,7 +3015,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      }
      createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
          const transportOptions = {
-@@ -620,16 +840,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -620,16 +861,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
      async createConnectedStreamableHttpClient(options = {}) {
          const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
@@ -3036,7 +3060,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              return { client, transport };
          }
          catch (error) {
-@@ -647,25 +895,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -647,25 +916,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      getClientSessionTimeoutMs() {
          return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
      }
@@ -3063,7 +3087,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              this._toolsList = [];
          }
          await (0, mcpToolCache_1.invalidateServerToolsCache)(this.name);
-@@ -698,7 +934,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -698,7 +955,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              });
              try {
                  if (typeof detachedTransport.terminateSession === 'function') {
@@ -3075,7 +3099,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  }
              }
              finally {
-@@ -740,18 +979,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -740,18 +1000,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
      }
      async callToolWithClient(client, toolName, args, meta, options) {
@@ -3103,7 +3127,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      }
      async closeStreamableHttpClient(args, options) {
          const { client, transport } = args;
-@@ -771,6 +1012,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -771,6 +1033,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
          });
      }
@@ -3115,7 +3139,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      async reconnectExistingStreamableHttpClient(args) {
          const { transportModule } = await this.loadStreamableHttpRuntime();
          const { StreamableHTTPClientTransport } = transportModule;
-@@ -781,7 +1027,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -781,7 +1048,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          try {
              const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
              await args.client.connect(transport, requestOptions);
@@ -3125,7 +3149,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  // Reconnecting with an existing session skips initialize(), so resend
                  // initialized to reopen the shared SSE stream for async responses.
                  await this.reopenSharedStreamableHttpSession(args.client);
-@@ -838,14 +1085,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -838,14 +1106,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
              }
              try {
@@ -3155,7 +3179,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  const recovered = await this.reconnectExistingStreamableHttpClient({
                      client: previousClient,
                      protocolVersion,
-@@ -872,7 +1126,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -872,7 +1147,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  await this.publishConnectedStreamableHttpClient({
                      client: recovered.client,
                      transport: recovered.transport,
@@ -3164,7 +3188,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  });
                  return recovered.client;
              }
-@@ -909,13 +1163,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -909,13 +1184,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          if (this.params.sessionId !== undefined) {
              return 'none';
          }
@@ -3190,7 +3214,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              ? 'reconnect-only'
              : 'none';
      }
-@@ -948,7 +1209,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -948,7 +1230,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              await this.publishConnectedStreamableHttpClient({
                  client,
                  transport,
@@ -3198,7 +3222,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              });
              this.serverInitializeResult = {
                  serverInfo: { name: this._name, version: '1.0.0' },
-@@ -967,7 +1227,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -967,7 +1248,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          catch (e) {
              // A losing concurrent connect can fail after another connect already
              // published a healthy shared session, so avoid closing shared state here.
@@ -3207,7 +3231,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              (0, logger_1.logToolActionError)(this.logger, 'Error initializing MCP server:', error);
              throw error;
          }
-@@ -975,11 +1235,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -975,11 +1256,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
      async invalidateToolsCache() {
          this._toolsCacheGeneration += 1;
@@ -3221,7 +3245,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
          if (!this.session) {
              throw new Error('Server not initialized. Make sure you call connect() first.');
          }
-@@ -988,19 +1248,17 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -988,19 +1269,34 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          }
          const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
          const session = this.session;
@@ -3230,9 +3254,25 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
 -        const tools = await listAllMcpTools({
 -            fetchPage: (cursor) => runMcpTransportOperation(this.params.url, 'streamable HTTP list tools', () => requestMcpToolsPage(session, ListToolsResultSchema, requestOptions, cursor)),
 -            onPage: (response) => this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`),
--        });
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
-+        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', () => listMcpTools(clientModule, session, requestOptions, this.maxListPages));
++        const probing = ((this.params.versionNegotiation ?? { mode: 'auto' }).mode ?? 'legacy') === 'auto';
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', async () => {
++            try {
++                return await listMcpTools(clientModule, session, requestOptions, this.maxListPages);
++            }
++            catch (error) {
++                if (probing && isModernEraResultMismatch(clientModule, session, error)) {
++                    return LEGACY_ERA_RECONNECT;
++                }
++                throw error;
++            }
+         });
++        if (response === LEGACY_ERA_RECONNECT) {
++            rememberLegacyEra(this.params.url);
++            this.debugLog(() => `MCP server ${this._name} sent 2025-era results after negotiating 2026-07-28; reconnecting over the 2025 handshake.`);
++            await this.connect();
++            return await this.listTools();
++        }
 +        this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`);
          assertMcpToolListingIsCurrent({
              listedClient: session,
@@ -3245,7 +3285,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
          this._toolsList = tools;
          this._cacheDirty = false;
          return tools;
-@@ -1022,18 +1280,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1022,18 +1318,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              if (isCallerAbortReason(error, options?.signal)) {
                  throw error;
              }
@@ -3268,7 +3308,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              }
              try {
                  result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
-@@ -1042,41 +1300,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1042,41 +1338,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  if (isCallerAbortReason(retryError, options?.signal)) {
                      throw retryError;
                  }
@@ -3318,14 +3358,14 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      }
      get name() {
          return this._name;
-@@ -1130,4 +1385,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1130,4 +1423,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
  }
  exports.NodeMCPServerStreamableHttp = NodeMCPServerStreamableHttp;
 -//# sourceMappingURL=node.js.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.mjs b/dist/shims/mcp-server/node.mjs
-index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df403b651c8 100644
+index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db4b920c76 100644
 --- a/dist/shims/mcp-server/node.mjs
 +++ b/dist/shims/mcp-server/node.mjs
 @@ -1,9 +1,12 @@
@@ -3351,7 +3391,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              throw error;
          }
          throw sanitizeMcpTransportError(error, endpoint, operation);
-@@ -535,6 +539,214 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
+@@ -535,6 +539,235 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
          });
      }
  }
@@ -3459,12 +3499,33 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
 +    if (era !== 'legacy') {
 +        return;
 +    }
++    rememberLegacyEra(endpoint);
++}
++function rememberLegacyEra(endpoint) {
++    legacyEraByEndpoint.delete(endpoint);
 +    if (legacyEraByEndpoint.size >= LEGACY_ERA_MEMORY_MAX_ENTRIES) {
 +        const oldest = legacyEraByEndpoint.keys().next().value;
 +        legacyEraByEndpoint.delete(oldest);
 +    }
 +    legacyEraByEndpoint.set(endpoint, Date.now());
 +}
++// A server can answer the `server/discover` probe yet send 2025-era results
++// without the `resultType` that protocol revision 2026-07-28 requires. Every
++// result from it then fails validation, so in practice it is a 2025-era
++// server: auto negotiation reconnects it over the 2025 handshake (and
++// remembers that, like any legacy verdict) instead of losing its results.
++function isModernEraResultMismatch(clientModule, client, error) {
++    try {
++        return (client.getProtocolEra() === 'modern' &&
++            clientModule.SdkError.isInstance(error) &&
++            error.code === clientModule.SdkErrorCode.InvalidResult &&
++            error.data?.violation === 'missing-resultType');
++    }
++    catch {
++        return false;
++    }
++}
++const LEGACY_ERA_RECONNECT = Symbol('legacy-era-reconnect');
 +function validateMaxListPages(value) {
 +    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
 +        throw new UserError('maxListPages must be a positive integer.');
@@ -3566,7 +3627,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
  export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      session = null;
      _cacheDirty = true;
-@@ -543,6 +755,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -543,6 +776,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      serverInitializeResult = null;
      clientSessionTimeoutSeconds;
      timeout;
@@ -3574,7 +3635,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      params;
      _name;
      transport = null;
-@@ -552,18 +765,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -552,18 +786,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      connectionStateVersion = 0;
      constructor(params) {
          super(params);
@@ -3606,7 +3667,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      }
      createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
          const transportOptions = {
-@@ -582,16 +802,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -582,16 +823,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      }
      async createConnectedStreamableHttpClient(options = {}) {
          const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
@@ -3651,7 +3712,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              return { client, transport };
          }
          catch (error) {
-@@ -609,25 +857,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -609,25 +878,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      getClientSessionTimeoutMs() {
          return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
      }
@@ -3678,7 +3739,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              this._toolsList = [];
          }
          await invalidateServerToolsCache(this.name);
-@@ -660,7 +896,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -660,7 +917,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              });
              try {
                  if (typeof detachedTransport.terminateSession === 'function') {
@@ -3690,7 +3751,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  }
              }
              finally {
-@@ -702,18 +941,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -702,18 +962,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
      }
      async callToolWithClient(client, toolName, args, meta, options) {
@@ -3718,7 +3779,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      }
      async closeStreamableHttpClient(args, options) {
          const { client, transport } = args;
-@@ -733,6 +974,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -733,6 +995,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
          });
      }
@@ -3730,7 +3791,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      async reconnectExistingStreamableHttpClient(args) {
          const { transportModule } = await this.loadStreamableHttpRuntime();
          const { StreamableHTTPClientTransport } = transportModule;
-@@ -743,7 +989,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -743,7 +1010,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          try {
              const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
              await args.client.connect(transport, requestOptions);
@@ -3740,7 +3801,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  // Reconnecting with an existing session skips initialize(), so resend
                  // initialized to reopen the shared SSE stream for async responses.
                  await this.reopenSharedStreamableHttpSession(args.client);
-@@ -800,14 +1047,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -800,14 +1068,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
              }
              try {
@@ -3770,7 +3831,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  const recovered = await this.reconnectExistingStreamableHttpClient({
                      client: previousClient,
                      protocolVersion,
-@@ -834,7 +1088,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -834,7 +1109,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  await this.publishConnectedStreamableHttpClient({
                      client: recovered.client,
                      transport: recovered.transport,
@@ -3779,7 +3840,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  });
                  return recovered.client;
              }
-@@ -871,13 +1125,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -871,13 +1146,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          if (this.params.sessionId !== undefined) {
              return 'none';
          }
@@ -3805,7 +3866,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              ? 'reconnect-only'
              : 'none';
      }
-@@ -910,7 +1171,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -910,7 +1192,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              await this.publishConnectedStreamableHttpClient({
                  client,
                  transport,
@@ -3813,7 +3874,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              });
              this.serverInitializeResult = {
                  serverInfo: { name: this._name, version: '1.0.0' },
-@@ -929,7 +1189,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -929,7 +1210,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          catch (e) {
              // A losing concurrent connect can fail after another connect already
              // published a healthy shared session, so avoid closing shared state here.
@@ -3822,7 +3883,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              logToolActionError(this.logger, 'Error initializing MCP server:', error);
              throw error;
          }
-@@ -937,11 +1197,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -937,11 +1218,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      }
      async invalidateToolsCache() {
          this._toolsCacheGeneration += 1;
@@ -3836,7 +3897,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
          if (!this.session) {
              throw new Error('Server not initialized. Make sure you call connect() first.');
          }
-@@ -950,19 +1210,17 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -950,19 +1231,34 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          }
          const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
          const session = this.session;
@@ -3845,9 +3906,25 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
 -        const tools = await listAllMcpTools({
 -            fetchPage: (cursor) => runMcpTransportOperation(this.params.url, 'streamable HTTP list tools', () => requestMcpToolsPage(session, ListToolsResultSchema, requestOptions, cursor)),
 -            onPage: (response) => this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`),
--        });
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
-+        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', () => listMcpTools(clientModule, session, requestOptions, this.maxListPages));
++        const probing = ((this.params.versionNegotiation ?? { mode: 'auto' }).mode ?? 'legacy') === 'auto';
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', async () => {
++            try {
++                return await listMcpTools(clientModule, session, requestOptions, this.maxListPages);
++            }
++            catch (error) {
++                if (probing && isModernEraResultMismatch(clientModule, session, error)) {
++                    return LEGACY_ERA_RECONNECT;
++                }
++                throw error;
++            }
+         });
++        if (response === LEGACY_ERA_RECONNECT) {
++            rememberLegacyEra(this.params.url);
++            this.debugLog(() => `MCP server ${this._name} sent 2025-era results after negotiating 2026-07-28; reconnecting over the 2025 handshake.`);
++            await this.connect();
++            return await this.listTools();
++        }
 +        this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`);
          assertMcpToolListingIsCurrent({
              listedClient: session,
@@ -3860,7 +3937,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
          this._toolsList = tools;
          this._cacheDirty = false;
          return tools;
-@@ -984,18 +1242,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -984,18 +1280,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              if (isCallerAbortReason(error, options?.signal)) {
                  throw error;
              }
@@ -3883,7 +3960,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              }
              try {
                  result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
-@@ -1004,41 +1262,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -1004,41 +1300,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  if (isCallerAbortReason(retryError, options?.signal)) {
                      throw retryError;
                  }

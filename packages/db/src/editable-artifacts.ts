@@ -615,28 +615,6 @@ export async function touchEditableArtifactSessionLink(
   });
 }
 
-/** Immutable creation provenance, unlike session links which reads can create. */
-export async function getEditableArtifactCreationAgent(
-  db: Database,
-  scopeInput: PersistedEditableArtifactScope,
-  artifactIdInput: string,
-): Promise<{ sessionId: string; turnId: string } | null> {
-  const scope = validateScope(scopeInput);
-  const artifactId = validateStableId(artifactIdInput, "artifact id");
-  return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ authority_key: string }>(
-      tx,
-      sql`select authority_key from editable_artifact_idempotency_receipts
-        where account_id = ${scope.accountId}::uuid and workspace_id = ${scope.workspaceId}::uuid
-          and artifact_id = ${artifactId} and operation_kind in ('create', 'import')
-          and resource_type = 'artifact' limit 1`,
-    );
-    if (!row) return null;
-    const actor = validateActorKey(row.authority_key);
-    return actor.kind === "agent" ? { sessionId: actor.sessionId, turnId: actor.turnId } : null;
-  });
-}
-
 /** Exact association lookup; never depends on the bounded recent-artifact list. */
 export async function hasEditableArtifactSessionLink(
   db: Database,
@@ -1409,6 +1387,63 @@ export class PostgresEditableArtifactStore {
           return Object.freeze({ kind: "authorization_stale" as const });
         }
         return Object.freeze({ kind: "result" as const, artifact });
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  async readArtifactsAtAuthorizationRevisions(
+    scopeInput: PersistedEditableArtifactScope,
+    requestsInput: readonly Readonly<{
+      artifactId: string;
+      expectedAuthorizationRevision: number;
+    }>[],
+  ): Promise<
+    readonly PromiseSettledResult<ReadPersistedEditableArtifactAtAuthorizationRevisionResult>[]
+  > {
+    const scope = validateScope(scopeInput);
+    if (requestsInput.length > 8) throw new TypeError("Artifact read batch is too large");
+    const requests = requestsInput.map((request) => ({
+      artifactId: validateStableId(request.artifactId, "artifact id"),
+      expectedAuthorizationRevision: validateInteger(
+        request.expectedAuthorizationRevision,
+        "expected artifact authorization revision",
+        1,
+      ),
+    }));
+    if (!requests.length) return [];
+    return withRlsContext(
+      this.db,
+      scope,
+      async (tx) => {
+        // The same single-statement MVCC fence as the scalar read. Scope and
+        // FORCE RLS apply before any row can be matched to an authorization.
+        const rows = await rawRows<ArtifactRow>(
+          tx,
+          sql`
+        select account_id, workspace_id, id, modality, title, lifecycle_state,
+          authorization_revision, head_sequence, causal_frontier, state_hash, current_snapshot_id,
+          created_at, updated_at
+        from editable_artifacts
+        where account_id = ${scope.accountId}::uuid
+          and workspace_id = ${scope.workspaceId}::uuid
+          and id in (${sql.join(
+            requests.map((request) => sql`${request.artifactId}`),
+            sql`, `,
+          )})`,
+        );
+        const byId = new Map(rows.map((row) => [row.id, row]));
+        return Promise.allSettled(
+          requests.map(async (request) => {
+            const row = byId.get(request.artifactId);
+            if (!row) return Object.freeze({ kind: "result" as const, artifact: null });
+            const artifact = artifactFromRow(row);
+            if (artifact.authorizationRevision !== request.expectedAuthorizationRevision) {
+              return Object.freeze({ kind: "authorization_stale" as const });
+            }
+            return Object.freeze({ kind: "result" as const, artifact });
+          }),
+        );
       },
       { isolationLevel: "repeatable read", accessMode: "read only" },
     );

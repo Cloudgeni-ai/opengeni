@@ -3,27 +3,29 @@ import {
   ExternalLinkIcon,
   MonitorDownIcon,
   PackageIcon,
+  SheetIcon,
   TerminalIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
-import { copyText } from "@/components/ui/copy-field";
+import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
+import { copyText } from "@opengeni/react/ui/copy-field";
 import {
   DropdownMenuItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
-import { detectConnectOs } from "@/lib/deployment";
-import { desktopBridge } from "@/lib/desktop";
+} from "@opengeni/react/ui/dropdown-menu";
+import { detectConnectOs } from "@opengeni/react/app/lib/deployment";
+import { desktopBridge } from "@opengeni/react/app/lib/desktop";
 import {
   desktopDownloadsFor,
   desktopDownloadUrl,
   desktopInstallCommand,
   desktopReleasePageUrl,
-} from "@/lib/desktop-download";
-import { currentPhoneAppPlatform } from "@/lib/open-in-app";
+} from "@opengeni/react/app/lib/desktop-download";
+import { currentPhoneAppPlatform } from "@opengeni/react/app/lib/open-in-app";
 
 /**
  * The account menu's "Desktop app" row: the download for this computer, the
@@ -75,5 +77,20 @@ export function DesktopAppSubmenu() {
         </DropdownMenuItem>
       </DropdownMenuSubContent>
     </DropdownMenuSub>
+  );
+}
+
+/** The account menu's "Excel add-in" row: how to add Opengeni to Excel. Hidden on phones and tablets. */
+export function ExcelAddinMenuItem() {
+  if (typeof window === "undefined" || currentPhoneAppPlatform()) return null;
+  return (
+    <DropdownMenuItem asChild>
+      <a href={EXCEL_ADDIN_PATH} target="_blank" rel="noopener noreferrer">
+        <SheetIcon />
+        Excel add-in
+        <ExternalLinkIcon className="ml-auto size-3.5 text-fg-muted" aria-hidden="true" />
+        <span className="sr-only">(opens in a new tab)</span>
+      </a>
+    </DropdownMenuItem>
   );
 }

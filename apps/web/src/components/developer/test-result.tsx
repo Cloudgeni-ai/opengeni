@@ -3,11 +3,11 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Disclosure } from "@/components/ui/disclosure";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { cn } from "@/lib/utils";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { untilLabel } from "./shared";
 

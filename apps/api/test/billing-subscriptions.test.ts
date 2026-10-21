@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import Stripe from "stripe";
 import { Hono } from "hono";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { SubscriptionPlan } from "@opengeni/contracts";
 import type { BillingSubscriptionOperation } from "@opengeni/db";
 import {

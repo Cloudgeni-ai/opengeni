@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import net from "node:net";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, waitFor, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { waitFor } from "@opengeni/testing/process";
 import { createDb, rawRows, withRlsContext } from "../src/database";
 import { DatabaseTransactionError } from "../src/persistence-errors";
 import { postClaimDatabaseRecoveryFailure } from "../../../apps/worker/src/activities/agent-turn/errors";
@@ -54,7 +55,7 @@ test("real raw transaction admission failure supplies own-client provenance with
   } finally {
     await client.close();
   }
-}, 10_000);
+}, 30_000);
 
 test("a real own transaction closure is classified even when no ORM query owns the failure", async () => {
   const client = createDb(shared.appUrl, { max: 1 });

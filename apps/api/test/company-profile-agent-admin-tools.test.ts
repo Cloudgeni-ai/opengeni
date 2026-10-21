@@ -45,7 +45,6 @@ function harness(options: { automatic?: boolean } = {}) {
       authorizations += 1;
     },
     // An agent no Site page started: nothing to refuse.
-    refuseSiteAgent: async () => null,
     json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
     router: {
       async propose(input) {

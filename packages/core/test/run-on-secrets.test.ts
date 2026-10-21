@@ -28,7 +28,10 @@ class CapturingMachine implements ControlRpc {
   readonly opStream = { transport: this.transport };
   private readonly runner: FakeOpRunner;
 
-  constructor(readonly workspaceRoot: string) {
+  constructor(
+    readonly workspaceRoot: string,
+    live = false,
+  ) {
     this.runner = new FakeOpRunner({
       transport: this.transport,
       workspaceId: WORKSPACE,
@@ -38,6 +41,7 @@ class CapturingMachine implements ControlRpc {
       defaultScript: (exec) => {
         this.execs.push(exec);
         return {
+          ...(live ? { live: true, holdUntilCancel: true } : {}),
           frames: [{ channel: "stdout", bytes: "ok" }],
           exit: { exitCode: 0, timedOut: false, durationMs: "1" },
         };
@@ -101,6 +105,37 @@ async function runOn(machine: CapturingMachine, op: RunOnOp, enabled = true) {
 }
 
 describe("run_on secret delivery (DL-9)", () => {
+  test("a yielded command retains its secret files instead of deleting them on HTTP return", async () => {
+    const machine = new CapturingMachine("/home/user/project", true);
+    const result = await executeRunOnSelfhostedMachine(
+      {
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: machine.workspaceRoot,
+        controlRpc: machine,
+        opStream: machine.opStream,
+        relay: { host: "relay.test" },
+        controlTimeoutMs: 2_000,
+        execTimeoutMs: 0,
+        yieldTimeMs: 1,
+        secretResolver: createStaticSecretResolver({ Canary: CANARY }),
+        backgroundCommands: {
+          adoptBackgroundCommand: async () => ({ commandId: "retained-command" }),
+        },
+      },
+      "target",
+      { kind: "exec", cmd: "use {{secretfile:Canary}}" },
+    );
+    expect(result).toMatchObject({
+      state: "running",
+      commandId: "retained-command",
+      deadlineMs: 0,
+    });
+    expect(machine.writes).toHaveLength(1);
+    expect(machine.removes).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain(CANARY);
+  });
   test("POSIX exec: spliced names in argv, the value only in ExecRequest.env", async () => {
     const machine = new CapturingMachine("/home/user/project");
     const result = await runOn(machine, { kind: "exec", cmd: 'printf %s "{{secret:Canary}}"' });

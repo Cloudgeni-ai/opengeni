@@ -11,6 +11,20 @@ import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
 import { migrationSqlForServer } from "./migration-postgres-compatibility";
 import {
+  RELEASE_DIRECTIVE,
+  migrationDeploymentMode,
+  migrationPhaseFromArgs,
+  migrationReleaseDirectives,
+  ordinaryMigrationIsPostureInert,
+  parseMigrationPhase,
+  partitionMigrationPhases,
+  type MigrationDeploymentMode,
+  type MigrationPhase,
+  type MigrationPhases,
+} from "./migration-phases";
+export { migrationDeploymentMode } from "./migration-phases";
+export type { MigrationDeploymentMode } from "./migration-phases";
+import {
   executeSessionHistoryBackfills,
   sessionHistoryBackfillPlan,
 } from "./migration-session-history-backfills";
@@ -103,12 +117,17 @@ const governedLegacyConcurrentIndexMigrations = new Set([
 ]);
 export interface ConcurrentIndexMigration {
   indexName: string;
+  /** Historical directive metadata; concurrent builds must wait for old snapshots. */
   lockTimeout: string;
   skipWhenValid: boolean;
   statement: string;
 }
 
 export type MigrationRuntimeOptions = {
+  /** Cumulative execution: pre; pre + maintenance; or everything (default). */
+  phase?: MigrationPhase;
+  /** Called after successful execution and policy reconciliation, under the lock. */
+  onPhaseComplete?: (result: MigrationPhaseResult) => void;
   /** Explicit historical retirement, never inferred from Pause or row age.
    * The exact version/sequence-fenced manifest is consumed only by 0764. */
   interruptedTurnRetirement?: InterruptedTurnRetirementManifest;
@@ -158,14 +177,18 @@ function assertIdentifier(name: string, value: string): string {
  *   CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...;
  *
  * The directive is deliberately not a generic "no transaction" escape hatch:
- * only one idempotent concurrent-index statement is accepted, lock acquisition
- * is always bounded, and an invalid artifact left by a failed concurrent build
+ * only one idempotent concurrent-index statement is accepted, and an invalid
+ * artifact left by a failed concurrent build
  * is removed before retry. Seven governed historical migrations predate the
  * IF NOT EXISTS rule; only those exact filenames may use their immutable bare
  * statements, and the runner makes their retries idempotent by skipping an
  * already-valid index. This keeps additive large-table indexes online without
  * rewriting shipped history or making arbitrary partially-applied migration
  * scripts possible.
+ * The historical lock-timeout directive is parsed without rewriting shipped
+ * files, but is no longer applied: PostgreSQL also uses lock_timeout for its
+ * safe wait for old snapshots, including readers of unrelated tables when the
+ * index is partial or has expressions. Ordinary DDL keeps its short timeout.
  */
 export function parseConcurrentIndexMigration(
   file: string,
@@ -185,8 +208,14 @@ export function parseConcurrentIndexMigration(
   }
 
   const lockTimeout = directive[1]!;
+  let inLeadingComments = true;
   const statement = lines
     .slice(directiveIndex + 1)
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith("--")) inLeadingComments = false;
+      return !(inLeadingComments && RELEASE_DIRECTIVE.test(trimmed));
+    })
     .join("\n")
     .trim();
   const withoutTrailingSemicolon = statement.endsWith(";")
@@ -460,7 +489,13 @@ export async function executeMigrationFile(
     return;
   }
 
-  await sql`select set_config('lock_timeout', ${concurrentIndex.lockTimeout}, false)`;
+  const [priorSettings] = await sql<{ lock_timeout: string }[]>`
+    select current_setting('lock_timeout') as lock_timeout
+  `;
+  // CONCURRENTLY is the online lock strategy. Its virtual-xid waits are part
+  // of completing a valid index, not failure to acquire an exclusive DDL lock.
+  // Aborting those waits rebuilds the same index on every deploy retry.
+  await sql`select set_config('lock_timeout', '0', false)`;
   try {
     const [existing] = await sql<Array<{ valid: boolean; ready: boolean }>>`
       select i.indisvalid as valid, i.indisready as ready
@@ -477,7 +512,7 @@ export async function executeMigrationFile(
     }
     await sql.unsafe(concurrentIndex.statement);
   } finally {
-    await sql`select set_config('lock_timeout', '0', false)`;
+    await sql`select set_config('lock_timeout', ${priorSettings!.lock_timeout}, false)`;
   }
 }
 
@@ -661,6 +696,7 @@ export async function migrate(
   schema: string | undefined = process.env.OPENGENI_DB_SCHEMA?.trim() || undefined,
   runtimeOptions?: MigrationRuntimeOptions,
 ): Promise<void> {
+  const phase = parseMigrationPhase(runtimeOptions?.phase);
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const depthPolicy = deploymentDepthPolicy(runtimeOptions);
@@ -708,6 +744,13 @@ export async function migrate(
         pendingMigrationSources.set(file, await readFile(join(migrationsDir, file), "utf8"));
       }
     }
+    const phases = phasesForMigrationSources(pendingMigrationSources);
+    const selected = new Set([
+      ...phases.pre,
+      ...(phase !== "pre" ? phases.maintenance : []),
+      ...(phase === "post" ? phases.post : []),
+    ]);
+    const appliedThisRun: string[] = [];
     // Initialize this session GUC for every pending migration that consumes it,
     // instead of maintaining a second filename list that can silently lag the
     // shipped migration chain. The conservative source marker is intentional:
@@ -726,7 +769,7 @@ export async function migrate(
       )`;
     }
     for (const file of files) {
-      if (applied.has(file)) {
+      if (!selected.has(file)) {
         continue;
       }
       const sqlText = pendingMigrationSources.get(file);
@@ -744,10 +787,17 @@ export async function migrate(
         ...(configuredKey ? { environmentsEncryptionKey: configuredKey } : {}),
       });
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
+      appliedThisRun.push(file);
     }
     // Reconcile even when all migration names were already recorded. This is
     // the only supported way to change deployment policy in a live database.
     await persistDeploymentDepthPolicy(sql, depthPolicy);
+    runtimeOptions?.onPhaseComplete?.({
+      schemaVersion: "opengeni/migration-phase/v1",
+      phase,
+      applied: appliedThisRun,
+      remaining: [...pendingMigrationSources.keys()].filter((file) => !selected.has(file)),
+    });
   } finally {
     await sql.end();
   }
@@ -770,22 +820,55 @@ export async function runMigrations(
   await migrate(adminConnection, targetSchema, runtimeOptions);
 }
 
-export type MigrationDeploymentMode = "historical" | "rolling" | "maintenance" | "unclassified";
+export interface MigrationPhaseResult {
+  schemaVersion: "opengeni/migration-phase/v1";
+  phase: MigrationPhase;
+  /** Names applied by this invocation, not the cumulative database ledger. */
+  applied: string[];
+  remaining: string[];
+}
 
-/**
- * The reviewed production path a migration declares on its first line.
- * `historical` covers the early chain (0001–0062) that predates the directive;
- * a later file without one is `unclassified` and is treated as needing a drain.
- */
-export function migrationDeploymentMode(file: string, sqlText: string): MigrationDeploymentMode {
-  const firstLine = sqlText.replaceAll("\r\n", "\n").split("\n", 1)[0]?.trim();
-  if (firstLine === "-- deployment-mode: rolling") return "rolling";
-  if (firstLine === "-- deployment-mode: maintenance") return "maintenance";
-  const ordinal = /^(\d{4})_/.exec(file)?.[1];
-  return ordinal && Number(ordinal) < 63 ? "historical" : "unclassified";
+/** Malformed or unsupported files are never deferred; execution still reports
+ * their original parser error at the original point in the default path. */
+export function isPostReleaseEligible(file: string, sqlText: string): boolean {
+  if (migrationDeploymentMode(file, sqlText) !== "rolling") return false;
+  const markers = migrationReleaseDirectives(sqlText);
+  if (markers.has("pre-release")) return false;
+  try {
+    // Check backfills first: the index parser rejects other opengeni directives.
+    if (parseBatchedBackfillMigration(file, sqlText)) return markers.has("post-release");
+    const index = parseConcurrentIndexMigration(file, sqlText);
+    return !!index && (markers.has("post-release") || !/^CREATE\s+UNIQUE\b/i.test(index.statement));
+  } catch {
+    return false;
+  }
+}
+
+export function isPreReleaseEligible(file: string, sqlText: string): boolean {
+  if (migrationDeploymentMode(file, sqlText) !== "rolling") return false;
+  try {
+    if (parseBatchedBackfillMigration(file, sqlText)) return true;
+    if (parseConcurrentIndexMigration(file, sqlText)) return true;
+    return ordinaryMigrationIsPostureInert(sqlText);
+  } catch {
+    return false;
+  }
+}
+
+function phasesForMigrationSources(sources: ReadonlyMap<string, string>): MigrationPhases {
+  return partitionMigrationPhases(
+    [...sources].map(([name, source]) => ({
+      name,
+      deploymentMode: migrationDeploymentMode(name, source),
+      preReleaseEligible: isPreReleaseEligible(name, source),
+      postReleaseEligible: isPostReleaseEligible(name, source),
+    })),
+  );
 }
 
 export interface MigrationPlan {
+  phaseProtocol: 1;
+  phases: MigrationPhases;
   /** Shipped migrations this database has not applied yet, in apply order. */
   pending: { name: string; deploymentMode: MigrationDeploymentMode }[];
   /**
@@ -824,12 +907,16 @@ export async function planMigrations(
     await sql.end();
   }
   const pending: MigrationPlan["pending"] = [];
+  const sources = new Map<string, string>();
   for (const file of files) {
     if (applied.has(file)) continue;
     const sqlText = await readFile(join(migrationsDir, file), "utf8");
+    sources.set(file, sqlText);
     pending.push({ name: file, deploymentMode: migrationDeploymentMode(file, sqlText) });
   }
   return {
+    phaseProtocol: 1,
+    phases: phasesForMigrationSources(sources),
     pending,
     requiresDrain: pending.some((migration) => migration.deploymentMode !== "rolling"),
   };
@@ -838,11 +925,19 @@ export async function planMigrations(
 /** Command-line entry. Bundled release images call this explicitly; see
  * scripts/assemble-server-runtime.ts. */
 export async function runMigrateCli(): Promise<void> {
+  const phase = migrationPhaseFromArgs(process.argv, process.env.OPENGENI_MIGRATION_PHASE);
   if (process.argv.includes("--plan")) {
     console.log(JSON.stringify(await planMigrations(), null, 2));
   } else {
-    await migrate();
+    let result: MigrationPhaseResult | undefined;
+    await migrate(undefined, undefined, {
+      phase,
+      onPhaseComplete: (value) => {
+        result = value;
+      },
+    });
     console.log("Applied Drizzle SQL migrations.");
+    console.log(JSON.stringify(result));
   }
 }
 

@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -77,6 +74,7 @@ async function skillSaveFixture(
     modes?: { personal?: Mode; workspace?: Mode };
     /** Whether a verified person started the chat's turn (true by default). */
     person?: boolean;
+    surface?: "site" | "web";
   },
 ) {
   const suffix = crypto.randomUUID();
@@ -153,6 +151,7 @@ async function skillSaveFixture(
     sessionId: session.id,
     reasoningEffortFallback: "low",
     createdEventPayload: {},
+    surface: input.surface,
   });
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(db, workspaceId, {
@@ -269,6 +268,23 @@ describe("skill_save refusals", () => {
 });
 
 describe("the person's own personal Skill from a shared chat", () => {
+  test.each(["site", "web"] as const)(
+    "%s turns save Skills with the same native learning policy",
+    async (surface) => {
+      if (!app || !shared) return;
+      const fixture = await skillSaveFixture(app.db, {
+        skillScope: "user",
+        learning: "workspace",
+        surface,
+        modes: { personal: "automatic", workspace: "automatic" },
+      });
+      const result = await fixture.editNotes();
+      expect(result.isError, JSON.stringify(result.content)).toBe(false);
+      expect(result.structuredContent.outcome).toBe("applied");
+      expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
+    },
+    120_000,
+  );
   test("publishes when the chat and the person are both Automatic", async () => {
     if (!app || !shared) return;
     const fixture = await skillSaveFixture(app.db, {

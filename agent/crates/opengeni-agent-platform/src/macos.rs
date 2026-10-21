@@ -192,7 +192,9 @@ impl DesktopBackend for MacosDesktop {
                             // SCK retains its completion callback after our
                             // bounded wait. Timeout is not native completion.
                             if let Some(reservation) = crate::current_work_reservation() {
-                                reservation.mark_unsettled();
+                                reservation.mark_unsettled(format!(
+                                    "ScreenCaptureKit callback still pending: {err}"
+                                ));
                             }
                         }
                         let terminal = !macffi::screen_capture_granted();

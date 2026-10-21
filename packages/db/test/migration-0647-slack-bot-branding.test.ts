@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
 
 test("Slack branding preserves legacy installs and records the verified name for new bindings", async () => {
   const blank = await acquireBlankTestDatabase("migration-0647-slack-branding");

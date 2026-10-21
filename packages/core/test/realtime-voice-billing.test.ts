@@ -7,7 +7,7 @@ import {
   realtimeVoiceStartedMinutes,
 } from "@opengeni/config";
 import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createRealtimeVoiceBilling,
   createVoiceInputBilling,
@@ -106,7 +106,7 @@ test("promotional chat-only credits are named, not reported as no credits", () =
     "Promotional credits don't cover live voice. Add credits to use it.",
   );
   expect(voiceInsufficientCreditsMessage("Voice input", "none")).toBe(
-    "Voice input needs Opengeni credits. Add credits to continue.",
+    "Voice input needs credits. Add credits to continue.",
   );
 });
 

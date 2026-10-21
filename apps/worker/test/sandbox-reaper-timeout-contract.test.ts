@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { sandboxArchiveCaptureTimeoutMs, sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSandboxLeaseActivities } from "../src/activities/sandbox-lease";

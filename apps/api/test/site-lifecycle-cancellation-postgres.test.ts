@@ -2,10 +2,10 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   cancelSiteRuntimeConversation,
   claimSessionWorkForAttempt,
@@ -378,8 +378,8 @@ test("stopSiteViewers drains old conversations over multiple pages and retains q
     insert into site_runtime_conversations(session_id,account_id,workspace_id,site_id,viewer_principal,viewer_kind,tool_ids,created_at,updated_at)
     values(${id},${f.accountId},${f.workspaceId},${f.siteId},${`guest:${id}`},'guest','["removed"]',now()-interval '30 days',now()-interval '30 days')`;
   const kept = crypto.randomUUID();
-  await shared.admin`insert into site_runtime_conversations(session_id,account_id,workspace_id,site_id,viewer_principal,viewer_kind,tool_ids)
-    values(${kept},${f.accountId},${f.workspaceId},${f.siteId},'user:kept','member','["kept"]')`;
+  await shared.admin`insert into site_runtime_conversations(session_id,account_id,workspace_id,site_id,viewer_principal,viewer_kind,tool_ids,created_at)
+    values(${kept},${f.accountId},${f.workspaceId},${f.siteId},'user:kept','member','["kept"]',now()-interval '1 day')`;
   const settings = testSettings();
   const effects = configureSitePublishingEffects(settings, {});
   const visited: string[] = [];
@@ -392,17 +392,16 @@ test("stopSiteViewers drains old conversations over multiple pages and retains q
     effects.schedule("hold", () => new Promise<void>((resolve) => releases.push(resolve)));
   await withSessionRlsActorContext({ subjectId: f.manager }, () =>
     stopSiteViewers({ db: client.db, settings } as SitePublishingDeps, f, f.siteId, {
-      reason: "agent_tools_narrowed",
+      reason: "agent_disabled",
       revokeSessions: false,
-      toolsNarrowedTo: { tools: ["kept"], everyoneTools: true },
     }),
   );
   await withSessionRlsActorContext({ subjectId: f.owner }, async () => {
     for (const release of releases) release();
     await effects.flush();
   });
-  expect(visited).toEqual(ids);
-  expect(new Set(visited).size).toBe(205);
+  expect(visited).toEqual([...ids, kept].sort());
+  expect(new Set(visited).size).toBe(206);
   const page = await listSiteRuntimeCancellationCandidates(client.db, f, {
     siteId: f.siteId,
     limit: 2,

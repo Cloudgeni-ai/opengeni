@@ -1,7 +1,12 @@
 import { sql } from "drizzle-orm";
-import { rawRows, withRlsContext, type Database } from "./database";
+import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import type { Permission } from "@opengeni/contracts";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
+import {
+  rlsSubjectIdOrEmpty,
+  subjectHasLiveWorkspaceAuthorityInScope,
+} from "./workspace-authority";
 import { lockSessionEventWriteRows } from "./session-control";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 
@@ -429,37 +434,6 @@ export async function getSitePublication(
 ): Promise<SitePublicationRecord | null> {
   if (!UUID.test(siteId)) return null;
   return await withRlsContext(db, scope, (tx) => publicationRow(tx, scope, siteId));
-}
-
-/**
- * Whether an agent in `sessionId`'s session tree created the artifact: its
- * first version records a source session with the same root session as
- * `sessionId`. False when there is no such version or either session cannot
- * be read (artifacts created over HTTP record no source session).
- */
-export async function artifactCreatedInSessionTree(
-  db: Database,
-  scope: SitePublishingScope,
-  artifactId: string,
-  sessionId: string,
-): Promise<boolean> {
-  if (!UUID.test(artifactId) || !UUID.test(sessionId)) return false;
-  return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ same_tree: boolean }>(
-      tx,
-      sql`select source.root_session_id = agent.root_session_id as same_tree
-            from (select v.source_session_id
-                    from workspace_artifact_versions v
-                   where v.workspace_id = ${scope.workspaceId} and v.artifact_id = ${artifactId}
-                   order by v.revision asc
-                   limit 1) first_version
-            join sessions source
-              on source.workspace_id = ${scope.workspaceId} and source.id = first_version.source_session_id
-            join sessions agent
-              on agent.workspace_id = ${scope.workspaceId} and agent.id = ${sessionId}`,
-    );
-    return row?.same_tree === true;
-  });
 }
 
 /** The Site itself (any audience); callers decide whether it may be published or served. */
@@ -1276,26 +1250,34 @@ export async function revokeSiteViewerSessions(
   });
 }
 
-/** Whether the subject holds a membership in this workspace (re-checked on every runtime call). */
+/** Whether the subject holds live authority in this workspace (re-checked on every runtime call). */
 export async function isSiteWorkspaceMember(
   db: Database,
   scope: SitePublishingScope,
   subjectId: string,
 ): Promise<boolean> {
-  return await withRlsContext(db, scope, async (tx) => {
-    const rows = await rawRows<{ one: number }>(
-      tx,
-      sql`select 1 as one from workspace_memberships
-        where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
-    );
-    return rows.length > 0;
-  });
+  return (await getSiteWorkspaceMemberPermissions(db, scope, subjectId)) !== null;
 }
 
 /**
- * The subject's workspace permissions (normalized), or null when they hold
- * no membership. A Site conversation of a member gets only the Site's tools
- * that member may use themselves.
+ * The subject's workspace permissions (normalized), or null when they hold no
+ * live workspace authority. A Site conversation of a member gets only the
+ * Site's tools that member may use themselves.
+ *
+ * For a managed person (`user:`) live authority is the canonical rule
+ * (`subjectHasLiveWorkspaceAuthorityInScope`): a membership row whose
+ * organization membership is active, or the person's own personal workspace,
+ * which has no membership row and carries the managed personal workspace
+ * permissions. The subject was verified by Site sign-in (a managed cookie at
+ * /v1/site-auth/authorize) and is named here from the Site viewer session,
+ * never taken from the page. Other subjects (configured external actors)
+ * keep the plain membership answer.
+ *
+ * Precondition: callers pass only a subject the API has already proven (a
+ * Site viewer session or site-auth code); this answers for that subject, it
+ * does not authenticate it. The probed subject and the organization
+ * tenancy lifecycle that `list_self_organization_memberships` sets are both
+ * restored before returning, so a caller's transaction never keeps them.
  */
 export async function getSiteWorkspaceMemberPermissions(
   db: Database,
@@ -1303,14 +1285,44 @@ export async function getSiteWorkspaceMemberPermissions(
   subjectId: string,
 ): Promise<Permission[] | null> {
   return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ permissions: unknown }>(
+    const membership = async () => {
+      const [row] = await rawRows<{ permissions: unknown }>(
+        tx,
+        sql`select permissions from workspace_memberships
+          where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
+      );
+      return row
+        ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))
+        : null;
+    };
+    if (!subjectId.startsWith("user:")) return await membership();
+    const priorSubjectId = await rlsSubjectIdOrEmpty(tx);
+    const [priorLifecycle] = await rawRows<{ value: string | null }>(
       tx,
-      sql`select permissions from workspace_memberships
-        where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
+      sql`select current_setting('opengeni.organization_tenancy_lifecycle', true) as value`,
     );
-    return row
-      ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))
-      : null;
+    let completed = false;
+    try {
+      await setSubjectRlsContext(tx, subjectId);
+      const live = await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        subjectId,
+      });
+      const permissions = live ? await membership() : null;
+      completed = true;
+      if (!live) return null;
+      return permissions ?? [...managedPersonalWorkspacePermissions];
+    } finally {
+      // Never leave the probed subject, or the lifecycle that opens every
+      // organization's memberships, applied to the caller's transaction.
+      const restore = tx.execute(
+        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true),
+          set_config('opengeni.organization_tenancy_lifecycle', ${priorLifecycle?.value ?? ""}, true)`,
+      );
+      if (completed) await restore;
+      else await restore.catch(() => undefined);
+    }
   });
 }
 
@@ -1672,21 +1684,9 @@ export async function listActiveSiteRuntimeConversations(
   input: {
     siteId: string;
     limit: number;
-    /**
-     * Only conversations holding workspace tools the Site no longer gives
-     * them: a tool outside `tools`, or any tool for a viewer outside the
-     * workspace once `everyoneTools` is off.
-     */
-    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
   },
 ): Promise<string[]> {
   if (!UUID.test(input.siteId)) return [];
-  const narrowed = input.toolsNarrowedTo;
-  const toolFilter = narrowed
-    ? sql`and (not (c.tool_ids <@ ${JSON.stringify(narrowed.tools)}::jsonb)
-        or (${!narrowed.everyoneTools} and jsonb_array_length(c.tool_ids) > 0
-          and c.viewer_kind in ('user', 'guest')))`
-    : sql``;
   return await withRlsContext(db, scope, async (tx) =>
     (
       await rawRows<{ session_id: string }>(
@@ -1694,7 +1694,7 @@ export async function listActiveSiteRuntimeConversations(
         sql`select c.session_id from site_runtime_conversations c
           join sessions s on s.workspace_id = c.workspace_id and s.id = c.session_id
           where c.workspace_id = ${scope.workspaceId} and c.site_id = ${input.siteId}
-            and c.updated_at > now() - interval '2 days' ${toolFilter}
+            and c.updated_at > now() - interval '2 days'
             and s.status in (${sql.join(
               ACTIVE_SESSION_STATUSES.map((status) => sql`${status}`),
               sql`, `,
@@ -1714,10 +1714,8 @@ export async function listSiteRuntimeCancellationCandidates(
     after?: string;
     limit: number;
     startedBefore: Date;
-    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
   },
 ): Promise<string[]> {
-  const narrowed = input.toolsNarrowedTo;
   return withRlsContext(db, scope, async (tx) =>
     (
       await rawRows<{ session_id: string }>(
@@ -1727,12 +1725,6 @@ export async function listSiteRuntimeCancellationCandidates(
       where c.account_id=${scope.accountId} and c.workspace_id=${scope.workspaceId}
         and c.site_id=${input.siteId} and c.created_at <= ${input.startedBefore.toISOString()}::timestamptz
         ${input.after ? sql`and c.session_id > ${input.after}::uuid` : sql``}
-        ${
-          narrowed
-            ? sql`and (not (c.tool_ids <@ ${JSON.stringify(narrowed.tools)}::jsonb)
-          or (${!narrowed.everyoneTools} and jsonb_array_length(c.tool_ids)>0 and c.viewer_kind in ('user','guest')))`
-            : sql``
-        }
       order by c.session_id limit ${Math.max(1, Math.min(input.limit, 200))}
     `,
       )

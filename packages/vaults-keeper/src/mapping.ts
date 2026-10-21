@@ -212,7 +212,7 @@ function unavailable(message: string): never {
 function textValue(field: ProviderWriteField): string {
   const value = field.value ?? "";
   if (Buffer.byteLength(value, "utf8") > VAULT_LIMITS.textValueMaxBytes) {
-    unavailable(`The value of "${field.name}" is larger than Opengeni stores`);
+    unavailable(`The value of "${field.name}" is larger than can be stored`);
   }
   return value;
 }
@@ -224,7 +224,7 @@ function totpValue(field: ProviderWriteField, label: string): string {
 }
 
 function customEntry(field: ProviderWriteField, title: string): KeeperFieldEntry {
-  if (field.kind === "file") unavailable("Keeper files cannot be written from Opengeni");
+  if (field.kind === "file") unavailable("Keeper files cannot be written from here");
   if (field.kind === "totp")
     return { type: "oneTimeCode", label: field.name, value: [totpValue(field, title)] };
   return {
@@ -295,15 +295,15 @@ export function buildCreateData(item: ProviderWriteItem): KeeperRecordData {
   }
   return unavailable(
     item.type === "passkey"
-      ? "Passkeys live only in Opengeni vaults"
+      ? "Passkeys live only in workspace-hosted vaults"
       : item.type === "api_key"
         ? "Keeper has no API key record type; create a login or a secure note"
-        : "Keeper file records cannot be created from Opengeni",
+        : "Keeper file records cannot be created from here",
   );
 }
 
 function setEntryValue(entry: KeeperFieldEntry, field: ProviderWriteField, title: string) {
-  if (field.kind === "file") unavailable("Keeper files cannot be written from Opengeni");
+  if (field.kind === "file") unavailable("Keeper files cannot be written from here");
   if (TOTP_TYPES.has(entry.type)) {
     entry.value = [totpValue(field, title)];
     return;
@@ -343,7 +343,7 @@ export function applyPatch(record: KeeperRecord, item: ProviderWriteItem): void 
       continue;
     }
     const source = target.source;
-    if (source.kind === "file") unavailable("Keeper files cannot be changed from Opengeni");
+    if (source.kind === "file") unavailable("Keeper files cannot be changed from here");
     if (source.kind === "notes") {
       data.notes = field.remove ? "" : textValue(field);
       continue;

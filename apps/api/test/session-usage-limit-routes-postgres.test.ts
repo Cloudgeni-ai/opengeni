@@ -7,10 +7,10 @@ import type { SessionWorkflowClient } from "@opengeni/core";
 import { createDb, createOrganizationApiKey, settleSessionUsageReceipt } from "@opengeni/db";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 // per-task usage limit routes, edge refusal and write authority through the

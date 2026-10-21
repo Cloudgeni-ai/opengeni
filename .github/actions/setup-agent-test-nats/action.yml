@@ -1,0 +1,14 @@
+name: Set up agent test NATS
+description: Install the pinned real broker used by native agent transport regressions.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v6
+      with:
+        go-version: "1.25.12"
+        cache: false
+    - name: Install the test broker
+      shell: bash
+      run: |
+        go install github.com/nats-io/nats-server/v2@v2.14.4
+        nats-server --version

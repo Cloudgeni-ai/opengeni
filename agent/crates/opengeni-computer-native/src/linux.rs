@@ -355,8 +355,13 @@ impl LinuxApplicationLauncher {
 
 /// Linux semantic adapter over the modern AT-SPI cache and typed interfaces.
 /// All object handles remain private; observations contain only short refs.
+/// Without an AT-SPI bus (for example an Xvfb virtual desktop on a headless
+/// host) it still sees and drives the screen with pixel input.
 pub(crate) struct AtspiComputerAdapter {
-    connection: AccessibilityConnection,
+    /// `None` when the session has no reachable AT-SPI bus.
+    connection: Option<AccessibilityConnection>,
+    /// Why `connection` is `None`.
+    accessibility_unavailable: Option<String>,
     incarnation: Uuid,
     sequence: AtomicU64,
     frame_sequence: AtomicU64,
@@ -389,25 +394,40 @@ impl AtspiComputerAdapter {
             atspi::connection::set_session_accessibility(true),
         )
         .await;
-        let connection = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
+        let accessibility = tokio::time::timeout(CACHE_TIMEOUT, AccessibilityConnection::new())
             .await
-            .map_err(|_| {
-                NativeAdapterError::unavailable(
-                    "Linux AT-SPI accessibility bus connection timed out",
-                    true,
-                )
-            })?
-            .map_err(|error| {
-                NativeAdapterError::unavailable(
-                    format!("Linux AT-SPI accessibility bus is unavailable: {error}"),
-                    true,
-                )
-            })?;
+            .map_err(|_| "Linux AT-SPI accessibility bus connection timed out".to_string())
+            .and_then(|connection| {
+                connection.map_err(|error| {
+                    format!("Linux AT-SPI accessibility bus is unavailable: {error}")
+                })
+            });
+        let (desktop, gnome, screen_unavailable) = match linux_gnome::detect().await {
+            WaylandScreen::NotWayland => match LinuxDesktop::open_default() {
+                Ok(desktop) => (Some(desktop), None, None),
+                Err(reason) => (None, None, Some(reason)),
+            },
+            WaylandScreen::Gnome(screen) => (None, Some(screen), None),
+            WaylandScreen::Unsupported(reason) => (None, None, Some(reason)),
+        };
+        // The screen is an independent control plane: without AT-SPI the
+        // adapter still captures and drives it, and only fails when neither
+        // semantic nor screen control is reachable.
+        let (connection, accessibility_unavailable) = match accessibility {
+            Ok(connection) => (Some(connection), None),
+            Err(reason) if desktop.is_some() || gnome.is_some() => (None, Some(reason)),
+            Err(reason) => return Err(NativeAdapterError::unavailable(reason, true)),
+        };
         let semantic_generation = Arc::new(AtomicU64::new(0));
-        let semantic_event_cache =
-            Arc::new(AtomicBool::new(register_semantic_events(&connection).await));
-        if semantic_event_cache.load(Ordering::Acquire) {
-            let event_connection = connection.clone();
+        let semantic_event_cache = Arc::new(AtomicBool::new(match &connection {
+            Some(connection) => register_semantic_events(connection).await,
+            None => false,
+        }));
+        if let Some(event_connection) = connection
+            .as_ref()
+            .filter(|_| semantic_event_cache.load(Ordering::Acquire))
+            .cloned()
+        {
             let event_generation = Arc::clone(&semantic_generation);
             let event_cache_enabled = Arc::clone(&semantic_event_cache);
             tokio::spawn(async move {
@@ -420,16 +440,9 @@ impl AtspiComputerAdapter {
                 event_generation.fetch_add(1, Ordering::AcqRel);
             });
         }
-        let (desktop, gnome, screen_unavailable) = match linux_gnome::detect().await {
-            WaylandScreen::NotWayland => match LinuxDesktop::open_default() {
-                Ok(desktop) => (Some(desktop), None, None),
-                Err(reason) => (None, None, Some(reason)),
-            },
-            WaylandScreen::Gnome(screen) => (None, Some(screen), None),
-            WaylandScreen::Unsupported(reason) => (None, None, Some(reason)),
-        };
         Ok(Self {
             connection,
+            accessibility_unavailable,
             incarnation: Uuid::new_v4(),
             sequence: AtomicU64::new(0),
             frame_sequence: AtomicU64::new(0),
@@ -447,6 +460,18 @@ impl AtspiComputerAdapter {
             application_snapshots: RwLock::new(BTreeMap::new()),
             semantic_event_cache,
             activated_applications: Mutex::new(BTreeSet::new()),
+        })
+    }
+
+    /// The AT-SPI connection, or why semantic access is unavailable.
+    fn accessibility(&self) -> NativeAdapterResult<&AccessibilityConnection> {
+        self.connection.as_ref().ok_or_else(|| {
+            NativeAdapterError::unavailable(
+                self.accessibility_unavailable
+                    .clone()
+                    .unwrap_or_else(|| "Linux AT-SPI accessibility is unavailable".to_string()),
+                true,
+            )
         })
     }
 
@@ -519,7 +544,7 @@ impl AtspiComputerAdapter {
 
     async fn cache_items(&self) -> NativeAdapterResult<Vec<CacheItem>> {
         let registry_root = self
-            .connection
+            .accessibility()?
             .root_accessible_on_registry()
             .await
             .map_err(|error| driver_error("construct AT-SPI registry root", error))?;
@@ -606,7 +631,7 @@ impl AtspiComputerAdapter {
         &self,
         root: &ObjectRefOwned,
     ) -> NativeAdapterResult<Vec<CacheItem>> {
-        let proxy = CacheProxy::builder(self.connection.connection())
+        let proxy = CacheProxy::builder(self.accessibility()?.connection())
             .destination(root.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct application cache destination", error))?
             .build()
@@ -1189,7 +1214,7 @@ impl AtspiComputerAdapter {
 
     async fn process_id(&self, object: &ObjectRefOwned) -> Option<u32> {
         let name = object.name()?.clone();
-        let proxy = atspi::zbus::fdo::DBusProxy::new(self.connection.connection())
+        let proxy = atspi::zbus::fdo::DBusProxy::new(self.accessibility().ok()?.connection())
             .await
             .ok()?;
         timed(proxy.get_connection_unix_process_id(name.into()))
@@ -1201,7 +1226,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<AccessibleProxy<'a>> {
-        AccessibleProxy::builder(self.connection.connection())
+        AccessibleProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct accessible destination", error))?
             .path(object.path().clone())
@@ -1215,7 +1240,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ComponentProxy<'a>> {
-        ComponentProxy::builder(self.connection.connection())
+        ComponentProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct component destination", error))?
             .path(object.path().clone())
@@ -1229,7 +1254,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ActionProxy<'a>> {
-        ActionProxy::builder(self.connection.connection())
+        ActionProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct action destination", error))?
             .path(object.path().clone())
@@ -1243,7 +1268,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<EditableTextProxy<'a>> {
-        EditableTextProxy::builder(self.connection.connection())
+        EditableTextProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct editable-text destination", error))?
             .path(object.path().clone())
@@ -1257,7 +1282,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<SelectionProxy<'a>> {
-        SelectionProxy::builder(self.connection.connection())
+        SelectionProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct selection destination", error))?
             .path(object.path().clone())
@@ -1271,7 +1296,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<TextProxy<'a>> {
-        TextProxy::builder(self.connection.connection())
+        TextProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct text destination", error))?
             .path(object.path().clone())
@@ -1285,7 +1310,7 @@ impl AtspiComputerAdapter {
         &'a self,
         object: &ObjectRefOwned,
     ) -> NativeAdapterResult<ValueProxy<'a>> {
-        ValueProxy::builder(self.connection.connection())
+        ValueProxy::builder(self.accessibility()?.connection())
             .destination(object.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct value destination", error))?
             .path(object.path().clone())
@@ -2189,22 +2214,26 @@ impl AtspiComputerAdapter {
 impl ComputerAdapter for AtspiComputerAdapter {
     fn capabilities(&self) -> NativeCapabilities {
         let desktop = self.desktop.is_some() || self.gnome.is_some();
+        // App and window targets come from AT-SPI; without it only the
+        // whole screen is a target.
+        let semantic = self.connection.is_some();
         NativeCapabilities {
-            semantic_observation: true,
-            app_discovery: true,
+            semantic_observation: semantic,
+            app_discovery: semantic,
             app_launch: desktop && self.application_launcher.is_some(),
-            window_capture: self
-                .desktop
-                .as_ref()
-                .is_some_and(LinuxDesktop::supports_window_capture),
+            window_capture: semantic
+                && self
+                    .desktop
+                    .as_ref()
+                    .is_some_and(LinuxDesktop::supports_window_capture),
             screen_capture: desktop,
-            semantic_actions: true,
+            semantic_actions: semantic,
             pointer_input: desktop,
             pointer_click_continuation: desktop,
             keyboard_input: desktop,
             clipboard: self.clipboard.is_some(),
-            background_actions: true,
-            parallel_apps: true,
+            background_actions: semantic,
+            parallel_apps: semantic,
         }
     }
 
@@ -3507,6 +3536,53 @@ mod live_tests {
 
     use super::*;
 
+    /// Create an executable script fixture without this test process ever
+    /// holding it open for writing. Tests in this binary run concurrently and
+    /// spawn processes: a fork on another thread while this process has the
+    /// script open for writing hands that child the descriptor until it execs,
+    /// and executing the script in that window fails with ETXTBSY ("Text file
+    /// busy"). A short-lived `sh` writes the file instead, so the only
+    /// writable descriptor belongs to a process that has exited before the
+    /// test runs the script.
+    fn write_executable_script(path: &std::path::Path, script: &str) {
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"")
+            .arg("sh")
+            .arg(path)
+            .arg(script)
+            .status()
+            .expect("start fixture writer");
+        assert!(status.success(), "write executable fixture: {status}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DISPLAY on an X11 server and a session bus without AT-SPI (e.g. DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent)"]
+    async fn drives_the_screen_without_an_accessibility_bus() {
+        let adapter = AtspiComputerAdapter::open()
+            .await
+            .expect("a reachable screen is enough to open the adapter");
+        assert!(
+            adapter.connection.is_none(),
+            "this test needs a session without AT-SPI"
+        );
+        let capabilities = adapter.capabilities();
+        assert!(capabilities.screen_capture && capabilities.pointer_input);
+        assert!(!capabilities.semantic_observation && !capabilities.app_discovery);
+        let targets = adapter.targets().await.expect("targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, NativeTargetKind::Screen);
+        let observation = adapter
+            .observe(&targets[0].id)
+            .await
+            .expect("observe screen");
+        assert_eq!(observation.target.id, targets[0].id);
+        adapter
+            .capture(&targets[0].id)
+            .await
+            .expect("capture the screen without AT-SPI");
+    }
+
     #[test]
     fn only_a_refused_first_screen_input_is_a_definite_failure() {
         let glyph = || {
@@ -3604,9 +3680,7 @@ mod live_tests {
     async fn application_launch_returns_after_a_long_running_launcher_starts() {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
-        fs::write(&executable, "#!/bin/sh\nsleep 2\n").expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        write_executable_script(&executable, "#!/bin/sh\nsleep 2\n");
         let launcher = LinuxApplicationLauncher { executable };
 
         tokio::time::timeout(
@@ -3623,16 +3697,13 @@ mod live_tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
         let environment = directory.path().join("environment");
-        fs::write(
+        write_executable_script(
             &executable,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s %s %s' \"$ACCESSIBILITY_ENABLED\" \"$GNOME_ACCESSIBILITY\" \"$QT_LINUX_ACCESSIBILITY_ALWAYS_ON\" > '{}'\n",
                 environment.display()
             ),
-        )
-        .expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        );
         let launcher = LinuxApplicationLauncher { executable };
 
         launcher
@@ -3672,9 +3743,7 @@ mod live_tests {
     async fn application_launch_reports_immediate_launcher_failure() {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
-        fs::write(&executable, "#!/bin/sh\nexit 9\n").expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        write_executable_script(&executable, "#!/bin/sh\nexit 9\n");
         let launcher = LinuxApplicationLauncher { executable };
 
         let error = launcher

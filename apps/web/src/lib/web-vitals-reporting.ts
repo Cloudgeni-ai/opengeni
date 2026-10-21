@@ -12,7 +12,7 @@ import type { ClientPage, ClientWebVitalMetric } from "@opengeni/contracts/clien
 import { onCLS, onINP, onLCP, onTTFB, type Metric } from "web-vitals";
 
 import { journeyPage } from "./analytics-journey";
-import { reportClientWebVital } from "./client-signals";
+import { reportClientWebVital } from "@opengeni/react/app/lib/client-signals";
 
 /**
  * Fraction of page loads that report vitals, decided once per document.

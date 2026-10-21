@@ -9,7 +9,7 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import type { SessionCommandActor } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrantAuthorization, type AccessGrantAuthorization } from "../src/access";
@@ -138,15 +138,7 @@ function origin(restricted: "turn" | "session" | "neither") {
     metadata: metadata(restricted === "session"),
   };
   track(spyOn(db, "getSession").mockResolvedValue(session as never));
-  // The calling agent's session has no Site lineage, so the Site clamp lets it through.
-  track(
-    spyOn(db, "getSiteDataAgentSession").mockResolvedValue({
-      originSiteIds: [],
-      siteTurn: false,
-      scheduledTaskId: null,
-      complete: true,
-    }),
-  );
+
   // The frozen policy resolves first-party tool defaults from workspace settings.
   track(
     spyOn(db, "requireWorkspace").mockResolvedValue({

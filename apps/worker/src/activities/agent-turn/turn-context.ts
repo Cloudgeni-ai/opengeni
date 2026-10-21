@@ -5,6 +5,7 @@ import type {
   AppendEventInput,
   ApplySessionTurnSettlementInput,
   SubscriptionCoreTurnIdentity,
+  SessionEventMutation,
 } from "@opengeni/db";
 import type {
   CodexCredentialPolicySnapshotV1,
@@ -39,7 +40,7 @@ export type ClaimedResult = (
   >,
 ) => RunAgentTurnResult;
 
-export type TurnSettleFn = (input: {
+export type TurnSettleInput = {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
   turnStatus:
     | "queued"
@@ -56,7 +57,19 @@ export type TurnSettleFn = (input: {
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
   notStartedToolCallIds?: readonly string[];
-}) => Promise<boolean>;
+};
+
+/**
+ * Durable turn settlement. `false` means this attempt lost ownership. With
+ * `requirePendingSteer`, `"pending_steer_withdrawn"` means the precondition
+ * failed under the session lock and nothing was written.
+ */
+export type TurnSettleFn = {
+  (
+    input: TurnSettleInput & { requirePendingSteer: true },
+  ): Promise<boolean | "pending_steer_withdrawn">;
+  (input: TurnSettleInput): Promise<boolean>;
+};
 
 export type TurnControlState = {
   cancellationRequestedAt: number | null;
@@ -151,7 +164,7 @@ export type RenewalState = {
 export type EventingState = {
   heartbeatDetails: TurnHeartbeatDetails | null;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-  batcher: ReturnType<typeof createRuntimeBatcher> | null;
+  batcher: ReturnType<typeof createRuntimeBatcher<SessionEventMutation<"event">>> | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
   toolPreparationReady: Promise<void> | null;
   toolPreparationClosing: boolean;
@@ -168,9 +181,6 @@ export type EventingState = {
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
-  /** Diagnostic only: the current stream's timing hook for a native transport's
-   *  literal provider dispatch. Never joins, fences or fails the request. */
-  providerDispatchObserver: (() => void) | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -367,7 +377,6 @@ export function createTurnContext(input: {
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
-      providerDispatchObserver: null,
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },

@@ -11,6 +11,24 @@ import {
 
 const native = process.platform === "linux" || process.platform === "darwin";
 
+async function expectBrowserExited(receipt: OwnedManagedBrowserProcess): Promise<void> {
+  // Exit is owned by shutdown; reaping an orphan belongs to its new parent.
+  // Independently reject every live process state, then require the production
+  // receipt check to prove no successor still owns the same browser profile.
+  if (process.platform === "linux") {
+    let stat: string | null = null;
+    try {
+      stat = await readFile(`/proc/${receipt.pid}/stat`, "utf8");
+    } catch (error) {
+      expect((error as NodeJS.ErrnoException).code).toBe("ENOENT");
+    }
+    if (stat !== null) expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]).toBe("Z");
+  } else {
+    expect(() => process.kill(receipt.pid, 0)).toThrow();
+  }
+  expect(await inspectOwnedManagedBrowserProcess(receipt)).toBe("exited");
+}
+
 async function fixture(fixtureOptions: { daemonRuntimeCopy?: boolean } = {}) {
   const directory = await mkdtemp("/tmp/og-headless-lineage-");
   const profileDirectory = join(directory, "profile");
@@ -33,9 +51,24 @@ async function fixture(fixtureOptions: { daemonRuntimeCopy?: boolean } = {}) {
         await writeFile(${JSON.stringify(pidFile)},String(fault.pid)+"\\n"); } catch {}
       process.exit(0);
     }); setInterval(()=>{},60000);`;
-  const daemonScript = `import {writeFile,symlink} from "node:fs/promises";
+  // Shutdown stops the browser, which then waits as this launcher's zombie, and
+  // then stops the launcher. Like a launcher that owns its browser, it reaps that
+  // exited browser before it exits, so its own exit proves the browser PID is
+  // gone; otherwise an adoptive reaper frees it later. A live browser still
+  // outlives it.
+  const daemonScript = `import {readFile,writeFile,symlink} from "node:fs/promises";
     const browser=Bun.spawn([${JSON.stringify(process.execPath)},"--no-env-file","-e",${JSON.stringify(childScript)},${JSON.stringify(`--user-data-dir=${profileDirectory}`)}],{stdout:"ignore",stderr:"ignore"});
     browser.exited.then(exitCode=>console.log(JSON.stringify({exitedBrowserPid:browser.pid,exitCode})));
+    const browserStopped=async()=>{
+      if(process.platform==="linux"){
+        try{const stat=await readFile("/proc/"+browser.pid+"/stat","utf8");return stat[stat.lastIndexOf(")")+2]==="Z";}catch{return false;}
+      }
+      return Bun.spawnSync(["ps","-o","stat=","-p",String(browser.pid)]).stdout.toString().trim().startsWith("Z");
+    };
+    process.on("SIGTERM",async()=>{
+      if(await browserStopped()) await browser.exited;
+      process.removeAllListeners("SIGTERM");process.kill(process.pid,"SIGTERM");
+    });
     await writeFile(${JSON.stringify(pidFile)},String(process.pid)+"\\n",{mode:0o600});
     await symlink("synthetic-host-"+browser.pid,${JSON.stringify(join(profileDirectory, "SingletonLock"))});
     console.log(JSON.stringify({browserPid:browser.pid}));setInterval(()=>{},60000);`;
@@ -204,6 +237,28 @@ test.skipIf(!native)(
 );
 
 test.skipIf(!native)(
+  "a reattached browser that already shut down is retired with its launcher, repeatably",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      const replacement = await f.reattach(receipt);
+      // The controller's own close request ended the browser, and its launcher
+      // reaped it, before cleanup could read the browser's parent.
+      process.kill(f.browserPid, "SIGTERM");
+      expect((await f.browserExited()).exitedBrowserPid).toBe(f.browserPid);
+      await replacement.terminate();
+      await f.daemon.exited;
+      expect(() => process.kill(f.daemon.pid, 0)).toThrow();
+      await replacement.terminate();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
   "a live browser is reattached after an agent update removed its daemon's runtime",
   async () => {
     const f = await fixture({ daemonRuntimeCopy: true });
@@ -345,7 +400,7 @@ test.skipIf(!native)(
       await expect(replacement.terminate(bystander.pid)).rejects.toThrow("lineage");
       expect(() => process.kill(f.browserPid, 0)).not.toThrow();
       await replacement.terminate();
-      expect(() => process.kill(f.browserPid, 0)).toThrow();
+      await expectBrowserExited(receipt);
       expect(() => process.kill(bystander.pid, 0)).not.toThrow();
     } finally {
       await f.close();
@@ -370,6 +425,9 @@ test.skipIf(!native)(
         cdpUrl: f.endpoint,
       });
       await replacement.terminate();
+      // The launcher still runs, so the stopped browser stays its zombie until
+      // the launcher reaps it; only its exit report allows the PID-absence check.
+      expect(await f.browserExited()).toEqual({ exitedBrowserPid: f.browserPid, exitCode: 0 });
       expect(() => process.kill(f.browserPid, 0)).toThrow();
     } finally {
       await f.close();
@@ -438,6 +496,7 @@ for (const holdReaper of [false, true]) {
           const stat = await readFile(`/proc/${f.browserPid}/stat`, "utf8");
           expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]).toBe("Z");
           expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+          await expectBrowserExited(receipt);
           f.daemon.kill("SIGCONT");
         }
         expect(await f.browserExited()).toEqual({ exitedBrowserPid: f.browserPid, exitCode: 0 });

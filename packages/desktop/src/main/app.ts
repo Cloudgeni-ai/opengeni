@@ -6,6 +6,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  globalShortcut,
   ipcMain,
   Menu,
   nativeTheme,
@@ -25,6 +26,8 @@ import {
   accountForAppLink,
   normalizeServerUrl,
   parseAppLink,
+  parseComputerConnectLink,
+  type ComputerConnectLink,
   serverLabel,
 } from "@opengeni/sdk/app-links";
 import { macSystemNames } from "@opengeni/sdk/this-computer";
@@ -42,12 +45,16 @@ import {
 import {
   DESKTOP_IPC,
   type DesktopAccountsSnapshot,
+  type DesktopAppShotPermissionId,
+  type DesktopAppShotResult,
+  type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
 import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
+import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
@@ -59,13 +66,14 @@ import {
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
-import { buildApplicationMenu } from "./menu";
+import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { MainWindow, openExternalSafely } from "./window";
+import { completeComputerLink, computerLinkAccount } from "./computer-link";
 
 type SdkModule = typeof import("@opengeni/sdk");
 
@@ -73,6 +81,7 @@ interface PendingSignIn {
   state: string;
   verifier: string;
   baseUrl: string;
+  computerLink?: ComputerConnectLink;
 }
 
 /** The account the window should show while its server is out of reach. */
@@ -149,6 +158,7 @@ export class DesktopShell {
   private readonly clients = new Map<string, { token: string; client: Promise<OpenGeniClient> }>();
   private sdk: Promise<SdkModule> | null = null;
   private pending: PendingSignIn | null = null;
+  private connectingFromLink = false;
   private welcomeError: string | null = null;
   /** Read once; "" when the app wasn't installed by a server's install script. */
   private installedFrom: string | null = null;
@@ -156,6 +166,8 @@ export class DesktopShell {
   /** Beside System Settings while a screen-control permission is being allowed there. */
   private readonly permissionGuide: PermissionGuide;
   private readonly inbox: InboxNotifier;
+  /** The shortcut that sends the window in front into the composer. */
+  private readonly appShots: AppShots;
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
   private quitting = false;
@@ -163,6 +175,11 @@ export class DesktopShell {
   private quitConfirmed = false;
   private confirmingQuit = false;
   private readonly lastPaths = new Map<string, string>();
+  /** Each account page's menu bar actions, as it last reported them. */
+  private readonly pageMenuActions = new Map<
+    string,
+    { actions: DesktopMenuAction[]; key: string }
+  >();
   /** Accounts whose page didn't load, with the address to try again. */
   private readonly failedLoads = new Map<string, string>();
   private unreachable: Unreachable | null = null;
@@ -241,23 +258,61 @@ export class DesktopShell {
         if (!client) throw new Error("Sign in again to turn this computer off here.");
         await disallowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
+      readMachine: async (accountId, _baseUrl, workspaceId, enrollmentId) => {
+        const client = await this.client(accountId);
+        if (!client) return null;
+        const machines = await client.listMachines(workspaceId);
+        const machine = machines.machines.find((entry) => entry.enrollmentId === enrollmentId);
+        return machine
+          ? {
+              online: ["online", "consent_required", "display_unavailable"].includes(machine.state),
+              screenControl: machine.allowScreenControl,
+              permissions: machine.runtime?.macPermissions ?? null,
+            }
+          : null;
+      },
+      enableScreenControl: async (accountId, workspaceId, enrollmentId) => {
+        const client = await this.client(accountId);
+        if (!client) throw new Error("Sign in again to connect this computer.");
+        await client.enableMachineScreenControl(workspaceId, enrollmentId);
+      },
       openSystemSettings: (url) => void shell.openExternal(url),
       onGuidePermission: (id, granted) => {
         if (id) this.permissionGuide.show(id);
         else if (granted) this.permissionGuide.granted();
         else this.permissionGuide.hide();
       },
-      trash: (path) => shell.trashItem(path),
-      onScreenControlHandedOver: () =>
-        showSimpleNotification(
-          `Allow ${config.productName} to use your screen`,
-          `Agents used your screen through the separate agent app, which ${config.productName} replaces. Allow Screen Recording and Accessibility to keep that working.`,
-          () => void this.allowNextPermission(),
-        ),
       onChange: () => {
         this.broadcast(DESKTOP_IPC.computerChanged);
         void this.refreshTray();
       },
+    });
+    const appShotStore = new AppShotSettingsStore(app.getPath("userData"), process.platform);
+    this.appShots = new AppShots({
+      platform:
+        process.platform === "darwin"
+          ? new MacAppShots({
+              ownPid: process.pid,
+              openSystemSettings: (url) => void shell.openExternal(url),
+              guide: (id, granted) => {
+                if (id && granted) this.permissionGuide.granted();
+                else if (id) this.permissionGuide.show(id);
+                else this.permissionGuide.hide();
+              },
+              requested: () => appShotStore.requested(),
+              markRequested: (id) => appShotStore.markRequested(id),
+              onPermissionsChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
+            })
+          : null,
+      store: appShotStore,
+      globalShortcut,
+      reveal: () => {
+        app.focus({ steal: true });
+        this.reveal();
+      },
+      deliver: (result) => this.deliverAppShot(result),
+      onChange: () => this.broadcast(DESKTOP_IPC.appShotsChanged),
+      log: (message, caught) => console.warn(message, caught),
     });
     this.inbox = new InboxNotifier({
       accounts: () => {
@@ -320,6 +375,7 @@ export class DesktopShell {
 
   start(): void {
     this.registerIpc();
+    this.appShots.start();
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -349,7 +405,10 @@ export class DesktopShell {
     process.once("SIGTERM", quitUnasked);
     process.once("SIGINT", quitUnasked);
     // However the app ends, its agent doesn't outlive it.
-    app.on("will-quit", () => this.computer.shutdownNow());
+    app.on("will-quit", () => {
+      this.appShots.stop();
+      this.computer.shutdownNow();
+    });
     app.on("window-all-closed", () => {
       if (process.platform !== "darwin" && !this.tray) app.quit();
     });
@@ -400,7 +459,7 @@ export class DesktopShell {
     this.confirmingQuit = true;
     try {
       const summary = this.config.thisComputer ? await this.computer.summary() : null;
-      if (summary?.running && !summary.needsPermissions) {
+      if (summary?.running && summary.management !== "service" && !summary.needsPermissions) {
         const parent = this.window?.window;
         const options: Electron.MessageBoxOptions = {
           type: "question",
@@ -627,6 +686,14 @@ export class DesktopShell {
       void this.finishSignIn(callback);
       return;
     }
+    const computerLink = parseComputerConnectLink(raw, this.config.scheme);
+    if (computerLink && this.config.thisComputer) {
+      if (this.connectingFromLink || this.pending) return;
+      const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
+      if (account) void this.connectFromLink(account, computerLink);
+      else void this.beginSignIn(computerLink.origin, computerLink);
+      return;
+    }
     const link = parseAppLink(raw);
     if (!link) {
       this.reveal();
@@ -648,7 +715,10 @@ export class DesktopShell {
 
   // --- Sign-in ------------------------------------------------------------------------------------
 
-  private async beginSignIn(serverInput: string): Promise<void> {
+  private async beginSignIn(
+    serverInput: string,
+    computerLink?: ComputerConnectLink,
+  ): Promise<void> {
     const baseUrl = normalizeServerUrl(serverInput);
     if (!baseUrl) {
       this.welcomeError = "Enter the address of your server, like app.opengeni.ai.";
@@ -657,7 +727,7 @@ export class DesktopShell {
     }
     const { verifier, challenge } = pkcePair();
     const state = randomState();
-    this.pending = { state, verifier, baseUrl };
+    this.pending = { state, verifier, baseUrl, ...(computerLink ? { computerLink } : {}) };
     this.welcomeError = null;
     this.pushWelcome();
     openExternalSafely(
@@ -702,6 +772,12 @@ export class DesktopShell {
         client.getAccessContext(),
         client.listWorkspaces().catch(() => []),
       ]);
+      if (pending.computerLink && context.subjectId !== pending.computerLink.subjectId) {
+        await client.signOutNativeApp().catch(() => undefined);
+        throw new Error(
+          "You signed in with a different account. Return to the browser, switch to the account that offered to connect this computer, and try again.",
+        );
+      }
       const account = this.store.upsert(
         {
           baseUrl: pending.baseUrl,
@@ -717,11 +793,55 @@ export class DesktopShell {
       this.welcomeError = null;
       this.window?.removeAccount(account.id);
       this.showAccount(account.id);
+      if (pending.computerLink) await this.connectFromLink(account, pending.computerLink);
       void this.inbox.poll();
     } catch (caught) {
       this.pending = null;
       this.welcomeError = errorMessage(caught, "The sign-in couldn't finish. Try again.");
       this.pushWelcome();
+    }
+  }
+
+  /** An external link never grants host access: confirm with the person on this computer. */
+  private async connectFromLink(account: StoredAccount, link: ComputerConnectLink): Promise<void> {
+    if (this.connectingFromLink) return;
+    this.connectingFromLink = true;
+    try {
+      const client = await this.client(account.id);
+      if (!client) return;
+      await completeComputerLink({
+        link,
+        account,
+        workspace: (id) => client.getWorkspace(id),
+        confirm: async (workspaceName) => {
+          this.reveal();
+          const { response } = await dialog.showMessageBox({
+            type: "question",
+            title: "Use this computer",
+            message: `Connect this computer to ${workspaceName}?`,
+            detail: `Signed in as ${account.email} on ${serverLabel(account.baseUrl)}. Your agents will be able to work with files and use the screen after you allow system permissions. Only you can use this connection. You can turn it off in the app.`,
+            buttons: ["Connect", "Cancel"],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true,
+          });
+          return response === 0;
+        },
+        navigate: (path) => this.showAccount(account.id, path),
+        connect: async (workspaceId) => {
+          await this.computer.connect(account.id, account.baseUrl, workspaceId, {
+            screenControl: true,
+          });
+        },
+      });
+    } catch (caught) {
+      await dialog.showMessageBox({
+        type: "error",
+        message: "Couldn't connect this computer",
+        detail: errorMessage(caught, "Return to the browser and try Open app and connect again."),
+      });
+    } finally {
+      this.connectingFromLink = false;
     }
   }
 
@@ -921,6 +1041,21 @@ export class DesktopShell {
         // Ignore messages from anything but an account's own page.
       }
     });
+    ipcMain.on(DESKTOP_IPC.menuActionsSet, (event, value: unknown) => {
+      let account: StoredAccount;
+      try {
+        account = this.senderAccount(event);
+      } catch {
+        return;
+      }
+      const actions = readMenuActions(value);
+      if (!actions) return;
+      const key = JSON.stringify(actions);
+      if ((this.pageMenuActions.get(account.id)?.key ?? "[]") === key) return;
+      if (actions.length === 0) this.pageMenuActions.delete(account.id);
+      else this.pageMenuActions.set(account.id, { actions, key });
+      if (this.store.snapshot().activeId === account.id) Menu.setApplicationMenu(this.menu());
+    });
     ipcMain.on(DESKTOP_IPC.appearanceSet, (event, appearance: unknown) => {
       try {
         this.senderAccount(event);
@@ -932,15 +1067,23 @@ export class DesktopShell {
       }
     });
     handle(DESKTOP_IPC.computerStatus, (account, workspaceId) =>
-      this.computer.status(account.baseUrl, String(workspaceId)),
+      this.computer.status(account.baseUrl, String(workspaceId), account.id),
     );
     handle(DESKTOP_IPC.computerConnect, (account, workspaceId, options) =>
       this.computer.connect(account.id, account.baseUrl, String(workspaceId), {
         screenControl: Boolean((options as ThisComputerConnectOptions | undefined)?.screenControl),
       }),
     );
-    handle(DESKTOP_IPC.computerPause, () => this.computer.pause());
-    handle(DESKTOP_IPC.computerResume, () => this.computer.resume());
+    handle(DESKTOP_IPC.computerPause, (account) => {
+      if (account.signedOut || !this.store.token(account.id))
+        throw new Error("Sign in again to manage this computer.");
+      return this.computer.pause();
+    });
+    handle(DESKTOP_IPC.computerResume, (account) => {
+      if (account.signedOut || !this.store.token(account.id))
+        throw new Error("Sign in again to manage this computer.");
+      return this.computer.resume();
+    });
     handle(DESKTOP_IPC.computerRequestPermission, (_account, id) =>
       this.computer.requestPermission(id as ThisComputerPermissionId),
     );
@@ -949,6 +1092,13 @@ export class DesktopShell {
     );
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
+    });
+    handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
+    handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
+    handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
+      if (id === "screenRecording" || id === "accessibility") {
+        await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
+      }
     });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
@@ -987,6 +1137,18 @@ export class DesktopShell {
     for (const contents of targets) {
       if (!contents.isDestroyed()) contents.send(channel, payload);
     }
+  }
+
+  /** A capture goes to the account the window shows, once its page has loaded. */
+  private deliverAppShot(result: DesktopAppShotResult): void {
+    const accountId = this.window?.accountId;
+    const contents = accountId ? this.window?.contentsFor(accountId) : null;
+    if (!contents || contents.isDestroyed()) return;
+    const send = () => {
+      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.appShotsCaptured, result);
+    };
+    if (contents.isLoading()) contents.once("did-finish-load", send);
+    else send();
   }
 
   private accountsChanged(): void {
@@ -1031,6 +1193,14 @@ export class DesktopShell {
               if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
             }
           : null,
+      pageActions:
+        active && !active.signedOut ? (this.pageMenuActions.get(active.id)?.actions ?? null) : null,
+      runPageAction: (id) => {
+        if (!active || active.signedOut) return;
+        this.reveal();
+        const contents = this.window?.contentsFor(active.id);
+        if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.menuAction, id);
+      },
       updates: this.updates
         ? { state: this.updates.menuState, run: () => this.updates?.menuAction() }
         : null,

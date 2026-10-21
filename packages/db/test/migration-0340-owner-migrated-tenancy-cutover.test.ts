@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { nestedPostgresSqlState } from "../src";

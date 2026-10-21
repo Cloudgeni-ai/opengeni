@@ -1,22 +1,20 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
+import { useCallback, useEffect, useId, useRef } from "react";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
 import {
   UsageMeterGroup,
   UsageReadout,
   usageResets,
   type UsageWindowReading,
-} from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/usage-meter";
 import {
-  invalidateSharedQueries,
-  isSharedQueryAccessRefusal,
-  peekSharedQuery,
-  sharedQueryWriter,
+  MODEL_SETTINGS_STALE_TIME_MS,
+  useSharedQuery,
   type SharedQueryKey,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 export type ClaudeUsageState = {
   value: ClaudeSubscriptionUsage | null;
@@ -28,8 +26,8 @@ export type ClaudeUsageState = {
 };
 
 // The last successful reading per exact scope + reading kind + credential +
-// version, retained per client so a revisit renders it at once while the page
-// re-reads it. Only a reading whose credential id and version are both known is
+// version, retained per client so a revisit within five minutes needs no read.
+// Only a reading whose credential id and version are both known is
 // retained: without them (people who can't manage the connection) a replaced
 // credential could not be told apart, so those readers always start cold.
 function claudeUsageQueryKey(input: {
@@ -38,27 +36,21 @@ function claudeUsageQueryKey(input: {
   accountPool: boolean;
   credentialId?: string | null | undefined;
   credentialVersion?: number | null | undefined;
+  canManage: boolean;
 }): SharedQueryKey | null {
   if (!input.credentialId || input.credentialVersion === undefined) return null;
   if (input.credentialVersion === null) return null;
   return [
+    "model-settings",
     "claude-usage",
     input.scope,
     input.scopeId,
     input.accountPool ? "pool-account" : "connection",
     input.credentialId,
     input.credentialVersion,
+    input.canManage ? "live" : "stored",
   ];
 }
-function retainedClaudeUsage(
-  client: object,
-  queryKey: SharedQueryKey | null,
-  readable: boolean,
-): ClaudeSubscriptionUsage | null {
-  if (!readable || !queryKey) return null;
-  return peekSharedQuery<ClaudeSubscriptionUsage>(client, queryKey)?.data ?? null;
-}
-
 export function useClaudeUsage({
   client,
   scope,
@@ -82,151 +74,99 @@ export function useClaudeUsage({
   accountPool?: boolean;
   onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
-  const key = `${scope}:${scopeId}:${accountPool ? "pool-account" : "connection"}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
-  const queryKey = claudeUsageQueryKey({
+  const readerId = useId();
+  const retainedKey = claudeUsageQueryKey({
     scope,
     scopeId,
     accountPool,
     credentialId,
     credentialVersion,
+    canManage,
   });
-  const queryKeyId = queryKey ? JSON.stringify(queryKey) : null;
-  const currentKey = useRef(key);
-  currentKey.current = key;
+  // Unknown credentials still use the shared read machinery, but never reuse
+  // another mount's reading: a replacement cannot be identified reliably.
+  const queryKey = retainedKey ?? [
+    "model-settings",
+    "claude-usage",
+    scope,
+    scopeId,
+    accountPool ? "pool-account" : "connection",
+    credentialId ?? null,
+    credentialVersion ?? null,
+    canManage ? "live" : "stored",
+    "reader",
+    readerId,
+  ];
+  const key = JSON.stringify(queryKey);
+  const readable = enabled && connected;
+  const epochRef = useRef({ client, key, readable, active: true });
+  if (
+    epochRef.current.client !== client ||
+    epochRef.current.key !== key ||
+    epochRef.current.readable !== readable
+  ) {
+    epochRef.current.active = false;
+    epochRef.current = { client, key, readable, active: true };
+  }
+  const epoch = epochRef.current;
   const credentialChanged = useRef(onCredentialChanged);
   credentialChanged.current = onCredentialChanged;
-  const generation = useRef(0);
-  const refreshingKey = useRef<{ key: string; request: number } | null>(null);
-  const reconnectNotified = useRef<string | null>(null);
-  const [state, setState] = useState<{
-    key: string;
-    value: ClaudeSubscriptionUsage | null;
-    error: boolean;
-    loading: boolean;
-    refreshing: boolean;
-  }>(() => {
-    const retained = retainedClaudeUsage(client, queryKey, enabled && connected);
-    return {
-      key,
-      value: retained,
-      error: false,
-      loading: enabled && connected && !retained,
-      refreshing: false,
-    };
-  });
   const load = useCallback(
-    async (refresh: boolean) => {
-      if (!enabled || !connected || (refresh && !canManage)) return;
-      if (refreshingKey.current?.key === key) return;
-      const request = ++generation.current;
-      if (refresh) {
-        refreshingKey.current = { key, request };
-        setState((previous) => ({ ...previous, key, refreshing: true }));
-      }
-      const retainedKey = queryKeyId ? (JSON.parse(queryKeyId) as SharedQueryKey) : null;
-      // Created before the read: a clear (identity change) meanwhile refuses it.
-      const write = sharedQueryWriter(client);
-      try {
-        const result =
-          accountPool && credentialId
-            ? scope === "workspace"
-              ? await (refresh
-                  ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
-                  : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
-              : await (refresh
-                  ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
-                  : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
-            : scope === "workspace"
-              ? await (refresh
-                  ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
-                  : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
-              : await (refresh
-                  ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
-                  : client.getOrganizationClaudeSubscriptionUsage(scopeId));
-        if (currentKey.current !== key || generation.current !== request) return;
-        if (
-          !result.connected ||
-          (credentialVersion !== undefined &&
-            credentialVersion !== null &&
-            result.credentialVersion !== credentialVersion)
-        ) {
-          setState({ key, value: null, error: true, loading: false, refreshing: false });
-          if (retainedKey) void invalidateSharedQueries(client, retainedKey);
-          await credentialChanged.current?.();
-          return;
-        }
-        setState({ key, value: result, error: false, loading: false, refreshing: false });
-        if (retainedKey) write(retainedKey, result);
-        if (result.refreshStatus === "reconnect") {
-          if (reconnectNotified.current !== key) {
-            reconnectNotified.current = key;
-            await credentialChanged.current?.();
-          }
-        } else if (reconnectNotified.current === key) reconnectNotified.current = null;
-      } catch (error) {
-        if (currentKey.current !== key || generation.current !== request) return;
-        // A refusal means this person can no longer see the reading at all:
-        // drop the retained one instead of showing it beside the error.
-        const refused = isSharedQueryAccessRefusal(error);
-        if (refused && retainedKey) void invalidateSharedQueries(client, retainedKey);
-        setState((previous) => ({
-          key,
-          value: !refused && previous.key === key ? previous.value : null,
-          error: true,
-          loading: false,
-          refreshing: false,
-        }));
-      } finally {
-        if (refresh && refreshingKey.current?.request === request) refreshingKey.current = null;
-      }
-    },
-    [
-      client,
-      scope,
-      scopeId,
-      key,
-      enabled,
-      connected,
-      canManage,
-      credentialVersion,
-      credentialId,
-      accountPool,
-      queryKeyId,
-    ],
+    async (refresh: boolean) =>
+      accountPool && credentialId
+        ? scope === "workspace"
+          ? await (refresh
+              ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
+              : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
+          : await (refresh
+              ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
+              : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
+        : scope === "workspace"
+          ? await (refresh
+              ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
+              : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
+          : await (refresh
+              ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
+              : client.getOrganizationClaudeSubscriptionUsage(scopeId)),
+    [client, scope, scopeId, credentialId, accountPool],
   );
+  // GET only projects saved quota. Manageable accounts use the live POST for
+  // cold/stale reads and invalidation (including the global Models Refresh).
+  // All paths share the cache's in-flight and generation fencing; a fresh
+  // remount does not contact Claude again. Read-only viewers keep using GET.
+  const query = useSharedQuery(client, queryKey, () => load(canManage), {
+    enabled: readable,
+    staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS,
+    pollIntervalMs: MODEL_SETTINGS_STALE_TIME_MS,
+    ...(retainedKey ? {} : { retainMs: 0 }),
+  });
   useEffect(() => {
-    const retained = retainedClaudeUsage(
-      client,
-      queryKeyId ? (JSON.parse(queryKeyId) as SharedQueryKey) : null,
-      enabled && connected,
-    );
-    setState({
-      key,
-      value: retained,
-      error: false,
-      loading: enabled && connected && !retained,
-      refreshing: false,
-    });
-    void load(false);
-    const poll = () => {
-      if (document.visibilityState !== "hidden") void load(false);
-    };
-    const timer = enabled && connected ? setInterval(poll, 30_000) : null;
-    if (enabled && connected) document.addEventListener("visibilitychange", poll);
+    epoch.active = true;
     return () => {
-      generation.current += 1;
-      if (refreshingKey.current?.key === key) refreshingKey.current = null;
-      if (timer) clearInterval(timer);
-      document.removeEventListener("visibilitychange", poll);
+      epoch.active = false;
     };
-  }, [client, key, queryKeyId, load, enabled, connected]);
+  }, [epoch]);
+  const mismatch = Boolean(
+    query.data &&
+    (!query.data.connected ||
+      (credentialVersion != null && query.data.credentialVersion !== credentialVersion)),
+  );
+  const needsMetadata = mismatch || query.data?.refreshStatus === "reconnect";
+  useEffect(() => {
+    if (epoch.active && needsMetadata) void credentialChanged.current?.();
+  }, [epoch, needsMetadata]);
+  const { refresh: refreshQuery } = query;
+  const refresh = useCallback(async () => {
+    if (!epoch.active || !readable || !canManage) return;
+    await refreshQuery();
+  }, [epoch, readable, canManage, refreshQuery]);
   return {
-    value: state.key === key ? state.value : null,
-    error: state.key === key && state.error,
-    loading: state.key !== key ? enabled && connected : state.loading,
-    refreshing: state.key === key && state.refreshing,
-    canRefresh: canManage && enabled && connected,
-    refresh: () => load(true),
+    value: mismatch ? null : query.data,
+    error: Boolean(query.error || mismatch),
+    loading: query.loading,
+    refreshing: query.fetching && !query.loading,
+    canRefresh: canManage && readable,
+    refresh,
   };
 }
 
@@ -294,7 +234,12 @@ export function claudeUsageReportedAt(
 
 export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
   const now = useMinuteNow();
-  const readings = claudeUsageReadings(state.value, now);
+  const unavailable =
+    state.error ||
+    state.value?.refreshStatus === "unavailable" ||
+    state.value?.refreshStatus === "reconnect";
+  // A failed live check is not evidence of no usage (or a fresh old reading).
+  const readings = claudeUsageReadings(unavailable ? null : state.value, now);
   const planReadings = readings.filter(
     (item) => item.label !== labels.overage && item.label !== labels.seven_day_overage_included,
   );
@@ -317,6 +262,11 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
       limitReached={reading.limitReached}
       resets={usageResets(resetWindows, reading.label)}
       loading={state.loading}
+      fallback={
+        unavailable || state.value?.refreshStatus === "scope_required"
+          ? "Usage unavailable"
+          : "No usage yet"
+      }
     />
   );
 }

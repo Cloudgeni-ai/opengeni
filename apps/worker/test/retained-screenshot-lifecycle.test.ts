@@ -18,7 +18,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createRetainedScreenshotMaintenanceActivities,

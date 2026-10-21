@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
-import { isSeatLimitError, subscriptionAction } from "@/lib/subscription-plans";
+import { isSeatLimitError, subscriptionAction } from "@opengeni/react/app/lib/subscription-plans";
 
 GlobalRegistrator.register();
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -115,6 +115,7 @@ test("upgrade confirms proration, fresh replacement credit and targets the selec
 test("checkout retries retain one UUID even after closing and reopening confirmation", async () => {
   const client = clientFixture();
   await mount(plans(client, "free"));
+  expect(document.body.textContent).not.toContain("Popular");
   await click("Get Pro");
   await submit();
   expect(document.body.textContent).toContain("Checkout transport unavailable");
@@ -247,6 +248,46 @@ test("late catalog reads cannot display another organization's plan", async () =
   expect(document.body.textContent).toBe("Legacy billing");
 });
 
+test("scoped monthly credit appears once and is not subtracted from purchased general credit", async () => {
+  const container = await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 35_000_000,
+          generalBalanceMicros: 25_000_000,
+          currency: "usd",
+          updatedAt: new Date().toISOString(),
+          plan: previewPlan("free"),
+          promotionalCredits: [
+            {
+              grantId: "00000000-0000-4000-8000-000000000002",
+              label: "Monthly plan credit",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+              planCredit: true,
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  expect(container.textContent?.match(/Monthly plan credit/g)).toHaveLength(1);
+  expect(container.textContent).toContain("$35.00");
+  expect(container.textContent).toContain("$25.00");
+  expect(container.textContent).not.toContain("$15.00");
+  expect(container.textContent).toContain("Used first · Resets monthly · View models");
+  const disclosure = container.querySelector("button")!;
+  await act(async () => disclosure.click());
+  expect(container.textContent).toContain("GPT-6 Luna");
+});
+
 test("balance splits monthly, promotional and other general credit without double counting", async () => {
   await mount(
     <OrganizationCreditBalance
@@ -281,6 +322,50 @@ test("balance splits monthly, promotional and other general credit without doubl
   expect(document.body.textContent).toContain("$75.00");
   expect(document.body.textContent).toContain("$10.00");
   expect(document.body.textContent).toContain("Other general credit");
+});
+
+test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {
+  const client = clientFixture();
+  const ungranted = { ...previewPlan("free"), creditGrantedMicros: 0, creditRemainingMicros: 0 };
+  await mount(
+    <SubscriptionPlans
+      client={client as unknown as OpenGeniBrowserClient}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: ungranted }}
+      plan={ungranted}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 7_000_000,
+          generalBalanceMicros: 7_000_000,
+          currency: "usd",
+          updatedAt: "2026-10-18T18:00:00Z",
+          plan: ungranted,
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  expect(document.body.textContent).toContain("Your plan");
+  expect(document.body.textContent).toContain("5 seats");
+  expect(document.body.textContent).not.toContain("of $0.00 left");
+  expect(document.body.textContent).not.toContain("Used first. Resets monthly.");
+  expect(document.body.textContent).not.toContain("Other general credit");
+  expect(document.body.textContent).toContain("$7.00");
 });
 
 test("seat refusal recognizes current and legacy bodies and offers exactly one upgrade action", async () => {

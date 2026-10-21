@@ -1,11 +1,16 @@
 import { directModelConnectionSpec } from "@opengeni/contracts";
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { useAppContext } from "@/context";
+import { Button } from "@opengeni/react/ui/button";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { DirectModelProviderForm } from "./direct-model-provider-connection";
-import { applyConnectedModelToNewSessionDraft } from "@/lib/model-access-onboarding";
+import { applyConnectedModelToNewSessionDraft } from "@opengeni/react/app/lib/model-access-onboarding";
+import {
+  invalidateModelSettingsQueries,
+  MODEL_SETTINGS_STALE_TIME_MS,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
 
 export function DirectModelProviderConnections({
   workspaceId,
@@ -17,30 +22,17 @@ export function DirectModelProviderConnections({
   onConnectionChange?: () => void;
 }) {
   const { client } = useAppContext();
-  const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [revision, setRevision] = useState(0);
+  const query = useSharedQuery(
+    client,
+    ["model-settings", "direct-connections", workspaceId],
+    () => client.listConnections(workspaceId),
+    { staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
+  const connections = (query.data ?? []).filter((row) => directModelConnectionSpec(row));
+  const error = query.error?.message;
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    client
-      .listConnections(workspaceId)
-      .then((rows) => {
-        if (!cancelled) {
-          setConnections(rows.filter((row) => directModelConnectionSpec(row)));
-          setError(null);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled)
-          setError(e instanceof Error ? e.message : "Could not load provider connections");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, workspaceId, revision]);
   function refresh() {
-    setRevision((value) => value + 1);
+    void invalidateModelSettingsQueries(client);
     onConnectionChange?.();
   }
   async function disconnect(connection: ConnectionMetadata) {

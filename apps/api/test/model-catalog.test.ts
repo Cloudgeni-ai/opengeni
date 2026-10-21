@@ -11,7 +11,7 @@ import {
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import {
   buildWorkspaceModelCatalog,
@@ -987,6 +987,36 @@ describe("workspace model catalog defaults", () => {
 });
 
 describe("workspace model catalog route discipline", () => {
+  test("speeds no serving account offers are shown but not runnable", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: true });
+    const model = configuredModels(withCodexCatalogProvider(settings)).find((candidate) =>
+      candidate.capabilities.latencyModes.some((mode) => mode.id === "ultrafast"),
+    )!;
+    const observations = {
+      [model.definitionVersion]: {
+        status: "available" as const,
+        reason: null,
+        checkedAt: new Date().toISOString(),
+        unavailableLatencyModes: ["ultrafast" as const],
+      },
+    };
+    const project = (withObservations: boolean) =>
+      projectWorkspaceModelCatalog(
+        resolveWorkspaceModelSelection({
+          settings,
+          policy: null,
+          codexSubscriptionActive: true,
+          ...(withObservations ? { observations } : {}),
+        }),
+      ).models.find((candidate) => candidate.id === model.id)!;
+    const runnable = (row: ReturnType<typeof project>) =>
+      Object.fromEntries(
+        (row.capabilities?.latencyModes ?? []).map((mode) => [mode.id, mode.runnable]),
+      );
+    expect(runnable(project(false))).toEqual({ standard: true, fast: true, ultrafast: true });
+    expect(runnable(project(true))).toEqual({ standard: true, fast: true, ultrafast: false });
+  });
+
   const here = dirname(fileURLToPath(import.meta.url));
   const source = readFileSync(resolve(here, "..", "src", "routes", "workspaces.ts"), "utf8");
 

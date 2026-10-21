@@ -15,12 +15,12 @@ import {
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import * as FormDialogModule from "@/components/ui/form-dialog";
+import * as FormDialogModule from "@opengeni/react/ui/form-dialog";
 import type { MachineAudienceClient } from "./machine-audience-dialog";
 
 // Keep the test independent of Radix portal mounting: the same form frame,
 // rendered in place while open.
-mock.module("@/components/ui/form-dialog", () => ({
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   ...FormDialogModule,
   FormDialog: ({
     open,

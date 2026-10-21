@@ -1,10 +1,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { InboxIcon } from "lucide-react";
 
-import { useRail } from "@/components/rail/rail-context";
-import { useAppContext } from "@/context";
-import { hasInbox, inboxAttentionCount, useInbox } from "@/lib/inbox";
-import { cn } from "@/lib/utils";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasInbox, inboxAttentionCount, useInbox } from "@opengeni/react/app/lib/inbox";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /** The Inbox entry: always visible to a signed-in person, with how many things wait on them. */
 export function InboxLink() {

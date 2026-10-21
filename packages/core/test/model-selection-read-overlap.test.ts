@@ -202,6 +202,10 @@ for (const first of ["inputs", "catalog"] as const) {
         workspaceOpperCustomModels: [],
         organizationOpperConnectionActive: false,
         organizationOpperCustomModels: [],
+        organizationDirect: {
+          openai: { active: false, models: [] },
+          azure_openai: { active: false, endpoint: null, models: [] },
+        },
         claudeConnections: {
           anthropic: { active: true, models: ["org-anthropic"] },
           claude_subscription: { active: false, models: ["org-subscription"] },
@@ -257,7 +261,9 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
           expect(args[1]).toEqual({
             accountId: f.context.accountId,
             workspaceId: f.context.workspaceId,
-            providerKinds,
+            // Organization Azure OpenAI has no workspace custom-model rail.
+            providerKinds:
+              name === "org-catalog" ? [...providerKinds, "openai", "azure_openai"] : providerKinds,
           });
         else if (name === "connections")
           expect(args.slice(1)).toEqual([f.context.workspaceId, null]);

@@ -4,7 +4,7 @@ import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   bootstrapWorkspace,
@@ -115,9 +115,10 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // ...and the 0755 connection-account intent columns.
     await stageConnectionAccountIntentColumns(owned.ownerUrl);
     await stageSiteSessionAudienceColumns(owned.ownerUrl);
-    // The current event adapter projects 0810's nullable key. Only stage the
-    // reader column for seeding; the real migration must create/backfill it.
-    await owner`alter table session_events add column usage_source_key text`;
+    // The current event adapter projects 0810's nullable key and 0889's tool
+    // name. Only stage the reader columns for seeding; the real migrations must
+    // create them.
+    await owner`alter table session_events add column usage_source_key text, add column tool_name text`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -248,7 +249,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     await owner`alter table scheduled_tasks drop column vault_policy`;
     await dropConnectionAccountIntentColumns(owned.ownerUrl);
     await dropSiteSessionAudienceColumns(owned.ownerUrl);
-    await owner`alter table session_events drop column usage_source_key`;
+    await owner`alter table session_events drop column usage_source_key, drop column tool_name`;
     expect(
       await owner`select column_name from information_schema.columns
       where table_schema=current_schema() and table_name='session_events'

@@ -11,7 +11,8 @@ import {
   type Page,
 } from "playwright";
 
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const fixturePath = "/test/ai-gateway-connection.html";

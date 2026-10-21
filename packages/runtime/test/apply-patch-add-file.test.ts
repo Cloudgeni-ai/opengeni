@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyDiff } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   withCodexAddFileApplyPatchInput,
   withCodexAddFileDiff,

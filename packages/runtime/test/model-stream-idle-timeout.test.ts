@@ -4,7 +4,7 @@ import {
   isModelSocketTransportError,
 } from "@opengeni/network/responses-websocket";
 import { Agent, Runner } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenAIClientFromSettings,
   classifyModelStreamIdleTimeoutError,

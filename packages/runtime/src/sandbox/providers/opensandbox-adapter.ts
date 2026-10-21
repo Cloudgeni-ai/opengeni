@@ -293,7 +293,14 @@ function parseOptionalString(value: unknown, field: string): string | null {
   return parseStateString(value, field);
 }
 
-function assertStateMatchesOptions(
+/** An existing sandbox belongs to the OpenSandbox server that created it; that
+ * binding is the only configuration a persisted sandbox must still match.
+ * Image and pool are creation inputs recorded in the state: a deployment that
+ * changes them affects new sandboxes only. A live sandbox created under the
+ * previous values must stay resumable, serializable and deletable, otherwise
+ * an upgrade strands it. The session verifies the provider-reported image and
+ * pool against these recorded values, not against the current configuration. */
+function assertStateBoundToProvider(
   state: OpenSandboxSessionState,
   options: OpenSandboxClientOptions,
 ): void {
@@ -301,18 +308,6 @@ function assertStateMatchesOptions(
     throw new SandboxConfigError(
       "opensandbox",
       "persisted OpenSandbox provider binding does not match the configured base URL",
-    );
-  }
-  if (state.image !== options.image) {
-    throw new SandboxConfigError(
-      "opensandbox",
-      "persisted OpenSandbox image does not match OPENGENI_OPENSANDBOX_IMAGE",
-    );
-  }
-  if (state.poolRef !== (options.poolRef ?? null)) {
-    throw new SandboxConfigError(
-      "opensandbox",
-      "persisted OpenSandbox pool does not match OPENGENI_OPENSANDBOX_POOL_REF",
     );
   }
 }
@@ -1815,7 +1810,7 @@ export class OpenSandboxClient {
     state: OpenSandboxSessionState,
     options: SandboxClientResumeOptions = {},
   ): Promise<OpenSandboxSession> {
-    assertStateMatchesOptions(state, this.options);
+    assertStateBoundToProvider(state, this.options);
     try {
       await withLifecycle(this.options, async (sandboxes) => {
         const info = await sandboxes.getSandbox(state.sandboxId);
@@ -1835,7 +1830,7 @@ export class OpenSandboxClient {
   }
 
   async delete(state: OpenSandboxSessionState): Promise<void> {
-    assertStateMatchesOptions(state, this.options);
+    assertStateBoundToProvider(state, this.options);
     try {
       await withLifecycle(this.options, async (sandboxes) => {
         await sandboxes.deleteSandbox(state.sandboxId);
@@ -1863,7 +1858,7 @@ export class OpenSandboxClient {
   }
 
   async serializeSessionState(state: OpenSandboxSessionState): Promise<Record<string, unknown>> {
-    assertStateMatchesOptions(state, this.options);
+    assertStateBoundToProvider(state, this.options);
     return {
       stateVersion: OPENSANDBOX_STATE_VERSION,
       sandboxId: state.sandboxId,
@@ -1938,7 +1933,7 @@ export class OpenSandboxClient {
           }
         : {}),
     };
-    assertStateMatchesOptions(state, this.options);
+    assertStateBoundToProvider(state, this.options);
     return state;
   }
 }

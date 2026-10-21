@@ -1,5 +1,5 @@
-import { formatMoneyMicros } from "@/lib/format";
-import type { BillingSummary } from "@/types";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import type { BillingSummary } from "@opengeni/react/app/types";
 import { CreditScopeDetails } from "@/components/credits/credit-scope-details";
 
 /** The credit balance, large, with one line on what it means. */
@@ -37,10 +37,13 @@ export function OrganizationCreditBalance({
       </p>
     );
   }
-  const plan = showPlanCredit ? balance.plan : null;
+  // A period without a monthly grant shows no "$0.00 monthly plan credit" row.
+  const plan = showPlanCredit && (balance.plan?.creditGrantedMicros ?? 0) > 0 ? balance.plan : null;
   if (balance.promotionalCredits?.length || plan) {
     const general =
-      (balance.generalBalanceMicros ?? balance.balanceMicros) - (plan?.creditRemainingMicros ?? 0);
+      (balance.generalBalanceMicros ?? balance.balanceMicros) -
+      (plan?.creditScoped ? 0 : (plan?.creditRemainingMicros ?? 0));
+    const scopedPlan = balance.promotionalCredits?.find((grant) => grant.planCredit);
     return (
       <div className="min-w-0">
         <p className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums">
@@ -48,11 +51,15 @@ export function OrganizationCreditBalance({
         </p>
         <p className="mt-1 text-xs leading-[18px] text-fg-muted">Total balance</p>
         <div className="mt-4 -mx-2 divide-y divide-border">
-          {plan ? (
+          {plan && !scopedPlan ? (
             <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
               <div>
                 <p className="text-sm font-medium text-fg">Monthly plan credit</p>
-                <p className="mt-0.5 text-xs text-fg-muted">Used first. Resets monthly.</p>
+                <p className="mt-0.5 text-xs text-fg-muted">
+                  {plan.creditScoped
+                    ? "For free-credit models. Resets monthly."
+                    : "Used first. Resets monthly."}
+                </p>
               </div>
               <span className="shrink-0 text-sm font-medium text-fg tabular-nums">
                 {formatMoneyMicros(plan.creditRemainingMicros, balance.currency)}
@@ -66,6 +73,9 @@ export function OrganizationCreditBalance({
               amount={formatMoneyMicros(grant.remainingMicros, balance.currency)}
               eligibleModelIds={grant.eligibleModelIds}
               coversVoice={grant.coversVoice}
+              description={
+                grant.planCredit ? "Used first · Resets monthly · View models" : undefined
+              }
             />
           ))}
           <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
@@ -76,7 +86,9 @@ export function OrganizationCreditBalance({
               <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
                 {general < 0
                   ? "Future purchases cover prior usage first."
-                  : "For models and platform usage."}
+                  : general === 0 && balance.promotionalCredits?.length
+                    ? "Other models need general credit."
+                    : "For any model and platform usage."}
               </p>
             </div>
             <span className="shrink-0 text-sm font-medium text-fg tabular-nums">

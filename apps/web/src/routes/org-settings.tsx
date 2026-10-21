@@ -3,14 +3,14 @@
 // They render inside the settings shell's Organization section
 // (components/settings/workspace-settings-shell.tsx); pages this person can't
 // use are hidden from the rail (lib/organization-settings-access.ts).
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { useNavigate } from "@tanstack/react-router";
 import { PlusIcon, UserPlusIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import type { ReturnTo } from "@/lib/return-to";
-import type { ModelsView } from "@/lib/models-route";
+import type { ReturnTo } from "@opengeni/react/app/lib/return-to";
+import type { ModelsView } from "@opengeni/react/app/lib/models-route";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
 import { OrganizationGeneralPage } from "@/components/organization/general-page";
 import { OrganizationIdentityPage } from "@/components/organization/identity-page";
@@ -27,19 +27,19 @@ import {
   organizationSettingsDescription,
   organizationSettingsLabel,
 } from "@/components/settings/organization-settings-pages";
-import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { PageHeader } from "@/components/ui/page-header";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useAppContext } from "@/context";
-import { orgLabel } from "@/lib/org";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   canInviteOrganizationRole,
   organizationAdminIdentityKey,
   type OrganizationAdminIdentity,
   type OrganizationAdminSection,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
@@ -47,15 +47,16 @@ import {
 import type { OrganizationView } from "@/lib/organization-route";
 import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { DeveloperLocation } from "@/lib/developer-route";
-import { hasAccountPermission } from "@/lib/permissions";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
-} from "@/lib/workspace-deletion";
-import type { OrganizationMembershipRole } from "@/types";
+} from "@opengeni/react/app/lib/workspace-deletion";
+import type { OrganizationMembershipRole } from "@opengeni/react/app/types";
 
 const CheckoutCreditsCelebration = lazy(async () => {
-  const module = await import("@/components/credits/checkout-credits-celebration");
+  const module =
+    await import("@opengeni/react/app/components/credits/checkout-credits-celebration");
   return { default: module.CheckoutCreditsCelebration };
 });
 

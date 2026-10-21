@@ -85,8 +85,12 @@ export type ProtonPassVaultProvider = VaultProvider & {
   close(): Promise<void>;
 };
 
-/** Proton share and item ids are URL-safe base64; anything else cannot exist. */
-const PROTON_ID = /^[A-Za-z0-9_=+/][A-Za-z0-9_=+/-]{0,255}$/;
+/**
+ * Proton share and item ids are base64 or URL-safe base64, so a real id can
+ * start with "-"; anything else cannot exist. Ids only ever reach pass-cli as
+ * `--name=value`, so a leading dash is never parsed as an option.
+ */
+const PROTON_ID = /^[A-Za-z0-9_=+/-]{1,256}$/;
 function assertIds(...ids: string[]) {
   for (const id of ids) {
     if (!PROTON_ID.test(id)) {
@@ -128,10 +132,10 @@ function refuse(message: string): never {
 }
 
 function fieldValue(field: ProviderWriteField): string {
-  if (field.remove) refuse("Proton Pass items cannot have fields removed from Opengeni");
+  if (field.remove) refuse("Proton Pass items cannot have fields removed from here");
   const value = field.value ?? "";
   if (utf8Bytes(value) > VAULT_LIMITS.textValueMaxBytes) {
-    refuse(`The value of "${field.name}" is larger than Opengeni stores`);
+    refuse(`The value of "${field.name}" is larger than can be stored`);
   }
   return value;
 }
@@ -180,7 +184,7 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
         password = fieldValue(field);
       } else {
         refuse(
-          `Proton Pass logins created from Opengeni hold a username, email, password and one one-time password; "${field.name}" needs an API key (custom) item`,
+          `Proton Pass logins created from here hold a username, email, password and one one-time password; "${field.name}" needs an API key (custom) item`,
         );
       }
     }
@@ -218,7 +222,7 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
   }
   if (item.type === "api_key") {
     const fields = item.fields.map((field) => {
-      if (field.kind === "file") refuse("Proton Pass files cannot be written from Opengeni");
+      if (field.kind === "file") refuse("Proton Pass files cannot be written from here");
       const fieldType =
         field.kind === "totp" ? "totp" : field.kind === "concealed" ? "hidden" : "text";
       const value = field.kind === "totp" ? totpValue(field, title) : fieldValue(field);
@@ -250,8 +254,8 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
   }
   return refuse(
     item.type === "passkey"
-      ? "Passkeys live only in Opengeni vaults"
-      : "Proton Pass file items cannot be created from Opengeni",
+      ? "Passkeys live only in workspace-hosted vaults"
+      : "Proton Pass file items cannot be created from here",
   );
 }
 
@@ -306,7 +310,7 @@ export function createProtonPassVaultProvider(
     if (!parsed.success) {
       throw new VaultProviderError(
         code,
-        "pass-cli returned output this Opengeni release does not understand",
+        "pass-cli returned output this release does not understand",
       );
     }
     return parsed.data;
@@ -370,7 +374,7 @@ export function createProtonPassVaultProvider(
     const attachment = field.value.attachment;
     assertIds(attachment.id);
     if (attachment.size > VAULT_LIMITS.fileValueMaxBytes) {
-      refuse(`"${field.name}" is larger than Opengeni reads from Proton Pass`);
+      refuse(`"${field.name}" is larger than can be read from Proton Pass`);
     }
     const dir = session.privateScratchDir();
     const target = join(dir, "attachment");
@@ -397,7 +401,7 @@ export function createProtonPassVaultProvider(
         return refuse("pass-cli did not produce the attachment");
       }
       if (size > VAULT_LIMITS.fileValueMaxBytes) {
-        refuse(`"${field.name}" is larger than Opengeni reads from Proton Pass`);
+        refuse(`"${field.name}" is larger than can be read from Proton Pass`);
       }
       return new Uint8Array(readFileSync(target));
     } finally {
@@ -583,7 +587,7 @@ export function createProtonPassVaultProvider(
       if (item.externalItemId !== undefined) {
         throw new VaultProviderError(
           "provider_unavailable",
-          "Proton Pass items cannot be updated from Opengeni: pass-cli 2.4.2 takes new values only as command-line arguments and cannot edit one-time passwords",
+          "Proton Pass items cannot be updated from here: pass-cli 2.4.2 takes new values only as command-line arguments and cannot edit one-time passwords",
         );
       }
       if (shareAccess.get(externalVaultId) === "read_only") {
@@ -667,7 +671,7 @@ export function createProtonPassVaultProvider(
 function incomplete(): never {
   throw new VaultProviderError(
     "provider_inventory_incomplete",
-    "The Proton Pass vault has more items than Opengeni mirrors at once",
+    "The Proton Pass vault has more items than can be mirrored at once",
   );
 }
 
@@ -684,7 +688,7 @@ function assertMirrorable(meta: ProviderItemMeta): void {
   ) {
     throw new VaultProviderError(
       "provider_inventory_incomplete",
-      `A Proton Pass item has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than Opengeni mirrors`,
+      `A Proton Pass item has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than can be mirrored`,
     );
   }
 }

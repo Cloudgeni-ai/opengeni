@@ -67,6 +67,8 @@ if (tool === "git") {
     if (process.env.BAKE_FIXTURE_SKIP !== "browserd") await output(args[args.indexOf("--outfile") + 1], "browserd " + process.env.OPENGENI_RUNTIME_BUILD_ID);
   } else if (args[0] === "packages/browserd/scripts/stage-agent-browser.ts") {
     await output(join(process.cwd(), "packages/browserd/dist", process.env.OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT), "pinned-driver");
+  } else if (args[0] === "docker/distrust-embedded-roots.ts") {
+    // The fixture binaries carry no root list; the call itself is asserted.
   } else throw Error("unexpected Bun command");
 } else if (tool === "rsign") {
   await output(args[args.indexOf("-x") + 1], "untrusted comment: synthetic fixture\nSIG\n");
@@ -171,6 +173,16 @@ describe("exact-source canary interaction bundle", () => {
             ? "--target=bun-linux-arm64"
             : "--target=bun-linux-x64",
         );
+        const distrust = result.calls
+          .filter(
+            (call) => call.tool === "bun" && call.args[0] === "docker/distrust-embedded-roots.ts",
+          )
+          .filter((call) => call.args.at(-1) === outfile)
+          .map((call) => call.args.slice(1, -1));
+        expect(distrust).toEqual([
+          ["docker/distrusted-roots.pem"],
+          ["--check", "docker/distrusted-roots.pem"],
+        ]);
       }
     } finally {
       await value.close();

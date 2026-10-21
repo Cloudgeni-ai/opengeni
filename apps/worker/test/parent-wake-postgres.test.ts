@@ -18,7 +18,7 @@ import {
   type SessionWorkflowWakeDeliveryResult,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
 
@@ -339,6 +339,33 @@ test("a finished child signals its parent parked in wait_for_input immediately",
   const grant = access.workspaceGrants[0]!;
   const accountId = grant.accountId;
   const workspaceId = grant.workspaceId!;
+  const [personalWorkspace] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name)
+    values (${accountId}, 'Parent personal resources') returning id`;
+  await admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${accountId}, ${grant.subjectId}, 'owner', 'active', ${personalWorkspace!.id})
+    on conflict (account_id, subject_id) do update set personal_workspace_id = excluded.personal_workspace_id`;
+  const [connection] = await admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${accountId}, true),
+      set_config('opengeni.workspace_id', ${personalWorkspace!.id}, true),
+      set_config('opengeni.subject_id', ${grant.subjectId}, true)`;
+    return await tx<{ id: string }[]>`insert into connections
+      (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+      values (${accountId}, ${personalWorkspace!.id}, ${grant.subjectId}, 'mail.test', 'oauth2', 'test-ciphertext')
+      returning id`;
+  });
+  const personalConnections = [
+    {
+      serverId: "mail",
+      connectionId: connection!.id,
+      originWorkspaceId: personalWorkspace!.id,
+      ownerSubjectId: grant.subjectId,
+      providerDomain: "mail.test",
+      kind: "oauth2" as const,
+      connectionType: "mcp" as const,
+    },
+  ];
 
   async function start(
     message: string,
@@ -358,6 +385,8 @@ test("a finished child signals its parent parked in wait_for_input immediately",
     const session = await createSession(db, {
       accountId,
       workspaceId,
+      subjectId: grant.subjectId,
+      personalConnectionDelegations: personalConnections,
       ...(parent
         ? {
             parentSessionId: parent.session.id,
@@ -480,8 +509,8 @@ test("a finished child signals its parent parked in wait_for_input immediately",
     settings: {} as Settings,
     observability: {
       info: () => undefined,
-      error: (message: string) => {
-        errors.push(message);
+      error: (message: string, attributes: Record<string, unknown>) => {
+        errors.push(`${message}: ${attributes.error}`);
       },
     } as unknown as NotifyServices["observability"],
     wakeSessionWorkflow: async (wake) => {
@@ -510,6 +539,13 @@ test("a finished child signals its parent parked in wait_for_input immediately",
   expect(errors).toEqual([]);
   const pending = await listOutstandingSessionSystemUpdates(db, workspaceId, parent.session.id);
   expect(pending.map((update) => update.kind)).toEqual(["child_terminal_result"]);
+  expect(pending[0]!.lineage).toMatchObject({
+    connectionAuthoritySubjectId: grant.subjectId,
+    parentTurnId: parent.turn.id,
+  });
+  const [accepted] = await admin<{ personal_connection_delegations: unknown }[]>`
+    select personal_connection_delegations from session_system_updates where id = ${pending[0]!.id}`;
+  expect(accepted!.personal_connection_delegations).toMatchObject(personalConnections);
   // The parent is signalled now, on the deadline's revision, instead of waiting
   // for the periodic dispatcher. The acknowledgement keeps the revision open
   // until a claim consumes the result.

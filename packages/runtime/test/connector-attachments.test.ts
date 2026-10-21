@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
-import { startTestMcpServer, testSettings } from "@opengeni/testing";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   CONNECTOR_ATTACHMENT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_RECEIPT_META_KEY,

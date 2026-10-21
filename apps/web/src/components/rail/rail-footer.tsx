@@ -7,7 +7,7 @@ import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceSubmenu } from "@/components/appearance-menu";
-import { DesktopAppSubmenu } from "@/components/desktop-app-menu";
+import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
 import {
@@ -17,10 +17,10 @@ import {
   useOrganizationInvitations,
 } from "@/components/organization-invitations";
 import { AccountTrigger } from "@/components/rail/account-trigger";
-import { useRail } from "@/components/rail/rail-context";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
-import { AccountUsageMenuItem } from "@/components/usage/usage-entry";
+import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -28,13 +28,15 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/dropdown-menu";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 const FeedbackDialog = lazy(() =>
-  import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
+  import("@opengeni/react/app/components/feedback").then((module) => ({
+    default: module.FeedbackDialog,
+  })),
 );
 
 const BrowserAccountMenu = lazy(() =>
@@ -152,6 +154,7 @@ export function RailFooter() {
                   onSendFeedback={onSendFeedback}
                 />
                 <DesktopAppSubmenu />
+                <ExcelAddinMenuItem />
                 {hasDesktopAccounts() ? (
                   <>
                     <DropdownMenuSeparator />

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TOOL_STEP_IDS } from "../src/timeline/tool-steps";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -44,6 +45,36 @@ describe("message runtime", () => {
     expect(pl.locale).toBe("pl");
   });
 
+  test("counted text still renders without Intl.PluralRules (Hermes)", async () => {
+    const original = Intl.PluralRules;
+    // Hermes on React Native ships Intl without PluralRules.
+    Reflect.deleteProperty(Intl, "PluralRules");
+    try {
+      // A fresh module instance, so no plural rules are cached from other tests.
+      const freshRuntime: string = "../src/messages/runtime.tsx?without-plural-rules";
+      const runtime = (await import(freshRuntime)) as typeof import("../src/messages/runtime");
+      const en = runtime.createOpenGeniText();
+      expect(en("counts.agents", { count: 1 })).toBe("1 agent");
+      expect(en("counts.agents", { count: 0 })).toBe("0 agents");
+      expect(en("counts.agents", { count: 4 })).toBe("4 agents");
+      const nb = runtime.createOpenGeniText({
+        locale: "nb",
+        messages: {
+          "counts.agents_one": "{count} agent",
+          "counts.agents_other": "{count} agenter",
+        },
+      });
+      expect(nb("counts.agents", { count: 1 })).toBe("1 agent");
+      expect(nb("counts.agents", { count: 2 })).toBe("2 agenter");
+    } finally {
+      Object.defineProperty(Intl, "PluralRules", {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
   test("host text wins, missing keys fall back to English", () => {
     const t = createOpenGeniText({
       locale: "nb",
@@ -80,6 +111,45 @@ describe("message runtime", () => {
     expect(t("counts.sheets", { count: 1 })).toBe("1 sheet");
     expect(seen.locale).toBe("nb");
     expect(t.locale).toBe("nb");
+  });
+
+  test("built-in text names the host's product; the nearest name wins", () => {
+    expect(createOpenGeniText()("provider.opengeniUpdated")).toBe("Opengeni updated");
+    expect(
+      createOpenGeniText({ productName: "Acme" })(
+        "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess",
+        {
+          count: 2,
+        },
+      ),
+    ).toBe("Acme retried 2 times without success.");
+
+    const seen: { text?: OpenGeniText } = {};
+    function Probe() {
+      seen.text = useOpenGeniText();
+      return null;
+    }
+    renderToStaticMarkup(
+      <OpenGeniMessagesProvider
+        productName="Acme"
+        messages={{ "provider.opengeniUpdated": "{product} er oppdatert" }}
+      >
+        <OpenGeniMessagesProvider locale="nb">
+          <Probe />
+        </OpenGeniMessagesProvider>
+      </OpenGeniMessagesProvider>,
+    );
+    expect(seen.text!("provider.opengeniUpdated")).toBe("Acme er oppdatert");
+    expect(seen.text!("modelPolicy.opengeniCredits")).toBe("Acme credits");
+
+    renderToStaticMarkup(
+      <OpenGeniMessagesProvider messages={{ "provider.opengeniUpdated": "{product} er oppdatert" }}>
+        <OpenGeniMessagesProvider productName="Inner">
+          <Probe />
+        </OpenGeniMessagesProvider>
+      </OpenGeniMessagesProvider>,
+    );
+    expect(seen.text!("provider.opengeniUpdated")).toBe("Inner er oppdatert");
   });
 });
 
@@ -126,6 +196,11 @@ describe("English catalog", () => {
         const source = readFileSync(join(root, file), "utf8");
         for (const match of source.matchAll(/["'`]([A-Za-z0-9_.]+)["'`]/g)) used.add(match[1]!);
       }
+    }
+    // Tool step keys are built from the step ids (`timeline.toolStep.<step>.<phase>`).
+    for (const step of TOOL_STEP_IDS) {
+      used.add(`timeline.toolStep.${step}.running`);
+      used.add(`timeline.toolStep.${step}.done`);
     }
     const unused = entries
       .map(([key]) => key)

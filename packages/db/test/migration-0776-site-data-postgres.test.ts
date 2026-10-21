@@ -2,7 +2,7 @@
 // FORCE RLS and reachable by the application role only inside a workspace
 // context; data follows its Site and is removed with the workspace.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   createDb,

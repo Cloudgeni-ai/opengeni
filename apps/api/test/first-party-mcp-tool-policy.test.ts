@@ -13,7 +13,8 @@ import {
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -1057,7 +1058,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "Opengeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1090,7 +1091,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "Opengeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1267,7 +1268,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent?.error).toMatchObject({
         code: `${tool}_failed`,
-        message: "Opengeni could not complete the request.",
+        message: "The workspace could not complete the request.",
         diagnosticExport: "disabled",
         diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
       });

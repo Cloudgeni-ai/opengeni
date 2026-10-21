@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { SkillRecord, SkillWriteReceipt } from "@opengeni/sdk";
-import type { AppContextValue } from "./context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 let SkillsPanelContent: typeof import("./routes/skills-panel").SkillsPanelContent;
 

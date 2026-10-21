@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { fetchCodexModels, type CodexFetch } from "@opengeni/codex";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import * as dbApi from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   refreshCoreCodexModelEntitlements,
   loadWorkspaceCodexCatalogReadiness,
@@ -82,6 +82,25 @@ function fixture(fetchImpl: CodexFetch) {
 }
 
 describe("core model discovery physical request custody", () => {
+  test("a refused fresh-token hint does not renew credentials or persist an entitlement denial", async () => {
+    const upstream = mock<CodexFetch>(async () => new Response("unauthorized", { status: 401 }));
+    const f = fixture(upstream);
+    const fresh = f.deps.getCoreToken;
+    const credentialModes: boolean[] = [];
+    f.deps.getCoreToken = async (...args) => {
+      credentialModes.push(args[4]);
+      return fresh(...args);
+    };
+    await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps, {
+      refreshCredentials: false,
+    });
+    expect(credentialModes).toEqual([false]);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(f.deps.recordModels).not.toHaveBeenCalled();
+    expect(f.reserve).toHaveBeenCalledTimes(1);
+    expect(f.settle).toHaveBeenCalledTimes(1);
+  });
+
   test("typing skips a refresh-due credential without probing or poisoning normal access", async () => {
     const upstream = mock<CodexFetch>(async () => Response.json({ models: [] }));
     const f = fixture(upstream);
@@ -114,10 +133,12 @@ describe("core model discovery physical request custody", () => {
       throw new Error("must not load credentials");
     });
     const readiness = await f.read();
+    // The stored catalog lists no `slug@ultrafast` entry, so Ultrafast stays unavailable.
     expect(readiness.observations[models[0]!.definitionVersion]).toEqual({
       status: "available",
       reason: null,
       checkedAt: new Date(observedAt).toISOString(),
+      unavailableLatencyModes: ["ultrafast"],
     });
     expect(await refreshCoreCodexModelEntitlements(db, settings, f.context, f.deps)).toBe(
       observedAt + 60_000,

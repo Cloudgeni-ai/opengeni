@@ -12,12 +12,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  startTestMcpServer,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import { buildAuthorizationUrl } from "../src/integrations/oauth-client";

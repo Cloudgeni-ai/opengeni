@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/network",
-  "version": "4.0.4",
+  "version": "4.3.1",
   "description": "DNS-pinned outbound HTTP transport and shared MCP OAuth discovery primitives.",
   "license": "Apache-2.0",
   "repository": {
@@ -34,7 +34,7 @@
   },
   "scripts": {
     "build": "bun ../../scripts/build-typescript-package.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

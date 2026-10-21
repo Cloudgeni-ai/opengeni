@@ -8,9 +8,9 @@ import {
   SelectedCheck,
   selectableSurface,
   type ChoiceCardsVariant,
-} from "@/components/ui/choice-cards";
-import { SelectMenuPanel } from "@/components/ui/select-menu";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/choice-cards";
+import { SelectMenuPanel } from "@opengeni/react/ui/select-menu";
+import { cn } from "@opengeni/react/app/lib/utils";
 import {
   apiKeyPresets,
   codexOrganizationAccounts,

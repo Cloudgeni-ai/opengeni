@@ -2,8 +2,10 @@
 
 These four bundled marks cover first-party catalog rows that do not pass
 through the integrations.sh import, so they cannot receive a vendored registry
-`logoAssetPath`. The web app serves them from its own immutable deployment; it
-never hotlinks a provider or relies on a third-party host at runtime.
+`logoAssetPath`. `@opengeni/react` carries them as data URLs (generated from
+these files; a test keeps them identical), so the session UI shows them in
+every host. It never hotlinks a provider or relies on a third-party host at
+runtime.
 
 `manifest.json` records the exact product identity, source, licence posture,
 and any display-only modification. The marks remain property of their owners

@@ -22,6 +22,8 @@ import type {
 } from "./turn-context";
 
 export type CapacityPhaseDeps = {
+  /** Accepted-turn work owned and drained by the activity, never a draft hint. */
+  codexEntitlementPreparation?: Promise<number> | undefined;
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];

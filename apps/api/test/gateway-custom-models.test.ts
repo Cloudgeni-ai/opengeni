@@ -36,11 +36,8 @@ import {
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import postgres from "postgres";
 
@@ -418,7 +415,18 @@ describe("workspace Gateway custom model API", () => {
         expectedVersion: current!.version,
         operationId: crypto.randomUUID(),
       };
-      const permissions: Permission[] = ["connections:read", "connections:write"];
+      // A workspace provider key is integration administration, not a Member action.
+      const memberDenied = await request(
+        path,
+        { method: "PATCH", permissions: ["connections:read", "connections:write"], body },
+        publicApp,
+      );
+      expect(memberDenied.status).toBe(403);
+      const permissions: Permission[] = [
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ];
       const rotated = await request(path, { method: "PATCH", permissions, body }, publicApp);
       expect(rotated.status).toBe(200);
       const publicBody = await rotated.json();
@@ -757,7 +765,12 @@ describe("workspace Gateway custom model API", () => {
       availability: { selectable: false, reason: "needs_reauth" },
     });
 
-    const permissions: Permission[] = ["connections:read", "connections:write"];
+    const permissions: Permission[] = [
+      "connections:read",
+      "connections:write",
+      // Workspace model-provider keys are integration administration.
+      "capabilities:manage",
+    ];
     const connectBody = (apiKey: string) => ({
       providerDomain: "api.opper.ai",
       kind: "api_key",
@@ -914,6 +927,64 @@ describe("workspace Gateway custom model API", () => {
       status: 202,
     });
     expect(body.model).toBe(model);
+  });
+
+  test("admits an organization Azure OpenAI deployment for people and services", async () => {
+    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "azure_openai",
+      credentialEncrypted: "metadata-only-test-credential",
+      credentialDigest: "metadata-only-test-digest",
+      endpoint: "https://contoso.openai.azure.com/openai/v1",
+      operationId: crypto.randomUUID(),
+    });
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "azure_openai",
+      upstreamModelId: "gpt-6.1-sol",
+      operationId: crypto.randomUUID(),
+    });
+    const model = "organization-azure-openai/gpt-6.1-sol";
+    const catalog = await request("/model-catalog", {}, publicApp);
+    expect(catalog.status).toBe(200);
+    const listed = (
+      (await catalog.json()) as { models: Array<Record<string, unknown>> }
+    ).models.find((candidate) => candidate.id === model);
+    expect(listed).toMatchObject({
+      provider: "organization-azure-openai",
+      billing: { upstreamPayer: "organization", metering: "external" },
+    });
+    const service = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "service:organization-azure-openai-test",
+      permissions: ["sessions:create"],
+      principalKind: "service",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    })}`;
+    for (const authorization of [await bearer(["sessions:create"]), service]) {
+      const response = await publicApp.request(
+        `http://x/v1/workspaces/${grant.workspaceId}/sessions`,
+        {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({
+            initialMessage: "Local admission regression; no inference",
+            model,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      const body = await response.json();
+      expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+        status: 202,
+      });
+      expect(body.model).toBe(model);
+    }
   });
 
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {

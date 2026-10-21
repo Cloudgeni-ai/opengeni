@@ -19,7 +19,7 @@ import { sql } from "drizzle-orm";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";

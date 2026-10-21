@@ -134,6 +134,8 @@ describe("session-only entry", () => {
     // Host-localizable copy: the dependency-free text runtime and its English defaults.
     expect(reactSources.some((id) => id.endsWith("/src/messages/runtime.tsx"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/messages/en.ts"))).toBe(true);
+    // Pure single-Send wording overrides for embedders; types only from the runtime.
+    expect(reactSources.some((id) => id.endsWith("/src/messages/single-send.ts"))).toBe(true);
     // Shared reads: the model catalog store and the deployment config read.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-query.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/lib/client-config-read.ts"))).toBe(true);
@@ -143,7 +145,20 @@ describe("session-only entry", () => {
     );
     // Retained conversation views for a reopen, on the shared-query store.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
-    expect(reactSources.length).toBe(38);
+    // Custom layouts mark an open conversation read through the shared hook and its pure model.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/hooks/use-session-read-acknowledgement.ts")),
+    ).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/session-attention-model.ts"))).toBe(true);
+    // Dependency-free turnless-output gap signal the live history shares with the terminal.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/turnless-output-gaps.ts"))).toBe(true);
+    // Exact reads of tool outputs a turn's step page delivered as previews.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/tool-output-reads.ts"))).toBe(true);
+    // The live stream's head read joins the conversation's fresh detail read.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/session-detail-read.ts"))).toBe(true);
+    // Dependency-free wake detection: the live stream rejoins after a sleep.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/page-wake.ts"))).toBe(true);
+    expect(reactSources.length).toBe(46);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

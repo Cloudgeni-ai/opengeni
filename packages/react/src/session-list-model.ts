@@ -281,7 +281,8 @@ export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = ne
   if (diffSeconds < 45) {
     return "now";
   }
-  const minutes = Math.floor(diffSeconds / 60);
+  // 45 to 59 seconds reads as a minute, never "0m".
+  const minutes = Math.max(1, Math.floor(diffSeconds / 60));
   if (minutes < 60) {
     return `${minutes}m`;
   }
@@ -289,7 +290,9 @@ export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = ne
   if (hours < 24) {
     return `${hours}h`;
   }
-  const days = Math.floor(hours / 24);
+  // Past a day, count calendar days in the viewer's time zone, like the long
+  // form ("4 days ago"), so both read the same for the same chat.
+  const days = Math.max(1, localCalendarDaysBetween(new Date(timestamp), now));
   if (days < 7) {
     return `${days}d`;
   }
@@ -297,6 +300,12 @@ export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = ne
     month: "short",
     day: "numeric",
   });
+}
+
+function localCalendarDaysBetween(from: Date, to: Date): number {
+  const start = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((end - start) / 86_400_000);
 }
 
 /** Codex subscription product ids are prefixed `codex/`. */
@@ -382,6 +391,27 @@ export function recentSessionsForHome<T extends SessionListRow>(
     0,
     limit,
   );
+}
+
+/**
+ * The phone home screen's chats in two sections: every pinned conversation,
+ * then the most recently used others (running first, then by recency), so
+ * pins never push recent work off the screen. Sub-agent sessions are reached
+ * from their parent and are left out of both.
+ */
+export function homeSessionSections<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  recentLimit = 15,
+  now: Date = new Date(),
+): { pinned: T[]; recent: T[] } {
+  const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
+  return {
+    pinned: pinned.filter((session) => !session.parentSessionId),
+    recent: [...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, recentLimit),
+  };
 }
 
 /** One project (workspace channel) and its sessions, as the web rail groups them. */

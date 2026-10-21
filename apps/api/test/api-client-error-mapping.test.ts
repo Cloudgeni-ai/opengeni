@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ErrorEnvelope } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import { createApp, type AppDependencies } from "../src/app";
 import { parseRequestJson } from "../src/http/request-body";

@@ -91,31 +91,13 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   `x-opengeni-site-frame` and its pinned `x-opengeni-site-id` (both stripped
   from Site-supplied headers); either header makes a request framed, and a
   framed request must name its own Site and can never manage collections.
-- Agents started from a Site page get the same clamp. Site HTML can start
-  or message agent sessions through the bridge with the viewer's authority,
-  so an agent whose session carries a Site origin (or whose spawning lineage
-  does, through parent sessions and parent turns) is framed to that Site:
-  viewer reach, only that Site, and no describe, define, delete, reset,
-  import or export. A turn the page sent into a session without a Site
-  origin (`surface = 'site'`) reaches no Site Data at all. The same check runs
-  for MCP tools, Codemode and HTTP calls with an agent's delegated
-  credential, since all of them resolve access in the service. The lineage
-  walk reads up to 32 spawning ancestors, and the session's root session
-  (`sessions.root_session_id`) is read directly. When the walk cannot read
-  the whole lineage (a deeper chain, a missing session, or an ancestor the
-  agent's person cannot see under session RLS) it fails closed: viewer reach
-  and no management on the one Site a known origin names, and no Site Data at
-  all when no origin is known. A session started from a Site stays clamped for its
-  whole life, including turns its owner later sends from the console; start a
-  new chat to manage data.
-- So "Site HTML cannot define collections or change access rules" holds for
-  the page's own requests and for agents it starts or messages directly.
-  Indirect paths are closed too: Site code reaches only the
-  `SITE_OPERATIONS` allowlist, a page reaches only sessions its own Site
-  started (a page on Site B gets a 404 for a Site A session), each Site turn
-  records which Site sent it, a schedule created from a Site records the Site
-  and its runs inherit the clamp, and an agent started from a Site cannot
-  create or change schedules or automations.
+- Agents use their ordinary native authority, regardless of Site origin or
+  turn surface. Owners retain manager reach; Site-created children and
+  Site-sent turns are not downgraded. Schedules retain their normal principal.
+  Outside-workspace published visitors still use their viewer-bound service
+  identity and reach only their Site's data. Page request restrictions do not
+  propagate into a separate agent permission profile.
+
 - The Site HTTP channel reaches only the current Site's data:
   `siteSessionPath` refuses `/published-artifacts/<id>/data|files` for every
   explicit id on every host, and hosts not bound to a published Site (inline
@@ -310,10 +292,11 @@ Stored records are untrusted; the Sites skill requires rendering them as text.
 `site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset`
 (needs `confirm: true`), `site_files_list`, `site_files_upload` and
 `site_files_delete`. They run with the attempt's authority, so scheduled tasks
-use the schedule's; agents started from a Site page are clamped to that page's
-viewer reach (see Access rules).
+use the schedule's. Site-origin agents use the same native role as console agents.
 
-**Web.** The Site page's Data tab (`apps/web/src/components/artifacts/site-data.tsx`)
+
+
+**Web.** The Site page's Data tab (`packages/react/src/app/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with
 access, records and size against the quota, a paged record table, a record's
 JSON as text, confirmed deletes with `expectedVersion`, and JSON/CSV export.
@@ -551,24 +534,10 @@ Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
 agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
 
-An agent started from a Site page (its session, spawning lineage or current
-turn came from the page) gets the page's reach, as with Site Data: every
-management tool and route refuses it (`forbidden`), and `site_sql_run` runs
-only the named queries the page itself could run, on that Site only, with
-`:viewer` bound to the agent's person. Published-host conversations automatically
-receive `site_data_query` and `site_data_write`, plus `site_sql_run` when SQL is
-enabled. Workspace-member conversations additionally receive read-only
-`site_sql_query`. The server pins the Site and resolves the conversation's viewer,
-including collection ownership, per-viewer records and named-query audiences;
-cross-Site requests and management tools are refused. A guest calling a
-`signed_in` named query gets `sign_in_required`. This exception does not grant
-ad hoc writes, definitions, migrations, imports, exports, reset or file management.
-Over HTTP, the Site agent guard (`SITE_AGENT_METHOD_WRITES` in
-`apps/api/src/site-agent-guard.ts`) opens only
-`POST .../sql/queries/:name` to such an agent; every other Site SQL write
-(settings, defining or deleting a query, migrations, ad hoc statements,
-import and reset) is refused with `site_agent_forbidden` before the route
-runs.
+Site and console agents use identical native Site SQL authorization. Members
+are not pinned to the originating Site. Outside-workspace visitor conversations
+retain viewer-bound data tools: only their own Site's data and permitted named
+queries, never SQL management or another Site. Live audience checks remain.
 
 Exports come in pieces: one response holds about `maxBytes` (16 MiB at most;
 the HTTP route defaults to 1 MiB for SQL, so every piece re-imports in one
@@ -682,7 +651,7 @@ answered; a metering failure is logged and does not fail the call.
 - `packages/sdk/test/site-data.test.ts`,
   `packages/react/test/published-html-artifact-frame.test.ts`: the bridge
   routing, capability negotiation and binary uploads.
-- `apps/web/src/components/artifacts/site-data.test.tsx`: the Data tab.
+- `packages/react/src/app/components/artifacts/site-data.test.tsx`: the Data tab.
 - Site SQL: `packages/contracts/test/site-sql.test.ts` (the statement
   checker and its refusals), `apps/site-gateway/test/site-db.miniflare.test.ts`
   (the `SiteDatabase` Durable Object in workerd: signatures, previous secret,
@@ -702,13 +671,8 @@ answered; a metering failure is logged and does not fail the call.
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals; live updates.
-- Review new workspace route families and first-party tools for the Site
-  agent clamp as they are added. Agents started from a Site page already
-  cannot change schedules, automations, publications, instructions, Skills,
-  Knowledge, secrets, members, connections or settings (see
-  `docs/site-conversations.md`).
-- Stamp the Site origin onto child sessions at creation so the lineage check
-  is one lookup instead of a bounded walk.
+
+
 - Site SQL: per-call CPU time is bounded only by the Durable Object's own
   limits (rows and bytes are bounded, recursive CTEs are refused in named
   queries); custom limit profiles have no Site SQL fields; a Postgres commit

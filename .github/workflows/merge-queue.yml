@@ -1,0 +1,189 @@
+name: Merge queue
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never share a group with full main CI or another speculative queue head.
+concurrency:
+  group: queue-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENGENI_TEST_MAX_CONCURRENCY: "4"
+  OPENGENI_TYPECHECK_CONCURRENCY: "1"
+
+jobs:
+  entry:
+    # A skipped job is also an accepted required check: Version events must not
+    # even use the Queue ready name owned by authenticated automation-report.
+    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'changeset-release/main' && 'Queue ready' || 'PR entry (not applicable)' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'changeset-release/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Explain queue entry and auditable local verification
+        run: |
+          echo 'PR entry only: before enqueueing, an agent must post exact-head full VM test evidence and independent review as required by AGENTS.md.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This entry check is not test or review evidence. The combined merge_group runs all selected source/unit checks before landing; full post-merge CI remains independent.' >> "$GITHUB_STEP_SUMMARY"
+
+  plan:
+    name: Queue impact
+    # Ordinary PRs use the required VM/review evidence process, not a duplicate
+    # hosted suite. queue-shadow is an explicit pre-rollout measurement lane.
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'queue-shadow') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      unit_count: ${{ steps.plan.outputs.unit_count }}
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      # The planner has only Bun/Node built-in dependencies. Do not serialize
+      # every runner behind an unnecessary installation here.
+      - name: Plan the complete combined tree, not only the last PR
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="${BASE_SHA:-$(git merge-base origin/main HEAD)}"
+          bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
+          echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/impact-plan.json")" >> "$GITHUB_OUTPUT"
+          # Avoid sixteen near-empty runners on focused plans; never omit files.
+          echo "unit_matrix=$(jq -c '.unitTests | length | ((. / 240) | ceil | if . < 1 then 1 elif . > 16 then 16 else . end) as $n | [range(0; $n) | {index: ., total: $n}]' "$RUNNER_TEMP/impact-plan.json")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: queue-impact-plan
+          path: ${{ runner.temp }}/impact-plan.json
+          if-no-files-found: error
+
+  contracts:
+    name: Queue source contracts
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Check committed Site browser runtime before builds
+        run: bun scripts/generate-site-browser-runtime.ts --check
+      - name: Validate the combined tree's outstanding changeset release plan
+        run: |
+          set -euo pipefail
+          # Match post-merge main's release-plan validation. Version PRs consume
+          # changesets, so do not pretend the combined tree is a new feature PR
+          # against its pre-version base. Exact Version reproduction remains
+          # mandatory in the authenticated automation-admission full CI lane.
+          git update-ref refs/heads/main "$GITHUB_SHA"
+          bunx changeset status --output "$RUNNER_TEMP/changeset-status.json"
+          count="$(jq -er '[.changesets[] | select(.releases | length > 0)] | length' "$RUNNER_TEMP/changeset-status.json")"
+          releases="$(jq -er '.releases | length' "$RUNNER_TEMP/changeset-status.json")"
+          if [ "$count" -gt 0 ] && [ "$releases" -eq 0 ]; then
+            echo '::error::Pending changesets cannot produce a Version PR'
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: queue-impact-plan
+          path: ${{ runner.temp }}/queue-plan
+      - name: Check impacted types
+        run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
+      # These three output/service contracts stay mandatory in full CI, not in
+      # the fast queue. No unit files, static guards or thresholds are removed.
+      - name: Check impacted static contracts
+        run: >-
+          bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
+          --exclude publish-closure --exclude sdk-compat --exclude example-builds
+
+  units:
+    name: Queue unit shard ${{ matrix.index }}/${{ matrix.total }}
+    needs: plan
+    if: ${{ needs.plan.outputs.unit_count != '0' }}
+    runs-on: ubuntu-latest
+    # Per-attempt test deadline remains 1200 seconds. This outer envelope allows
+    # the explicitly requested single unchanged-input retry before ejection.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: queue-impact-plan
+          path: ${{ runner.temp }}/queue-plan
+      - name: Run every impact-selected unit file with real database enforcement
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
+        run: >-
+          bun scripts/ci/retry-once.ts --report "$RUNNER_TEMP/queue-retry.json" --
+          bun scripts/ci/profile-command.ts --name queue-unit-${{ matrix.index }}
+          --output "$RUNNER_TEMP/queue-unit-{attempt}.json" --timeout-seconds 1200 --
+          bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: queue-unit-${{ matrix.index }}
+          path: |
+            ${{ runner.temp }}/queue-unit-*.json
+            ${{ runner.temp }}/queue-retry.json
+          if-no-files-found: ignore
+
+  ready:
+    name: ${{ github.event_name == 'merge_group' && 'Queue ready' || 'Queue shadow result' }}
+    needs: [plan, contracts, units]
+    if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'queue-shadow')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on failed, cancelled or unexpectedly skipped work
+        env:
+          PLAN: ${{ needs.plan.result }}
+          CONTRACTS: ${{ needs.contracts.result }}
+          UNITS: ${{ needs.units.result }}
+          UNIT_COUNT: ${{ needs.plan.outputs.unit_count }}
+        run: |
+          set -euo pipefail
+          test "$PLAN" = success
+          test "$CONTRACTS" = success
+          if [ "$UNIT_COUNT" = 0 ]; then test "$UNITS" = skipped;
+          else test "$UNITS" = success; fi

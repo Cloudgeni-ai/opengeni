@@ -1,19 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { createElement, StrictMode } from "react";
 
-import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-menu-body";
+import { FollowUpRepositoryMenuBody } from "@opengeni/react/app/components/follow-up-repository-menu-body";
 import {
   RepositoryContextPicker,
   RepositoryContextMenuBody,
   repositoryBindingPresentation,
-} from "@/components/repository-picker";
+} from "@opengeni/react/app/components/repository-picker";
 import { actRun, registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type {
   GitHubInstallationBinding,
   GitHubRepository,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubRepositoryCatalogItem,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 registerDom();
 

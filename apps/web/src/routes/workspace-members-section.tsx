@@ -1,50 +1,50 @@
 // Settings > Access: who can use this workspace, with one role each. The same
 // AccessList rows and verbs as every other place access is edited.
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { SearchIcon, UserPlusIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   RoleSelect,
   roleLabel,
   type RoleOption,
   type RoleValue,
-} from "@/components/ui/role-select";
-import { Section, SectionStack } from "@/components/ui/section";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/role-select";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorTechnicalFacts,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { permissionLabel } from "@/lib/api-key-presets";
-import { orgLabel } from "@/lib/org";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   workspaceAccessLevels,
   workspaceMemberPermissionGroups,
   type WorkspaceAccessLevel,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-} from "@/types";
-import { FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
+} from "@opengeni/react/app/types";
+import { FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Roles and rows, shared with the organization-managed Access page.

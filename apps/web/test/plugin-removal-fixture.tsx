@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { PluginInstallationSummary, PluginUninstallPreview } from "@opengeni/sdk";
 import { Toaster } from "sonner";
-import { Button } from "../src/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { useSourcePackages } from "../src/components/capabilities/use-source-packages";
 import "../src/styles.css";
 

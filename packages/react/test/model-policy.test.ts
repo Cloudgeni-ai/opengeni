@@ -41,6 +41,24 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("treats rows without readiness or availability as ready and selectable", () => {
+    const rows = projectPickerRows(englishText, [
+      { id: "gpt-5.6-sol" } as unknown as WorkspaceModelCatalogModel,
+      catalogModel({
+        id: "blocked",
+        label: "Blocked",
+        credentialReadiness: {
+          status: "not_ready",
+          reason: "missing_credential",
+          basis: "configuration",
+          checkedAt: null,
+        },
+      }),
+    ]);
+    expect(rows.map((row) => [row.id, row.selectable, row.unavailableReason])).toEqual([
+      ["gpt-5.6-sol", true, null],
+    ]);
+  });
   test("shows promotional coverage and general credit requirements in model rows", () => {
     const models = (["promotional", "general", "unavailable"] as const).map((creditFunding) =>
       catalogModel({ id: creditFunding, label: creditFunding, cost: "credits", creditFunding }),
@@ -48,7 +66,7 @@ describe("model-policy", () => {
     expect(projectPickerRows(englishText, models).map((row) => row.fundingHint)).toEqual([
       "Free credits",
       "Uses credits",
-      "Needs credits",
+      "Not covered by your credits",
     ]);
   });
   test.each([

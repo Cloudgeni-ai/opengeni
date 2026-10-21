@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   resolveTurnExecutionPolicyV1,
   configuredModels,
@@ -31,6 +28,7 @@ import {
   readSubscriptionSessionBinding,
   reserveSubscriptionCoreCodexRequest,
   recordSubscriptionCoreCodexQuotaObservation,
+  recordSubscriptionCoreCodexTurnUsageReading,
   recordSubscriptionCoreCodexSelectionForTurnAttempt,
   recordSubscriptionCoreCodexTurnFailure,
   refreshSubscriptionCoreCodexCredential,
@@ -220,6 +218,7 @@ async function runningTurn(
     initiator?: { kind: "subject"; subjectId: string } | { kind: "service" };
     personalAuthority?: boolean;
     upstreamModelId?: string;
+    latencyMode?: "standard" | "fast" | "ultrafast";
   },
 ): Promise<TurnFixture> {
   const catalog = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));
@@ -282,6 +281,7 @@ async function runningTurn(
               }),
               productModelId: MODEL,
               upstreamModelId: input.upstreamModelId,
+              ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
             },
           }
         : {},
@@ -824,6 +824,32 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       { provider: "codex", ownerMembershipId: org.ownerMembershipId, authorityGeneration: 1 },
     ]);
     expect(await place(own)).toMatchObject({ kind: "run", connectionId: personal, personal: true });
+    const reading = {
+      windows: [
+        { id: "primary", usedPercent: 12, resetsAt: Date.now() + 3_600_000, status: "ok" as const },
+      ],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      revision: 0,
+      observedAt: Date.now(),
+      observedRefreshGeneration: 1,
+      source: "response_headers" as const,
+    };
+    expect(
+      await recordSubscriptionCoreCodexTurnUsageReading(
+        client!.db,
+        own.identity,
+        leaseOf(own, personal),
+        reading,
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${personal}`
+      ).length,
+    ).toBe(1);
     const loaded = await loadSubscriptionCoreCodexCredential(
       client!.db,
       settings,
@@ -846,6 +872,20 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       initiator: { kind: "service" },
     });
     expect(await place(unfrozen)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    expect(
+      await recordSubscriptionCoreCodexTurnUsageReading(
+        client!.db,
+        unfrozen.identity,
+        leaseOf(own, personal),
+        { ...reading, observedAt: reading.observedAt + 1 },
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${personal}`
+      ).length,
+    ).toBe(1);
 
     // The owner's shared-workspace session with a v2 entry is not their own work.
     const sharedSession = await runningTurn(org, {
@@ -1392,6 +1432,108 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       ).toEqual({ kind: "needs_relogin" });
     },
   );
+
+  test("every header reading persists before finalization and even when the allocator rejects its order or generation", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const connectionId = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "history",
+    });
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    expect(await place(turn)).toMatchObject({ kind: "run", connectionId });
+    const now = Date.now();
+    const observation = (usedPercent: number, at: number, generation = 1) => ({
+      windows: [{ id: "primary", usedPercent, resetsAt: now + 3_600_000, status: "ok" as const }],
+      modelCooldowns: {},
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      revision: 0,
+      observedAt: at,
+      observedRefreshGeneration: generation,
+      source: "response_headers" as const,
+    });
+    const ref = leaseOf(turn, connectionId);
+    for (const [used, at] of [
+      [10, now - 1_200_000],
+      [20, now - 600_000],
+      [30, now],
+    ] as const) {
+      expect(
+        await recordSubscriptionCoreCodexTurnUsageReading(
+          client!.db,
+          turn.identity,
+          ref,
+          observation(used, at),
+        ),
+      ).toBe(true);
+    }
+    // Header persistence must not mutate allocator policy or wait until turn end.
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${connectionId}`
+      ).length,
+    ).toBe(3);
+    expect(
+      (
+        await shared!
+          .admin`select * from subscription_connection_quota where connection_id=${connectionId}`
+      ).length,
+    ).toBe(0);
+    expect(
+      await recordSubscriptionCoreCodexQuotaObservation(
+        client!.db,
+        turn.identity,
+        ref,
+        observation(30, now),
+      ),
+    ).toBe(true);
+    const before = await shared!
+      .admin`select quota, revision from subscription_connection_quota where connection_id=${connectionId}`;
+    expect(
+      await recordSubscriptionCoreCodexQuotaObservation(
+        client!.db,
+        turn.identity,
+        ref,
+        observation(25, now - 300_000),
+      ),
+    ).toBe(false);
+    expect(
+      await recordSubscriptionCoreCodexQuotaObservation(
+        client!.db,
+        turn.identity,
+        ref,
+        observation(35, now + 1, 0),
+      ),
+    ).toBe(false);
+    expect([
+      ...(await shared!
+        .admin`select quota, revision from subscription_connection_quota where connection_id=${connectionId}`),
+    ]).toEqual([...before]);
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${connectionId}`
+      ).length,
+    ).toBe(5);
+    // Neither direct readings nor rejected allocator observations may bypass a lost lease.
+    const wrongLease = { ...ref, generation: ref.generation + 1 };
+    expect(
+      await recordSubscriptionCoreCodexTurnUsageReading(
+        client!.db,
+        turn.identity,
+        wrongLease,
+        observation(40, now + 2),
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await shared!
+          .admin`select * from opengeni_private.subscription_usage_readings where connection_id=${connectionId}`
+      ).length,
+    ).toBe(5);
+  });
 
   test("quota observations and failure receipts are fenced to the leased connection", async () => {
     const org = await organization();
@@ -2059,6 +2201,49 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
         { slugs: [], refreshGeneration: 1, observedAt: Date.now() },
       ),
     ).toBe(false);
+  });
+
+  test("an Ultrafast turn is placed only on an account offering the model at that tier", async () => {
+    const org = await organization();
+    await enableCodexCutover(org.accountId);
+    const plain = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "tier-plain",
+    });
+    const tiered = await sharedConnection(org, {
+      workspaceId: org.sharedWorkspaceId,
+      label: "tier-ultrafast",
+    });
+    const upstream = "tiered-upstream-model";
+    const scope = {
+      kind: "workspace" as const,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const observe = (connectionId: string, slugs: string[]) =>
+      recordSubscriptionCoreCodexModelCatalog(client!.db, scope, connectionId, {
+        slugs,
+        refreshGeneration: 1,
+        observedAt: Date.now(),
+      });
+    expect(await observe(plain, [upstream, `${upstream}@priority`])).toBe(true);
+    expect(await observe(tiered, [upstream, "other-model@ultrafast"])).toBe(true);
+    const ultrafast = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      upstreamModelId: upstream,
+      latencyMode: "ultrafast",
+    });
+    // Neither account offers this model at the tier: the turn waits.
+    expect(await place(ultrafast)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
+    expect(await observe(tiered, [upstream, `${upstream}@ultrafast`])).toBe(true);
+    expect(await place(ultrafast)).toMatchObject({ kind: "run", connectionId: tiered });
+    // A Standard turn for the same model may use either account.
+    const standard = await runningTurn(org, {
+      workspaceId: org.sharedWorkspaceId,
+      upstreamModelId: upstream,
+    });
+    expect(await place(standard)).toMatchObject({ kind: "run" });
   });
 });
 

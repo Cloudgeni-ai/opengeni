@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { findCompactionNeededError } from "@opengeni/runtime";
 import {
   portableCompactionUsesPreparedPrefix,

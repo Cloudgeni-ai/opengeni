@@ -17,12 +17,9 @@ import {
   type DbClient,
   type ScheduledTaskCreatorPolicy,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
 
@@ -175,7 +172,7 @@ async function queuedAgentRun(
 // it through to the generated session and freezes it in the accepted execution.
 
 describe("scheduled-task agent configuration (real PostgreSQL)", () => {
-  test("a task without agent resolves all within the scheduled generated-tool boundary", async () => {
+  test("a task without agent resolves all to the ordinary deployment defaults", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
@@ -183,23 +180,21 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
-    const posting = new Set<string>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
-    // Ordinary-chat discovery is not an unattended posting grant. Preserve
-    // every other default, but no bot posting without a person-chosen channel.
-    expect(session.firstPartyMcpTools).toEqual(defaults.filter((tool) => !posting.has(tool)));
+    // Scheduled work keeps the same capabilities as interactive work,
+    // including the ordinary bot posting tools.
+    expect(session.firstPartyMcpTools).toEqual(defaults);
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
-    for (const tool of posting) {
-      expect(defaults).toContain(tool);
-      expect(session.firstPartyMcpTools).not.toContain(tool);
+    for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
+      expect(session.firstPartyMcpTools).toContain(tool);
     }
   }, 60_000);
 
   test.each([
-    ["posting allowed", ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS]],
-    ["posting disallowed", ["goal_set"]],
+    ["posting allowed", ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS], true],
+    ["posting disallowed", ["goal_set"], false],
   ] as const)(
-    "explicit defaults stay destination-bound and under the ceiling: %s",
-    async (_label, allowed) => {
+    "explicit defaults stay under the deployment ceiling: %s",
+    async (_label, allowed, postingAllowed) => {
       if (!available) return;
       const grant = await workspaceGrant();
       const task = await generatedTask(grant, null);
@@ -208,7 +203,9 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
         allowedFirstPartyMcpTools: [...allowed],
       });
       expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
-      expect(session.firstPartyMcpTools).toEqual(["goal_set"]);
+      expect(session.firstPartyMcpTools).toEqual(
+        postingAllowed ? ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS] : ["goal_set"],
+      );
       expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
       expect(accepted?.resolvedAgentConfig).toEqual(session.agent);
     },
@@ -222,7 +219,10 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     const { accepted } = await dispatchGeneratedSession(grant, task.id, {
       defaultFirstPartyMcpTools: ["goal_set", ...SCHEDULED_SLACK_BOT_POSTING_TOOLS],
     });
-    expect(accepted?.resolvedFirstPartyMcpTools).toEqual(["goal_set"]);
+    expect(accepted?.resolvedFirstPartyMcpTools).toEqual([
+      "goal_set",
+      ...SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+    ]);
     const { producerKey } = await queuedAgentRun(grant, accepted!);
     const { activities: scheduled } = activities({
       defaultFirstPartyMcpTools: [

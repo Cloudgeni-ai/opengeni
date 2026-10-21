@@ -1,12 +1,8 @@
-import { getSessionParentClaudeProviderAccountAuthority } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import type { Session, SessionGoal, SessionSystemUpdatePayload } from "@opengeni/contracts";
 import {
   getSession,
   getSessionGoal,
-  getSessionParentPersonalConnectionDelegations,
-  getSessionParentMcpAccountBindings,
-  getSessionParentXaiProviderAccountAuthority,
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
@@ -73,54 +69,26 @@ export async function notifyParentOfChildIdle(
     if (!child || !child.parentSessionId) {
       return;
     }
-    const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
     const clientEventId = `child-completion:${childSessionId}:${episodeKey}`;
+    const committed = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
+      accountId: child.accountId,
+      workspaceId,
+      dedupeKey: clientEventId,
+    });
+    if (!committed) throw new Error("Committed idle child-result outbox disappeared");
+    if (committed.status === "delivered") return;
+    const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
     // The idle settlement committed this row with the child's frozen final
     // answer. This adds the goal facts; the upsert keeps the frozen content.
     const payload = childCompletionPayload(child, goal);
-    const personalConnectionDelegations = await getSessionParentPersonalConnectionDelegations(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
-    const mcpAccountBindings = await getSessionParentMcpAccountBindings(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
-    const xaiAuthority = await getSessionParentXaiProviderAccountAuthority(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
-    const claudeAuthority = await getSessionParentClaudeProviderAccountAuthority(
-      svc.db,
-      workspaceId,
-      childSessionId,
-    );
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
-      accountId: child.accountId,
-      workspaceId,
-      sourceSessionId: child.id,
-      targetSessionId: child.parentSessionId,
+      // Lifecycle settlement owns the complete accepted authority. Enrichment
+      // changes only goal facts, never reconstructs or drops frozen lineage.
+      ...committed,
       kind: "child_terminal_result",
       classification: goal?.status === "paused" ? "action_required" : "success",
-      sourceId: child.id,
-      dedupeKey: clientEventId,
       summary: childCompletionSummary(child, goal, "idle"),
       payload,
-      lineage: {
-        ...(claudeAuthority.subjectId
-          ? { claudeAuthoritySubjectId: claudeAuthority.subjectId }
-          : {}),
-        childSessionId: child.id,
-        parentSessionId: child.parentSessionId,
-        ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
-      },
-      personalConnectionDelegations,
-      mcpAccountBindings,
-      xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
-      claudeProviderAccountAuthoritySnapshot: claudeAuthority.snapshot,
     });
     if (outbox.status === "delivered") {
       return;
@@ -131,7 +99,7 @@ export async function notifyParentOfChildIdle(
     // reaper retries it; child terminal settlement never depends on this turn.
     svc.observability.error("Failed to wake parent session on worker idle boundary", {
       childSessionId,
-      error: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 }
@@ -168,7 +136,7 @@ export async function deliverChildLifecycleOutboxToParent(
     svc.observability.error("Failed to deliver committed child-lifecycle notice", {
       childSessionId,
       dedupeKey,
-      error: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 }
@@ -434,7 +402,7 @@ export async function repairMissedSessionWorkflowWakes(
     }
   } catch (error) {
     svc.observability.error("Missing quiescence-receipt wake repair failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error,
     });
   }
 }

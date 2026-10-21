@@ -9,8 +9,6 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { siteAgentClamp, siteViewerForGrant } from "@opengeni/core";
-import { isSiteWorkspaceMember } from "@opengeni/db";
 import * as z4 from "zod/v4";
 import { contractToolInput } from "./contract-input";
 import {
@@ -159,7 +157,7 @@ export function registerSiteSqlTools(
     "site_sql_define_query",
     {
       description:
-        'Create, replace or delete a named query a Site page runs with site.sql.run(name, params). Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement with :name parameters; pages pass values only, never SQL. :viewer (the viewer\'s principal, such as user:<id> or guest:<id>), :viewer_kind and :viewer_signed_in are bound by Opengeni, so a query can keep rows per viewer: e.g. INSERT INTO votes (voter, choice) VALUES (:viewer, :choice). audience: everyone (including anonymous guests of public Sites), signed_in (default) or managers (agents and the console only). Set action to "delete" to remove the query.',
+        'Create, replace or delete a named query a Site page runs with site.sql.run(name, params). Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement with :name parameters; pages pass values only, never SQL. :viewer (the viewer\'s principal, such as user:<id> or guest:<id>), :viewer_kind and :viewer_signed_in are bound by the host, so a query can keep rows per viewer: e.g. INSERT INTO votes (voter, choice) VALUES (:viewer, :choice). audience: everyone (including anonymous guests of public Sites), signed_in (default) or managers (agents and the console only). Set action to "delete" to remove the query.',
       inputSchema: contractToolInput(
         z4.object({
           siteId: SiteIdInput,
@@ -217,17 +215,6 @@ export function registerSiteSqlTools(
         params?: Record<string, string | number | boolean | null> | undefined;
         maxRows?: number | undefined;
       }) => {
-        const clamp = await siteAgentClamp(deps.db, grant);
-        if (clamp?.clamped) {
-          const viewer = await siteViewerForGrant(deps.db, grant);
-          if (
-            clamp.originSiteIds.length !== 1 ||
-            clamp.originSiteIds[0] !== args.siteId ||
-            !viewer.subjectId ||
-            !(await isSiteWorkspaceMember(deps.db, grant, viewer.subjectId))
-          )
-            throw new SiteSqlError("forbidden", SITE_AGENT_OTHER_SITE_MESSAGE);
-        }
         return await runSiteSqlStatement(
           deps,
           grant,
@@ -238,7 +225,6 @@ export function registerSiteSqlTools(
             ...(args.maxRows ? { maxRows: args.maxRows } : {}),
           },
           "read",
-          { asSiteMember: clamp?.clamped === true },
         );
       },
       async (site, args) => {

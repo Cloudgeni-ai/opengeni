@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { drainWorkspaceWebhookDeliveries } from "../src/workspace-webhook-dispatch";
 
 const spies: Array<{ mockRestore(): void }> = [];

@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { createObservability, withTraceContext } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   initializeContextCompactionMetrics,
   ModelRequestLifecycleMetrics,
@@ -233,6 +233,75 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
       /opengeni_model_provider_ttft_seconds_sum\{[^}]*content="text"[^}]*provider="codex-subscription"[^}]*\} 12\b/,
     );
     expect(metrics).toMatch(/opengeni_stream_ttft_seconds_sum\{[^}]*\} 10\b/);
+  });
+
+  test("transport admission after native dispatch cannot time the previous response as preparation", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "codex-subscription",
+      now: () => now,
+    });
+
+    now = 1_000;
+    timing.onModelRequestEntry("model_entry");
+    now = 1_200;
+    timing.onProviderDispatch();
+    // Native dispatch admission runs outside instrumentedModelFetch. Its inner
+    // transport admission therefore follows the dispatch notification.
+    timing.onModelRequestEntry("transport");
+    now = 6_200;
+    expect(timing.completeResponse()?.preDispatchMs).toBe(200);
+
+    // One second of tool work is not preparation for the next model call.
+    now = 7_200;
+    timing.onModelRequestEntry("model_entry");
+    now = 7_400;
+    timing.onProviderDispatch();
+    timing.onModelRequestEntry("transport");
+    now = 8_400;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 200,
+      timeToFirstTokenMs: null,
+      timeToFirstTextMs: null,
+      durationMs: 1_000,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_sum\{[^}]*provider="codex-subscription"[^}]*\} 0\.4\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_count\{[^}]*provider="codex-subscription"[^}]*\} 2\b/,
+    );
+  });
+
+  test("transport rechecks before dispatch and on retries do not create model-entry samples", async () => {
+    const observability = worker();
+    let now = 1_000;
+    const timing = new StreamTimingMetrics(observability, { provider: "openai", now: () => now });
+    timing.onModelRequestEntry("model_entry");
+    now = 1_100;
+    timing.onModelRequestEntry("transport");
+    now = 1_200;
+    timing.onProviderDispatch();
+    now = 2_000;
+    timing.onModelRequestEntry("transport");
+    now = 2_100;
+    timing.onProviderDispatch();
+    now = 2_300;
+    timing.onEvent("agent.message.delta");
+    now = 3_000;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 200,
+      timeToFirstTokenMs: 1_100,
+      timeToFirstTextMs: 1_100,
+      durationMs: 1_800,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_count\{[^}]*provider="openai"[^}]*\} 1\b/,
+    );
   });
 
   test("provider TTFT survives a lagging structural event and follows the latest dispatch", async () => {

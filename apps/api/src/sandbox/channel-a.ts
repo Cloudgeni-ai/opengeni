@@ -99,6 +99,7 @@ import {
   relayConfigFromSettings,
   requireLiveAgentAttemptAuthorization,
   resolveChannelAMachineConnection,
+  directRequestAbandonCommand,
   getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
@@ -141,6 +142,7 @@ export type ChannelAOperation =
   | "browser.action"
   | "browser.control"
   | "browser.download.save"
+  | "browser.recording.save"
   | "browser.attach"
   | "computer.create"
   | "computer.end"
@@ -617,13 +619,20 @@ export async function withFormerConnectedMachine<T>(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    transactionalFsWriteMachineSupported:
+      enrollment.agentCapabilities.transactionalFsWriteMachine === true,
     browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    runAsSupported: enrollment.agentCapabilities.runAs === true,
     ...(settings.agentOpStreamEnabled === true &&
     enrollment.opStream === true &&
     bus.getOpStreamConnection
       ? {
           opStream: {
             transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+            ...(enrollment.agentCapabilities.opRelease === true
+              ? { outputReleaseSupported: true }
+              : {}),
+            connectionGeneration: String(enrollment.connectionGeneration),
           },
         }
       : {}),
@@ -664,6 +673,9 @@ async function channelAMachineAuthority(
     },
   };
 }
+
+/** How often a direct operation that is still running reports itself. */
+const DIRECT_OPERATION_SLOW_REPORT_MS = 60_000;
 
 async function withChannelAOperation<T>(
   services: ChannelAServices,
@@ -863,7 +875,15 @@ async function withChannelAOperation<T>(
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
         browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+        runAsSupported: enrollment.agentCapabilities.runAs === true,
+        abandonCommand: directRequestAbandonCommand(db, {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+        }),
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection
@@ -872,6 +892,10 @@ async function withChannelAOperation<T>(
                 transport: new NatsOpStreamTransport(
                   async () => bus.getOpStreamConnection?.() ?? null,
                 ),
+                ...(enrollment.agentCapabilities.opRelease === true
+                  ? { outputReleaseSupported: true }
+                  : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),
@@ -1069,6 +1093,9 @@ async function withChannelAOperation<T>(
   // retained-process reconciler must not poll that provider session while this
   // request is still its active owner. Stale direct holders remain crash-
   // recoverable through the ordinary holder TTL reaper.
+  // A request that holds its sandbox for minutes keeps the chat from being
+  // deleted, so say which operation it is while it lasts.
+  let nextSlowReportMs = DIRECT_OPERATION_SLOW_REPORT_MS;
   const directHolderHeartbeat = setInterval(() => {
     void touchLeaseHolder(db, {
       accountId,
@@ -1077,6 +1104,19 @@ async function withChannelAOperation<T>(
       kind: "direct",
       holderId,
     }).catch(() => undefined);
+    const elapsedMs = performance.now() - operationStartedAt;
+    if (elapsedMs >= nextSlowReportMs) {
+      nextSlowReportMs = elapsedMs + DIRECT_OPERATION_SLOW_REPORT_MS;
+      services.observability?.warn("sandbox direct operation still running", {
+        workspaceId,
+        sessionId: session.id,
+        sandboxGroupId,
+        backend: session.sandboxBackend,
+        operation,
+        holderId,
+        elapsedMs: Math.round(elapsedMs),
+      });
+    }
   }, 10_000);
   directHolderHeartbeat.unref?.();
 

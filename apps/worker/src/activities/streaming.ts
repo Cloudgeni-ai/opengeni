@@ -130,12 +130,13 @@ export type RuntimeBatcherOptions = {
   now?: () => number;
 };
 
-export function createRuntimeBatcher(
-  flushEvents: (events: AppendEventInput[]) => Promise<void>,
+export function createRuntimeBatcher<Mutation = never>(
+  flushEvents: (events: AppendEventInput[], mutations?: Mutation[]) => Promise<void>,
   options: RuntimeBatcherOptions = {},
 ) {
   const now = options.now ?? (() => performance.now());
   let pending: AppendEventInput[] = [];
+  const pendingMutations = new WeakMap<AppendEventInput, Mutation>();
   let lastFlush = Number.NEGATIVE_INFINITY;
   // Leading edge: the first text fragment of a turn, and the first after a
   // structural event, goes out at once. Only text consumes it, so another
@@ -173,11 +174,16 @@ export function createRuntimeBatcher(
     "turn.cancelled",
   ]);
   return {
-    push: async (event: { type: SessionEventType; payload: unknown }) => {
+    push: async (event: { type: SessionEventType; payload: unknown }, mutation?: Mutation) => {
       throwIfFlushFailed();
+      if (mutation !== undefined && !structural.has(event.type)) {
+        throw new Error("A durable checkpoint requires a structural event");
+      }
       // Append BEFORE the structural check so a structural event's flush always
       // carries any pending deltas in order (same flush, order preserved).
-      pending.push({ type: event.type, payload: event.payload });
+      const pendingEvent = { type: event.type, payload: event.payload };
+      pending.push(pendingEvent);
+      if (mutation !== undefined) pendingMutations.set(pendingEvent, mutation);
       const elapsed = Date.now() - lastFlush;
       if (structural.has(event.type)) {
         await flush();
@@ -250,12 +256,19 @@ export function createRuntimeBatcher(
     const running = (async () => {
       try {
         while (pending.length > 0) {
-          const events = mergeAdjacentTextDeltas(pending.splice(0, MAX_BATCH_EVENTS));
+          const batch = pending.splice(0, MAX_BATCH_EVENTS);
+          const events = mergeAdjacentTextDeltas(batch);
+          const mutations: Mutation[] = [];
+          for (const event of batch) {
+            const mutation = pendingMutations.get(event);
+            if (mutation !== undefined) mutations.push(mutation);
+          }
           activeBatchSize = events.length;
           lastFlush = Date.now();
           const startedAt = now();
           try {
-            await flushEvents(events);
+            if (mutations.length > 0) await flushEvents(events, mutations);
+            else await flushEvents(events);
           } catch (error) {
             flushFailed = true;
             flushFailure = error;

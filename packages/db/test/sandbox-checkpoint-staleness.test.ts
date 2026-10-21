@@ -3,7 +3,7 @@
 // such write (never before the box was created). Runs as the restricted app role.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   createDb,

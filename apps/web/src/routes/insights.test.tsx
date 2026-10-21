@@ -20,7 +20,7 @@ const context = {
   },
   client: { requestJson, getWorkspaceInsights, getWorkspaceModelCatalog },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 const navigate = mock(async (_options: unknown) => undefined);
 const RouterPackage = await import("@tanstack/react-router");
 mock.module("@tanstack/react-router", () => ({ ...RouterPackage, useNavigate: () => navigate }));

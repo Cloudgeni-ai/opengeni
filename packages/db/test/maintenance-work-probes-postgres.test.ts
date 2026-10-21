@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import {
   automaticSessionTitleFanoutDue,
   bootstrapWorkspace,
@@ -26,14 +29,14 @@ import {
   type KnowledgeContext,
 } from "../src/index";
 
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("maintenance-work-probes");
+  const acquired = await acquireRestrictedRuntimeTestDatabase("maintenance-work-probes");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
-  client = createDb(shared.appUrl);
+  client = createDb(shared.appUrl, { searchPath: shared.schema });
 }, 180_000);
 
 afterAll(async () => {
@@ -332,6 +335,25 @@ describe("maintenance work probes", () => {
     ).toEqual([]);
     // A claim older than the timeout may be reclaimed, so it is due again.
     expect(await siteAuthMaintenanceDue(client.db, { claimTimeoutMs: 0 })).toBe(true);
+    await shared.admin`UPDATE sessions SET status='running' WHERE id=${scope.sessionId}`;
+    await shared.admin`UPDATE site_auth_connections SET maintenance_session_id=${scope.sessionId},
+      maintenance_due_at=now()-interval '2 hours',
+      maintenance_started_at=now()-interval '1 hour', maintenance_claimed_at=now()-interval '1 hour'
+      WHERE workspace_id=${scope.workspaceId}`;
+    // The due check is conservative; the claim must see a live maintenance
+    // session even with an unrelated ambient subject, not replace it as missing.
+    await shared.admin.begin(async (tx) => {
+      await tx`SELECT set_config('opengeni.subject_id','unrelated-subject',true),
+        set_config('application_name','opengeni-lossless-v1-session-variable-sets-v1',true)`;
+      await tx.unsafe("SET LOCAL ROLE opengeni_app");
+      expect(
+        await tx`SELECT * FROM opengeni_private.claim_site_auth_maintenance(0,5)`,
+      ).toHaveLength(0);
+    });
+    await shared.admin`UPDATE sessions SET status='failed' WHERE id=${scope.sessionId}`;
+    expect(await claimSiteAuthMaintenance(client.db, { claimTimeoutMs: 0, limit: 5 })).toHaveLength(
+      1,
+    );
     await expect(siteAuthMaintenanceDue(client.db, { claimTimeoutMs: -1 })).rejects.toThrow();
   });
 

@@ -16,7 +16,7 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -46,7 +46,12 @@ import { rawRows, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  MAINTENANCE_PRIVATE_TABLES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
+} from "../src/runtime-posture";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
+import { ABSENT_USAGE_HISTORY_POSTURE } from "./fixtures/absent-usage-history-posture";
 import {
   stageVaultPolicyColumns,
   withoutAbsentLaterPosture,
@@ -502,8 +507,9 @@ beforeAll(async () => {
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
     await stageSiteSessionAudienceColumns(database.ownerUrl);
-    // Current event readers also project 0810's nullable usage source key.
-    await staging`alter table session_events add column usage_source_key text`;
+    // Current event readers also project 0810's nullable usage source key and
+    // 0889's nullable tool name.
+    await staging`alter table session_events add column usage_source_key text, add column tool_name text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -638,6 +644,34 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
       "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
     );
+    // 0848–0849 add the strict-owner projections and maintenance claim boundary.
+    // The original checkpoint validators already exist and provisioning revokes
+    // their runtime EXECUTE, even before the later wrappers are installed.
+    heldBack.push(
+      ...MAINTENANCE_PRIVATE_TABLES.map(
+        (table) => `maintenance probe index ${table} is missing or accessible to runtime`,
+      ),
+      ...MAINTENANCE_PROBE_OWNER_ROUTINES.filter(
+        (routine) =>
+          routine !== "validate_sandbox_checkpoint_refs()" &&
+          routine !== "validate_sandbox_checkpoint_artifact_refs()",
+      ).map((routine) => `maintenance probe helper ${routine} is missing or unsafe`),
+      "maintenance claim predicate maintenance_claim_active(text, text) is missing or unsafe",
+      "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
+    );
+    // 0851 adds exact session-tree machine access and agent creation authority.
+    heldBack.push(
+      ...[
+        "guard_session_agent_creation_provenance()",
+        "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+        "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+      "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
+    );
+    // 0854 adds the private-file lookup.
+    heldBack.push(
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+    );
     // 0796-0798 (subscription plans and billing operations) are held back too.
     heldBack.push(
       ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
@@ -648,11 +682,13 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "subscription plan maintenance inventory is missing",
       "subscription plan Free anniversary helper is missing",
     );
-    // 0805 (private actor visibility) and 0823 (personal machine consents).
+    // 0805 (private actor visibility), 0823 (personal machine consents), and
+    // 0841 (chat-visible machine access explanation) are also held back.
     heldBack.push(
       ...[
         "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
         "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
+        "get_session_machine_access(uuid, uuid, uuid)",
         "session_private_actor_visible_keys()",
       ].map((routine) => `target-schema runtime capability ${routine} is missing or ambiguous`),
       ...[
@@ -668,10 +704,14 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "billing_subscription_operations",
       // 0820 (retained browser downloads).
       "browser_session_retained_downloads",
+      // 0890 reconciliation tables are absent from this historical schema.
+      "model_call_fact_reconciliation_candidates",
+      "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
@@ -693,6 +733,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_runtime_conversations",
       "site_runtime_rate_windows",
       "site_runtime_usage",
+      // 0842 adds private Site/chat grants to both posture inventories.
+      "site_session_access",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
@@ -713,6 +755,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
+      ...ABSENT_USAGE_HISTORY_POSTURE,
+      // Selected-workspace Slack bot access arrives in the withheld 0864.
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
     ].sort();

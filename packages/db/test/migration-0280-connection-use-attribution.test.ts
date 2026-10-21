@@ -2,7 +2,7 @@
 // attribution. (The Variable Set halves of 0280 were retired with Variable
 // Sets in 0739; these connection-use cases are kept from the original suite.)
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import {

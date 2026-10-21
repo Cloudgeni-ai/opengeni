@@ -10,7 +10,7 @@ import {
 } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import { ErrorCode } from "@opengeni/agent-proto";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { buildAgentCapabilities, repositoryWorkspaceSkillPathsOption } from "../src";
 import {
@@ -638,8 +638,8 @@ description: Prepare a safe release.
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {
     const session = fakeSession({
-      ".agents/skills/opengeni-documents/SKILL.md":
-        "---\nname: opengeni-documents\ndescription: Repository copy.\n---\n",
+      ".agents/skills/documents/SKILL.md":
+        "---\nname: documents\ndescription: Repository copy.\n---\n",
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: Repository release instructions.\n---\n",
     });
@@ -649,7 +649,7 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(),
         undefined,
-        new Set(["opengeni-documents"]),
+        new Set(["documents"]),
       ),
     ).resolves.toEqual([
       expect.objectContaining({

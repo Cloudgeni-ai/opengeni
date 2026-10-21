@@ -12,9 +12,12 @@ import {
   type RefObject,
 } from "react";
 import { Dialog } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { cn } from "../lib/cn";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
+
+const DialogContainedPortal = containedPortal(Dialog.Portal);
 
 /* ----------------------------------------------------------------------------
    Screenshot lightbox
@@ -324,7 +327,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       <Dialog.Root open={state !== null} onOpenChange={(next) => !next && close()}>
         <AnimatePresence>
           {state !== null ? (
-            <Dialog.Portal forceMount>
+            <DialogContainedPortal forceMount>
               <Dialog.Overlay asChild forceMount>
                 <motion.div
                   initial={{ opacity: 0 }}
@@ -429,7 +432,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   ) : null}
                 </motion.div>
               </Dialog.Content>
-            </Dialog.Portal>
+            </DialogContainedPortal>
           ) : null}
         </AnimatePresence>
       </Dialog.Root>

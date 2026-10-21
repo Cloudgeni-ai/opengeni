@@ -1,11 +1,11 @@
-import type { RoleOption, RoleValue } from "@/components/ui/role-select";
+import type { RoleOption, RoleValue } from "@opengeni/react/ui/role-select";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import type { WorkspaceRoleId } from "./organization-directory";
 

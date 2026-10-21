@@ -49,7 +49,7 @@ import {
   initializeSessionStartAtomically,
   readLease,
 } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { supervisedCommandProtocolReady } from "@opengeni/db/retained-provider-commands";
 import { createObservability } from "@opengeni/observability";
 import { RoutingSandboxSession } from "@opengeni/runtime";

@@ -1244,7 +1244,13 @@ always stays after them.
     `status = 'error'` with `health_retry_at` one hour later. The next
     placement or waiter check that could lease the connection returns due
     quarantines to service and wakes the account's waiters; a waiter's next
-    check includes the quarantine's end. The recovery routine filters
+    check includes the quarantine's end. Readers that only decide
+    availability (session admission, the model catalog, the account lists
+    and the personal owner reader) derive the same transition without
+    waiting for a turn: an `error` row whose `health_retry_at` has passed
+    reads `active` with no error. A turn's placement reads the stored status,
+    which its lease and credential reads enforce, after recovering. The
+    recovery routine filters
     explicitly rather than relying on row-level security (its owner may
     bypass it): shared rows by `subscription_connection_visible` for the
     turn's workspace, personal rows only for the owner's own turn (the
@@ -1662,9 +1668,13 @@ enabled, and one added branch in the operation-lease guard.
     upstream idempotency key and claim release on an uncertain outcome are
     the legacy sequence: an uncertain send is retried only with the same key.
   - Completion (`completeSubscriptionCoreCodexResetRedemption`) records the
-    outcome and audit event and, for `reset` or `alreadyRedeemed`, clears
-    the stored exhaustion only when it was observed with the connection's
-    current refresh generation, then delivers a core wake after commit. The
+    outcome and audit event and, for `reset` or `alreadyRedeemed`,
+    invalidates every stored usage window and the stored exhaustion
+    deadline (`quotaAfterRateLimitReset`: each window keeps its id with
+    unknown usage until the next reading), only when the quota was observed
+    with the connection's current refresh generation, then delivers a core
+    wake after commit. Clearing only the deadline left an exhausted weekly
+    window standing, so woken waiters re-waited until its old reset. The
     legacy exhaustion columns and capacity outbox are never touched.
 - **Overview (EP-N21).** The core overview projects the workspace's core
   pool. Each account's live usage (through the seam, as above) and reset

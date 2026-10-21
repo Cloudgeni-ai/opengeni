@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/codex",
-  "version": "4.0.4",
+  "version": "4.3.1",
   "description": "ChatGPT/Codex subscription auth + transport: device-code login, token refresh, and the Responses-backend fetch. Pure HTTP + transforms; no database dependency.",
   "license": "Apache-2.0",
   "repository": {
@@ -36,7 +36,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

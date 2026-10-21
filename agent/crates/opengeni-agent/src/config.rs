@@ -134,8 +134,22 @@ pub struct StoredConnection {
     /// explicit reconnect to that deployment replaces it.
     #[serde(default)]
     pub legacy_origin: bool,
+    /// A refused transport is suspended until renewal or explicit reconnect.
+    /// This belongs to this credential document, never the shared host engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_state: Option<AuthenticationState>,
     /// The existing workspace-scoped runtime credentials.
     pub credentials: StoredCredentials,
+}
+
+/// Persisted recovery state for one connection's exact credentials.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationState {
+    /// The transport refused these credentials; the renewal loop checks authority.
+    RenewalRequired,
+    /// Renewal refused the grant or cannot recover the rejected transport.
+    ReconnectRequired,
 }
 
 impl StoredConnection {
@@ -149,6 +163,7 @@ impl StoredConnection {
             connection_id,
             api_url,
             legacy_origin: false,
+            authentication_state: None,
             credentials,
         }
     }
@@ -161,6 +176,7 @@ impl StoredConnection {
             connection_id,
             api_url,
             legacy_origin: true,
+            authentication_state: None,
             credentials,
         }
     }

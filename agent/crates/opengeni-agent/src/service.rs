@@ -18,7 +18,9 @@ use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, Servi
 use tracing::info;
 
 use crate::browser_bridge;
-use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, StartArgs};
+use crate::cli::{
+    ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, ServiceStatusArgs, StartArgs,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchdInstallAction {
@@ -105,8 +107,16 @@ pub fn stop(args: &ServiceScopeArgs) -> Result<(), String> {
 }
 
 /// Prints the ordinary background service status.
-pub fn show_status(args: &ServiceScopeArgs) -> Result<(), String> {
-    status(scope(args))
+pub fn show_status(args: &ServiceStatusArgs) -> Result<(), String> {
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&inspect(scope(&args.scope))?).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    } else {
+        status(scope(&args.scope))
+    }
 }
 
 /// Dispatches a `service` subcommand. Returns a human-facing result string on
@@ -118,7 +128,7 @@ pub fn run(args: &ServiceArgs) -> Result<(), String> {
         ServiceAction::Uninstall(a) => uninstall(scope(a)),
         ServiceAction::Start(a) => lifecycle("start", scope(a)),
         ServiceAction::Stop(a) => lifecycle("stop", scope(a)),
-        ServiceAction::Status(a) => status(scope(a)),
+        ServiceAction::Status(a) => show_status(a),
     }
 }
 
@@ -596,7 +606,11 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     let spec = spec_for(install_scope)?;
 
     if args.print {
-        let definition = service::render_for_host(&spec).map_err(|e| e.to_string())?;
+        let definition = if ServiceSpec::backend() == ServiceBackend::Launchd {
+            launchd_definition(&spec, &home()?)?
+        } else {
+            service::render_for_host(&spec).map_err(|e| e.to_string())?
+        };
         println!("{definition}");
         return Ok(());
     }
@@ -668,7 +682,7 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let user_home = home()?;
     let plist_path = service::launchd_plist_path(&user_home);
-    let body = service::render_launchd_plist(spec, &user_home).map_err(|e| e.to_string())?;
+    let body = launchd_definition(spec, &user_home)?;
     let definition_changed =
         std::fs::read(&plist_path).map_or(true, |existing| existing != body.as_bytes());
     if let Some(parent) = plist_path.parent() {
@@ -738,6 +752,45 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
         plist_path.display()
     );
     Ok(())
+}
+
+fn launchd_definition(spec: &ServiceSpec, user_home: &Path) -> Result<String, String> {
+    let existing_environment = launchd_environment(&service::launchd_plist_path(user_home))?;
+    service::render_launchd_plist_with_environment(spec, user_home, &existing_environment)
+        .map_err(|e| e.to_string())
+}
+
+fn launchd_environment(path: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+    match std::fs::metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::BTreeMap::new())
+        }
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+        Ok(_) => {}
+    }
+    // plutil handles both XML and binary plists; never scrape XML or silently
+    // overwrite a configuration that could not be read.
+    let output = Command::new("/usr/bin/plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!("could not read LaunchAgent {}", path.display()));
+    }
+    parse_launchd_environment(&output.stdout)
+}
+
+fn parse_launchd_environment(
+    json: &[u8],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(json).map_err(|error| format!("invalid LaunchAgent: {error}"))?;
+    match value.get("EnvironmentVariables") {
+        Some(environment) => serde_json::from_value(environment.clone())
+            .map_err(|error| format!("invalid LaunchAgent environment: {error}")),
+        None => Ok(std::collections::BTreeMap::new()),
+    }
 }
 
 /// `bootout` may return before launchd has completely retired the old job.
@@ -902,11 +955,7 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
 fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => {
-            let unit = service::ids::SYSTEMD_UNIT;
-            match install_scope {
-                ServiceScope::User => systemctl(&["--user", action, unit])?,
-                ServiceScope::System => systemctl(&[action, unit])?,
-            }
+            systemctl(&systemd_lifecycle_args(action, install_scope))?;
             println!("{action}ed the opengeni-agent service.");
             Ok(())
         }
@@ -928,7 +977,11 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
                     )?;
                 }
             } else {
-                run_tool("launchctl", &["bootout", &target])?;
+                // Disable first: logout/login must not silently undo a pause.
+                run_tool("launchctl", &["disable", &target])?;
+                if capture("launchctl", &["print", &target]).is_ok() {
+                    run_tool("launchctl", &["bootout", &target])?;
+                }
             }
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
@@ -936,13 +989,118 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
         ServiceBackend::WindowsTask => {
             windows_user_scope(install_scope)?;
             if action == "start" {
-                crate::windows_task::install(&spec_for(install_scope)?, false)
+                crate::windows_task::resume()
             } else {
                 crate::windows_task::stop()
             }
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
+}
+
+fn systemd_lifecycle_args(action: &str, install_scope: ServiceScope) -> Vec<&'static str> {
+    let mut args = if install_scope == ServiceScope::User {
+        vec!["--user"]
+    } else {
+        vec![]
+    };
+    args.extend([
+        if action == "start" {
+            "enable"
+        } else {
+            "disable"
+        },
+        "--now",
+        service::ids::SYSTEMD_UNIT,
+    ]);
+    args
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceInspection {
+    schema_version: u32,
+    installed: bool,
+    enabled: bool,
+    running: bool,
+    /// The configured launch identity, not the inspecting helper's executable.
+    binary_path: Option<String>,
+}
+
+fn launchd_disabled(output: &str, label: &str) -> bool {
+    output.lines().any(|line| {
+        line.trim()
+            .strip_prefix(&format!("\"{label}\" => "))
+            .is_some_and(|value| {
+                matches!(
+                    value.trim_end_matches([',', ';']).trim(),
+                    "true" | "disabled"
+                )
+            })
+    })
+}
+
+fn inspect(install_scope: ServiceScope) -> Result<ServiceInspection, String> {
+    let mut result = ServiceInspection {
+        schema_version: 1,
+        installed: false,
+        enabled: false,
+        running: false,
+        binary_path: None,
+    };
+    match ServiceSpec::backend() {
+        ServiceBackend::Launchd => {
+            let plist = service::launchd_plist_path(&home()?);
+            result.installed = plist.exists();
+            if result.installed {
+                result.binary_path = Some(
+                    capture(
+                        "/usr/bin/plutil",
+                        &[
+                            "-extract",
+                            "ProgramArguments.0",
+                            "raw",
+                            "-o",
+                            "-",
+                            &plist.to_string_lossy(),
+                        ],
+                    )?
+                    .trim()
+                    .to_string(),
+                );
+                let domain = format!("gui/{}", unsafe_uid());
+                let disabled = capture("launchctl", &["print-disabled", &domain])?;
+                result.enabled = !launchd_disabled(&disabled, service::ids::LAUNCHD_LABEL);
+                let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
+                result.running = capture("launchctl", &["print", &target]).is_ok_and(|output| {
+                    output.lines().any(|line| line.trim() == "state = running")
+                });
+            }
+        }
+        ServiceBackend::Systemd => {
+            let unit = service::ids::SYSTEMD_UNIT;
+            let mut args = if install_scope == ServiceScope::User {
+                vec!["--user"]
+            } else {
+                vec![]
+            };
+            args.extend([
+                "show",
+                unit,
+                "--property=LoadState,UnitFileState,ActiveState",
+            ]);
+            let output = capture_systemctl(&args)?;
+            result.installed = output.lines().any(|line| line == "LoadState=loaded");
+            result.enabled = output.lines().any(|line| line == "UnitFileState=enabled");
+            result.running = output.lines().any(|line| line == "ActiveState=active");
+        }
+        ServiceBackend::WindowsTask => {
+            windows_user_scope(install_scope)?;
+            (result.installed, result.enabled, result.running) = crate::windows_task::inspect();
+        }
+        ServiceBackend::Unsupported => return Err(service::unsupported_backend().to_string()),
+    }
+    Ok(result)
 }
 
 fn status(install_scope: ServiceScope) -> Result<(), String> {
@@ -1073,6 +1231,52 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn explicit_pause_and_resume_persist_without_replacing_systemd_definition() {
+        assert_eq!(
+            systemd_lifecycle_args("stop", ServiceScope::User),
+            ["--user", "disable", "--now", "opengeni-agent.service"]
+        );
+        assert_eq!(
+            systemd_lifecycle_args("start", ServiceScope::System),
+            ["enable", "--now", "opengeni-agent.service"]
+        );
+    }
+
+    #[test]
+    fn launchd_pause_inspection_matches_only_the_exact_service_override() {
+        let label = service::ids::LAUNCHD_LABEL;
+        assert!(launchd_disabled(
+            &format!("disabled services = {{\n  \"{label}\" => true\n}}"),
+            label
+        ));
+        assert!(!launchd_disabled(&format!("\"{label}\" => false"), label));
+        assert!(launchd_disabled(&format!("\"{label}\" => disabled"), label));
+        assert!(!launchd_disabled(&format!("\"{label}\" => enabled"), label));
+        assert!(!launchd_disabled(
+            &format!("\"{label}.other\" => true"),
+            label
+        ));
+        assert!(!launchd_disabled("disabled services = {}", label));
+    }
+
+    #[test]
+    fn service_inspection_is_versioned_and_keeps_paused_distinct_from_missing() {
+        let value = serde_json::to_value(ServiceInspection {
+            schema_version: 1,
+            installed: true,
+            enabled: false,
+            running: false,
+            binary_path: Some("/Applications/Agent.app/Contents/MacOS/agent".into()),
+        })
+        .unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["installed"], true);
+        assert_eq!(value["enabled"], false);
+        assert_eq!(value["running"], false);
+        assert!(value["binaryPath"].as_str().unwrap().contains("Agent.app"));
+    }
+
+    #[test]
     fn scope_maps_system_flag() {
         assert_eq!(
             scope(&ServiceScopeArgs { system: true }),
@@ -1103,6 +1307,61 @@ mod tests {
                 PathBuf::from("/run/systemd/system.control")
             ]
         );
+    }
+
+    #[test]
+    fn restart_reads_existing_launchd_environment_without_importing_shell_values() {
+        let env = parse_launchd_environment(
+            br#"{"EnvironmentVariables":{"PATH":"/opt/tools/bin:/usr/bin","LANG":"en_US.UTF-8"}}"#,
+        )
+        .unwrap();
+        assert_eq!(env.get("PATH").unwrap(), "/opt/tools/bin:/usr/bin");
+        assert_eq!(env.get("LANG").unwrap(), "en_US.UTF-8");
+        assert!(parse_launchd_environment(b"{}").unwrap().is_empty());
+        assert!(parse_launchd_environment(br#"{"EnvironmentVariables":{"PATH":5}}"#).is_err());
+        assert!(parse_launchd_environment(b"invalid").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchd_environment_reads_xml_and_binary_plists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = service::launchd_plist_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let environment = std::collections::BTreeMap::from([
+            ("PATH".to_string(), "/opt/tools/bin:/usr/bin".to_string()),
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+        ]);
+        let spec = ServiceSpec {
+            binary_path: PathBuf::from(
+                "/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+            ),
+            args: vec!["run".into()],
+            scope: ServiceScope::User,
+            environment_path: None,
+        };
+        let body = service::render_launchd_plist_with_environment(
+            &spec,
+            Path::new("/Users/runner"),
+            &environment,
+        )
+        .unwrap();
+        std::fs::write(&path, body).unwrap();
+        for format in ["xml1", "binary1"] {
+            assert!(Command::new("/usr/bin/plutil")
+                .args(["-convert", format])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            let parsed = launchd_environment(&path).unwrap();
+            for (key, value) in &environment {
+                assert_eq!(parsed.get(key), Some(value));
+            }
+            let rendered = launchd_definition(&spec, dir.path()).unwrap();
+            assert!(rendered.contains("/opt/tools/bin:/usr/bin"));
+            assert!(rendered.contains("en_US.UTF-8"));
+        }
     }
 
     #[test]

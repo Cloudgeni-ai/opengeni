@@ -75,6 +75,16 @@ Once no API image older than 0527 can run, a later rolling migration drops
 
 ## Verified signup trial runtime switch (0521)
 
+**Current behavior after 0845:** new verified signup receipts carry zero money
+and establish one-human/one-org eligibility for monthly Free credit. Existing
+positive trial balances remain untouched. Neither of the legacy money switches
+below disables eligibility or re-enables a signup bonus. No production config
+edit is needed to stop bonus money; monthly funding still requires enabled
+subscription plans and the configured free-credit model policy. There is no
+eligibility backfill. See [subscription plans](subscription-plans.md).
+
+The remainder of this section documents the historical, pre-0845 money switch.
+
 `0521_verified_signup_trial_runtime_switch.sql` is a rolling migration. It needs
 no drain and no `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then
 run the normal `db:provision-roles`. Its seed revision allows grants, so this
@@ -1037,7 +1047,16 @@ bun run db:provision-roles
 bun run db:assert-runtime-posture
 ```
 
-The Job receives the ordinary runtime Secret first and the separate
+The Job reads an incoming-release ConfigMap snapshot created before its hook,
+not the previous release's still-live workload ConfigMap. Chart-managed runtime
+Secrets (`secret.create=true`) receive the same hook-scoped snapshot treatment;
+externally managed runtime and migration Secrets must already contain the desired
+values before Helm runs. Migration and catalog-import snapshots reuse the
+canonical chart rendering and follow their Job's hook events at an earlier
+weight, with cleanup after the hook event succeeds. See the
+[chart hook settings contract](../deploy/helm/opengeni/README.md#hook-release-settings).
+
+After that config source, the Job receives the ordinary runtime Secret first and the separate
 migration-only Secret second. This gives the assertion the restricted
 `OPENGENI_DATABASE_URL` while keeping the owner URL and provisioning password
 out of API and worker pods. Its default command serializes `db:migrate`,
@@ -1938,6 +1957,11 @@ and accepts its own commit or a normally merged ancestor with successful exact-s
 main CI. For an ancestor, its controller and package source remain separate and
 the signed provenance names both; the run's head SHA is not the package source.
 Select the source-named artifact from the successful canonical publisher run.
+The artifact is uploaded by the run's credential-free `confirm` job once npm serves
+every accepted version. npm processes accepted writes asynchronously, sometimes for
+more than 18 minutes; if `confirm` fails because a version is still invisible after
+its 30-minute window, re-run that failed job. It publishes nothing and completes
+the same run.
 Environment approval and ordinary image/CI/deployment checks remain mandatory.
 Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
 reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
@@ -1963,6 +1987,14 @@ rebase-and-merge). Hotfix via `hotfix/*` into `production`, then merge
 `workflow_dispatch` candidate/acceptance/publication. Official source ancestry
 is `origin/production`. The `production` pointer already exists; do not
 recreate it and do not force-push.
+
+When first activating workspace default machines and scheduled
+`executionTarget: workspace_default`, replace the API and both worker roles
+without old/new runtime overlap before accepting those settings. Older binaries
+ignore the new placement fields and would use the deployment backend instead.
+Migration 0864 itself supports rolling schema compatibility; that does not make
+mixed-version placement semantics safe. Existing chats and already accepted
+occurrences retain their frozen machine.
 
 Protect `production`: no force-push; merge commits only (disable squash and
 rebase-and-merge); required checks `Admit production PR head` and
@@ -1990,6 +2022,58 @@ a later GitHub `APPROVE` or structured PASS body on the exact head:
   required main CI jobs remain fail-closed;
 - GitHub branch protection may still require a review to merge into `main`;
   that is a merge-time GitHub rule, not a second operator PASS check.
+
+**Tested-descendant candidate admission.** When the merge batcher lands a
+Version PR as a singleton true merge and `main` then fast-forwards to a later
+fully green tested tip, dispatch `release-candidate.yml` with `source_sha` set
+to that released tip and the optional `provenance_sha` set to the exact Version
+PR merge. An empty `provenance_sha` (or one equal to `source_sha`) keeps the
+exact-source lane above unchanged. The two SHAs stay separate: every Version
+proof above (merged associated PR from `changeset-release/main` by the GitHub
+Actions bot, reviewed base/head, `merge` or provider-verified moving-main merge
+topology, full reviewed delta, release-head retention and exact-head source
+admission) runs at `provenance_sha`, while every CI, image and artifact proof
+runs at `source_sha` only. `scripts/check-release-pr-automation.mjs` additionally
+requires, fail-closed:
+
+- `source_sha` retained by `main` at the initial and terminal reads, with
+  `provenance_sha` on its first-parent chain; the controller is either the
+  Version PR's reviewed base or a later `main` commit, never `source_sha` itself;
+- every intervening first-parent commit is a two-parent merge whose single
+  associated PR merged into `main` with `merge_commit_sha` equal to that merge
+  and head equal to its second parent; a competing `changeset-release/main` PR,
+  a direct commit, a squash or rebase, or a missing association is rejected;
+- every merge tree from `provenance_sha` to `source_sha` is recomputed from
+  protected `main` history fetched as Git objects only (`git merge-tree
+  --write-tree`) and must equal the recorded tree, so conflict resolutions and
+  hidden extra deltas are rejected;
+- every reviewed Version path keeps its reviewed content at `source_sha`, and no
+  pending `.changeset/*.md` exists there;
+- the required source CI jobs plus `Verify landed merge content` and
+  `Publish fully green main SHA` succeeded in one `push` run on `main` for
+  `source_sha`; the newest `Full CI` commit status was created by the GitHub
+  Actions bot and targets that run's current attempt; and that run attempt owns
+  exactly one unexpired, digest-bearing `full-green-main-<source_sha>` and
+  `canary-images-<source_sha>` artifact created after that attempt started.
+  Admission downloads each exact artifact ID, verifies its archive digest and
+  parses the canonical receipts. Source, workflow, run, attempt, full mode and
+  all eight workload image repositories/digests must match; a previous attempt's
+  receipt is not accepted even when its run ID or artifact name matches.
+  Batch-ready or queue-ready signals are
+  not full green, and nothing is borrowed from the Version merge's own CI.
+
+The walk is bounded to 100 intervening merges and 2,000 compared commits. Any
+later change to a reviewed Version path fails closed; choose an earlier green
+tip. The admission job reports `release_source_sha`, `version_provenance_sha`
+and `release_admission_mode`; the candidate receipt schema is unchanged.
+
+Recover a failed full-main run intended for release with **Re-run all jobs**, not
+"Re-run failed jobs": the canary image and full-green receipts must come from the
+same selected attempt. A green provider run with stale image receipts is still
+ineligible. `latest-green-main.ts` discovers full-CI-green SHAs, not complete
+Version-release eligibility; a tip with pending changesets or altered reviewed
+Version content is rejected by admission. Prefer the isolated Version merge's own
+fully green run or a qualifying descendant, never relax those checks.
 
 Do not recreate admission from a live review list, a review comment, a commit
 message, or a local record. The ordinary operator still records identity fields
@@ -2185,12 +2269,26 @@ and terminal head identity remain fail-closed. The merge authority separately pe
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
-Do not enable or leave auto-merge armed on a generated Version PR until trusted
+Before batcher activation, do not enable or leave auto-merge armed on a generated Version PR until trusted
 CI on that exact head is green. Immediately before merge, re-read `baseRefOid`,
 `headRefOid`, `state`, and `autoMergeRequest` from the PR. Require the PR to
 remain open and auto-merge to remain null, then merge with an exact head-SHA
 fence. Never rely on an earlier UI observation for this boundary. Ordinary
 candidate/operator admission does not re-read GitHub reviews after merge.
+
+After the rollout owner enables the in-house batcher, replace only that manual
+merge action with the `queue-ready` label. Keep auto-merge off for Version PRs.
+First require the exact-head trusted full CI, `Queue ready`, current-base source
+admission and release-head retention evidence described above. Also run the
+full relevant VM tests, obtain independent review, and post the genuine exact-head
+evidence comment required by `AGENTS.md`; bot-created PRs have no exemption.
+The existing workflows create/update and validate Version PRs, but do not merge
+them automatically or fabricate that comment. Observe the singleton batch's
+`Batch ready` result and actual landed merge SHA. A regenerated head invalidates
+the earlier VM/review evidence and requires a fresh admission. The batcher performs
+the final head/readiness reread and post-land reconciliation; a late newer head
+must never be described as tested. The release consumer separately verifies full
+main CI at the released tip, not just the fast batch result.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
@@ -2226,15 +2324,20 @@ exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest. The official BOM does **not** include `opengeni-desktop`.
-Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
-published by `.github/workflows/publish-desktop-image.yml` to
-`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>`.
-The publisher uses the existing `public-release` OIDC identity, verifies the tag's
-immutable digest and source label after registry logout, pulls anonymously, and
-runs the installed artifact runtime doctor while rejecting `.unavailable`.
-The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` and
-`canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
-error-tolerant job, not publication gates.
+Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd).
+Its browser controller must match the server revision, so protected main CI
+builds it with the other canary images, pushes
+`ghcr.io/cloudgeni-ai/opengeni-desktop:canary-sha-<source-sha>`, verifies the
+tag resolves anonymously, and records the digest as `images.desktop` in the
+`canary-images-<source-sha>` receipt. A deployment that takes its images from
+that receipt should set Helm `desktop.imageRef` to
+`ghcr.io/cloudgeni-ai/opengeni-desktop@<images.desktop.digest>` in the same change.
+`.github/workflows/publish-desktop-image.yml` is dispatch-only. It publishes
+`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>` through
+the `public-release` OIDC identity, verifies the tag's immutable digest and
+source label after registry logout, pulls anonymously, and runs the installed
+artifact runtime doctor while rejecting `.unavailable`. Use it to refresh the
+default pin below. The workflow retains publication evidence.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
 Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override
@@ -2768,6 +2871,25 @@ that CA through a private ConfigMap/Secret before running
 `bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
 separate from the Opengeni-to-Temporal client settings below.
 
+Budget PostgreSQL connections across processes, not just current activity:
+each API has a runtime pool (`OPENGENI_API_DATABASE_POOL_MAX`, default 32) and
+a separate managed-auth pool (maximum 10); each worker has the default runtime
+pool (10) plus one readiness connection. Web and relay do not open SQL pools.
+Include each deployment's independent surge, old terminating pods that are
+still draining, Temporal's per-service default and visibility pools, one-shot
+migration/provisioning jobs, catalog import (default pool 10), and operator
+connections. Subtract PostgreSQL's reserved slots from `max_connections`.
+Pools are lazy; observed idle/active counts are not the rollout upper bound.
+Set server capacity against that budget and measured backend memory rather
+than shrinking application pools to fit an accidental server default.
+
+Scoped transactions retry transient connection acquisition up to eight times
+with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
+sleep, plus driver connection time). This never replays a callback that has
+started or a failed savepoint. Running turns whose database connection remains
+unavailable, including SQLSTATE 53300, use the existing fenced exact-attempt
+recovery lane; ordinary data/authentication failures remain failures.
+
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
 namespace used by Opengeni (`default` by default). The Opengeni worker cannot
@@ -2794,6 +2916,16 @@ The runtime secret must provide values such as:
   re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
   including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
+- Optional `OPENGENI_DATABASE_NOTIFICATION_URL`: a direct or session-pooled connection
+  to the **same database and runtime role**, for committed sidebar invalidations.
+  Each API process lazily opens one dedicated `LISTEN` connection, shared by its
+  open workspace streams. Direct deployments use `OPENGENI_DATABASE_URL` by default.
+  Transaction-pooled deployments (port 6432 or prepared statements explicitly
+  disabled) must provide this separate URL to enable hints; otherwise clients keep
+  their existing polling. Do not point this at a transaction-mode pooler or an
+  owner credential. Listener loss restores polling, and reconnect reconciles every
+  loaded list before the client resumes hint-driven reads. Rolling migrations
+  must run before the new API starts serving, as for the other runtime schema.
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
 - `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS without an API key
@@ -2832,7 +2964,7 @@ The runtime secret must provide values such as:
   Disabled subscription deliveries are retained but not marked processed, so they
   can be replayed after activation. Stripe readiness/products/webhook configuration
   are separate operator activation work, not performed by this flag.
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` is a legacy compatibility flag after migration 0845: new verified first self-service signups always receive a zero-value Free eligibility receipt, never a separate bonus. The flag and historical runtime money switch cannot disable eligibility or restore bonus money. Existing positive trial grants remain untouched; no old user is backfilled. Enabled subscription maintenance issues monthly Free funding under the current plan catalog and free-credit model policy. `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` provides the signup receipt's bootstrap scope until a runtime policy exists; a positive Free grant never silently becomes unrestricted when scope is missing. See [subscription plans](subscription-plans.md) and [scoped promotional credits](scoped-promotional-credits.md). No payment card is required. Completed in-flight usage can create general debt, and future top-ups repay it first; cards are not automatically charged. New work without an explicit model uses the existing funded-model resolution described in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
@@ -3399,14 +3531,37 @@ annotations (read/send timeouts of at least `3600` seconds, buffering off). Flip
 `selfhosted.enabled=true` together with `relay.enabled=true` and the NATS
 callout.
 
-### Ingress channel affinity
+### Multi-replica relay routing
 
-The relay pairs a channel's producer and consumer in a per-replica in-memory
-registry, so both dials for a given channel must reach the SAME relay replica.
-When running more than one relay replica behind an L7 ingress, configure the
-ingress to route both dials for a channel to the same backend (consistent-hash or
-session affinity keyed on the channel); otherwise a producer and consumer can
-land on different replicas and never pair.
+No ingress affinity, cookie stickiness, query hashing, or headless ingress backend
+is required. The producer's initial registration selects a relay owner and returns
+a signed, channel-bound routing hint. The agent includes that hint in the stream
+descriptor; the API carries it in the viewer's public relay URL. A different relay
+receiving that dial verifies the ordinary stream token and the hint, then proxies
+one WebSocket hop to the owner. Pairing, replay rings, epoch fences and rate
+accounting remain in the owner's existing registry. Stream bytes do not traverse
+Postgres or the control-plane broker.
+
+The chart automatically advertises each pod's IP with
+`OPENGENI_RELAY_ADVERTISE_IP` and allows only same-release relay-to-relay traffic
+on the stream port. Other deployments should set that variable to each replica's
+private, peer-reachable IP and allow peers to reach its `OPENGENI_RELAY_BIND` port.
+IP literals support IPv4 and IPv6; no peer DNS service is needed. Leaving it unset
+retains standalone operation. Do not advertise an ingress or load-balancer IP.
+
+A route names a process incarnation as well as an address, so a recycled pod IP
+cannot accept the previous owner's channel. Producer reconnects retain a live
+owner. If that owner is unavailable, the producer registers a replacement and
+updates its stream descriptor; scoped terminal refreshes return the new route
+without creating another shell. Viewers rejected by the old route refresh their
+existing stream grant. As before, losing a relay owner loses its in-memory replay
+tail; this is not durable terminal output storage.
+
+Roll out the matching relay image and server/runtime first, then the agent release
+that understands the additive owner-route fields. Older agents remain compatible
+with standalone relays but do not supply routes for affinity-free multi-replica
+pairing. Existing pre-upgrade producer channels acquire routes when re-registered.
+No frontend protocol change or special ingress-controller configuration is needed.
 
 ### Runtime-secret keys
 
@@ -3835,7 +3990,7 @@ that the rules are healthy in a live deployment.
 
 Minimum production dashboards should cover:
 
-- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
+- API traffic: request rate, error rate, and p50/p95/p99 latency by `route` and `method`, scoped to one environment/deployment. Request counts carry exact `status`; duration histograms carry bounded `status_class` (`1xx` through `5xx`, or `unknown`) and `component`. The API Latency dashboard separates successful latency, request volume, the exact ≤500 ms fraction, and failures; successful history begins at the status-class rollout, while all-status historical queries remain continuous. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
 - Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"}` for the self-service post-sign-in organization setup, and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
 - Product usage (server-side, consent-independent): `opengeni_sessions_created_total{surface,created_by_kind,root}` counts newly created sessions (`surface` is the fixed turn-surface list plus `unknown`; `created_by_kind` is `subject` or `service`; `root` is `true` for a session without a parent and `false` for a child), and `opengeni_user_messages_total{surface}` counts accepted user messages: the initial message of a created session unless its first turn is deferred, every accepted Send/Steer (web, API key, Slack, MCP, embedded), and each accepted scheduled occurrence (`surface="scheduled"`). Idempotent replays are not counted. Both are process-local counters that initialize at zero: aggregate with `sum` across API and control-worker replicas. `opengeni_active_users{window="5m"|"15m"|"1h"|"24h"|"7d"|"30d"}` is the number of distinct managed people active inside the window: a canonical managed browser request that the web console marks with `x-opengeni-user-activity: active`, which it sends only while the tab is visible and the person interacted with it in the last 5 minutes. Idle open tabs, background polling, and event streams never count. API processes record presence throttled to once per person per minute and batched off the request path; API keys, services, agents, embedded-host and local subjects are never counted. Every control worker publishes the same global database value, so aggregate it with `max`, never `sum`. `opengeni_credit_grants_total{grant_class="signup_trial"|"coupon"|"manual"|"other"}` and `opengeni_credit_granted_micros_total{grant_class}` are cumulative totals of positive credit grants observed by a ledger trigger since migration 0565, so they include the verified-signup trial grant (written by a database trigger) and operator grants that no application process writes; they are global gauges, so take `max` across control workers first and then subtract the same expression `offset` by the window. Do not apply `increase()` per pod series: every control-worker restart starts a new series, so a per-pod `increase()` sees only that pod's lifetime and undercounts. `opengeni_credit_micros_total{kind="grant"}` remains the process-local counter for grants written in application code. Per-person history for the same activity is the `user.active`, `credits.granted`, and `connection.revoked` lifecycle facts; see [`embedding.md`](embedding.md#product-lifecycle-facts).
 - Analytics consent: `opengeni_analytics_consent_total{decision="granted"|"denied"}` counts answers to the web console's optional-analytics banner, and `opengeni_analytics_consent_reports_rejected_total{reason}` counts refused reports; both initialize at zero. Only a changed answer is counted, so it is a count of decisions, not of people. Use the `denied` share to state how much of the consenting audience PostHog cannot see; people who never answer the banner are not counted at all, so also compare PostHog's consented sign-ins with the server `sign_in` counter. See [`application-observability.md`](application-observability.md#analytics-consent).
@@ -3863,20 +4018,24 @@ Minimum production dashboards should cover:
 
 Prometheus-style examples:
 
+For the HTTP examples, substitute the namespace, release, and environment of
+one exact deployment. Success-only duration queries require the status-class
+emitter and do not backfill older samples.
+
 ```promql
-sum by (route, method) (rate(opengeni_http_requests_total{variable set="production"}[5m]))
+sum by (route, method) (rate(opengeni_http_requests_total{environment="production",namespace="opengeni-production",release="opengeni",component="api"}[5m]))
 ```
 
 ```promql
-sum by (route) (rate(opengeni_http_requests_total{variable set="production",status=~"5.."}[5m]))
+sum by (route) (rate(opengeni_http_requests_total{environment="production",namespace="opengeni-production",release="opengeni",component="api",status=~"5.."}[5m]))
 /
-sum by (route) (rate(opengeni_http_requests_total{variable set="production"}[5m]))
+sum by (route) (rate(opengeni_http_requests_total{environment="production",namespace="opengeni-production",release="opengeni",component="api"}[5m]))
 ```
 
 ```promql
 histogram_quantile(
   0.95,
-  sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{variable set="production"}[5m]))
+  sum by (le, route, method) (rate(opengeni_http_request_duration_seconds_bucket{environment="production",namespace="opengeni-production",release="opengeni",component="api",status_class="2xx"}[5m]))
 )
 ```
 

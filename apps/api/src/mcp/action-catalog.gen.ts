@@ -1366,6 +1366,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
@@ -1827,6 +1834,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "duplicateWorkspaceArtifact",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate",
+    "request": [
+      "DuplicateWorkspaceArtifactRequest"
+    ],
+    "response": [
+      "WorkspaceArtifactMutationResponse"
+    ]
+  },
+  {
     "id": "editQueueItem",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit",
@@ -2056,6 +2074,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "FsWriteResponse"
     ]
+  },
+  {
+    "id": "GET /v1/office/workbooks",
+    "method": "GET",
+    "path": "/v1/office/workbooks",
+    "request": [],
+    "response": []
   },
   {
     "id": "GET /v1/organizations/:accountId/insights/calls",
@@ -2642,6 +2667,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getBrowserRecording",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId",
+    "request": [],
+    "response": [
+      "BrowserRecordingSummary"
+    ]
+  },
+  {
     "id": "getBrowserSession",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId",
@@ -3173,6 +3207,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OrganizationServiceAccount"
+    ]
+  },
+  {
+    "id": "getOrganizationSubscriptionUsagePools",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/subscription-usage-pools",
+    "request": [],
+    "response": [
+      "SubscriptionUsagePoolsResponse"
     ]
   },
   {
@@ -3727,6 +3770,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceStateResponse"
+    ]
+  },
+  {
+    "id": "getWorkspaceSubscriptionUsagePools",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/subscription-usage-pools",
+    "request": [],
+    "response": [
+      "SubscriptionUsagePoolsResponse"
     ]
   },
   {
@@ -4831,6 +4883,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "listSiteSessionAccess",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listSlackInstallationBindings",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/slack-bot/bindings",
@@ -5132,6 +5191,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "GatewayRealtimeConnectResponse"
+    ]
+  },
+  {
+    "id": "negotiateRealtimeWebsocket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+    "request": [
+      "SessionRealtimeWebsocketRequest"
+    ],
+    "response": [
+      "SessionRealtimeWebsocketResponse"
     ]
   },
   {
@@ -6119,6 +6189,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
@@ -6900,6 +6977,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "saveBrowserRecording",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
+    "request": [
+      "BrowserRecordingSaveRequest"
+    ],
+    "response": [
+      "BrowserRecordingSaveResponse"
+    ]
+  },
+  {
     "id": "saveComposerDraft",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft",
@@ -7227,6 +7315,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AuthRunMutationResponse"
+    ]
+  },
+  {
+    "id": "startBrowserRecording",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings",
+    "request": [],
+    "response": [
+      "BrowserRecordingSummary"
     ]
   },
   {
@@ -7689,6 +7786,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "UpdateExternalWorkspaceMemberResponse"
+    ]
+  },
+  {
+    "id": "updateFileVisibility",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
+    "request": [
+      "UpdateFileVisibilityRequest"
+    ],
+    "response": [
+      "UpdateFileVisibilityResponse"
     ]
   },
   {

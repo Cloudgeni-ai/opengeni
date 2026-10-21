@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "4.0.4",
+  "version": "4.3.1",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -67,13 +67,29 @@
       "types": "./src/session.ts",
       "default": "./src/session.ts"
     },
+    "./session-app": {
+      "types": "./src/session-app.ts",
+      "default": "./src/session-app.ts"
+    },
     "./session-ui": {
       "types": "./src/session-ui.ts",
       "default": "./src/session-ui.ts"
     },
+    "./ui/*": {
+      "types": "./src/ui/*.tsx",
+      "default": "./src/ui/*.tsx"
+    },
+    "./app/*": {
+      "types": "./src/app/*.tsx",
+      "default": "./src/app/*.tsx"
+    },
     "./diffs": {
       "types": "./src/diffs.ts",
       "default": "./src/diffs.ts"
+    },
+    "./workbench": {
+      "types": "./src/workbench.ts",
+      "default": "./src/workbench.ts"
     },
     "./accounts": {
       "types": "./src/accounts.tsx",
@@ -154,6 +170,11 @@
       "style": "./styles/compiled.css",
       "default": "./styles/compiled.css"
     },
+    "./app.css": {
+      "types": "./styles/app.d.ts",
+      "style": "./styles/app.css",
+      "default": "./styles/app.css"
+    },
     "./responsive.css": {
       "types": "./styles/responsive.d.ts",
       "style": "./styles/responsive.css",
@@ -214,7 +235,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun run build:css && bun ../../scripts/generate-visualization-assets.ts && bun ../../scripts/build-typescript-package.ts",
     "build:css": "bun scripts/build-compiled-css.ts",
     "check:css": "bun scripts/build-compiled-css.ts --check",
@@ -231,7 +252,10 @@
     "@fontsource-variable/noto-sans-arabic": "5.2.10",
     "@fontsource-variable/noto-sans-jp": "5.2.10",
     "@opengeni/connect": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
     "@opengeni/sdk": "workspace:*",
+    "@tanstack/react-virtual": "^3.14.11",
+    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
     "lucide-react": "^1.8.0",
@@ -240,6 +264,7 @@
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.11.2",
     "remark-gfm": "^4.0.1",
+    "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
     "thinking-orbs": "^0.3.1",
     "virtua": "^0.49.2"
@@ -259,7 +284,6 @@
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",
-    "@opengeni/contracts": "workspace:*",
     "@pierre/diffs": "^1.2.11",
     "@tailwindcss/postcss": "4.2.4",
     "@tailwindcss/vite": "^4.2.4",

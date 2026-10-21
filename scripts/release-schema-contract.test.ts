@@ -37,6 +37,21 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("model fact reconciliation adds rolling state and concurrent paging indexes", async () => {
+    const contract = await buildCompleteSchemaContract();
+    for (const path of [
+      "0890_model_fact_reconciliation_progress.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0892_model_fact_event_pages.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+    ]) {
+      expect(contract.migrations.find((migration) => migration.path === path)).toMatchObject({
+        path,
+        deploymentMode: "rolling",
+      });
+    }
+  });
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2325,7 +2340,49 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0900_workspace_admin_predicate_privileges.sql",
+      "0899_ordered_turn_history_pages.sql",
+      "0898_organization_direct_openai_model_providers.sql",
+      "0897_workspace_owner_administers_subscriptions.sql",
+      "0896_shared_child_turn_context_authority.sql",
+      "0895_organization_voice_defaults.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0892_model_fact_event_pages.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0890_model_fact_reconciliation_progress.sql",
+      "0889_session_events_tool_name.sql",
+      "0888_session_list_invalidation.sql",
+      "0887_session_events_attempt_reference_index.sql",
+      "0886_remove_duplicate_session_identity_indexes.sql",
+      "0885_checkpoint_gc_reference_sets.sql",
+      "0884_subscription_core_personal_quarantine_expiry.sql",
+      "0883_retired_instance_interactions.sql",
+      "0882_continuable_core_capacity_waits.sql",
+      "0881_knowledge_scope_expression.sql",
+      "0880_quiescence_repair_skips_parked_waits.sql",
+      "0879_unsettled_admissions_session_index.sql",
+      "0878_keyed_knowledge_visibility.sql",
+      "0877_single_semantic_event_projection.sql",
+      "0876_connection_validation_shared_locks.sql",
+      "0875_realtime_history_reference_index.sql",
+      "0874_elevenlabs_realtime_models.sql",
+      "0873_mcp_binding_delegation_revocation.sql",
+      "0872_agent_update_blockers.sql",
+      "0867_member_teammate_permissions_backfill.sql",
+      "0866_member_teammate_permissions_backfill_index.sql",
+      "0865_member_teammate_permissions.sql",
+      "0871_subscription_usage_history.sql",
+      "0872_subscription_usage_call_history_seed.sql",
+      "0864_scheduled_bot_capability.sql",
+      "0863_classify_connected_command_ops.sql",
+      "0862_compute_stale_sandbox_enrollments.sql",
+      "0861_compute_lease_group_end_and_sleep.sql",
+      "0860_compute_commands_settle_by_push.sql",
+      "0859_compute_leases_skip_idle_drain.sql",
+      "0858_sandbox_enrollments.sql",
       "0838_reclaim_exited_backend_runtime_capabilities.sql",
+      "0841_session_machine_access_explanation.sql",
       "0837_hot_session_tables_analyze_cadence.sql",
       "0836_cheaper_session_write_fences.sql",
       "0832_schedule_defaults_and_turn_notifications.sql",
@@ -2850,6 +2907,28 @@ describe("release schema contract", () => {
       "0793_private_site_sessions.sql",
       "0794_site_ai_insights.sql",
       "0795_site_lifecycle_cancellation.sql",
+      "0839_docker_local_command_containment.sql",
+      "0840_retained_process_reconciler_version.sql",
+      "0842_site_session_access.sql",
+      "0843_indexed_inbox_lineage.sql",
+      "0844_free_plan_credit_scope.sql",
+      "0845_signup_eligibility_without_bonus.sql",
+      "0846_independent_session_titles.sql",
+      "0847_read_only_runtime_probes.sql",
+      "0848_strict_owner_maintenance_probes.sql",
+      "0849_strict_owner_maintenance_claims.sql",
+      "0851_personal_machine_session_tree.sql",
+      "0852_maintenance_predicate_privileges.sql",
+      "0853_connected_machine_root_working_dirs.sql",
+      "0854_file_visibility.sql",
+      "0855_session_fork_agent_parity.sql",
+      "0856_session_fork_workflow_identity.sql",
+      "0857_connection_origin_workspace_cascade.sql",
+      "0868_humanless_personal_workspace_learning.sql",
+      "0869_personal_workspace_editable_artifacts.sql",
+      "0870_invitation_binding_seat_scope.sql",
+      "0871_explicit_workspace_recovery.sql",
+      "0872_file_app_shot.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

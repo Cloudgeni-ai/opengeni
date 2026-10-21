@@ -115,6 +115,10 @@ describe("relay metrics listener chart wiring", () => {
         name: "OPENGENI_RELAY_METRICS_BIND",
         value: "0.0.0.0:9464",
       });
+      expect(container.env).toContainEqual({
+        name: "OPENGENI_RELAY_ADVERTISE_IP",
+        valueFrom: { fieldRef: { fieldPath: "status.podIP" } },
+      });
 
       const publicService = find(manifests, "Service", "metrics-test-opengeni-relay")!;
       expect(publicService.spec.type).toBe("NodePort");
@@ -153,6 +157,31 @@ describe("relay metrics listener chart wiring", () => {
       const metricsRule = rules.find((rule) => rule.ports[0]!.port === 9464)!;
       expect(JSON.stringify(wssRule.from)).toContain("ingress-nginx");
       expect(JSON.stringify(wssRule.from)).not.toContain("prometheus");
+      expect(wssRule.from).toContainEqual({
+        podSelector: {
+          matchLabels: {
+            "app.kubernetes.io/name": "opengeni",
+            "app.kubernetes.io/instance": "metrics-test",
+            "app.kubernetes.io/component": "relay",
+          },
+        },
+      });
+      expect(policy.spec.egress).toEqual([
+        {
+          to: [
+            {
+              podSelector: {
+                matchLabels: {
+                  "app.kubernetes.io/name": "opengeni",
+                  "app.kubernetes.io/instance": "metrics-test",
+                  "app.kubernetes.io/component": "relay",
+                },
+              },
+            },
+          ],
+          ports: [{ protocol: "TCP", port: 8443 }],
+        },
+      ]);
       expect(JSON.stringify(metricsRule.from)).toContain("prometheus");
       expect(JSON.stringify(metricsRule.from)).not.toContain("ingress-nginx");
     },

@@ -8,13 +8,13 @@ import type { VaultSummary } from "@opengeni/react";
 import { ArrowUpRightIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@/components/ui/flush-form-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { userErrorText } from "@/lib/api-error";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FLUSH_DETAIL_PAGE_CLASS, FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import { FinishConnectingNotice } from "./provider-connections";
 import { ProviderTile } from "./provider-marks";
@@ -26,7 +26,10 @@ import {
   VaultChooser,
   type LinkVaultActions,
 } from "./vault-chooser";
-import { vaultErrorText, type ConnectionOwner } from "./vault-model";
+import {
+  vaultErrorText,
+  type ConnectionOwner,
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   connectionName,
   lockedText,

@@ -1,9 +1,9 @@
 import { createRoot } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
-import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
-import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
-import type { Session } from "../src/types";
+import { SessionTenancyControl } from "@opengeni/react/app/components/session/session-tenancy-control";
+import { SessionTenancyOperationController } from "@opengeni/react/app/lib/session-tenancy-operation-controller";
+import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";

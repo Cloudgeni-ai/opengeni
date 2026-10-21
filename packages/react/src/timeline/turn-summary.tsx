@@ -25,6 +25,7 @@ import {
   formatElapsed,
   resolveTurnSummaryFacets,
   selectTurnSummaryFacets,
+  turnSummaryFallbackLabel,
   type TurnSummaryFacetConfiguration,
   type TurnSummaryStatus,
 } from "./turn-summary-model";
@@ -133,6 +134,8 @@ export type TurnSummaryProps = {
    * chevron and is not a disclosure control. Defaults to true.
    */
   expandable?: boolean | undefined;
+  /** The turn has steps that are not loaded yet (opening the row reads them). */
+  unloadedSteps?: boolean | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
@@ -159,6 +162,7 @@ export function TurnSummary({
   contextCompactionCount,
   status,
   expandable = true,
+  unloadedSteps,
   onOpenStateChange,
   children,
 }: TurnSummaryProps) {
@@ -467,21 +471,23 @@ export function TurnSummary({
         {statusLine}
         {liveHeader && !open && !status
           ? liveHeader
-          : facets.map(({ facet, result }, index) => (
-              <FacetRenderBoundary key={facet.id}>
-                <>
-                  {index > 0 || statusLine ? " · " : null}
-                  <span aria-label={result.ariaLabel} title={result.title}>
-                    {result.icon ? (
-                      <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                        {result.icon}
-                      </span>
-                    ) : null}
-                    {result.content}
-                  </span>
-                </>
-              </FacetRenderBoundary>
-            ))}
+          : !statusLine && facets.length === 0 && !failure && outcome !== "cancelled"
+            ? turnSummaryFallbackLabel(t, context.items, unloadedSteps)
+            : facets.map(({ facet, result }, index) => (
+                <FacetRenderBoundary key={facet.id}>
+                  <>
+                    {index > 0 || statusLine ? " · " : null}
+                    <span aria-label={result.ariaLabel} title={result.title}>
+                      {result.icon ? (
+                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                          {result.icon}
+                        </span>
+                      ) : null}
+                      {result.content}
+                    </span>
+                  </>
+                </FacetRenderBoundary>
+              ))}
         {failure ? (
           <span className="text-og-status-failed" title={failure.detail}>
             {" "}

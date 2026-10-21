@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, withSessionRlsActorContext } from "../src/database";
 import {
@@ -50,6 +50,7 @@ import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
 const forwardMigrations = [
@@ -82,11 +83,25 @@ const forwardMigrations = [
   "0652_session_archive_guard_search_path.sql",
   "0653_session_archive_tenancy_fence.sql",
   "0657_session_archive_purge_retained_evidence.sql",
+  // The list notification projection includes withheld archive/import fields.
+  "0888_session_list_invalidation.sql",
   "0660_session_archive_preference_snapshot_export.sql",
   // Resolves the Knowledge claim installed by the withheld 0461 migration.
   "0730_maintenance_work_probes.sql",
   // Rewrites the visibility transition installed by withheld 0501; replay after it.
   "0738_private_sessions_share_sandboxes.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  // Replaces the file ownership trigger from 0461 and reads 0499's file
+  // read-capability table; replay after both.
+  "0854_file_visibility.sql",
+  // Rewrites the fork routines from replayed 0738; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and backfills over 0560's import column.
+  "0856_session_fork_workflow_identity.sql",
+  // Patches the account-binding fence as rewritten by withheld 0501.
+  "0873_mcp_binding_delegation_revocation.sql",
+  ...strictOwnerMaintenanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

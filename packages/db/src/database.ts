@@ -8,32 +8,33 @@ import { databaseBootConnectOptions } from "./boot-connect";
 
 import {
   DatabaseTransactionError,
+  isDatabaseConnectionLoss,
   isDatabasePersistenceFailure,
+  isRetryableDatabaseTransportFailure,
+  nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 import { startDatabaseTiming } from "./database-timing";
+import {
+  createSessionListChangeSource,
+  type SessionListChangeSource,
+} from "./session-list-notifications";
 
-// §7.7 driver widening (Step I). `Database` is the structural, cross-driver
-// query-layer port: every helper in this file accepts `db: Database` and uses
-// only the methods present on drizzle's base `PgDatabase` (select/insert/update/
-// delete/transaction/execute). Widening from the concrete
-// `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
-// pure TYPE change — no runtime behavior changes — that lets an embedded host
-// inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
-// Opengeni's schema, not just the postgres-js handle `createDb` builds. The
-// `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
-// callable across drivers whose raw-result shapes differ (postgres-js returns a
-// row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
-// reads that index a row array (`getManagedUserByEmail` here is the only
-// host-facing one — see `userLookup`) stay postgres-js-shaped for standalone;
-// `userLookup` is the injection seam for hosts on a different driver.
-// `PostgresJsDatabase<typeof schema>` is assignable to this, so standalone is
-// unaffected.
-
-export type Database = PgDatabase<any, typeof schema>;
+// Structural cross-driver query port. Opengeni passes explicit tables to its
+// builders; it never uses Drizzle's schema-registered relational `query` API.
+// Omit that API at both root and transaction scope without rejecting a host's
+// richer schema-configured handle. The query-result HKT remains deliberately
+// driver-independent; standalone raw row arrays retain their existing shape.
+export type Database = Omit<PgDatabase<any, any>, "query" | "transaction"> & {
+  transaction<T>(
+    run: (tx: DatabaseTransaction) => Promise<T>,
+    config?: PgTransactionConfig,
+  ): Promise<T>;
+};
+type DatabaseTransaction = Database & { rollback(): never };
 
 declare const sessionActivityDatabaseBrand: unique symbol;
 
@@ -54,6 +55,13 @@ export type RlsContext = {
   accountId: string;
   workspaceId?: string | null;
 };
+
+/** The requested tenant no longer exists. Other scope/setup failures stay errors. */
+export class WorkspaceNotFoundError extends Error {
+  constructor(readonly workspaceId: string) {
+    super(`Workspace not found: ${workspaceId}`);
+  }
+}
 
 export type SessionRlsActorContext = {
   /** Server-authorized session attachment scope; never taken from request JSON. */
@@ -88,6 +96,15 @@ export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAcces
  */
 export function currentSessionRlsActorContext(): Readonly<SessionRlsActorContext> | undefined {
   return sessionRlsActorContext.getStore();
+}
+
+/**
+ * Runs `fn` with no session RLS actor, so its reads see the tenant as the
+ * system does (private chats included). Only for narrow reads whose result is
+ * never disclosed to the request; not re-exported from the package.
+ */
+export async function withoutSessionRlsActor<T>(fn: () => Promise<T>): Promise<T> {
+  return await sessionRlsActorContext.exit(() => siteViewerRlsContext.exit(fn));
 }
 
 /**
@@ -208,6 +225,8 @@ export type UserProfileLookup = (
 ) => Promise<ManagedUserProfile[]>;
 
 export type CreateDbOptions = {
+  /** Direct or session-pooled PostgreSQL URL for API list invalidations. Lazy; never a transaction pooler. */
+  notificationDatabaseUrl?: string;
   /**
    * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
    * UNSET → today's behavior: NO `search_path` startup parameter is sent, so the
@@ -259,9 +278,16 @@ type DbBinding = {
   rlsStrategy: RlsStrategy;
   userLookup?: UserLookup;
   userProfileLookup?: UserProfileLookup;
+  sessionListChanges?: SessionListChangeSource;
+  cancellableTransactions?: boolean;
 };
 
 const dbBindings = new WeakMap<object, DbBinding>();
+
+/** Absent for externally constructed handles or transaction-only connections. */
+export function sessionListChangesFor(db: Database): SessionListChangeSource | undefined {
+  return dbBindings.get(db as object)?.sessionListChanges;
+}
 
 /** The strategy bound to a handle (or the `"force"` default). */
 export function rlsStrategyFor(db: Database): RlsStrategy {
@@ -418,6 +444,42 @@ export function defaultDatabasePreparedStatements(databaseUrl: string): boolean 
 }
 
 type PostgresSql = postgres.Sql | postgres.TransactionSql;
+const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
+
+/** Only used on a reserved transaction connection. Join the protocol cancel
+ * before allowing rollback/release, so it cannot reach a later pool borrower.
+ * The postgres patch exposes the driver's existing cancellation completion.
+ */
+function abortableQuery<T extends postgres.Row[]>(
+  query: postgres.PendingQuery<T>,
+  signal: AbortSignal,
+): postgres.PendingQuery<T> {
+  const observe = query.then.bind(query);
+  let result: Promise<unknown> | undefined;
+  Object.defineProperty(query, "then", {
+    value: (...args: Parameters<Promise<unknown>["then"]>) => {
+      result ??= (async () => {
+        signal.throwIfAborted();
+        let cancellation: Promise<void> | undefined;
+        const abort = () => {
+          cancellation = query.cancel();
+          // Observe a failed cancel immediately; the query still must settle.
+          void cancellation.catch(() => {});
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        try {
+          return await new Promise<unknown>((resolve, reject) => observe(resolve, reject));
+        } finally {
+          signal.removeEventListener("abort", abort);
+          if (cancellation) await cancellation;
+          signal.throwIfAborted();
+        }
+      })();
+      return result.then(...args);
+    },
+  });
+  return query;
+}
 
 /**
  * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
@@ -426,19 +488,29 @@ type PostgresSql = postgres.Sql | postgres.TransactionSql;
  * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
  * parameters keep postgres-js's one-message simple protocol.
  */
-function preparingUnsafe<T extends PostgresSql>(target: T): T {
+function preparingUnsafe<T extends PostgresSql>(target: T, prepare = true, reserved = false): T {
   const wrapScoped = (args: unknown[]) =>
     args.map((arg) =>
       typeof arg === "function"
-        ? (scoped: postgres.TransactionSql) =>
-            (arg as (scoped: postgres.TransactionSql) => unknown)(preparingUnsafe(scoped))
+        ? async (scoped: postgres.TransactionSql) => {
+            databaseQuerySignal.getStore()?.throwIfAborted();
+            const result = await (arg as (scoped: postgres.TransactionSql) => unknown)(
+              preparingUnsafe(scoped, prepare, true),
+            );
+            databaseQuerySignal.getStore()?.throwIfAborted();
+            return result;
+          }
         : arg,
     );
   return new Proxy(target, {
     get(base, property) {
       if (property === "unsafe") {
-        return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) =>
-          base.unsafe(query, parameters as never, { prepare: true, ...options });
+        return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) => {
+          const signal = reserved ? databaseQuerySignal.getStore() : undefined;
+          signal?.throwIfAborted();
+          const pending = base.unsafe(query, parameters as never, { prepare, ...options });
+          return signal ? abortableQuery(pending, signal) : pending;
+        };
       }
       if (property === "begin" || property === "savepoint") {
         const method = Reflect.get(base, property) as unknown;
@@ -456,10 +528,17 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
   // is never reused indefinitely, and bound each connection's prepared-statement
   // cache; application_name aids server-side diagnostics.
+  // Opening a connection costs tens of milliseconds (TCP, TLS, auth, startup
+  // parameters) on the request that needs it, while an idle one costs the server
+  // only a backend slot. With a 30 s idle timeout, bursty workers reopened about
+  // one connection a second in steady state; five minutes keeps a worker's pool
+  // warm between turns. postgres.js TCP keepalive (60 s) keeps NAT and load
+  // balancer flow state alive for idle connections, and max_lifetime still
+  // bounds every connection's age.
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
     prepare: preparedStatements,
-    idle_timeout: 30,
+    idle_timeout: 300,
     max_lifetime: 1800,
     // postgres.js grows one pool-wide reconnect delay after every refused or
     // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
@@ -493,18 +572,57 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       // their own SET clause.
     },
   });
-  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client, { schema });
+  // Registering the full schema eagerly allocates one relational query builder
+  // per table on every transaction/savepoint, even for a single raw SQL query.
+  const db = drizzle(preparingUnsafe(client, preparedStatements));
+  const sessionListChanges = options.notificationDatabaseUrl
+    ? createSessionListChangeSource(options.notificationDatabaseUrl, {
+        ...(options.searchPath ? { searchPath: options.searchPath } : {}),
+      })
+    : undefined;
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
+    cancellableTransactions: true,
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
     ...(options.userProfileLookup ? { userProfileLookup: options.userProfileLookup } : {}),
+    ...(sessionListChanges ? { sessionListChanges } : {}),
   });
   return {
     db,
     close: async () => {
+      await sessionListChanges?.close();
       await client.end();
     },
   };
+}
+
+/** Run maintenance within its caller's existing deadline, not a new timeout.
+ * Keep any shorter configured statement timeout. A disconnected caller is
+ * detected during execution, including an abrupt process exit. A network
+ * partition remains subject to TCP failure detection and the server deadline.
+ * Unsupported injected drivers are explicit rather than silently detached.
+ */
+export async function withDatabaseMaintenanceLifetime<T>(
+  db: Database,
+  lifetime: { signal: AbortSignal; deadlineAtMs?: number },
+  run: (scoped: Database) => Promise<T>,
+): Promise<T> {
+  lifetime.signal.throwIfAborted();
+  if (!dbBindingFor(db)?.cancellableTransactions)
+    throw new Error("The database driver does not support joined maintenance cancellation");
+  return databaseQuerySignal.run(lifetime.signal, () =>
+    db.transaction(async (tx) => {
+      lifetime.signal.throwIfAborted();
+      const remaining =
+        lifetime.deadlineAtMs === undefined ? null : Math.floor(lifetime.deadlineAtMs - Date.now());
+      if (remaining !== null && remaining <= 0)
+        throw new Error("The maintenance run deadline passed");
+      await tx.execute(sql`select
+      set_config('statement_timeout', coalesce(least(nullif(extract(epoch from current_setting('statement_timeout')::interval)*1000,0),${remaining}::numeric),0)::text || 'ms',true),
+      set_config('client_connection_check_interval',least(nullif(extract(epoch from current_setting('client_connection_check_interval')::interval)*1000,0),100)::text || 'ms',true)`);
+      return run(tx);
+    }),
+  );
 }
 
 /**
@@ -710,7 +828,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
       from ${sql.raw(last)}, resolved, parent`,
   );
   if (!row) {
-    if (input.accountId === null) throw new Error(`Workspace not found: ${input.workspaceId}`);
+    if (input.accountId === null) throw new WorkspaceNotFoundError(input.workspaceId!);
     throw new Error("RLS context could not be applied on the active backend");
   }
   const expectedWorkspaceId = input.workspaceId ?? "";
@@ -855,34 +973,53 @@ async function restoreRlsContextSettings(
 
 /** Attribute only failures outside the application callback to our transaction
  * driver. BEGIN/COMMIT/ROLLBACK can throw raw postgres.js errors, unlike ORM
- * queries. This supplies provenance, never transaction retry permission. */
+ * queries. Only unentered pool admission can retry; entered callbacks cannot. */
 async function withDatabaseTransactionProvenance<T>(
   db: Database,
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
-  let entered = false;
-  let callbackFailure: { error: unknown } | undefined;
-  try {
-    return await db.transaction(async (tx) => {
-      entered = true;
-      try {
-        return await fn(tx as unknown as Database);
-      } catch (error) {
-        callbackFailure = { error };
-        throw error;
+  // Only admission on a pool can be retried here. Once the driver entered the
+  // callback, COMMIT may have succeeded and external effects may have run.
+  // A savepoint cannot repair its parent's lost connection either.
+  const maxAttempts = isTransactionHandle(db) ? 1 : 8;
+  for (let attempt = 1; ; attempt += 1) {
+    let entered = false;
+    let callbackFailure: { error: unknown } | undefined;
+    try {
+      return await db.transaction(async (tx) => {
+        entered = true;
+        try {
+          return await fn(tx as unknown as Database);
+        } catch (error) {
+          callbackFailure = { error };
+          throw error;
+        }
+      }, transactionConfig);
+    } catch (error) {
+      // A provider/tool rejection propagated by a successful rollback is still
+      // the provider/tool's error, even if it has a connection-looking code.
+      if (callbackFailure && callbackFailure.error === error) throw error;
+      if (
+        !entered &&
+        attempt < maxAttempts &&
+        (nestedPostgresSqlState(error) === "53300" ||
+          isDatabaseConnectionLoss(error) ||
+          isRetryableDatabaseTransportFailure(error))
+      ) {
+        // Equal jitter, 250 ms doubling to 4 s: at most 15.75 s of backoff.
+        // No pooled connection is held while waiting; each try reacquires one.
+        const ceilingMs = Math.min(250 * 2 ** (attempt - 1), 4_000);
+        await new Promise((resolve) => setTimeout(resolve, ceilingMs * (0.5 + Math.random() / 2)));
+        continue;
       }
-    }, transactionConfig);
-  } catch (error) {
-    // A provider/tool rejection propagated by a successful rollback is still
-    // the provider/tool's error, even if it has a connection-looking code.
-    if (callbackFailure && callbackFailure.error === error) throw error;
-    if (!isDatabasePersistenceFailure(error)) throw error;
-    throw new DatabaseTransactionError(
-      entered ? "settlement" : "admission",
-      error,
-      callbackFailure?.error,
-    );
+      if (!isDatabasePersistenceFailure(error)) throw error;
+      throw new DatabaseTransactionError(
+        entered ? "settlement" : "admission",
+        error,
+        callbackFailure?.error,
+      );
+    }
   }
 }
 
@@ -1004,7 +1141,7 @@ export async function rlsContextForWorkspace(
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
   if (!row) {
-    throw new Error(`Workspace not found: ${workspaceId}`);
+    throw new WorkspaceNotFoundError(workspaceId);
   }
   return { accountId: row.accountId, workspaceId };
 }

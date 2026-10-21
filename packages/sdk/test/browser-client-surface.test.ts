@@ -64,6 +64,9 @@ const legacyBrowserUnusedMethods = [
   "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
+  // The organization account page reads usage from the account overview, so
+  // this standalone usage read stays available to SDK callers only.
+  "organizationCodexAccountUsage",
   "rejectGoalRevision",
   "revokeUserResourceGrant",
   "rollbackCompanyProfile",
@@ -72,7 +75,6 @@ const legacyBrowserUnusedMethods = [
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
-  "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
@@ -96,6 +98,11 @@ const agentInteractionMethods = [
   "adoptBrowserSessionWorkingCopy",
   "getBrowserSessionWorkingCopyAdoption",
   "revertBrowserSessionWorkingCopyAdoption",
+  // Recording a browser flow is an agent action (browser_record); the console
+  // plays the saved video as an ordinary artifact.
+  "startBrowserRecording",
+  "getBrowserRecording",
+  "saveBrowserRecording",
 ];
 
 // Server-side integrations replace the Skills a session carries, and hosts that

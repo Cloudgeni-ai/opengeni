@@ -16,6 +16,71 @@ import { withPoolWakeServiceScopeInTransaction } from "../subscription-session-a
  * remainder. Home-provider wakes retain their existing delivery semantics. */
 const CANDIDATE_WAKE_BATCH_SIZE = 256;
 
+/** The canonical effective-control ancestry bound (`SESSION_ANCESTRY_LIMIT`).
+ * Repeated here because session-control imports this module. */
+const PAUSE_ANCESTRY_LIMIT = 10_000;
+
+/**
+ * The subset of `sessionIds` whose effective control is Pause in this
+ * statement's snapshot: an undefeated direct or ancestor pause (defeated only
+ * by a strictly newer override on a strictly deeper path row), or a workspace
+ * pause not defeated by a newer override on the path. This is the canonical
+ * effective-control algebra (session-control's `projectEffectiveControl`) as
+ * a lock-free read. It only decides whether a capacity wake is delivered now:
+ * Pause leaves the waiter for Resume, whose own committed wake reconstructs
+ * it, so a stale answer either sends one harmless spurious wake or defers
+ * delivery to that Resume wake.
+ */
+async function effectivelyPausedSessionIds(
+  tx: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Set<string>> {
+  if (sessionIds.length === 0) return new Set();
+  const rows = await rawRows<{ session_id: string }>(
+    tx,
+    sql`with recursive targets(id) as (
+        select unnest(array[${sql.join(
+          sessionIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )}]::uuid[])
+      ), ancestry as (
+        select target.id as target_id, session.parent_session_id, session.direct_control_state,
+          session.direct_pause_revision, session.subtree_run_override_revision, 0::integer as depth
+        from targets target
+        join sessions session on session.workspace_id = ${workspaceId}::uuid
+          and session.id = target.id
+        union all
+        select child.target_id, parent.parent_session_id, parent.direct_control_state,
+          parent.direct_pause_revision, parent.subtree_run_override_revision, child.depth + 1
+        from ancestry child
+        join sessions parent on parent.workspace_id = ${workspaceId}::uuid
+          and parent.id = child.parent_session_id
+        where child.parent_session_id is not null and child.depth < ${PAUSE_ANCESTRY_LIMIT}
+      ), path as (
+        select ancestry.*, max(ancestry.subtree_run_override_revision) over (
+            partition by ancestry.target_id order by ancestry.depth
+            rows between unbounded preceding and 1 preceding
+          ) as descendant_override_revision
+        from ancestry
+      )
+      select path.target_id::text as session_id from path
+      where path.direct_control_state = 'paused' and path.direct_pause_revision is not null
+        and (path.descendant_override_revision is null
+          or path.descendant_override_revision <= path.direct_pause_revision)
+      union
+      select target.id::text from targets target
+      join workspace_inference_controls control_row
+        on control_row.workspace_id = ${workspaceId}::uuid and control_row.workspace_state = 'paused'
+      where not exists (
+        select 1 from path
+        where path.target_id = target.id and control_row.workspace_pause_revision is not null
+          and path.subtree_run_override_revision > control_row.workspace_pause_revision
+      )`,
+  );
+  return new Set(rows.map((row) => row.session_id));
+}
+
 /**
  * Delete the shared subscription core's waiters for one provider of turns
  * whose wait a human or control transition ended (Steer, Cancel), inside
@@ -242,7 +307,20 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             for no key update of sessions`,
         );
         if (present.length === 0) continue;
+        // A paused waiter keeps its advanced revision below but receives no
+        // delivery: Pause leaves the waiter for Resume, and Resume's own
+        // committed wake starts a run that sees the unobserved revision as an
+        // already-due waiter. Delivering here would only start a workflow run
+        // that peeks Pause and closes, once per waiter per capacity change.
+        // Read after the session locks so a concurrent Resume commits after
+        // this transaction and carries its own wake.
+        const paused = await effectivelyPausedSessionIds(
+          tx,
+          workspaceId,
+          present.map((row) => row.session_id),
+        );
         for (const row of present) {
+          if (paused.has(row.session_id)) continue;
           // The generic durable wake is the crash-safe backstop: the global
           // dispatcher delivers it even if the typed outbox row's signal is
           // never sent. A waiter that ended since the read leaves its (still
@@ -280,14 +358,18 @@ export async function wakeSubscriptionCoreCapacityWaiters(
             returning session_id::text as session_id, waiter_id::text as waiter_id,
               generation, wake_revision`,
         );
-        for (const row of woken)
+        let delivered = false;
+        for (const row of woken) {
+          if (paused.has(row.session_id)) continue;
+          delivered = true;
           await tx.execute(sql`insert into subscription_capacity_wake_outbox (
               account_id, workspace_id, session_id, waiter_id, generation, wake_revision
             ) values (
               ${input.accountId}::uuid, ${workspaceId}::uuid, ${row.session_id}::uuid,
               ${row.waiter_id}::uuid, ${Number(row.generation)}, ${Number(row.wake_revision)}
             ) on conflict (account_id, waiter_id, generation, wake_revision) do nothing`);
-        if (woken.length > 0) touched.push({ accountId: input.accountId, workspaceId });
+        }
+        if (delivered) touched.push({ accountId: input.accountId, workspaceId });
       }
       await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
       return touched;

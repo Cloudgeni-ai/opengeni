@@ -178,6 +178,7 @@ test("title responses retain separate custody and cannot be settled by the conve
   const main = fixture();
   const title = fixture();
   let prechecks = 0;
+  const readings: number[] = [];
   const context = sessionTitleCodexRequestContext(
     {
       clientVersion: "fixture",
@@ -186,6 +187,9 @@ test("title responses retain separate custody and cannot be settled by the conve
         throw new Error("not used");
       },
       resolveModel: (value) => value,
+      persistUsageHeaders: async (snapshot) => {
+        readings.push(snapshot.checkedAt.getTime());
+      },
       beforeProviderDispatch: async (value) => {
         prechecks++;
         if (value) await main.tracker.reserve(value);
@@ -195,6 +199,14 @@ test("title responses retain separate custody and cannot be settled by the conve
     () => "title",
     title.tracker,
   );
+  await context.persistUsageHeaders!({
+    checkedAt: new Date(1234),
+    primaryUsedPercent: 10,
+    primaryResetAt: null,
+    secondaryUsedPercent: null,
+    secondaryResetAt: null,
+  });
+  expect(readings).toEqual([1234]);
   await context.beforeProviderDispatch!({ requestId: "title", transportAttempt: 1 });
   await context.onProviderRequestSettled!({
     requestId: "title",

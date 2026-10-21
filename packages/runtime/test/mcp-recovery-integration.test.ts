@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { digestCanonicalJson } from "@opengeni/tool-gateway";
 import { McpOperationRecoverySchema } from "@opengeni/config";
 import { z } from "zod";

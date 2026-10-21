@@ -11,10 +11,11 @@ import {
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -59,6 +60,8 @@ const subscriptionCoreMigrations = [
   "0715_subscription_core_api_key_connections.sql",
   // Builds on withheld 0712's receipts and patches the helpers it patched.
   "0716_subscription_authority_compat.sql",
+  "0843_indexed_inbox_lineage.sql",
+  "0846_independent_session_titles.sql",
   // Requires 0716's routines; it follows 0716.
   "0717_subscription_authority_fences.sql",
   // Adds a trigger on the session bindings table from withheld 0642.
@@ -103,6 +106,22 @@ const subscriptionCoreMigrations = [
   "0807_subscription_rls_admin_once_per_statement.sql",
   // Empties that table and rewrites the 0807 reclaim routine on it.
   "0838_reclaim_exited_backend_runtime_capabilities.sql",
+  // Replaces the admin helper created by withheld 0642; replay after its original.
+  "0847_read_only_runtime_probes.sql",
+  // Usage history routines live in the subscription schema from withheld core
+  // migrations; the seed reads them. Replay both after them.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
+  // Rewrites the subscription and vault routines and 0777's policies.
+  "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
+  // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
+  ...strictOwnerMaintenanceMigrationTail,
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

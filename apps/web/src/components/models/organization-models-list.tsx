@@ -1,4 +1,11 @@
-import { SubscriptionAccountRow } from "./subscription-account-ui";
+import { possessive } from "./possessive";
+import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
+import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
+import {
+  AccountGroupHeading,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
@@ -6,6 +13,7 @@ import {
   ClaudeSettingRows,
   claudePlan,
   claudeUsageCell,
+  ClaudeAccountUsageReadout,
 } from "./claude-subscription-models";
 import type {
   CodexAccount,
@@ -16,7 +24,8 @@ import type {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { isValidElement, useMemo, type ReactNode } from "react";
+import { useOrganizationCodexUsage } from "@/components/models/use-organization-codex-overview";
 
 import {
   PROVIDER_CONNECTION_CONFIGS,
@@ -49,7 +58,7 @@ import {
   payerShortLabel,
   resetsLabel,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
@@ -64,19 +73,24 @@ import {
   superGrokAccountName,
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
-import { billingClassForModel } from "@/lib/model-policy";
-import { accountKey, type GatewayId } from "@/lib/models-route";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
+import {
+  accountKey,
+  type GatewayId,
+  type WorkspaceGatewayId,
+} from "@opengeni/react/app/lib/models-route";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models, the list: every account that pays for
@@ -90,13 +104,22 @@ import { accountKey, type GatewayId } from "@/lib/models-route";
    workspaces use, read-only: only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
-export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "opper", "vercel"];
+export const GATEWAYS: readonly GatewayId[] = [
+  "anthropic",
+  "azure_openai",
+  "openai",
+  "openrouter",
+  "opper",
+  "vercel",
+];
 
 /** The catalog provider id of an organization key's models. */
 const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
   vercel: "organization-gateway",
   openrouter: "organization-openrouter",
   opper: "organization-opper",
+  openai: "organization-openai",
+  azure_openai: "organization-azure-openai",
   anthropic: "organization-anthropic",
   claude_subscription: "organization-claude-subscription",
 };
@@ -105,6 +128,8 @@ const ORGANIZATION_KIND = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  openai: "openai",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 } as const;
@@ -142,7 +167,7 @@ export interface WorkspaceModelsSnapshot {
   grokShared: SuperGrokAccount[];
   claudeOwn: ClaudeSubscriptionAccount[];
   claudeShared: ClaudeSubscriptionAccount[];
-  keysOwn: GatewayId[];
+  keysOwn: WorkspaceGatewayId[];
   keysShared: { id: GatewayId; models: number }[];
   /** "GPT-6 Astra · Codex", or null when it can't be read. */
   defaultModel: string | null;
@@ -197,12 +222,15 @@ async function readWorkspaceModels(
     grokShared: grokInherited ? (grokData?.accounts ?? []) : [],
     claudeOwn: claudeData?.source === "organization" ? [] : (claudeData?.accounts ?? []),
     claudeShared: claudeData?.source === "organization" ? (claudeData?.accounts ?? []) : [],
-    keysOwn: gateways.filter((id) =>
-      own.some(
-        (connection) =>
-          connection.status === "active" &&
-          isProviderConnection(connection, PROVIDER_CONNECTION_CONFIGS[id]),
-      ),
+    keysOwn: gateways.filter(
+      (id): id is WorkspaceGatewayId =>
+        id !== "openai" &&
+        id !== "azure_openai" &&
+        own.some(
+          (connection) =>
+            connection.status === "active" &&
+            isProviderConnection(connection, PROVIDER_CONNECTION_CONFIGS[id]),
+        ),
     ),
     keysShared: gateways
       .map((id) => ({ id, models: readyOrganizationKeyModels(models, id) }))
@@ -233,38 +261,36 @@ function useWorkspaceSnapshots(
   /** Changes when the organization's defaults change, so what workspaces follow is re-read. */
   defaultsRevision: string,
 ): Record<string, WorkspaceModelsSnapshot | "loading" | "error"> {
-  const [snapshots, setSnapshots] = useState<
-    Record<string, WorkspaceModelsSnapshot | "loading" | "error">
-  >({});
   const readable = useMemo(
     () => workspaces.filter((workspace) => workspace.canManage),
     [workspaces],
   );
   const key = readable.map((workspace) => `${workspace.id}:${workspace.savedDefaultModel}`).join();
-  useEffect(() => {
-    let live = true;
-    setSnapshots(
-      Object.fromEntries(readable.map((workspace) => [workspace.id, "loading" as const])),
-    );
-    for (const workspace of readable) {
-      readWorkspaceModels(client, workspace, claudeEnabled)
-        .then((snapshot) => {
-          if (live) setSnapshots((current) => ({ ...current, [workspace.id]: snapshot }));
-        })
-        .catch(() => {
-          if (live) setSnapshots((current) => ({ ...current, [workspace.id]: "error" }));
-        });
-    }
-    return () => {
-      live = false;
-    };
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-read when the set of workspaces changes
-  }, [client, key, claudeEnabled, defaultsRevision]);
-  return snapshots;
+  const query = useSharedQuery(
+    client,
+    ["model-settings", "workspace-snapshots", key, claudeEnabled, defaultsRevision],
+    async () =>
+      Object.fromEntries(
+        await Promise.all(
+          readable.map(
+            async (workspace) =>
+              [workspace.id, await readWorkspaceModels(client, workspace, claudeEnabled)] as const,
+          ),
+        ),
+      ),
+    { enabled: readable.length > 0, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
+  return (
+    query.data ??
+    Object.fromEntries(
+      readable.map((workspace) => [workspace.id, query.error ? "error" : "loading"]),
+    )
+  );
 }
 
 export function OrganizationModelsList({
   client,
+  organizationId,
   organizationDefaults,
   accountRules,
   modelLabel,
@@ -290,6 +316,7 @@ export function OrganizationModelsList({
   onConnect,
 }: {
   client: OpenGeniBrowserClient;
+  organizationId?: string | undefined;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;
   /** The organization's account rules and every workspace's; owners and admins only, otherwise null. */
@@ -407,7 +434,17 @@ export function OrganizationModelsList({
           email={account.email}
           primary={account.active}
           meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
-          cells={{ usage: claudeUsageCell(account) }}
+          cells={{
+            usage: (
+              <ClaudeAccountUsageReadout
+                client={client}
+                scope="workspace"
+                scopeId={workspace.id}
+                account={account}
+                canManage={workspace.canManage && account.scope !== "organization"}
+              />
+            ),
+          }}
           indicator={
             account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
           }
@@ -430,8 +467,54 @@ export function OrganizationModelsList({
   /* What the organization shares, as the workspaces of a workspace admin use it. */
   const sharedRows = administrator ? [] : sharedAccountRows(ready, labels, ownCodexIds);
 
-  const orgRows = administrator ? (
+  const orgGrokRows = administrator ? (
     <>
+      {orgGrok.unavailable ? null : (
+        <OrganizationSuperGrokRows
+          grok={orgGrok}
+          labels={labels}
+          onOpen={(id) => onOpenAccount(accountKey("supergrok", id, true))}
+        />
+      )}
+    </>
+  ) : null;
+  const orgKeyRows =
+    administrator && GATEWAYS.some((id) => providerListed(orgGateways[id])) ? (
+      <>
+        {GATEWAYS.filter((id) => providerListed(orgGateways[id])).map((id) => (
+          <OrganizationKeyRow
+            key={`org:${id}`}
+            state={orgGateways[id]}
+            labels={labels}
+            onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
+          />
+        ))}
+      </>
+    ) : null;
+  /* Workspace-owned and shared rows, split by how they pay: keys are pay as you go. */
+  const payAsYouGo = (row: ReactNode) =>
+    isValidElement(row) &&
+    String(row.key).includes(":gateway:") &&
+    !String(row.key).endsWith("claude_subscription");
+  const subscriptionRows = [...sharedRows, ...ownRows].filter((row) => !payAsYouGo(row));
+  const keyRows = [...sharedRows, ...ownRows].filter(payAsYouGo);
+  const orgSubscriptionsListed =
+    administrator &&
+    (orgCodex.loading ||
+      orgCodex.accounts.length > 0 ||
+      Boolean(orgCodex.pending || orgCodex.loadError) ||
+      (claudeEnabled && (orgClaude.loading || orgClaude.accounts.length > 0)) ||
+      (!orgGrok.unavailable && orgGrok.accounts.length > 0));
+  const orgPooledRows = administrator ? (
+    <>
+      {organizationId ? (
+        <ConnectedSubscriptionUsagePool
+          client={client}
+          scope="organization"
+          id={organizationId}
+          provider="codex"
+        />
+      ) : null}
       <OrganizationCodexRows
         codex={orgCodex}
         labels={labels}
@@ -439,6 +522,14 @@ export function OrganizationModelsList({
         onOpen={(id) => onOpenAccount(accountKey("codex", id, true))}
         onConnect={() => onConnect()}
       />
+      {claudeEnabled && organizationId ? (
+        <ConnectedSubscriptionUsagePool
+          client={client}
+          scope="organization"
+          id={organizationId}
+          provider="claude"
+        />
+      ) : null}
       {claudeEnabled ? (
         <ClaudeAccountRows
           claude={orgClaude}
@@ -453,21 +544,6 @@ export function OrganizationModelsList({
           }}
         />
       ) : null}
-      {orgGrok.unavailable ? null : (
-        <OrganizationSuperGrokRows
-          grok={orgGrok}
-          labels={labels}
-          onOpen={(id) => onOpenAccount(accountKey("supergrok", id, true))}
-        />
-      )}
-      {GATEWAYS.filter((id) => providerListed(orgGateways[id])).map((id) => (
-        <OrganizationKeyRow
-          key={`org:${id}`}
-          state={orgGateways[id]}
-          labels={labels}
-          onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
-        />
-      ))}
     </>
   ) : null;
 
@@ -575,15 +651,23 @@ export function OrganizationModelsList({
           />
         ) : (
           <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
+            {subscriptionRows.length > 0 || orgSubscriptionsListed ? (
+              <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+            ) : null}
+            {orgPooledRows}
+            {orgGrokRows}
+            {subscriptionRows}
+            {credits.visible || keyRows.length > 0 || orgKeyRows ? (
+              <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+            ) : null}
             <OpenGeniCreditsRow
               credits={credits}
               workspaceId={anchorWorkspaceId}
               workspaceName={creditsReturnLabel}
               scope={labels.everyone}
             />
-            {orgRows}
-            {sharedRows}
-            {ownRows}
+            {orgKeyRows}
+            {keyRows}
             {loadingWorkspaces ? <ListRowSkeleton count={1} /> : null}
           </RowList>
         )}
@@ -603,6 +687,22 @@ export function OrganizationModelsList({
           onEditAllowed={onEditAllowed}
           onEditCompaction={onEditCompaction}
         />
+      ) : null}
+
+      {organizationDefaults && organizationId ? (
+        <Section
+          title="Voice"
+          description="Connect ElevenLabs once for every workspace, and choose how each voice model sounds and listens. A workspace can choose its own."
+        >
+          <OrganizationElevenLabsVoiceConnection
+            organizationId={organizationId}
+            organizationName={organizationName}
+          />
+          <OrganizationRealtimeVoiceSettingsRows
+            anchorWorkspaceId={anchorWorkspaceId}
+            defaults={organizationDefaults}
+          />
+        </Section>
       ) : null}
 
       {accountRules ? (
@@ -766,10 +866,7 @@ export function OrganizationDefaultsSection({
   );
 }
 
-/** "Acme's", "Acme Robotics'". */
-export function possessive(name: string): string {
-  return /s$/i.test(name) ? `${name}'` : `${name}'s`;
-}
+export { possessive };
 
 /** Cached weekly usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {
@@ -931,6 +1028,8 @@ function OrganizationCodexRow({
   usage: ReactNode;
   onOpen: () => void;
 }) {
+  const live = useOrganizationCodexUsage(codex.client, codex.organizationId, account);
+  const readings = codexUsageReadings(live.data?.usage, Date.now());
   const access = useConnectionAccess({
     client: codex.client,
     organizationId: codex.organizationId,
@@ -947,11 +1046,21 @@ function OrganizationCodexRow({
       meta={[
         organizationReachLabel(labels, access.data),
         planLabel(account.plan, "ChatGPT"),
-        resetsLabel(account.resetCreditAvailableCount),
+        resetsLabel(live.resetCredits?.availableCount ?? account.resetCreditAvailableCount),
       ]}
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (
           <StatusBadge status="disabled" variant="dot" />
+        ) : live.loading ? (
+          <UsageReadout percent={null} window="this week" loading />
+        ) : live.error || live.data?.status === "error" ? (
+          <span className="text-xs text-fg-muted">Usage unavailable</span>
+        ) : live.data ? (
+          <UsageReadout
+            percent={readings[0]!.percent}
+            window="this week"
+            resets={usageResets(readings, readings[0]!.label)}
+          />
         ) : (
           usage
         ),

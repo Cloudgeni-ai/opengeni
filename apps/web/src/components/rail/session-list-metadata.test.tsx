@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ActiveWorkMark, RailTrailingMetadata } from "./session-row-content";
+import {
+  ActiveWorkMark,
+  RailTrailingMetadata,
+} from "@opengeni/react/app/components/rail/session-row-content";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
@@ -44,6 +47,18 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain("motion-reduce:animate-none");
   });
 
+  test("a session parked until it wakes shows a still hourglass, not the working spinner", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata
+        summary={{ kind: "waiting", count: 1, total: 1, label: "1 waiting to resume" }}
+      />,
+    );
+
+    expect(markup).toContain("lucide-hourglass");
+    expect(markup).toContain('title="1 waiting to resume"');
+    expect(markup).not.toContain("animate-spin");
+  });
+
   test("uses the dedicated teal token for unread chats and following up", () => {
     const unread = renderToStaticMarkup(
       <RailTrailingMetadata summary={{ kind: "unread", count: 1, total: 1, label: "1 unread" }} />,
@@ -71,7 +86,9 @@ describe("RailTrailingMetadata", () => {
   });
 
   test("defines the approved teal shades separately from neutral brand colors", async () => {
-    const styles = await Bun.file(new URL("../../styles.css", import.meta.url)).text();
+    const styles = await Bun.file(
+      new URL("../../../../../packages/react/styles/app.css", import.meta.url),
+    ).text();
     expect(styles).toContain("--color-session-update: light-dark(#0f766e, #5ad4c5)");
     expect(styles).toContain("--color-brand: var(--og-color-accent)");
   });
@@ -100,7 +117,12 @@ describe("RailTrailingMetadata", () => {
   });
 
   test("uses the shared active-work marker in both session action menus", async () => {
-    const source = await Bun.file(new URL("./session-list.tsx", import.meta.url)).text();
+    const source = await Bun.file(
+      new URL(
+        "../../../../../packages/react/src/app/components/rail/session-list.tsx",
+        import.meta.url,
+      ),
+    ).text();
 
     expect(source.match(/<ActiveWorkMark className="size-4" \/>/g)).toHaveLength(2);
     expect(source).not.toContain("CircleDashedIcon");

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

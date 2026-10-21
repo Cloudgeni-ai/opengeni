@@ -27,8 +27,6 @@ import {
   resolveSkillImport,
   saveSkill,
   removeSkill,
-  siteClampedAgentMessage,
-  siteSessionClamp,
 } from "@opengeni/core";
 import {
   buildPortableSkillArtifact,
@@ -61,8 +59,6 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 
 const TELL_PERSON =
   "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
-const TELL_PERSON_WHY =
-  "Tell the person in your reply that it was not saved and why; your other work can continue.";
 
 /** Plain reasons for the genuine refusals the person is shown. */
 const NOT_PERMITTED_REASONS: ReadonlyMap<string, string> = new Map([
@@ -104,7 +100,7 @@ export function skillRefusalMessage(
   }
   switch (refusal?.reason) {
     case "site_agent":
-      return `Nothing was saved. ${error.message}. ${TELL_PERSON_WHY}`;
+      return "Nothing was saved under the policy applied to that earlier attempt.";
     case "learning_off":
       return `Nothing was saved. Agent learning for Skills is Off where this change would be saved (this chat's, the workspace's or the person's own setting). Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`;
     case "not_permitted":
@@ -129,8 +125,6 @@ export function skillLearningRefusal(
   const requested =
     args && typeof args === "object" ? (args as { skillId?: unknown }).skillId : undefined;
   const skillId = typeof requested === "string" && UUID.test(requested) ? requested : undefined;
-  if (error.message === siteClampedAgentMessage("Skills"))
-    return { destination: "skill", reason: "site_agent", ...(skillId ? { skillId } : {}) };
   return classifyLearningRefusal({ destination: "skill", message: error.message, skillId });
 }
 
@@ -163,25 +157,6 @@ function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptTo
   };
 }
 
-/**
- * The check before a Skill write (save, install, publish, remove): the live
- * attempt, and that no Site page started the agent. An agent started from a
- * Site page reads Skills but never changes them: it does not learn. The
- * refusal is definite (nothing was saved).
- */
-export function skillWriteAuthorizer(
-  authorize: () => Promise<void>,
-  siteClamped: () => Promise<boolean>,
-): () => Promise<void> {
-  return async () => {
-    await authorize();
-    if (await siteClamped())
-      throw new SkillLifecycleRefusedError("42501", siteClampedAgentMessage("Skills"), {
-        cause: null,
-      });
-  };
-}
-
 export function createWorkspaceSkillTools(input: {
   db: Database;
   settings: Settings;
@@ -209,12 +184,7 @@ export function createWorkspaceSkillTools(input: {
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
   };
   const authorize = () => assertSkillReadAttempt(input.db, { ...context, actor: input.actor });
-  const authorizeWrite = skillWriteAuthorizer(
-    authorize,
-    async () =>
-      (await siteSessionClamp(input.db, context, input.actor.sessionId, input.actor.turnId))
-        .clamped,
-  );
+  const authorizeWrite = authorize;
   const selected = new Map(input.selected.map((entry) => [entry.id, entry.artifact]));
   const shadowed = sessionShadowedSkillNames(input.selected);
   // Readable Skills that skill_search returned in this attempt.

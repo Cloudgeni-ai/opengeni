@@ -32,6 +32,38 @@
   shared histories are not silently converted or exposed as new private Site
   history. Existing Site HTML and source are not rewritten.
 
+## Allowing an existing chat in a private console Site
+
+In the console's Site **Conversations** tab, the owner can choose **Allow an
+existing chat**. This grants that private Site access to one exact chat owned
+by the same person. It does not share the chat with other viewers, move it,
+change its tools, rewrite its creation origin, or grant access to descendants.
+Making the Site shared or archiving it disables this extra access. Existing
+Site-created conversations retain their original audience rules.
+
+Owner-authorized agents can use the normal SDK's `setSiteSessionAccess` and
+`listSiteSessionAccess` with normal owner authority, regardless of turn surface.
+Site page code cannot manage these grants. Published guest/runtime Sites do not consume them.
+
+Inside the console Site, use `listSessionPage(workspaceId, { siteAccessId:
+"current" })` to list available chats, then mount the normal
+`SessionConversation` with the chosen session ID. `originSiteId` still means
+creation provenance and does not include explicitly allowed older chats.
+Both list filters remain viewer-authorized and bound into pagination cursors.
+
+The Site retains the same operation and text-only body restrictions; approvals,
+credentials, attachments and hidden model context still belong in the console.
+Site-submitted turns record their real Site origin and retain the chat's normal
+execution authority, identical to console turns.
+**Remove access** revokes subsequent reads and writes immediately; an open event
+stream rechecks every two seconds and closes on revocation. Already accepted
+work is not cancelled and already delivered text cannot be recalled.
+
+Management routes are `GET /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access`
+and `PUT`/`DELETE` on its `/:sessionId` suffix. They are deliberately absent from
+the frame operation allowlist. Migration `0842_site_session_access.sql` adds
+the tenant/owner-isolated grant table without backfilling or modifying sessions.
+
 ## Inline AI and app-defined interaction
 
 `createOpenGeniSiteClient().ai` is a convenience over native session creation and
@@ -69,6 +101,16 @@ does not make separately published artifacts or shared Site Data private; use
 their existing audience controls deliberately.
 
 ## API and implementation
+
+The injected browser client is the checked-in
+`packages/sdk/src/site-browser-runtime.gen.ts`, built from the SDK and shared
+Site route contracts. After changing either dependency, use the repository's
+pinned Bun to run `bun scripts/generate-site-browser-runtime.ts` and commit its
+output. `bun scripts/generate-site-browser-runtime.ts --check` verifies freshness
+without rewriting it; CI runs this before package builds, which otherwise
+regenerate the file and can hide stale committed bytes. The generated-runtime
+SDK tests execute those bytes through the real host bridge and preview transport;
+the Site conversations browser test also executes the injected script tag.
 
 `GET /v1/workspaces/:id/sessions?view=page&originSiteId=<uuid>` combines Site
 origin with ordinary project/search/date/visibility filters before pagination.
@@ -113,124 +155,39 @@ the console, in the conversation itself, not inside the Site. A Site that embeds
 answer controls get the 403 above; the person opens the conversation in the
 console (the origin link on the Site's Conversations tab) to respond.
 
-A Site page starts a session with a message and a model only. Session create
-accepts `initialMessage`, `requestedSessionId`, `idempotencyKey`,
-`clientEventId`, `model`, `reasoningEffort`, `latencyMode`, `startMode` and
-`metadata` (keys starting with `_opengeni` are dropped), and refuses any other
-field with a value (tools, MCP servers, first-party tools and permissions,
-vault policy, connections, sandbox or environment choice, working directory,
-resources, Skills, agent overrides, model context, learning overrides, goal,
-project, visibility, usage limit, nesting). The session then runs on a minimal
-Site profile: no vault access, the workspace's default agent capabilities with
-workspace administration and browser and computer control turned off (so the
-page cannot reach the viewer's sandboxes, Connected Machines or Chrome through
-`run_on`, `sandbox_attach`, `sandbox_swap`, `sandbox_provision`, `browser_*` or
-`computer_*`), with `sandboxBackend: "none"`. First-party tools are explicit:
-the Site's requested tools plus its own data tools, not workspace defaults.
-Registry connections carry `allowedTools` with the exact names declared by the
-Site, intersected with the connection's allowlist and member permissions at
-execution. Empty means none; duplicate references intersect their lists.
-Workers it starts can only narrow that.
-An agent started from a Site page is also clamped (`assertNotSiteClampedAgent`):
-it cannot create or change schedules, automations, Site publications,
-workspace instructions, Skills, Knowledge or secrets, so it does not learn.
-Nor can it change the workspace itself, its members, connections,
-integrations, webhooks, network routes or settings, the organization
-profile, Connected Machines or sandbox environments. It cannot reach compute
-beyond its own session's: it cannot run on, attach, swap or provision a
-sandbox or Connected Machine, drive a browser or computer session, or start a
-worker on a chosen machine (`targetSandboxId`), a self-hosted backend or
-another session's sandbox group (403); its workers share its sandbox or get a
-new managed one. It changes a Site's content (new versions, rollback, archive,
-restore, audience) only for the Site it was started from and Sites an agent in
-its own session tree created with the artifact tools (the Site's first version
-records that session), published or not, so a page cannot spread itself
-through the person's other Sites. Sites it creates over HTTP record no source
-session, so it cannot change them later; agents create Sites with
-`artifacts_create`. The first-party tools refuse those writes with
-`site_agent_clamped`:
+A Site-created chat uses ordinary workspace defaults: tools, capabilities,
+vault policy, compute, memory and agent reach. Explicit restrictions use ordinary
+host-owned chat settings, never fields controlled by the page. Create fields
+remain host-owned; see `SITE_FRAME_SESSION_CREATE_FIELDS`. Origin metadata
+remains server-authored. A page cannot replace identity, hidden instructions,
+vault policy or tool permissions through a nested agent configuration.
 
-- `knowledge_*` writes and `instruction_policy_save`;
-- `secret_save`, `secret_move` and `secret_delete`;
-- `skill_save`, `skill_install`, `skill_publish` and `skill_remove`;
-- `company_profile_propose` and `company_profile_confirm`;
-- `connected_machine_enroll_token`, `connected_machine_enable_screen_control`
-  and `connected_machine_remove`;
-- `rig_propose_change`, `rig_verify` and `rig_promote`;
-- `run_on`, `sandbox_attach`, `sandbox_swap` and `sandbox_provision`;
-- `artifacts_publish`, `artifacts_rollback`, `artifacts_archive` and
-  `artifacts_restore` for any other Site.
-
-Over HTTP the clamp is an allowlist (`SITE_AGENT_WRITES` in
-`apps/api/src/site-agent-guard.ts`). Under `/v1/workspaces/:workspaceId` such
-an agent may send writes only to:
-
-- its tools: the first-party MCP endpoint (and its docs and files servers),
-  Codemode calls and SDK proxy, and the tool gateway's calls;
-- conversations: starting one (a child of its own session, so it stays
-  clamped), renaming, archiving or deleting one it reaches, and working in
-  one (events, steer, control, queue, composer draft, retry, context, goal,
-  artifacts, files, git, terminal, background commands);
-- files and content: uploads and download links, new Sites and uploads, Site Data and a Site's files (only for the Site it was
-  started from), and a Site's versions, rollback, status and audience (under
-  the rule above);
-- reads sent as POST: Knowledge and document searches, download links, the
-  Knowledge save dry run and a Connected Machine audience preview;
-- feedback.
-
-Documents, spreadsheets and presentations (`/editable-artifacts` writes, and
-the first-party `editable_artifact_create`, `_import`, `_apply` and `_export` tools)
-are open only when a published Site the agent was started from declares one
-of those first-party tools in its current version's requested tools;
-otherwise they are refused like any other write. Its other tools are the
-Site's declared tools, intersected with what the person may use.
-
-Every other write, including `PATCH` or `DELETE` on the workspace itself, a
-session's agent, tools, servers, credentials, variable sets, vaults, Skills,
-usage limit and admin access, tool approvals, browser and computer sessions
-(which can drive the viewer's Chrome or screen), and any route family added
-later, is refused with 403 before the route runs. The refusal names what it
-would change ("workspace settings" when no narrower name fits). Paths are
-matched percent-decoded, as the router sees them, and reading stays open.
-`apps/api/test/site-agent-guard.test.ts` pins the open routes against the
-registered route table. A session started from a Site page cannot get
-session admin access (409), and an agent acting for a Site page cannot run
-`admin_action_call`.
-Published members start as their verified human identity; outsiders start as
-`site:<siteId>` with an immutable viewer binding. Both use the publication's
-own tools and existing authority ceilings (see `docs/site-runtime-api.md`): workspace
-tools only for members who may use connections, never for people outside
-the workspace, and the limits of the viewer's audience
-(`docs/published-sites.md`, "Limits and billing").
+An existing chat has identical tools and authority whether a turn comes from
+the console or a Site. There is no Site agent clamp, ancestor walk, special
+write allowlist, artifact creation-tree exception or admin-access refusal.
+Normal owner access, per-tool permissions, accepted authority and approvals
+still apply. Revoking a Site/chat grant prevents further page requests; it
+does not retroactively rewrite an accepted turn's authority.
 
 ## Agent defaults
 
-Published-host conversations get this Site's `site_data_query` and
-`site_data_write`; enabled SQL adds `site_sql_run`, and members also get read-only
-`site_sql_query`, each intersected with the member's live permissions. A member
-without artifact-publishing permission can still use AI, without unavailable
-write tools; a member without data-read permission can use plain AI without data
-tools. Calls act as the conversation's viewer and refuse other Site ids
-and management operations. There is no sandbox, and publication settings offer no
-sandbox opt-in. Members get no Site budget or stamped session usage limit, even
-after a previous conversation; they retain normal model selection and subscriptions.
-Non-members receive an explicit credit-billed model, one Site budget and an optional
-per-person budget; anonymous guests additionally meet bot guards. Admission reserves
-a $0.25 turn estimate by default, not the entire conversation cap; outstanding
-reservations return retryable `site_budget_busy`.
-The executable session ceiling is metered spend plus that funded reservation.
-Further sends, steering and resumes fund a top-up before execution; a single
-provider call can overshoot before metering. Data tools revalidate the current
-audience on every call, independently of best-effort cancellation.
+Published workspace members dispatch as their verified, live member identity
+with ordinary chat defaults. The publication's optional author instructions
+remain explicit; no platform restrictions are prepended. The historical
+`agent.tools` publication field does not narrow member chats or cancel them
+when edited. Direct page tool declarations remain enforced separately.
 
-Existing published-host chats are normalized before their next admitted Send,
-Steer, queued-message Steer, composer submission or Resume. The trusted host
-atomically restores only this Site's viewer-bound data tools and permissions,
-the artifact capability and platform instructions, selects no sandbox, and
-stops inheriting workspace-default tools. It preserves only the conversation's
-still-authorized connector refs. A version marker and audit event commit with
-the configuration, so a failed write refuses admission and retries safely.
-Already accepted in-flight execution is not rewritten. No republish is needed.
+Visitors outside the workspace still use the `site:<siteId>` service identity,
+with viewer-bound data tools, no workspace tools or sandbox, and funded usage
+limits. This is their actual authority, not a member downgrade. Current
+audience is rechecked on every data-tool call. Guest continuations normalize
+their legacy service profile atomically through `site-publishing/agent-session.ts`.
+
+No migration rewrites stored member settings or previously accepted work.
+Older chats keep their explicit saved selections, editable normally in the
+console, but no longer encounter computed Site-origin refusals. New member
+chats inherit normal defaults, including normal sandbox costs and approval
+pauses. Approvals still require the console.
 
 Funding admission retains a durable pending token across the gap before enqueue.
 Start, Send, Steer, queued-message Steer, composer submission and Resume carry that

@@ -1,5 +1,21 @@
 # @opengeni/subscriptions
 
+## 4.3.1
+
+### Minor Changes
+
+- 9976132: Add pooled weekly subscription utilization, estimated plan-size weighting and reset-aware forecasts with one total remaining bar. Retain observed limit history; organization pools cover organization accounts and workspace pools cover all visible accounts available to that workspace, using each account's total usage. Show five-hour limits only when blocking an account; keep individual account details in the account list.
+
+## 4.2.0
+
+### Patch Changes
+
+- 93e20fe: Redeeming a Codex rate-limit reset credit now restarts chats waiting for that account within seconds. The stored usage windows read before the reset are invalidated along with the stored exhaustion deadline, so a woken waiter places on the account instead of waiting again until the old weekly reset; it no longer depends on a later live usage read.
+
+## 4.1.3
+
+## 4.1.1
+
 ## 4.0.4
 
 ## 3.4.0

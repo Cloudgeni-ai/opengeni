@@ -12,19 +12,16 @@ import {
 import * as schema from "@opengeni/db/schema";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../../../packages/db/src/lossless-json";
 import { createApp } from "../src/app";
 
 let shared: SharedTestDatabase | null;
 let driver: postgres.Sql;
 let db: Database;
-const invalidLookups: string[] = [];
+const invalidLookups: Array<{ query: string; parameters: unknown[] }> = [];
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("external-workspace-routing");
@@ -38,7 +35,7 @@ beforeAll(async () => {
     debug: (_connection, query, parameters) => {
       // Observe attempted SQL, not just HTTP status: a guard used to swallow 22P02.
       if (parameters.includes("external") || parameters.includes("not-a-uuid"))
-        invalidLookups.push(query);
+        invalidLookups.push({ query, parameters: [...parameters] });
     },
   });
   db = drizzle(driver, { schema });
@@ -153,6 +150,54 @@ test("valid external provisioning and asUser imports never query a workspace nam
   expect(invalidLookups).toEqual([]);
 }, 60_000);
 
+test("new external workspace provisioning never queries a namespace segment as a workspace ID", async () => {
+  if (!shared) return;
+  const f = await fixture();
+  const body = JSON.stringify({
+    accountId: f.accountId,
+    externalSource: "host",
+    externalId: crypto.randomUUID(),
+    name: "New tenant",
+  });
+  const response = await f.app.request("/v1/workspaces/external", {
+    method: "PUT",
+    headers: f.headers,
+    body,
+  });
+  expect(response.status, await response.clone().text()).toBe(201);
+  const { workspace } = await response.json();
+  const replay = await f.app.request("/v1/workspaces/external", {
+    method: "PUT",
+    headers: f.headers,
+    body,
+  });
+  expect(replay.status, await replay.clone().text()).toBe(200);
+  expect((await replay.json()).workspace.id).toBe(workspace.id);
+  const identity = { source: "host", externalId: "alice" };
+  const member = await f.app.request(`/v1/workspaces/${workspace.id}/external-members`, {
+    method: "POST",
+    headers: f.headers,
+    body: JSON.stringify({ identity, permissions: ["workspace:read", "sessions:read"] }),
+  });
+  expect(member.status, await member.clone().text()).toBe(200);
+  const actorHeaders = {
+    ...f.headers,
+    "x-opengeni-external-actor": encodeURIComponent(JSON.stringify({ mode: "external", identity })),
+  };
+  const access = await f.app.request("/v1/access/me", { headers: actorHeaders });
+  expect(access.status, await access.clone().text()).toBe(200);
+  // A named external user cannot provision organization workspaces. Even this
+  // refused path must never treat the external route namespace as a native ID.
+  const denied = await f.app.request("/v1/workspaces/external", {
+    method: "PUT",
+    headers: actorHeaders,
+    body,
+  });
+  expect(denied.status, await denied.clone().text()).toBe(403);
+  expect(invalidLookups).toEqual([]);
+  expect(f.errors).toEqual([]);
+}, 60_000);
+
 test("every registered external route stays outside native middleware, including denied requests", async () => {
   if (!shared) return;
   const f = await fixture();
@@ -196,7 +241,32 @@ test("allowance writes and reads use the resolved tenant and preserve organizati
     expect(result.status, await result.clone().text()).toBe(200);
     const denied = await f.app.request(`${f.externalBase}${suffix}`, { headers: other.headers });
     expect(denied.status, await denied.clone().text()).toBe(404);
+    const nativeDenied = await f.app.request(`/v1/workspaces/${f.workspace.id}${suffix}`, {
+      headers: other.headers,
+    });
+    expect(nativeDenied.status, await nativeDenied.clone().text()).toBe(403);
   }
+  expect(invalidLookups).toEqual([]);
+}, 60_000);
+
+test("first-use membership refuses an incomplete workspace without creating membership", async () => {
+  if (!shared) return;
+  const f = await fixture();
+  const [incomplete] = await shared.admin`
+    insert into workspaces (account_id, name) values (${f.accountId}, 'Incomplete tenant') returning id`;
+  const response = await f.app.request(`/v1/workspaces/${incomplete!.id}/sessions`, {
+    headers: {
+      ...f.headers,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { source: "host", externalId: "alice" } }),
+      ),
+    },
+  });
+  expect(response.status, await response.clone().text()).toBe(403);
+  const [members] = await shared.admin`
+    select count(*)::int as count from workspace_memberships where workspace_id = ${incomplete!.id}`;
+  expect(members!.count).toBe(0);
+  expect(f.diagnosticStates.filter(Boolean)).toEqual([]);
   expect(invalidLookups).toEqual([]);
 }, 60_000);
 

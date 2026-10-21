@@ -12,7 +12,9 @@ import {
   createDb,
 } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { startTestServices, testSettings, waitFor, type TestServices } from "@opengeni/testing";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { Document, DocumentFile } from "../../packages/artifact-tool/src/document";
 import { Presentation, PresentationFile } from "../../packages/artifact-tool/src/presentation";
 import { Workbook } from "../../packages/artifact-tool/src/spreadsheet";

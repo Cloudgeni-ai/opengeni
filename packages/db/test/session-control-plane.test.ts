@@ -87,13 +87,15 @@ import {
   updateSessionTitle,
   upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
+  steerQueuedTurnInTransaction,
+  resolveWaitingSteer,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import postgres from "postgres";
 
@@ -160,9 +162,13 @@ async function send(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   text: string,
-  delivery: "send" | "steer" = "send",
+  requested: "send" | "steer" | "steer_now" = "send",
   model?: string,
 ) {
+  // "steer_now" is the explicit "Send now": queue the prompt, then Steer its
+  // row with `interrupt` so the live attempt is interrupted immediately
+  // instead of at its next model step.
+  const delivery = requested === "steer_now" ? "send" : requested;
   const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
     grant.workspaceId,
@@ -185,6 +191,24 @@ async function send(
         }),
       ),
   );
+  if (requested === "steer_now") {
+    const queued = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
+    if (!queued) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          turnId: queued.id,
+          expectedTurnVersion: queued.version,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: `steer-now-${text}-${crypto.randomUUID()}`,
+          interrupt: true,
+        }),
+      ),
+    );
+  }
   const turn = await getSessionTurn(client.db, grant.workspaceId, accepted.turnId);
   if (!turn) throw new Error(`Accepted turn missing: ${accepted.turnId}`);
   return { ...accepted, turn };
@@ -261,6 +285,76 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("history and event appends survive transient connection acquisition failures", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "persist despite connection pressure");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const position = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    for (const [offset, code] of ["53300", "57P03", "ECONNREFUSED", "ECONNRESET"].entries()) {
+      let admissions = 0;
+      const interrupted = new Proxy(client.db, {
+        get(target, property, receiver) {
+          if (property !== "transaction") return Reflect.get(target, property, receiver);
+          return (...args: Parameters<typeof target.transaction>) => {
+            admissions += 1;
+            if (admissions === 1)
+              return Promise.reject(
+                Object.assign(new Error("injected connection failure"), { code }),
+              );
+            return target.transaction(...args);
+          };
+        },
+      });
+      expect(
+        await appendSessionHistoryItems(interrupted, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          expectedExecutionGeneration: turn!.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [
+            {
+              position: position + offset,
+              item: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: `saved-${code}` }],
+              },
+            },
+          ],
+        }),
+      ).toBe(true);
+      expect(admissions).toBe(2);
+      admissions = 0;
+      const result = await appendSessionEventsForTurnAttempt(
+        interrupted,
+        grant.workspaceId!,
+        session.id,
+        turn!.id,
+        turn!.executionGeneration,
+        attemptId,
+        [{ type: "agent.reasoning.delta", payload: { delta: `saved-${code}` } }],
+      );
+      expect(result.accepted).toBe(true);
+      expect(admissions).toBe(2);
+    }
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(history.filter((row) => row.position >= position)).toHaveLength(4);
+    const events =
+      await shared.admin`select id from session_events where session_id = ${session.id} and type = 'agent.reasoning.delta'`;
+    expect(events).toHaveLength(4);
+  });
+
   describe("exact-attempt connector policy replay", () => {
     async function policyAttempt() {
       const { grant, session } = await fixture();
@@ -1142,7 +1236,7 @@ describe("clean session control plane", () => {
       { attemptId },
     );
     expect(predecessor).not.toBeNull();
-    const replacement = await send(grant, session.id, "use this direction", "steer");
+    const replacement = await send(grant, session.id, "use this direction", "steer_now");
 
     expect(
       await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -3240,6 +3334,70 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
+  test.each([0, 3])(
+    "internal MCP waits preserve the provider budget and clear on model progress (%s)",
+    async (count) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "survive the internal API outage");
+      const firstAttemptId = crypto.randomUUID();
+      const first = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: firstAttemptId },
+      );
+      if (!first) throw new Error("turn was not claimed");
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        await db.execute(
+          sql`update session_turns set metadata = metadata || ${JSON.stringify({
+            providerRecoveryCount: count,
+            ...(count > 0
+              ? {
+                  providerRecoveryReason: "provider_overloaded",
+                  providerRecoveryStartedAt: new Date(Date.now() - 60_000).toISOString(),
+                }
+              : {}),
+          })}::jsonb where id = ${first.id}::uuid`,
+        );
+      });
+      const recovered = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "first_party_mcp_setup_unavailable",
+      });
+      expect(recovered.action).toBe("recovering");
+      const waiting = await getSessionTurn(client.db, grant.workspaceId!, first.id);
+      expect(waiting?.metadata.providerRecoveryCount).toBe(count);
+      expect(typeof waiting?.metadata.internalMcpSetupWaitStartedAt).toBe("string");
+      const nextAttemptId = crypto.randomUUID();
+      const next = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: nextAttemptId },
+      );
+      if (!next) throw new Error("turn was not reclaimed");
+      expect(next.id).toBe(first.id);
+      const completed = await appendSessionEventsForTurnAttempt(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        next.id,
+        next.executionGeneration,
+        nextAttemptId,
+        [{ type: "agent.model.request", payload: { phase: "completed" } }],
+      );
+      expect(completed.accepted).toBe(true);
+      const metadata = (await getSessionTurn(client.db, grant.workspaceId!, first.id))?.metadata;
+      expect(metadata).not.toHaveProperty("providerRecoveryCount");
+      expect(metadata).not.toHaveProperty("internalMcpSetupWaitStartedAt");
+    },
+  );
+
   test("a completed current model request resets only the consecutive provider recovery budget", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "continue through intermittent provider overloads");
@@ -4209,6 +4367,104 @@ describe("clean session control plane", () => {
       callId: "pause-approval-call",
     });
     expect(steeredResult).not.toHaveProperty("status");
+  });
+
+  test("a Steer waiting for the next model step replaces an approval wait that came first", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "ask before running");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    // Accepted while the step still runs: it waits for the next model step.
+    const steered = await send(grant, session.id, "do this instead", "steer");
+    expect(steered.turn.metadata).toMatchObject({ deferredUntilModelStep: true });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "running",
+    });
+    // The step ends in an approval instead of another model request.
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "waiting-steer-approval-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "approval_tool",
+        callId: "waiting-steer-approval-call",
+        arguments: "{}",
+      },
+    });
+    await attachOpenSuffixToPendingToolCalls(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      members: [
+        { callId: "waiting-steer-approval-call", interruptionKind: "approval", reasoningItems: [] },
+      ],
+    });
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn!.id,
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvalId: "waiting-steer-approval-call" },
+        },
+      ],
+    });
+
+    const resolved = await resolveWaitingSteer(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+    });
+    expect(resolved).not.toBeNull();
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "superseded",
+      cancelReason: "steer",
+    });
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).slice(-1)[0]
+        ?.item,
+    ).toMatchObject({ type: "function_call_result", callId: "waiting-steer-approval-call" });
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items.some(
+        (item) => item.metadata.delivery === "steer",
+      ),
+    ).toBe(false);
+    expect(
+      await resolveWaitingSteer(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+      }),
+    ).toBeNull();
+    const next = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(next?.id).toBe(steered.turn.id);
   });
 
   test("accepted Send and Steer stay out of the waiting queue", async () => {
@@ -5560,7 +5816,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const steered = await send(grant, session.id, "replace it", "steer");
+    const steered = await send(grant, session.id, "replace it", "steer_now");
 
     await expect(
       markSessionAttemptQuiesced(client.db, {
@@ -5634,7 +5890,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const steered = await send(grant, session.id, "replace the vanished worker", "steer");
+    const steered = await send(grant, session.id, "replace the vanished worker", "steer_now");
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     expect(
       await markSessionWorkflowWakeDelivered(client.db, {
@@ -6051,7 +6307,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    const replacement = await send(grant, session.id, "replace it", "steer");
+    const replacement = await send(grant, session.id, "replace it", "steer_now");
     await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     // Temporarily open admission without manufacturing the receipt event that
     // the historical race never wrote. This lets a newer attempt exist before

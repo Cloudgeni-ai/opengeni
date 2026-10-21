@@ -8,7 +8,12 @@ import {
   type BrowserDownloadSaveResponse as BrowserDownloadSaveResponseValue,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
-import { type Database, withRlsContext, withWorkspaceRls } from "./database";
+import {
+  type Database,
+  withoutSessionRlsActor,
+  withRlsContext,
+  withWorkspaceRls,
+} from "./database";
 import {
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
@@ -264,6 +269,58 @@ export type RetainedBrowserDownload = {
 };
 
 type RetainedScope = { accountId: string; workspaceId: string; browserSessionId: string };
+
+/** The browser's chat lost its creation binding, or its private chat has no owner. */
+export class BrowserDownloadOwnerUnavailableError extends Error {}
+
+/**
+ * Whose private files a browser's kept downloads are: the owner of the chat
+ * that created the browser when that chat is private, else null (workspace
+ * files). Read with system authority, because the request saving the browser
+ * (a capacity save) may not see another person's private chat; the read is
+ * bound to the browser's own creating chat and only decides file ownership.
+ */
+export async function getBrowserDownloadPrivateOwner(
+  db: Database,
+  input: RetainedScope & { sourceSessionId: string },
+): Promise<string | null> {
+  const [row] = await withoutSessionRlsActor(
+    async () =>
+      await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb
+            .select({
+              visibility: schema.sessions.visibility,
+              ownerSubjectId: schema.sessions.ownerSubjectId,
+            })
+            .from(schema.browserSessionAssociations)
+            .innerJoin(
+              schema.sessions,
+              and(
+                eq(schema.sessions.workspaceId, schema.browserSessionAssociations.workspaceId),
+                eq(schema.sessions.id, schema.browserSessionAssociations.sessionId),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.browserSessionAssociations.workspaceId, input.workspaceId),
+                eq(schema.browserSessionAssociations.browserSessionId, input.browserSessionId),
+                eq(schema.browserSessionAssociations.sessionId, input.sourceSessionId),
+                eq(schema.browserSessionAssociations.relationship, "created"),
+              ),
+            )
+            .limit(1),
+      ),
+  );
+  if (!row) throw new BrowserDownloadOwnerUnavailableError("the browser's chat is unavailable");
+  if (row.visibility !== "user_private") return null;
+  if (!row.ownerSubjectId?.trim()) {
+    throw new BrowserDownloadOwnerUnavailableError("the browser's private chat has no owner");
+  }
+  return row.ownerSubjectId;
+}
 
 /** Record that a completed download is retained as a ready workspace file.
  * Idempotent per download: the first retained file wins. */

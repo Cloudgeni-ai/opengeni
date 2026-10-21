@@ -1,9 +1,14 @@
 // Preview-only data/context wiring. SessionList, its hooks, and its styles are real.
-import type { OpenGeniClient, SessionListPageOptions } from "@opengeni/sdk";
+import type {
+  OpenGeniClient,
+  SessionListPageOptions,
+  WorkspaceLiveStreamOptions,
+  WorkspaceSessionListEvent,
+} from "@opengeni/sdk";
 import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
-import type { AppContextValue } from "../src/context";
-import { SessionChannelProjectionAuthority } from "../src/lib/session-pins";
-import type { Session } from "../src/types";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
+import type { Session } from "@opengeni/react/app/types";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const subjectId = "sidebar-preview";
@@ -283,8 +288,12 @@ export type SessionSidebarEvidence = {
   failCursor: string | null;
   failTodayCursor: string | null;
   holdTodayCursor: string | null;
+  holdChannelId: string | null;
+  holdChannelCursor: string | null;
   heldPageStarted: boolean;
   releaseHeldPage: () => void;
+  /** `?hints=1` only: another device archives a row and the server sends its commit hint. */
+  archiveRemotely: (sessionId: string) => void;
   snapshot: () => Session[];
 };
 
@@ -295,8 +304,19 @@ export const evidence: SessionSidebarEvidence = {
   failCursor: null,
   failTodayCursor: null,
   holdTodayCursor: null,
+  holdChannelId: null,
+  holdChannelCursor: null,
   heldPageStarted: false,
   releaseHeldPage: () => {},
+  archiveRemotely: (sessionId) => {
+    const row = rows.find((candidate) => candidate.id === sessionId);
+    if (!row) throw new Error("Preview session not found");
+    row.archived = true;
+    row.archivedAt = new Date().toISOString();
+    row.archiveVersion = (row.archiveVersion ?? 0) + 1;
+    row.updatedAt = row.archivedAt;
+    publishHint([sessionId]);
+  },
   snapshot: () => structuredClone(rows),
 };
 
@@ -365,8 +385,16 @@ export const client = {
     };
     evidence.listCalls.push(call);
     const todayPage = options.updatedFrom !== undefined && options.updatedBefore === undefined;
-    if (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor) {
+    const heldChannelPage =
+      evidence.holdChannelId !== null &&
+      options.channelId === evidence.holdChannelId &&
+      (options.cursor ?? null) === evidence.holdChannelCursor;
+    if (
+      heldChannelPage ||
+      (todayPage && evidence.holdTodayCursor && options.cursor === evidence.holdTodayCursor)
+    ) {
       evidence.holdTodayCursor = null;
+      evidence.holdChannelId = null;
       evidence.heldPageStarted = true;
       await new Promise<void>((resolve) => {
         evidence.releaseHeldPage = resolve;
@@ -429,6 +457,49 @@ client.listSessionSummaryPage = async (workspace, options) => {
     pinned: page.pinned.map(sessionListEntry),
   };
 };
+
+// `?hints=1` serves the workspace live stream, so the sidebar runs in commit
+// hint mode: no list polling, and only a published hint invalidates rows.
+const pendingHints: WorkspaceSessionListEvent[] = [];
+let wakeHintStream = () => {};
+function publishHint(sessionIds: string[] | null) {
+  pendingHints.push({
+    type: "workspace.sessions.changed",
+    workspaceId,
+    available: true,
+    sessionIds,
+  });
+  wakeHintStream();
+}
+if (previewParameters.has("hints")) {
+  Object.assign(client, {
+    getClientConfig: async () => ({}),
+    getWorkspace: async (id: string) => ({ id, inferenceControl: { revision: 0 } }),
+    streamWorkspaceLiveEvents: async function* (
+      workspace: string,
+      options: WorkspaceLiveStreamOptions = {},
+    ) {
+      options.onStateChange?.("live");
+      yield {
+        type: "workspace.sessions.changed",
+        workspaceId: workspace,
+        available: true,
+        sessionIds: null,
+      } satisfies WorkspaceSessionListEvent;
+      while (!options.signal?.aborted) {
+        const hint = pendingHints.shift();
+        if (hint) {
+          yield hint;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wakeHintStream = resolve;
+          options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+    },
+  });
+}
 
 const invocation = { workspaceId };
 const context = {

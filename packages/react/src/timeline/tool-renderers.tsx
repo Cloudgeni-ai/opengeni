@@ -41,6 +41,8 @@ import {
 import { useContext, useState, type ReactNode } from "react";
 import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
+import { useToolDetails } from "./tool-details";
+import type { ToolCallItem } from "./types";
 import { ConnectorLogoIcon, useToolConnectorLogo } from "./provider-logo";
 import {
   generatedImageReceipt,
@@ -55,6 +57,7 @@ import {
   createToolRegistry,
   type ToolRegistry,
   type ToolRegistryEntry,
+  type ToolRenderer,
   type ToolRendererProps,
 } from "./registry";
 import {
@@ -81,12 +84,16 @@ import {
   pathDirname,
   machinePresentation,
   runOnPresentation,
+  plainToolRow,
+  presentedToolKind,
+  presentsToolOutputPreview,
   toolRowPresentation,
   toolSearchPreview,
   toolSearchQuery,
   truncatePreview,
   webSearchPresentation,
   writeStdinPresentation,
+  type PresentedToolKind,
   type ToolBody,
   type ToolIconKind,
   type ToolPreview,
@@ -300,6 +307,8 @@ function PresentedBody({ body }: { body: ToolBody }) {
       );
     case "web-results":
       return <WebSearchResults results={body.results} />;
+    case "none":
+      return null;
   }
 }
 
@@ -334,14 +343,22 @@ function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
 
 /** Draw one shared-model row with the web disclosure primitives. */
 function PresentedToolRow({
-  presentation: p,
+  presentation,
+  item,
   logo = null,
 }: {
   presentation: ToolRowPresentation;
+  /** The call the row presents; plain tool details reduce the row from it. */
+  item: ToolCallItem;
   /** A connector's logo, drawn in place of the row's icon. */
   logo?: string | null;
 }) {
   const msg = useOpenGeniText();
+  const computeLabel = useTimelineComputeLabel();
+  const p =
+    useToolDetails() === "plain"
+      ? plainToolRow(msg, item, presentation, { computeLabel })
+      : presentation;
   const Icon = toolIcon(p.icon);
   return (
     <ActivityDisclosure
@@ -355,6 +372,7 @@ function PresentedToolRow({
       {...(p.failed !== undefined ? { failed: p.failed } : {})}
       {...(p.cancelled !== undefined ? { cancelled: p.cancelled } : {})}
       preview={p.preview ? presentedPreviewNode(msg, p.preview) : undefined}
+      expandable={p.body.kind !== "none"}
     >
       <PresentedBody body={p.body} />
     </ActivityDisclosure>
@@ -364,19 +382,21 @@ function PresentedToolRow({
 function ExecRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const computeLabel = useTimelineComputeLabel();
-  return <PresentedToolRow presentation={execPresentation(msg, item, { computeLabel })} />;
+  return (
+    <PresentedToolRow presentation={execPresentation(msg, item, { computeLabel })} item={item} />
+  );
 }
 
 function WriteStdinRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
-  return <PresentedToolRow presentation={writeStdinPresentation(msg, item)} />;
+  return <PresentedToolRow presentation={writeStdinPresentation(msg, item)} item={item} />;
 }
 
 function ApplyPatchRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const presentation = applyPatchPresentation(msg, item);
   return presentation ? (
-    <PresentedToolRow presentation={presentation} />
+    <PresentedToolRow presentation={presentation} item={item} />
   ) : (
     <GenericRenderer item={item} />
   );
@@ -384,17 +404,17 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
 
 function WebSearchRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
-  return <PresentedToolRow presentation={webSearchPresentation(msg, item)} />;
+  return <PresentedToolRow presentation={webSearchPresentation(msg, item)} item={item} />;
 }
 
 function AskRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
-  return <PresentedToolRow presentation={askPresentation(msg, item)} />;
+  return <PresentedToolRow presentation={askPresentation(msg, item)} item={item} />;
 }
 
 function RunOnRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
-  return <PresentedToolRow presentation={runOnPresentation(msg, item)} />;
+  return <PresentedToolRow presentation={runOnPresentation(msg, item)} item={item} />;
 }
 
 /**
@@ -407,7 +427,7 @@ function MachineRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const retained = mcpToolLeaf(item.name).startsWith("computer_")
     ? retainedScreenshotMetadata(item.output)
     : null;
-  if (!retained?.available) return <PresentedToolRow presentation={presentation} />;
+  if (!retained?.available) return <PresentedToolRow presentation={presentation} item={item} />;
   return (
     <RetainedSessionImageDisclosure
       artifact={retained}
@@ -435,14 +455,17 @@ function MachineRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
  */
 function UnreviewedGenericRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const msg = useOpenGeniText();
+  const details = useToolDetails();
   const logo = useToolConnectorLogo(item.display);
   const { images, output } = retainedToolResultImages(item.output);
   if (images.length === 0 || item.status === "running") {
-    return <PresentedToolRow presentation={toolRowPresentation(msg, item)} logo={logo} />;
+    return (
+      <PresentedToolRow presentation={toolRowPresentation(msg, item)} item={item} logo={logo} />
+    );
   }
   // A tool that returned images shows them like a viewed image, with its
   // ordinary result text (and any further images) in the expanded body.
-  const presentation = toolRowPresentation(msg, { ...item, output });
+  const presentation = toolRowPresentation(msg, { ...item, output }, { details });
   const Icon = toolIcon(presentation.icon);
   const [first, ...rest] = images;
   return (
@@ -1038,6 +1061,7 @@ function GeneratedVideoRenderer({ item }: ToolRendererProps) {
 }
 function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRendererProps) {
   const msg = useOpenGeniText();
+  const plain = useToolDetails() === "plain";
   const { text: output, isError } = unwrapMcpOutput(item.output);
   const receipt = parseSandboxFileArtifactReceipt(output);
   const [downloadState, setDownloadState] = useState<"idle" | "loading" | "error">("idle");
@@ -1156,7 +1180,7 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     >
       {downloadButton}
       {openLink}
-      {isPatchFilename(receipt.filename) ? (
+      {plain ? null : isPatchFilename(receipt.filename) ? (
         <PatchApplyCommand
           artifact={receipt.artifact}
           filename={receipt.filename}
@@ -1590,7 +1614,16 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
 
 /* ---- environment_set_variable (secret-safe, write-only) -------------------- */
 
-function SecretSetRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function SecretSetRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullSecretSetRenderer {...props} />
+  );
+}
+
+function FullSecretSetRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const name = typeof args.name === "string" ? args.name : "variable";
@@ -1645,7 +1678,16 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
 
 /* ---- tool_search (progressive MCP disclosure) ------------------------------ */
 
-function ToolSearchRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function ToolSearchRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullToolSearchRenderer {...props} />
+  );
+}
+
+function FullToolSearchRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const query = toolSearchQuery(item);
   const icon = <PackageSearchIcon className={ICON_SIZE} />;
@@ -1748,7 +1790,16 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
 
 /* ---- docs / knowledge search ----------------------------------------------- */
 
-function DocsSearchRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function DocsSearchRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullDocsSearchRenderer {...props} />
+  );
+}
+
+function FullDocsSearchRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const query = typeof args.query === "string" ? args.query.trim() : "";
@@ -1827,7 +1878,16 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
 
 /* ---- set_session_title / set_other_session_title --------------------------- */
 
-function SetSessionTitleRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function SetSessionTitleRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullSetSessionTitleRenderer {...props} />
+  );
+}
+
+function FullSetSessionTitleRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const titleArg = typeof args.title === "string" ? args.title.trim() : "";
@@ -1901,7 +1961,16 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
 
 /* ---- company memory propose (docs MCP) ------------------------------------- */
 
-function MemoryProposeRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function MemoryProposeRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullMemoryProposeRenderer {...props} />
+  );
+}
+
+function FullMemoryProposeRenderer({ item }: ToolRendererProps) {
   const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const text = typeof args.text === "string" ? args.text.trim() : "";
@@ -2190,6 +2259,31 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     render: SetSessionTitleRenderer,
   },
 ];
+
+/** Built-in renderers that draw their row from the shared presentation. */
+const PRESENTATION_RENDERERS: ReadonlyMap<ToolRenderer, PresentedToolKind> = new Map<
+  ToolRenderer,
+  PresentedToolKind
+>([
+  [ExecRenderer, "exec"],
+  [WriteStdinRenderer, "write_stdin"],
+  [ApplyPatchRenderer, "apply_patch"],
+  [GenericRenderer, "generic"],
+]);
+
+/**
+ * Whether `renderer` can draw `item` while its output is a bounded preview
+ * (see {@link presentsToolOutputPreview}). Every other row (media, receipts,
+ * cards that parse their result, consumer renderers) needs its exact output
+ * before it renders.
+ */
+export function rendersToolOutputPreview(renderer: ToolRenderer, item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  return (
+    PRESENTATION_RENDERERS.get(renderer) === presentedToolKind(item) &&
+    presentsToolOutputPreview(item)
+  );
+}
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */
 export const defaultToolRegistry: ToolRegistry = createToolRegistry(BASE_ENTRIES, GenericRenderer);

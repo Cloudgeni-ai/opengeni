@@ -23,9 +23,13 @@ import type {
   GitFileDiff,
   GitStatusResponse,
   SessionCapabilities,
+  SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
   WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
 import type { MachinesResponse, MachineView } from "@opengeni/react/machines";
+import { isPresentedSessionToolName } from "@opengeni/sdk";
 import { MockOpenGeniClient } from "./mock";
 
 export const DOCK_SESSION_ID = "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
@@ -563,6 +567,12 @@ export type DockState = {
   announceFileCount?: number;
   /** First attach fails; a second explicit intent recovers the live PNG. */
   liveFileWakeRecovery?: boolean;
+  /**
+   * A reloaded session with terminal history: past turns' command output and
+   * an interactive PTY's scrollback, served with the server's history filters
+   * (conversation reads exclude it; the dock reads it by type).
+   */
+  terminalHistory?: boolean;
 };
 
 export const DOCK_STATES: Record<string, DockState> = {
@@ -611,6 +621,18 @@ export const DOCK_STATES: Record<string, DockState> = {
     gitStatus: statusReview,
     gitDiff: diffReview,
     announceFileCount: 3,
+  },
+  // A reloaded chat: the box sleeps, and the Terminal shows past command
+  // output and PTY scrollback read from history when it opens.
+  "terminal-history": {
+    label: "Reloaded · terminal history",
+    capabilities: capsCold(),
+    capture: captureAvailable(manifest(diffReview, treeReview, 7)),
+    machines: fleet(machine({ state: "offline", active: false })),
+    gitStatus: statusReview,
+    gitDiff: diffReview,
+    announceFileCount: 3,
+    terminalHistory: true,
   },
   // Actively warming: machine reconnecting → chip "Waking…".
   waking: {
@@ -823,6 +845,22 @@ export class DockStateMockClient extends MockOpenGeniClient {
 
   constructor(private readonly state: DockState) {
     super();
+    if (state.terminalHistory) {
+      seedTerminalHistory(this.bus(DOCK_SESSION_ID));
+      // Page reads with the server's filters, for this state only: the hooks
+      // prefer `listEventPage` whenever a client has it.
+      Object.assign(this, {
+        listEventPage: async (
+          _workspaceId: string,
+          sessionId: string,
+          options: SessionEventListOptions = {},
+        ): Promise<SessionEventPage> => {
+          const page = serverHistoryRead(this.bus(sessionId).events, options);
+          recordHistoryRead(options, page.events);
+          return page;
+        },
+      });
+    }
     // Seed a capture announce so the pre-paint default tab resolves (Changes when
     // the session has changes, Files otherwise) exactly as production does.
     if (state.announceFileCount && state.announceFileCount > 0) {
@@ -881,6 +919,17 @@ export class DockStateMockClient extends MockOpenGeniClient {
 
   override async getWorkspaceCapture(): Promise<GetWorkspaceCaptureResponse> {
     return this.state.capture;
+  }
+
+  override async listEvents(
+    workspaceId: string,
+    sessionId: string,
+    options: SessionEventListOptions = {},
+  ): Promise<SessionEvent[]> {
+    if (!this.state.terminalHistory) return super.listEvents(workspaceId, sessionId, options);
+    const page = serverHistoryRead(this.bus(sessionId).events, options);
+    recordHistoryRead(options, page.events);
+    return page.events;
   }
 
   override async listMachines(): Promise<MachinesResponse> {
@@ -977,4 +1026,177 @@ export class DockStateMockClient extends MockOpenGeniClient {
       truncated: false,
     };
   }
+}
+
+// ── reloaded terminal history ────────────────────────────────────────────────
+
+const ESC = "\u001b[";
+const DIM = `${ESC}2m`;
+const GREEN = `${ESC}32m`;
+const RED = `${ESC}31m`;
+const CYAN = `${ESC}36m`;
+const YELLOW = `${ESC}33m`;
+const RESET = `${ESC}0m`;
+const PTY_ID = "7d1e2f30-4a5b-4c6d-8e7f-1a2b3c4d5e6f";
+const PROMPT = `${GREEN}operator@api${RESET}:${CYAN}~/api${RESET}$ `;
+
+type HistoryBus = {
+  append: (type: string, payload: unknown, turnId?: string | null) => SessionEvent;
+};
+
+/**
+ * A session as a reload finds it: an interactive terminal that tailed the API
+ * log for a while (2,000 rows), then two finished turns whose commands ran in
+ * the sandbox, with a short terminal check between them.
+ */
+function seedTerminalHistory(bus: HistoryBus): void {
+  const pty = (chunk: string) =>
+    bus.append("terminal.pty.output.delta", { ptyId: PTY_ID, stream: "stdout", chunk, seq: 0 });
+  bus.append("terminal.pty.started", {
+    ptyId: PTY_ID,
+    cols: 120,
+    rows: 32,
+    shell: "/bin/bash",
+    cwd: "/workspace/api",
+  });
+  pty(`${PROMPT}tail -f logs/api.log\r\n`);
+  const routes = [
+    "/v1/health",
+    "/v1/orders",
+    "/v1/orders/:id",
+    "/v1/carts",
+    "/v1/workspaces/:workspaceId/sessions",
+  ];
+  for (let index = 0; index < 2000; index += 1) {
+    const seconds = String(index % 60).padStart(2, "0");
+    const minutes = String(12 + (Math.floor(index / 60) % 48)).padStart(2, "0");
+    const code = index % 97 === 0 ? `${YELLOW}429${RESET}` : `${GREEN}200${RESET}`;
+    pty(
+      `${DIM}2026-10-21T09:${minutes}:${seconds}Z${RESET} GET ${routes[index % routes.length]} ${code} ${12 + (index % 37)}ms\r\n`,
+    );
+  }
+  pty("^C\r\n");
+
+  const turn = (input: {
+    turnId: string;
+    question: string;
+    command: string;
+    output: string[];
+    answer: string;
+  }) => {
+    bus.append("user.message", { text: input.question, routing: "accepted_for_execution" });
+    bus.append("turn.started", { turnId: input.turnId }, input.turnId);
+    const callId = `${input.turnId}-call`;
+    bus.append(
+      "agent.toolCall.created",
+      { id: callId, name: "exec_command", arguments: { cmd: input.command } },
+      input.turnId,
+    );
+    bus.append(
+      "sandbox.command.output.delta",
+      { stream: "stdout", chunk: `${PROMPT}${input.command}\r\n` },
+      input.turnId,
+    );
+    for (const line of input.output) {
+      bus.append("sandbox.command.output.delta", { stream: "stdout", chunk: line }, input.turnId);
+    }
+    bus.append("agent.toolCall.output", { id: callId, output: "ok" }, input.turnId);
+    bus.append("agent.message.completed", { text: input.answer }, input.turnId);
+    bus.append("turn.completed", { turnId: input.turnId }, input.turnId);
+  };
+  turn({
+    turnId: "6a1b2c3d-0000-4000-8000-000000000001",
+    question: "Run the API test suite and fix anything failing.",
+    command: "bun test --filter api",
+    output: [
+      `${DIM}bun test v1.4.3${RESET}\r\n`,
+      `${GREEN}✓${RESET} orders › creates an order ${DIM}[4.21ms]${RESET}\r\n`,
+      `${GREEN}✓${RESET} orders › rejects an empty cart ${DIM}[1.02ms]${RESET}\r\n`,
+      `${RED}×${RESET} carts › expires after 24h ${DIM}[0.88ms]${RESET}\r\n`,
+      `${GREEN}✓${RESET} carts › expires after 24h (retry) ${DIM}[0.91ms]${RESET}\r\n`,
+      `\r\n ${GREEN}412 pass${RESET}\r\n ${DIM}0 fail${RESET}\r\nRan 412 tests across 38 files. ${DIM}[2.84s]${RESET}\r\n`,
+    ],
+    answer: "Fixed the cart expiry clock skew; all 412 tests pass.",
+  });
+  pty(`${PROMPT}git status --short\r\n M src/carts/expiry.ts\r\n M test/carts.test.ts\r\n`);
+  turn({
+    turnId: "6a1b2c3d-0000-4000-8000-000000000002",
+    question: "Deploy it to staging.",
+    command: "kubectl rollout status deploy/api -n api-staging",
+    output: [
+      `Waiting for deployment "api" rollout to finish: 1 of 3 updated replicas are available...\r\n`,
+      `Waiting for deployment "api" rollout to finish: 2 of 3 updated replicas are available...\r\n`,
+      `deployment "api" successfully rolled out\r\n`,
+      `${GREEN}Deploy reachable at https://api-staging.acme.dev${RESET}\r\n`,
+    ],
+    answer: "Staging is on the new build and healthy.",
+  });
+}
+
+/** The API's history filters: types, presented calls, bounds, direction, limit. */
+function serverHistoryRead(
+  events: readonly SessionEvent[],
+  options: SessionEventListOptions,
+): SessionEventPage {
+  const after = options.after ?? 0;
+  const before = options.before ?? Number.MAX_SAFE_INTEGER;
+  const include = options.includeTypes?.length ? new Set<string>(options.includeTypes) : null;
+  const exclude = new Set<string>(options.excludeTypes ?? []);
+  const rows = events.filter((event) => {
+    if (event.sequence <= after || event.sequence >= before) return false;
+    if (include && !include.has(event.type)) return false;
+    if (!exclude.has(event.type)) return true;
+    return (
+      options.presentedToolCalls === "include" &&
+      event.type === "agent.toolCall.created" &&
+      isPresentedSessionToolName((event.payload as { name?: unknown } | null)?.name)
+    );
+  });
+  const direction =
+    options.direction ??
+    (options.before !== undefined ? "before" : options.after !== undefined ? "after" : "before");
+  const limit = options.limit ?? 500;
+  const page = direction === "before" ? rows.slice(-limit) : rows.slice(0, limit);
+  return {
+    events: page,
+    mode: "forensic",
+    payloadMode: "full",
+    direction,
+    bytes: JSON.stringify(page).length,
+    maxBytes: 1024 * 1024,
+    truncated: rows.length > page.length,
+    hasMore: rows.length > page.length,
+    truncatedBy: rows.length > page.length ? "count" : null,
+    coveredSequence:
+      page.length > 0 ? { first: page[0]!.sequence, last: page.at(-1)!.sequence } : null,
+    nextAfter: null,
+    nextBefore: null,
+    forensicExact: true,
+  };
+}
+
+export type DockHistoryRead = {
+  includeTypes: string[] | null;
+  excludeTypes: string[] | null;
+  rows: number;
+  terminalRows: number;
+};
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __OG_DOCK_HISTORY_READS__: DockHistoryRead[] | undefined;
+}
+
+/** Evidence for browser acceptance: every history read and what it returned. */
+function recordHistoryRead(options: SessionEventListOptions, rows: readonly SessionEvent[]): void {
+  const reads = (globalThis.__OG_DOCK_HISTORY_READS__ ??= []);
+  reads.push({
+    includeTypes: options.includeTypes ? [...options.includeTypes] : null,
+    excludeTypes: options.excludeTypes ? [...options.excludeTypes] : null,
+    rows: rows.length,
+    terminalRows: rows.filter(
+      (event) =>
+        event.type === "terminal.pty.output.delta" || event.type === "sandbox.command.output.delta",
+    ).length,
+  });
 }

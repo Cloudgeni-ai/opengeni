@@ -124,7 +124,7 @@ export async function bootstrapKeeperConfiguration(
       } catch {
         throw new VaultProviderError(
           "provider_unavailable",
-          "Keeper accepted the one-time token but Opengeni could not save the connection; generate a new token and connect again",
+          "Keeper accepted the one-time token but the connection could not be saved; generate a new token and connect again",
         );
       }
     }

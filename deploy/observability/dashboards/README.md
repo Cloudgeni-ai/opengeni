@@ -1,6 +1,6 @@
 # Opengeni Grafana dashboards
 
-Dashboards-as-code for the Opengeni control plane. Seven boards, each answering a
+Dashboards-as-code for the Opengeni control plane. Nine boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
@@ -11,9 +11,11 @@ different "manage and fix problems as soon as they arise" question:
 | `sandbox-health.json` | **Opengeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
 | `turn-startup.json` | **Opengeni · Turn Startup** | Where does queue-to-first-byte time go — worker queue, sandbox/rig/repository/file/tool/model preparation, provider dispatch, or provider response? |
 | `google-drive-sync.json` | **Opengeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
+| `api-latency.json` | **Opengeni · API Latency** | Is each interactive API route meeting 500 ms P95 for successful requests, with enough samples and without increasing failures? Compares the selected window with the preceding equal window and keeps all-status history separate. |
 | `runtime-failures.json` | **Opengeni · Runtime Failures** | Are alerts firing, scrape targets healthy, synthetic probes fresh, turn workers restarting, recovery exhausted, turns failing or recovering, MCP connections or tool calls broken or slow, sandboxes/providers failing, the API returning 5xx, or the durable write path saturated? |
+| `compute.json` | **Opengeni · Compute** | Is Opengeni compute healthy and does it have room — hosts by state with the memory, processors and disk they can still promise, lease renewals and the host group as the control service's leader sees them, the control service's API by route and outcome, and each host's sandboxes, memory, pressure, operations and alarms from the metrics it passes on? Host panels follow the release's hosts through `compute_fleet_host_info`. |
 
-All seven are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All nine are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded. The Turn Startup dashboard additionally requires one exact
 `$namespace`, `$environment`, and `$release` selection so a shared Prometheus
@@ -27,6 +29,26 @@ history. The production example's 30-day time limit plus 80 GB size limit does
 not guarantee 30 days: Prometheus applies whichever limit is reached first.
 Size local storage from measured ingestion or use remote write before relying
 on the full window.
+
+The API Latency dashboard also selects one exact deployment, then a method and
+route (session creation by default). Successful latency uses the bounded
+`status_class="2xx"` histogram label; 1xx through 5xx and `unknown` are separate
+series. Existing all-status queries remain valid by summing away that label.
+Success-only history starts when the new emitter is deployed and covers only
+updated processes during a mixed rollout. Never compare a success-only P95 with
+an older all-status P95. The adjacent counts and exact ≤500 ms bucket fraction
+help assess sparse traffic and histogram interpolation. Synthetic probes and
+automation remain included; these are handler timings, not browser or model
+completion latency. Treat streaming and long-running tool routes separately.
+
+The dashboard query regression tests can execute against Prometheus itself:
+
+```bash
+OPENGENI_TEST_PROMTOOL=/path/to/promtool bun test ./deploy/observability/dashboards/api-latency.test.ts
+```
+
+Without `promtool`, the structural checks still run and query evaluation is
+explicitly skipped.
 
 ## Importing
 

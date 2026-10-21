@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, composeRuntimeSkills, runtimeSkillIndexForAgent } from "../src";
 
 const capabilities = {
@@ -63,8 +63,8 @@ describe("video generation runtime surface", () => {
       sites: false,
       videoGeneration: true,
     });
-    expect(disabled.index.map((entry) => entry.name)).not.toContain("opengeni-video-generation");
-    expect(enabled.index.map((entry) => entry.name)).toContain("opengeni-video-generation");
+    expect(disabled.index.map((entry) => entry.name)).not.toContain("video-generation");
+    expect(enabled.index.map((entry) => entry.name)).toContain("video-generation");
   });
 
   test("keeps video tools and server-readable guidance on connected machines", () => {
@@ -95,7 +95,7 @@ describe("video generation runtime surface", () => {
       "skill_read",
     ]);
     expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain(
-      "opengeni-video-generation",
+      "video-generation",
     );
   });
 

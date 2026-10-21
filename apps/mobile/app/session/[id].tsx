@@ -141,13 +141,13 @@ function LiveSession(props: {
       },
       onCopy: (text) => void copyText(text),
       onOpenGeniLink: openLink,
-      ...createNativePreviewRenderers({
+      ...createNativePreviewRenderers(t, {
         client: props.client,
         workspaceId: props.workspaceId,
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, webBaseUrl]);
+  }, [props.client, props.workspaceId, webBaseUrl, t]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -368,6 +368,7 @@ function LiveSession(props: {
               label={pill.name}
               detail={pill.effort}
               fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
+              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy

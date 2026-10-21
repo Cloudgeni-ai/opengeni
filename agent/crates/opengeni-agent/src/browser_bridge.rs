@@ -109,25 +109,85 @@ fn extension_origin() -> String {
 /// Run the Chrome-spawned Native Messaging host. It owns no browser or cloud
 /// authority: after reading the owner-only local authority file it authenticates
 /// to the already-running agent and copies bounded native-message frames.
+///
+/// Chrome discards a host's stderr, so when the host cannot reach the agent it
+/// first tells the extension why in one `unavailable` frame on stdout. The
+/// extension shows that to the person instead of a bare disconnect.
 pub fn run_native_host() -> Result<(), BrowserBridgeError> {
-    let config_dir = crate::config::config_dir()
-        .map_err(|error| BrowserBridgeError::Protocol(error.to_string()))?;
-    let authority = read_authority(&authority_path(&config_dir))?;
+    let mut browser_output = std::io::stdout().lock();
+    let connected = crate::config::config_dir()
+        .map_err(|error| {
+            (
+                AgentUnavailableReason::AgentError,
+                BrowserBridgeError::Protocol(error.to_string()),
+            )
+        })
+        .and_then(|config_dir| connect_native_host(&config_dir));
+    match connected {
+        Ok(socket) => relay_native_host(socket, std::io::stdin(), browser_output),
+        Err((reason, error)) => {
+            write_agent_unavailable_sync(&mut browser_output, reason, &error.to_string());
+            Err(error)
+        }
+    }
+}
+
+/// Opens the authenticated agent connection for this host, or says which
+/// [`AgentUnavailableReason`] keeps it from doing so.
+fn connect_native_host(
+    config_dir: &Path,
+) -> Result<std::net::TcpStream, (AgentUnavailableReason, BrowserBridgeError)> {
+    use AgentUnavailableReason::{AgentError, AgentNotRunning, AgentOutdated};
+    // The running agent writes this file when it starts its bridge.
+    let authority = match read_authority(&authority_path(config_dir)) {
+        Ok(authority) => authority,
+        Err(BrowserBridgeError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err((AgentNotRunning, error.into()));
+        }
+        Err(error) => return Err((AgentError, error)),
+    };
     if authority.protocol_version != BRIDGE_PROTOCOL_VERSION {
-        return Err(BrowserBridgeError::Protocol(
-            "running agent uses an incompatible browser bridge".to_string(),
+        // This host is the agent's installed program. A running agent with an
+        // older bridge is a previous version that has not restarted yet.
+        let reason = if authority.protocol_version < BRIDGE_PROTOCOL_VERSION {
+            AgentOutdated
+        } else {
+            AgentError
+        };
+        return Err((
+            reason,
+            BrowserBridgeError::Protocol(
+                "the running agent and its installed program use different browser bridge versions; restart the agent"
+                    .to_string(),
+            ),
         ));
     }
-    let mut socket = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))?;
+    let mut socket = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+        .map_err(|error| {
+            // A file left behind by an agent that exited without removing it.
+            let reason = if error.kind() == std::io::ErrorKind::ConnectionRefused {
+                AgentNotRunning
+            } else {
+                AgentError
+            };
+            (reason, error.into())
+        })?;
+    authenticate_native_host(&mut socket, &authority.token).map_err(|error| (AgentError, error))?;
+    Ok(socket)
+}
+
+fn authenticate_native_host(
+    socket: &mut std::net::TcpStream,
+    token: &str,
+) -> Result<(), BrowserBridgeError> {
     socket.set_nodelay(true)?;
     let authentication = serde_json::to_vec(&serde_json::json!({
         "type": "authenticate",
         "protocolVersion": BRIDGE_PROTOCOL_VERSION,
         "role": "extension",
-        "token": authority.token,
+        "token": token,
     }))?;
-    write_native_frame_sync_bounded(&mut socket, &authentication, MAX_AUTH_MESSAGE_BYTES)?;
-    relay_native_host(socket, std::io::stdin(), std::io::stdout().lock())
+    write_native_frame_sync_bounded(socket, &authentication, MAX_AUTH_MESSAGE_BYTES)
 }
 
 /// Copy frames between Chrome (`browser_input`/`browser_output`) and the
@@ -180,9 +240,14 @@ where
         let _ = writer.shutdown(Shutdown::Write);
     });
 
-    while let Some(message) =
-        read_native_frame_sync_bounded(&mut socket, MAX_COMMAND_MESSAGE_BYTES)?
-    {
+    let mut answered = false;
+    let ended = loop {
+        let message = match read_native_frame_sync_bounded(&mut socket, MAX_COMMAND_MESSAGE_BYTES) {
+            Ok(Some(message)) => message,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        };
+        answered = true;
         if let Err(error) = write_native_frame_sync_bounded(
             &mut browser_output,
             &message,
@@ -197,8 +262,99 @@ where
             let _ = writer.shutdown(Shutdown::Write);
             return Err(error);
         }
+    };
+    if !answered {
+        // The agent explains every hello it refuses. Closing without a word
+        // means it stopped, or did not accept this host's authentication.
+        let detail = match &ended {
+            Ok(()) => "the agent closed the browser connection without answering".to_string(),
+            Err(error) => format!("the agent connection failed before answering: {error}"),
+        };
+        write_agent_unavailable_sync(
+            &mut browser_output,
+            AgentUnavailableReason::AgentError,
+            &detail,
+        );
     }
-    Ok(())
+    ended
+}
+
+/// Why this computer's agent cannot take an extension connection. The agent
+/// side sends it in one `unavailable` frame before closing, so the extension
+/// can tell the person which side to start or update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentUnavailableReason {
+    /// No agent is running for this user.
+    AgentNotRunning,
+    /// The running agent is older than the extension (or than its own
+    /// installed program, until it restarts).
+    AgentOutdated,
+    /// The extension is older than the running agent.
+    ExtensionOutdated,
+    /// Anything else; the frame's detail says what.
+    AgentError,
+}
+
+/// The frame an extension of any version can read: it exists to explain a
+/// version difference, so its shape never depends on the protocol version.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentUnavailable<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    protocol_version: u32,
+    reason: AgentUnavailableReason,
+    /// The running agent's version. Only the running agent sends it: a native
+    /// host is the installed program, which may already be newer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_version: Option<&'static str>,
+    detail: &'a str,
+}
+
+fn agent_unavailable_frame(
+    reason: AgentUnavailableReason,
+    agent_version: Option<&'static str>,
+    detail: &str,
+) -> Vec<u8> {
+    serde_json::to_vec(&AgentUnavailable {
+        kind: "unavailable",
+        protocol_version: BRIDGE_PROTOCOL_VERSION,
+        reason,
+        agent_version,
+        detail: truncate_utf8(detail, MAX_CONNECTION_END_DETAIL_BYTES),
+    })
+    .expect("agent unavailable frame serializes")
+}
+
+/// The native host's own report. Best effort: Chrome may already have closed
+/// the port.
+fn write_agent_unavailable_sync<W: std::io::Write>(
+    browser_output: &mut W,
+    reason: AgentUnavailableReason,
+    detail: &str,
+) {
+    let frame = agent_unavailable_frame(reason, None, detail);
+    let _ = write_native_frame_sync_bounded(browser_output, &frame, MAX_COMMAND_MESSAGE_BYTES);
+}
+
+/// Which side is outdated when a hello names another bridge protocol version.
+/// Read before the full hello, whose shape belongs to that version.
+fn hello_version_refusal(bytes: &[u8]) -> Option<AgentUnavailableReason> {
+    #[derive(Deserialize)]
+    struct HelloVersion {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "protocolVersion")]
+        protocol_version: Option<u32>,
+    }
+    let hello = serde_json::from_slice::<HelloVersion>(bytes).ok()?;
+    let version = hello.protocol_version.filter(|_| hello.kind == "hello")?;
+    match version.cmp(&BRIDGE_PROTOCOL_VERSION) {
+        std::cmp::Ordering::Less => Some(AgentUnavailableReason::ExtensionOutdated),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(AgentUnavailableReason::AgentOutdated),
+    }
 }
 
 fn send_native_host_closing(
@@ -230,22 +386,88 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 /// Install the user-scoped Native Messaging manifest for Google Chrome and for
 /// any already-present compatible Chromium channels. The manifest points at the
 /// exact running agent binary; Chrome supplies the pinned extension origin.
+///
+/// On Windows the browsers find the manifest through the per-user registry, so
+/// the one manifest file is written under `%LOCALAPPDATA%` and each browser's
+/// `NativeMessagingHosts` key names it.
 pub fn install_native_host_manifests(
     binary_path: &Path,
     home: &Path,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
-    let binary = binary_path.to_str().ok_or_else(|| {
+    #[cfg(windows)]
+    return install_registered_native_host(
+        binary_path,
+        &browser_data_home(home),
+        &CurrentUserRegistry,
+    );
+    #[cfg(not(windows))]
+    install_native_host_manifests_in(binary_path, &browser_data_home(home))
+}
+
+fn native_host_manifest_body(binary_path: &Path) -> Result<Vec<u8>, BrowserBridgeError> {
+    let binary = launchable_program_path(binary_path);
+    let binary = binary.to_str().ok_or_else(|| {
         BrowserBridgeError::Protocol("agent binary path is not valid UTF-8".to_string())
     })?;
-    let body = serde_json::to_vec_pretty(&NativeHostManifest {
+    Ok(serde_json::to_vec_pretty(&NativeHostManifest {
         name: NATIVE_HOST_NAME,
         description: "Opengeni attached-browser bridge",
         path: binary,
         kind: "stdio",
         allowed_origins: extension_origins(),
-    })?;
+    })?)
+}
+
+/// The path a manifest names for the agent binary. Chrome on Windows starts a
+/// Native Messaging host through `cmd.exe`, which cannot run a program named by
+/// a verbatim path (`\\?\C:\…`, the form `canonicalize` returns there): the host
+/// never starts and the extension reports a broken connection. The manifest
+/// therefore names the ordinary form of the same path.
+fn launchable_program_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(ordinary) = path.to_str().and_then(ordinary_windows_path) {
+        return PathBuf::from(ordinary);
+    }
+    path.to_path_buf()
+}
+
+/// `\\?\C:\dir\file` as `C:\dir\file` and `\\?\UNC\server\share\file` as
+/// `\\server\share\file`; `None` when `path` is not such a verbatim path.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ordinary_windows_path(path: &str) -> Option<String> {
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{share}"));
+    }
+    let rest = path.strip_prefix(r"\\?\")?;
+    let drive = rest.as_bytes();
+    (drive.len() >= 3 && drive[0].is_ascii_alphabetic() && drive[1] == b':' && drive[2] == b'\\')
+        .then(|| rest.to_string())
+}
+
+/// Whether a manifest naming `target` belongs to the agent at `binary_path`:
+/// it names this binary, or a program that no longer exists in this agent's
+/// own directory (a leftover from before the agent was renamed).
+fn manifest_points_here(body: &[u8], binary_path: &Path) -> bool {
+    let binary_path = launchable_program_path(binary_path);
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|manifest| {
+            let target = manifest.get("path")?.as_str()?;
+            Some(launchable_program_path(Path::new(target)))
+        })
+        .is_some_and(|target| {
+            target == binary_path || (target.parent() == binary_path.parent() && !target.exists())
+        })
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn install_native_host_manifests_in(
+    binary_path: &Path,
+    data_home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let body = native_host_manifest_body(binary_path)?;
     let mut installed = Vec::new();
-    for (browser_root, primary) in native_host_browser_roots(home) {
+    for (browser_root, primary) in native_host_browser_roots(data_home) {
         if !primary && !browser_root.exists() {
             continue;
         }
@@ -261,7 +483,15 @@ pub fn install_native_host_manifests(
 /// Remove every user-scoped manifest location this build owns. Missing files are
 /// already clean and ignored.
 pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeError> {
-    for (browser_root, _) in native_host_browser_roots(home) {
+    #[cfg(windows)]
+    return remove_registered_native_host(&browser_data_home(home), &CurrentUserRegistry);
+    #[cfg(not(windows))]
+    remove_native_host_manifests_in(&browser_data_home(home))
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn remove_native_host_manifests_in(data_home: &Path) -> Result<(), BrowserBridgeError> {
+    for (browser_root, _) in native_host_browser_roots(data_home) {
         let path = browser_root
             .join("NativeMessagingHosts")
             .join(format!("{NATIVE_HOST_NAME}.json"));
@@ -274,9 +504,208 @@ pub fn remove_native_host_manifests(home: &Path) -> Result<(), BrowserBridgeErro
     Ok(())
 }
 
+/// Remove the manifests that point at `binary_path`, leaving those another agent
+/// on this computer wrote. A manifest that points at a program which no longer
+/// exists in this agent's own directory is a leftover from before the agent was
+/// renamed, so it is removed too. Returns the removed paths.
+pub fn remove_native_host_manifests_for(
+    binary_path: &Path,
+    home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    #[cfg(windows)]
+    return remove_registered_native_host_for(
+        binary_path,
+        &browser_data_home(home),
+        &CurrentUserRegistry,
+    );
+    #[cfg(not(windows))]
+    remove_native_host_manifests_for_in(binary_path, &browser_data_home(home))
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+fn remove_native_host_manifests_for_in(
+    binary_path: &Path,
+    data_home: &Path,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let mut removed = Vec::new();
+    for (browser_root, _) in native_host_browser_roots(data_home) {
+        let path = browser_root
+            .join("NativeMessagingHosts")
+            .join(format!("{NATIVE_HOST_NAME}.json"));
+        let body = match std::fs::read(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if manifest_points_here(&body, binary_path) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Where a Chromium-family browser on Windows looks up a Native Messaging host:
+/// the default value of a per-user registry key, naming the manifest file.
+trait NativeHostRegistry {
+    fn key_exists(&self, key: &str) -> std::io::Result<bool>;
+    fn default_value(&self, key: &str) -> std::io::Result<Option<String>>;
+    fn set_default_value(&self, key: &str, value: &str) -> std::io::Result<()>;
+    fn delete_key(&self, key: &str) -> std::io::Result<()>;
+}
+
+#[cfg(windows)]
+struct CurrentUserRegistry;
+
+#[cfg(windows)]
+impl NativeHostRegistry for CurrentUserRegistry {
+    fn key_exists(&self, key: &str) -> std::io::Result<bool> {
+        opengeni_agent_windows_ffi::current_user_registry::key_exists(key)
+    }
+    fn default_value(&self, key: &str) -> std::io::Result<Option<String>> {
+        opengeni_agent_windows_ffi::current_user_registry::default_value(key)
+    }
+    fn set_default_value(&self, key: &str, value: &str) -> std::io::Result<()> {
+        opengeni_agent_windows_ffi::current_user_registry::set_default_value(key, value)
+    }
+    fn delete_key(&self, key: &str) -> std::io::Result<()> {
+        opengeni_agent_windows_ffi::current_user_registry::delete_key(key)
+    }
+}
+
+/// The per-user registry roots of the Chromium-family browsers on Windows.
+/// Google Chrome (all channels share its key) is always registered, so the
+/// bridge works for a Chrome installed later; the others only when present.
+const WINDOWS_BROWSER_KEYS: [(&str, bool); 4] = [
+    (r"Software\Google\Chrome", true),
+    (r"Software\Chromium", false),
+    (r"Software\Microsoft\Edge", false),
+    (r"Software\BraveSoftware\Brave-Browser", false),
+];
+
+fn windows_host_key(browser_key: &str) -> String {
+    format!(r"{browser_key}\NativeMessagingHosts\{NATIVE_HOST_NAME}")
+}
+
+fn windows_manifest_path(manifest_directory: &Path) -> PathBuf {
+    manifest_directory.join(format!("{NATIVE_HOST_NAME}.json"))
+}
+
+/// Writes the manifest into `manifest_directory` and points each browser's
+/// host key at it. Returns the manifest path.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn install_registered_native_host(
+    binary_path: &Path,
+    manifest_directory: &Path,
+    registry: &dyn NativeHostRegistry,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let body = native_host_manifest_body(binary_path)?;
+    std::fs::create_dir_all(manifest_directory)?;
+    let manifest = windows_manifest_path(manifest_directory);
+    write_public_atomic(&manifest, &body)?;
+    let value = manifest.to_str().ok_or_else(|| {
+        BrowserBridgeError::Protocol("manifest path is not valid UTF-8".to_string())
+    })?;
+    for (browser_key, primary) in WINDOWS_BROWSER_KEYS {
+        if !primary && !registry.key_exists(browser_key)? {
+            continue;
+        }
+        registry.set_default_value(&windows_host_key(browser_key), value)?;
+    }
+    Ok(vec![manifest])
+}
+
+/// Removes this build's manifest and every browser host key that names it.
+/// A key naming another manifest belongs to someone else and stays.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn remove_registered_native_host(
+    manifest_directory: &Path,
+    registry: &dyn NativeHostRegistry,
+) -> Result<(), BrowserBridgeError> {
+    let manifest = windows_manifest_path(manifest_directory);
+    unregister_windows_manifest(&manifest, registry)?;
+    match std::fs::remove_file(&manifest) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Removes the registration when its manifest points at `binary_path` (or at a
+/// renamed predecessor in the same directory), leaving another agent's.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn remove_registered_native_host_for(
+    binary_path: &Path,
+    manifest_directory: &Path,
+    registry: &dyn NativeHostRegistry,
+) -> Result<Vec<PathBuf>, BrowserBridgeError> {
+    let manifest = windows_manifest_path(manifest_directory);
+    let body = match std::fs::read(&manifest) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if !manifest_points_here(&body, binary_path) {
+        return Ok(Vec::new());
+    }
+    remove_registered_native_host(manifest_directory, registry)?;
+    Ok(vec![manifest])
+}
+
+fn unregister_windows_manifest(
+    manifest: &Path,
+    registry: &dyn NativeHostRegistry,
+) -> Result<(), BrowserBridgeError> {
+    for (browser_key, _) in WINDOWS_BROWSER_KEYS {
+        let key = windows_host_key(browser_key);
+        let names_this = registry
+            .default_value(&key)?
+            .is_some_and(|value| Path::new(&value) == manifest);
+        if names_this {
+            registry.delete_key(&key)?;
+        }
+    }
+    Ok(())
+}
+
+/// The directory under which Chromium-family browsers keep their per-user data
+/// for `home`.
 #[cfg(target_os = "macos")]
-fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
-    let applications = home.join("Library").join("Application Support");
+fn browser_data_home(home: &Path) -> PathBuf {
+    home.join("Library").join("Application Support")
+}
+
+/// The directory under which Chromium-family browsers keep their per-user data
+/// for `home`: `$XDG_CONFIG_HOME` when set, as the browsers themselves resolve it.
+#[cfg(target_os = "linux")]
+fn browser_data_home(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| home.join(".config"), PathBuf::from)
+}
+
+/// Where this agent keeps its Native Messaging manifest for `home`:
+/// `%LOCALAPPDATA%\Opengeni\NativeMessagingHosts`, beside the agent's install
+/// directory (`%LOCALAPPDATA%\Opengeni\bin`).
+#[cfg(windows)]
+fn browser_data_home(home: &Path) -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| home.join("AppData").join("Local"), PathBuf::from)
+        .join("Opengeni")
+        .join("NativeMessagingHosts")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn browser_data_home(home: &Path) -> PathBuf {
+    home.to_path_buf()
+}
+
+#[cfg(target_os = "macos")]
+fn native_host_browser_roots(applications: &Path) -> Vec<(PathBuf, bool)> {
     vec![
         (applications.join("Google").join("Chrome"), true),
         (applications.join("Google").join("Chrome Beta"), false),
@@ -290,10 +719,7 @@ fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 #[cfg(target_os = "linux")]
-fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| home.join(".config"), PathBuf::from);
+fn native_host_browser_roots(config: &Path) -> Vec<(PathBuf, bool)> {
     vec![
         (config.join("google-chrome"), true),
         (config.join("google-chrome-beta"), false),
@@ -304,7 +730,7 @@ fn native_host_browser_roots(home: &Path) -> Vec<(PathBuf, bool)> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn native_host_browser_roots(_home: &Path) -> Vec<(PathBuf, bool)> {
+fn native_host_browser_roots(_data_home: &Path) -> Vec<(PathBuf, bool)> {
     Vec::new()
 }
 
@@ -571,18 +997,9 @@ struct PendingCommand {
 
 struct ControllerReply {
     bytes: Vec<u8>,
-    reservation: Option<WorkReservation>,
-    settled: bool,
-}
-
-impl Drop for ControllerReply {
-    fn drop(&mut self) {
-        if !self.settled {
-            if let Some(reservation) = &self.reservation {
-                reservation.mark_unsettled();
-            }
-        }
-    }
+    // PendingCommand independently retains physical work through a late result.
+    // An undeliverable reply must not permanently poison update admission.
+    _reservation: Option<WorkReservation>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1171,6 +1588,10 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let (outbound, mut outbound_rx) = mpsc::channel::<Vec<u8>>(128);
     let mut claim: Option<(String, String)> = None;
     let mut closing: Option<(NativeHostClosingReason, Option<String>)> = None;
+    // Until `ready` is written, a failure is a refused hello: the extension is
+    // told why before the connection closes.
+    let mut ready_sent = false;
+    let mut refusal: Option<AgentUnavailableReason> = None;
     let result = async {
         loop {
             // read_exact may already have consumed part of the header or body.
@@ -1181,6 +1602,12 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 tokio::select! {
                     frame = &mut incoming => {
                         let Some(bytes) = frame? else { return Ok(()); };
+                        if !ready_sent {
+                            refusal = hello_version_refusal(&bytes);
+                            if refusal.is_some() {
+                                return Err(BrowserBridgeError::Protocol("extension protocol version is unsupported".to_string()));
+                            }
+                        }
                         let message: ExtensionMessage = serde_json::from_slice(&bytes)?;
                         match message {
                             ExtensionMessage::Hello { protocol_version, device, tabs } => {
@@ -1212,6 +1639,7 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                     MAX_COMMAND_MESSAGE_BYTES,
                                 )
                                 .await?;
+                                ready_sent = true;
                                 debug!(%device_id, connection_generation = %generation, tab_count, "attached browser profile registered");
                             }
                             ExtensionMessage::Inventory { device_id, connection_generation, inventory_revision, profile, tabs } => {
@@ -1248,6 +1676,14 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
     }
     .await;
+    if let (false, Err(error)) = (ready_sent, &result) {
+        let frame = agent_unavailable_frame(
+            refusal.unwrap_or(AgentUnavailableReason::AgentError),
+            Some(env!("CARGO_PKG_VERSION")),
+            &error.to_string(),
+        );
+        let _ = write_native_frame_bounded(&mut writer, &frame, MAX_COMMAND_MESSAGE_BYTES).await;
+    }
     if let Some((device_id, generation)) = claim {
         inventory.disconnect(
             &device_id,
@@ -1265,10 +1701,9 @@ async fn serve_controller(
 ) -> Result<(), BrowserBridgeError> {
     let (responses, mut response_rx) = mpsc::channel::<ControllerReply>(128);
     let writer_task = tokio::spawn(async move {
-        while let Some(mut response) = response_rx.recv().await {
+        while let Some(response) = response_rx.recv().await {
             write_native_frame_bounded(&mut writer, &response.bytes, MAX_RESPONSE_MESSAGE_BYTES)
                 .await?;
-            response.settled = true;
         }
         Ok::<(), BrowserBridgeError>(())
     });
@@ -1294,6 +1729,9 @@ async fn serve_controller(
         // Reserve before spawn/first await. A controller peer's disappearing
         // waiter cannot cancel an accepted extension command or its publisher.
         let reservation = inventory.update_drain.reserve_work(None);
+        if let Some(reservation) = &reservation {
+            reservation.describe(format!("attached-browser request {request_id}"));
+        }
         let accepted = reservation.is_some();
         let reply_reservation = reservation.clone();
         let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
@@ -1321,12 +1759,11 @@ async fn serve_controller(
                     let _ = request_responses
                         .send(ControllerReply {
                             bytes,
-                            reservation: reply_reservation,
-                            settled: false,
+                            _reservation: reply_reservation,
                         })
                         .await;
-                } else if let Some(reservation) = reply_reservation {
-                    reservation.mark_unsettled();
+                } else {
+                    tracing::warn!(%request_id, "attached-browser controller reply could not be encoded");
                 }
             },
         ));
@@ -1760,6 +2197,21 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lost_controller_reply_keeps_physical_work_but_does_not_poison_updates() {
+        use crate::uploads::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = std::sync::Arc::new(UpdateDrain::default());
+        let physical = drain.reserve_work(None).unwrap();
+        drop(ControllerReply {
+            bytes: b"reply".to_vec(),
+            _reservation: Some(physical.clone()),
+        });
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(!drain.seal_update("update"));
+        drop(physical);
+        assert!(drain.seal_update("update"));
+    }
+
     use super::*;
     use base64::engine::general_purpose::STANDARD;
     use serde_json::json;
@@ -2365,12 +2817,17 @@ mod tests {
         .is_err());
     }
 
+    // The manifest tests pass a temporary browser data directory directly. Going
+    // through the public functions would resolve `$XDG_CONFIG_HOME`, which CI
+    // runners and many desktops set, so parallel tests would share, and remove,
+    // the real user's manifests.
     #[test]
     fn installs_a_pinned_origin_manifest_and_removes_it_cleanly() {
         let directory = tempfile::tempdir().expect("tempdir");
         let binary = directory.path().join("opengeni-agent");
         std::fs::write(&binary, b"fixture").expect("binary");
-        let manifests = install_native_host_manifests(&binary, directory.path()).expect("install");
+        let manifests =
+            install_native_host_manifests_in(&binary, directory.path()).expect("install");
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_ne!(manifests, Vec::<std::path::PathBuf>::new());
         for path in &manifests {
@@ -2381,8 +2838,209 @@ mod tests {
             assert_eq!(manifest["allowed_origins"][0], extension_origin());
             assert_eq!(manifest["allowed_origins"], json!(extension_origins()));
         }
-        remove_native_host_manifests(directory.path()).expect("remove");
+        remove_native_host_manifests_in(directory.path()).expect("remove");
         assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn removes_only_the_manifests_that_point_at_this_agent() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let other = directory.path().join("other-agent");
+        let this = directory.path().join("this-agent");
+        std::fs::write(&other, b"fixture").expect("other binary");
+        let manifests =
+            install_native_host_manifests_in(&other, directory.path()).expect("install");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&this, directory.path()).expect("keep"),
+            Vec::<std::path::PathBuf>::new()
+        );
+        assert!(manifests.iter().all(|path| path.exists()));
+        install_native_host_manifests_in(&this, directory.path()).expect("overwrite");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
+            manifests
+        );
+        assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn removes_a_leftover_manifest_from_before_this_agent_was_renamed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let install = directory.path().join("install");
+        std::fs::create_dir_all(&install).expect("install dir");
+        let old_name = install.join("old-agent");
+        let this = install.join("This Agent");
+        let manifests =
+            install_native_host_manifests_in(&old_name, directory.path()).expect("install");
+        assert_eq!(
+            remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
+            manifests
+        );
+        assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    /// An in-memory `HKEY_CURRENT_USER`: key path to its default value (`None`
+    /// for a key without one).
+    #[derive(Default)]
+    struct FakeRegistry(std::sync::Mutex<std::collections::BTreeMap<String, Option<String>>>);
+
+    impl FakeRegistry {
+        fn with_keys(keys: &[&str]) -> Self {
+            let registry = Self::default();
+            for key in keys {
+                registry
+                    .0
+                    .lock()
+                    .expect("registry")
+                    .insert((*key).to_string(), None);
+            }
+            registry
+        }
+        fn value(&self, key: &str) -> Option<String> {
+            self.0.lock().expect("registry").get(key).cloned().flatten()
+        }
+    }
+
+    impl NativeHostRegistry for FakeRegistry {
+        fn key_exists(&self, key: &str) -> std::io::Result<bool> {
+            Ok(self.0.lock().expect("registry").contains_key(key))
+        }
+        fn default_value(&self, key: &str) -> std::io::Result<Option<String>> {
+            Ok(self.value(key))
+        }
+        fn set_default_value(&self, key: &str, value: &str) -> std::io::Result<()> {
+            self.0
+                .lock()
+                .expect("registry")
+                .insert(key.to_string(), Some(value.to_string()));
+            Ok(())
+        }
+        fn delete_key(&self, key: &str) -> std::io::Result<()> {
+            self.0.lock().expect("registry").remove(key);
+            Ok(())
+        }
+    }
+
+    const CHROME_HOST_KEY: &str =
+        r"Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser";
+    const EDGE_HOST_KEY: &str = r"Software\Microsoft\Edge\NativeMessagingHosts\ai.opengeni.browser";
+    const BRAVE_HOST_KEY: &str =
+        r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\ai.opengeni.browser";
+
+    #[test]
+    fn windows_registers_chrome_and_present_browsers_through_the_registry() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("opengeni-agent.exe");
+        std::fs::write(&binary, b"fixture").expect("binary");
+        let manifests_dir = directory.path().join("NativeMessagingHosts");
+        // Edge is installed; Chrome has never run (its key is absent).
+        let registry = FakeRegistry::with_keys(&[r"Software\Microsoft\Edge"]);
+
+        let installed =
+            install_registered_native_host(&binary, &manifests_dir, &registry).expect("install");
+
+        let manifest = manifests_dir.join("ai.opengeni.browser.json");
+        assert_eq!(installed, vec![manifest.clone()]);
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("json");
+        assert_eq!(body["name"], NATIVE_HOST_NAME);
+        assert_eq!(body["path"], binary.to_str().expect("path"));
+        assert_eq!(body["type"], "stdio");
+        assert_eq!(body["allowed_origins"], json!(extension_origins()));
+        let named = Some(manifest.to_str().expect("path").to_string());
+        assert_eq!(registry.value(CHROME_HOST_KEY), named);
+        assert_eq!(registry.value(EDGE_HOST_KEY), named);
+        assert!(!registry.key_exists(BRAVE_HOST_KEY).expect("query"));
+
+        remove_registered_native_host(&manifests_dir, &registry).expect("remove");
+        assert!(!manifest.exists());
+        assert!(!registry.key_exists(CHROME_HOST_KEY).expect("query"));
+        assert!(!registry.key_exists(EDGE_HOST_KEY).expect("query"));
+        assert!(registry
+            .key_exists(r"Software\Microsoft\Edge")
+            .expect("query"));
+    }
+
+    #[test]
+    fn windows_removes_only_its_own_registration() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let other = directory.path().join("other").join("opengeni-agent.exe");
+        let this = directory.path().join("this").join("opengeni-agent.exe");
+        for binary in [&other, &this] {
+            std::fs::create_dir_all(binary.parent().expect("parent")).expect("dir");
+            std::fs::write(binary, b"fixture").expect("binary");
+        }
+        let manifests_dir = directory.path().join("NativeMessagingHosts");
+        let registry = FakeRegistry::default();
+        // Another product's host under the same name stays untouched.
+        registry
+            .set_default_value(EDGE_HOST_KEY, r"C:\Elsewhere\host.json")
+            .expect("seed");
+
+        install_registered_native_host(&other, &manifests_dir, &registry).expect("install");
+        assert_eq!(
+            remove_registered_native_host_for(&this, &manifests_dir, &registry).expect("keep"),
+            Vec::<PathBuf>::new()
+        );
+        assert!(registry.value(CHROME_HOST_KEY).is_some());
+
+        install_registered_native_host(&this, &manifests_dir, &registry).expect("overwrite");
+        let manifest = manifests_dir.join("ai.opengeni.browser.json");
+        assert_eq!(
+            remove_registered_native_host_for(&this, &manifests_dir, &registry).expect("remove"),
+            vec![manifest.clone()]
+        );
+        assert!(!manifest.exists());
+        assert!(!registry.key_exists(CHROME_HOST_KEY).expect("query"));
+        assert_eq!(
+            registry.value(EDGE_HOST_KEY).as_deref(),
+            Some(r"C:\Elsewhere\host.json")
+        );
+    }
+
+    #[test]
+    fn windows_verbatim_paths_have_an_ordinary_form() {
+        assert_eq!(
+            ordinary_windows_path(r"\\?\C:\Users\person\AppData\Local\Opengeni\bin\agent.exe")
+                .as_deref(),
+            Some(r"C:\Users\person\AppData\Local\Opengeni\bin\agent.exe")
+        );
+        assert_eq!(
+            ordinary_windows_path(r"\\?\UNC\server\share\agent.exe").as_deref(),
+            Some(r"\\server\share\agent.exe")
+        );
+        assert_eq!(ordinary_windows_path(r"C:\bin\agent.exe"), None);
+        assert_eq!(ordinary_windows_path(r"\\server\share\agent.exe"), None);
+        assert_eq!(ordinary_windows_path(r"\\?\Volume{0}\agent.exe"), None);
+    }
+
+    /// Chrome starts the host through `cmd.exe`, which cannot run a verbatim
+    /// path, so a manifest written from the canonical binary path names the
+    /// ordinary form, and still counts as this agent's when removing it.
+    #[cfg(windows)]
+    #[test]
+    fn windows_manifest_names_a_program_cmd_can_start() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("opengeni-agent.exe");
+        std::fs::write(&binary, b"fixture").expect("binary");
+        let canonical = binary.canonicalize().expect("canonical");
+        assert!(canonical.to_str().expect("path").starts_with(r"\\?\"));
+        let manifests_dir = directory.path().join("NativeMessagingHosts");
+        let registry = FakeRegistry::default();
+
+        install_registered_native_host(&canonical, &manifests_dir, &registry).expect("install");
+
+        let manifest = manifests_dir.join("ai.opengeni.browser.json");
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("json");
+        let named = body["path"].as_str().expect("path");
+        assert!(!named.starts_with(r"\\?\"), "{named}");
+        assert_eq!(Path::new(named).canonicalize().expect("named"), canonical);
+        assert_eq!(
+            remove_registered_native_host_for(&canonical, &manifests_dir, &registry)
+                .expect("remove"),
+            vec![manifest]
+        );
     }
 
     fn authentication(token: &str) -> Vec<u8> {
@@ -2513,8 +3171,124 @@ mod tests {
             v1::AttachedBrowserConnectionEndReason::AgentRejected as i32
         );
         assert!(end.detail.contains("unavailable reason"), "{}", end.detail);
+        // The extension is told why before the connection closes.
+        let refusal = read_json(&mut socket).await;
+        assert_eq!(refusal["type"], "unavailable");
+        assert_eq!(refusal["reason"], "agent_error");
+        assert_eq!(refusal["agentVersion"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            refusal["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("unavailable reason")),
+            "{refusal}"
+        );
         assert_eq!(server.inventory().snapshot().devices.len(), 0);
         server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_hello_from_another_bridge_version_says_which_side_is_outdated() {
+        for (version, reason) in [(0, "extension_outdated"), (2, "agent_outdated")] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let server = BrowserBridgeServer::start(directory.path())
+                .await
+                .expect("start");
+            let mut socket = extension_socket(directory.path()).await;
+            let other_version = hello_with(
+                "11111111-1111-4111-8111-111111111111",
+                "connection-1",
+                |hello| {
+                    hello["protocolVersion"] = json!(version);
+                    // Another version's hello need not parse as this one's.
+                    hello.as_object_mut().expect("hello").remove("device");
+                },
+            );
+            write_native_frame(&mut socket, &other_version)
+                .await
+                .expect("hello");
+
+            let refusal = read_json(&mut socket).await;
+            assert_eq!(refusal["type"], "unavailable", "{refusal}");
+            assert_eq!(refusal["reason"], reason, "{refusal}");
+            assert_eq!(refusal["agentVersion"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(server.inventory().snapshot().devices.len(), 0);
+            server.shutdown().await.expect("shutdown");
+        }
+    }
+
+    #[test]
+    fn the_native_host_tells_chrome_when_the_agent_closes_without_answering() {
+        let listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let agent = std::thread::spawn(move || drop(listener.accept().expect("accept")));
+        let socket =
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).expect("connect");
+        agent.join().expect("agent thread");
+
+        let mut chrome_input = Vec::new();
+        // Ignore the result: a reset connection is as silent as a closed one.
+        let _ = relay_native_host(socket, std::io::empty(), &mut chrome_input);
+
+        let frame = read_native_frame_sync_bounded(
+            &mut Cursor::new(chrome_input),
+            MAX_COMMAND_MESSAGE_BYTES,
+        )
+        .expect("frame")
+        .expect("an unavailable frame for Chrome");
+        let refusal: serde_json::Value = serde_json::from_slice(&frame).expect("json");
+        assert_eq!(refusal["type"], "unavailable");
+        assert_eq!(refusal["reason"], "agent_error");
+        // The host is the installed program, not the running agent.
+        assert!(refusal.get("agentVersion").is_none(), "{refusal}");
+    }
+
+    #[test]
+    fn a_hello_version_probe_reads_only_hellos() {
+        assert_eq!(
+            hello_version_refusal(br#"{"type":"hello","protocolVersion":0}"#),
+            Some(AgentUnavailableReason::ExtensionOutdated)
+        );
+        assert_eq!(
+            hello_version_refusal(br#"{"type":"hello","protocolVersion":7,"device":"new shape"}"#),
+            Some(AgentUnavailableReason::AgentOutdated)
+        );
+        assert_eq!(
+            hello_version_refusal(&hello("11111111-1111-4111-8111-111111111111", "c", 1)),
+            None
+        );
+        assert_eq!(
+            hello_version_refusal(br#"{"type":"native_host_closing","protocolVersion":7}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_native_host_says_when_no_agent_is_running() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (reason, _) = connect_native_host(directory.path()).expect_err("no authority");
+        assert_eq!(reason, AgentUnavailableReason::AgentNotRunning);
+
+        // An agent that exited without removing its authority file.
+        let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("bind")
+            .local_addr()
+            .expect("address")
+            .port();
+        let authority = |protocol_version| BridgeAuthority {
+            protocol_version,
+            port,
+            token: "token".to_string(),
+            pid: 1,
+        };
+        write_authority(directory.path(), &authority(BRIDGE_PROTOCOL_VERSION)).expect("write");
+        let (reason, _) = connect_native_host(directory.path()).expect_err("stale authority");
+        assert_eq!(reason, AgentUnavailableReason::AgentNotRunning);
+
+        // A running agent from before its installed program was updated.
+        write_authority(directory.path(), &authority(BRIDGE_PROTOCOL_VERSION - 1)).expect("write");
+        let (reason, _) = connect_native_host(directory.path()).expect_err("older agent");
+        assert_eq!(reason, AgentUnavailableReason::AgentOutdated);
     }
 
     #[tokio::test]

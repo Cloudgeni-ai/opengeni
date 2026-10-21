@@ -4,8 +4,8 @@
  * the same Acme Robotics content as every component section.
  */
 
-import type { AccessMember } from "@/components/ui/access-list";
-import type { RoleOption } from "@/components/ui/role-select";
+import type { AccessMember } from "@opengeni/react/ui/access-list";
+import type { RoleOption } from "@opengeni/react/ui/role-select";
 
 import {
   apiKeyPresets,

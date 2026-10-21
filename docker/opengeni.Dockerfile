@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.3
 # Share the frozen-install inputs without tying them to a CPU architecture.
 FROM scratch AS workspace-manifests
 
@@ -35,6 +35,7 @@ COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/decisions/package.json packages/decisions/package.json
 COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
@@ -55,7 +56,33 @@ COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
+# Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
+# the compromised emSign roots there once, natively on the build machine, for the
+# target architecture's Bun (never executed here); every stage that runs or
+# ships Bun copies this binary (see docker/distrust-embedded-roots.ts).
+FROM oven/bun:${BUN_VERSION} AS bun-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-distrusted
+COPY --from=bun-target /usr/local/bin/bun /out/bun
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
+
+# Bun (like curl and git) also trusts the OS store in /etc/ssl/certs, and the
+# oven/bun base images ship a ca-certificates older than Debian's distrust of
+# emSign ECC Root CA - G3 and Comodo AAA Services (20250419+deb13u1). Stages
+# that install system packages upgrade ca-certificates with them. Stages that
+# install none (web runs no target-architecture step at all) copy this current
+# store instead, built natively from the same Debian release (the package is
+# architecture-independent), and point OpenSSL-style lookups at it, since a
+# COPY cannot remove the stale entries in /etc/ssl/certs.
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION}-slim AS trust-store
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && cp -rL /etc/ssl/certs /out-certs
+
 FROM oven/bun:${BUN_VERSION} AS source-base
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -103,6 +130,7 @@ RUN bun scripts/build-runtime-processes.ts worker \
   && bun scripts/assemble-server-runtime.ts worker
 
 FROM oven/bun:${BUN_VERSION}-slim AS worker
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -174,6 +202,7 @@ RUN bun scripts/build-runtime-processes.ts api \
   && bun scripts/assemble-server-runtime.ts api
 
 FROM oven/bun:${BUN_VERSION}-slim AS api
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -222,6 +251,9 @@ RUN bun scripts/build-runtime-processes.ts artifact-outbox
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
 FROM oven/bun:${BUN_VERSION}-slim AS artifact-outbox-dispatcher
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs
+ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -241,6 +273,10 @@ RUN install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun
 RUN bun build --compile packages/artifact-tool/src/materializer-cli-entry.ts \
   --outfile /opt/opengeni/bin/opengeni-artifact-materializer
+# The compiled program embeds this stage's (already distrusted) Bun; prove it.
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts --check /opt/opengeni-docker/distrusted-roots.pem \
+  /opt/opengeni/bin/opengeni-artifact-materializer
 USER root
 RUN chown root:root /opt/opengeni/bin/opengeni-artifact-materializer \
   && chmod 0555 /opt/opengeni/bin/opengeni-artifact-materializer
@@ -250,6 +286,7 @@ RUN bun scripts/build-runtime-processes.ts artifact-materializer
 # The runtime installation includes its own exact file closure. Preserve its
 # root-owned/read-only permissions and recheck its native ABI in the slim image.
 FROM oven/bun:${BUN_VERSION}-slim AS artifact-materializer
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -294,6 +331,9 @@ RUN bun run --cwd apps/web build \
 
 # No target-architecture RUN steps or copied native build dependencies.
 FROM oven/bun:${BUN_VERSION} AS web
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs
+ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION

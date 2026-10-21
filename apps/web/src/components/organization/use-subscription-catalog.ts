@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { apiErrorFacts } from "@/lib/api-error";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 /** The catalog endpoint is the deployment gate; a balance plan alone is not. */
 export function useSubscriptionCatalog(

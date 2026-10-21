@@ -58,6 +58,7 @@
       "@opengeni/codemode": ["./packages/codemode/src/index.ts"],
       "@opengeni/browserd": ["./packages/browserd/src/index.ts"],
       "@opengeni/config": ["./packages/config/src/index.ts"],
+      "@opengeni/decisions": ["./packages/decisions/src/index.ts"],
       "@opengeni/core": ["./packages/core/src/index.ts"],
       "@opengeni/core/editable-artifacts": ["./packages/core/src/editable-artifacts.ts"],
       "@opengeni/core/editable-artifact-live": ["./packages/core/src/editable-artifact-live.ts"],

@@ -11,14 +11,15 @@ import {
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
   lacksWorkspacePermission,
-} from "./permissions";
+} from "@opengeni/react/app/lib/permissions";
 import { workspaceMemberAccessRole } from "./workspace-access-levels";
 
 describe("workspace member permission groups", () => {
-  test("members can discover connections without gaining connection administration", () => {
+  test("members connect their own accounts without gaining integration administration", () => {
     const member = workspaceAccessLevels.find((level) => level.role === "member")!;
     expect(member.permissions).toContain("connections:read");
-    expect(member.permissions).not.toContain("connections:write");
+    // Workspace-owned provider keys and the Slack bot also check capabilities:manage.
+    expect(member.permissions).toContain("connections:write");
     expect(member.permissions).not.toContain("capabilities:manage");
   });
 
@@ -29,22 +30,33 @@ describe("workspace member permission groups", () => {
     expect(member.permissions).toContain("artifacts:publish");
   });
 
-  test("member is a superset of viewer without administrative powers", () => {
+  test("member is a full teammate: a superset of viewer without settings powers", () => {
     const level = (role: string) => workspaceAccessLevels.find((item) => item.role === role)!;
     const member = new Set(level("member").permissions);
     expect(level("viewer").permissions.filter((permission) => !member.has(permission))).toEqual([]);
     expect(level("member").permissions.every((p) => level("admin").permissions.includes(p))).toBe(
       true,
     );
+    for (const teammate of [
+      "stream:control",
+      "terminal:attach",
+      "codemode:call",
+      "files:write",
+      "connections:write",
+      "mcp_servers:attach",
+      "rigs:manage",
+      "enrollments:read",
+      "artifacts:publish",
+    ]) {
+      expect(member.has(teammate)).toBe(true);
+    }
     for (const administrative of [
       "workspace:admin",
       "members:manage",
       "api_keys:manage",
-      "connections:write",
+      "capabilities:manage",
       "github:manage",
-      "rigs:manage",
-      // Connected Machines stay admin-managed in shared workspaces.
-      "enrollments:read",
+      // Enrolling and sharing Connected Machines stays admin-managed.
       "enrollments:manage",
       "variable-sets:manage",
       "secrets:read",

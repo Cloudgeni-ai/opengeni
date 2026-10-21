@@ -9,6 +9,7 @@ import {
   LOSSLESS_JSON_STRING_PREFIX,
 } from "./lossless-json";
 import * as schema from "./schema";
+import { excludeUnclaimedHumanPromptEventFilter } from "./session-prompt-visibility";
 
 export type SessionEventSliceOptions = ListSessionEventPageOptions & {
   /** Exact call filters applied before loading value slices. */
@@ -112,17 +113,7 @@ async function listSessionEventSlicesInternal(
     eq(schema.sessionEvents.workspaceId, workspaceId),
     eq(schema.sessionEvents.sessionId, sessionId),
     gt(schema.sessionEvents.sequence, Math.min(options.after ?? 0, 2_147_483_647)),
-    // Same indexed exclusion as the audit/discovery reader. Do not substitute
-    // turn status: terminal-before-claim prompts must remain excluded too.
-    sql`(${schema.sessionEvents.type} <> 'user.message' or not exists (
-      select 1 from ${schema.sessionTurns} unclaimed_prompt_turn
-      where unclaimed_prompt_turn.workspace_id = ${workspaceId}
-        and unclaimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
-        and unclaimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
-        and unclaimed_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
-        and unclaimed_prompt_turn.source in ('user', 'api')
-        and unclaimed_prompt_turn.started_at is null
-    ))`,
+    excludeUnclaimedHumanPromptEventFilter(workspaceId),
   ];
   if (options.before !== undefined && options.before <= 2_147_483_647)
     predicates.push(lt(schema.sessionEvents.sequence, options.before));

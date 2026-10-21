@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdateWithSourceMutation,
   bootstrapWorkspace,
   createDb,
   createSession,
   mutateSessionControlInTransaction,
+  isWorkspaceAgentActivityPaused,
+  listOutstandingSessionSystemUpdates,
+  mutateWorkspaceControlInTransaction,
+  withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
@@ -63,7 +67,12 @@ async function reusableSession(status: string) {
   return { ...scope, subjectId: grant.subjectId, sessionId: session.id };
 }
 
-async function nextOccurrence(target: Awaited<ReturnType<typeof reusableSession>>) {
+async function nextOccurrence(
+  target: Awaited<ReturnType<typeof reusableSession>>,
+  options: { requireIdleSession: boolean; refusePaused?: boolean } = {
+    requireIdleSession: true,
+  },
+) {
   const rejections: (string | null)[] = [];
   const result = await addSessionSystemUpdateWithSourceMutation(
     client.db,
@@ -85,7 +94,7 @@ async function nextOccurrence(target: Awaited<ReturnType<typeof reusableSession>
     async (_tx, _wakeEventId, _updateId, rejection) => {
       rejections.push(rejection);
     },
-    { requireIdleSession: true },
+    options,
   );
   return { reason: result.reason, rejections };
 }
@@ -144,4 +153,58 @@ test("Pause skips a reusable occurrence without reserving an unserviceable queue
   expect(row!.status).toBe("idle");
   await control("resume");
   expect((await nextOccurrence(target)).reason).toBe("added");
+});
+
+test("Pause refuses a buffered or concurrent occurrence too, so none waits unsettled behind it", async () => {
+  const target = await reusableSession("idle");
+  const control = (action: "pause" | "resume") =>
+    withWorkspaceSubjectSessionActivityRls(client.db, target.workspaceId!, target.subjectId, (db) =>
+      mutateSessionControlInTransaction(db, {
+        accountId: target.accountId,
+        workspaceId: target.workspaceId!,
+        sessionId: target.sessionId,
+        action,
+        actor: { type: "human", subjectId: target.subjectId },
+        operationKey: crypto.randomUUID(),
+      }),
+    );
+  const buffered = { requireIdleSession: false, refusePaused: true };
+  await control("pause");
+  expect(await nextOccurrence(target, buffered)).toEqual({
+    reason: "session_paused",
+    rejections: ["session_paused"],
+  });
+  expect(
+    await listOutstandingSessionSystemUpdates(client.db, target.workspaceId!, target.sessionId),
+  ).toEqual([]);
+  await control("resume");
+
+  const workspace = async (action: "pause" | "resume") => {
+    const [current] = await shared.admin`select revision from workspace_inference_controls
+      where workspace_id = ${target.workspaceId!}`;
+    const expectedRevision = Number(current?.revision ?? 0);
+    return withWorkspaceRls(client.db, target.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: target.accountId,
+          workspaceId: target.workspaceId!,
+          actor: { type: "human", subjectId: target.subjectId },
+          action,
+          reason: "scheduled admission",
+          operationKey: `${action}:${crypto.randomUUID()}`,
+          expectedRevision,
+        }),
+      ),
+    );
+  };
+  await workspace("pause");
+  expect(await isWorkspaceAgentActivityPaused(client.db, target.workspaceId!)).toBe(true);
+  expect((await nextOccurrence(target, buffered)).reason).toBe("workspace_paused");
+  // Skip-overlap admission names the workspace too, not a paused chat.
+  expect((await nextOccurrence(target)).reason).toBe("workspace_paused");
+  // Without refusePaused (ordinary system updates) a Pause still queues.
+  expect((await nextOccurrence(target, { requireIdleSession: false })).reason).toBe("added");
+  await workspace("resume");
+  expect(await isWorkspaceAgentActivityPaused(client.db, target.workspaceId!)).toBe(false);
+  expect((await nextOccurrence(target, buffered)).reason).toBe("added");
 });

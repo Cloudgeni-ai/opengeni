@@ -3,8 +3,8 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
-  type Settings,
-} from "@opengeni/config";
+} from "@opengeni/config/defaults";
+import type { Settings } from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -424,6 +424,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openSandboxApiKey: undefined,
     openSandboxImage: undefined,
     openSandboxTtlSeconds: 3_600,
+    computeVcpus: 2,
+    computeMemoryMib: 4096,
+    computeAgentReadyTimeoutMs: 120_000,
     openSandboxUseServerProxy: true,
     openSandboxSignedEndpoints: false,
     openSandboxSignedEndpointTtlSeconds: 600,

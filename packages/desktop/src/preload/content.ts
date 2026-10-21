@@ -9,8 +9,11 @@ import {
   DESKTOP_BRIDGE_VERSION,
   DESKTOP_IPC,
   type DesktopAccountsSnapshot,
+  type DesktopAppShotResult,
+  type DesktopAppShotStatus,
   type DesktopBridge,
   type DesktopCommand,
+  type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerStatus,
 } from "../contract";
@@ -52,6 +55,25 @@ if (origin && window.location.origin === origin) {
     if (command === "newSession") window.location.assign(`/workspaces/${workspaceId}/sessions`);
     if (command === "openInbox") window.location.assign(`/workspaces/${workspaceId}/inbox`);
   });
+  // Menu bar actions: the page lists them, the shell runs the chosen one back
+  // through the newest listener. Leaving the page drops its actions, so the
+  // menu falls back to its own items until the next page reports again.
+  let menuActionListener: ((id: string) => void) | null = null;
+  let reportedMenuActions = false;
+  ipcRenderer.on(DESKTOP_IPC.menuAction, (_event, id: string) => {
+    menuActionListener?.(id);
+  });
+  window.addEventListener("pagehide", () => {
+    if (reportedMenuActions) ipcRenderer.send(DESKTOP_IPC.menuActionsSet, []);
+  });
+  // Captures go to the page's newest listener. One that arrives before the
+  // page listens (the window was just opened for it) waits briefly for it.
+  let appShotListener: ((result: DesktopAppShotResult) => void) | null = null;
+  let waitingAppShot: { result: DesktopAppShotResult; at: number } | null = null;
+  ipcRenderer.on(DESKTOP_IPC.appShotsCaptured, (_event, result: DesktopAppShotResult) => {
+    if (appShotListener) appShotListener(result);
+    else waitingAppShot = { result, at: Date.now() };
+  });
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -62,6 +84,8 @@ if (origin && window.location.origin === origin) {
       "thisComputerDisconnect",
       "openExternal",
       "commands",
+      "appShots",
+      "menuActions",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
@@ -97,7 +121,37 @@ if (origin && window.location.origin === origin) {
         };
       },
     },
+    menuActions: {
+      set: (actions: DesktopMenuAction[]) => {
+        reportedMenuActions = true;
+        ipcRenderer.send(DESKTOP_IPC.menuActionsSet, actions);
+      },
+      onAction: (listener) => {
+        menuActionListener = listener;
+        return () => {
+          if (menuActionListener === listener) menuActionListener = null;
+        };
+      },
+    },
     setAppearance: (appearance) => ipcRenderer.send(DESKTOP_IPC.appearanceSet, appearance),
+    appShots: {
+      status: () => ipcRenderer.invoke(DESKTOP_IPC.appShotsStatus) as Promise<DesktopAppShotStatus>,
+      update: (settings) =>
+        ipcRenderer.invoke(DESKTOP_IPC.appShotsUpdate, settings) as Promise<DesktopAppShotStatus>,
+      requestPermission: (id) => ipcRenderer.invoke(DESKTOP_IPC.appShotsRequestPermission, id),
+      onCapture: (listener) => {
+        appShotListener = listener;
+        const waiting = waitingAppShot;
+        waitingAppShot = null;
+        if (waiting && Date.now() - waiting.at < 60_000) {
+          queueMicrotask(() => appShotListener?.(waiting.result));
+        }
+        return () => {
+          if (appShotListener === listener) appShotListener = null;
+        };
+      },
+      onChange: (listener) => subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
+    },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);
 }
