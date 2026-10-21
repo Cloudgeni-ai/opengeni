@@ -644,6 +644,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceCustomModels,
       organizationProviders,
       workspace,
+      organizationDefaults,
+      creditBalance,
     ] = await Promise.all([
       claudeCore.then((core) =>
         getWorkspaceConnectionModelRestrictions(
@@ -695,12 +697,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         providerKinds,
       }),
       getWorkspace(deps.db, workspaceId),
+      getOrganizationModelDefaults(deps.db, grant.accountId),
+      deps.settings.billingMode === "stripe"
+        ? getBillingBalance(deps.db, grant.accountId)
+        : Promise.resolve(undefined),
     ]);
     const xaiSubscriptionActive = xaiCatalog.active;
     const connectionModelRestrictions = xaiCatalog.core
       ? withCoreRoutedXaiRestriction(currentConnectionModelRestrictions, xaiCatalog.core)
       : currentConnectionModelRestrictions;
-    const organizationDefaults = await getOrganizationModelDefaults(deps.db, grant.accountId);
     const claudeConnections: ClaudeConnectionCatalog = {};
     const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
     const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
@@ -750,16 +755,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
     const workspaceSettings = workspace?.settings ?? {};
-    const creditBalance =
-      deps.settings.billingMode === "stripe"
-        ? await getBillingBalance(deps.db, grant.accountId)
-        : undefined;
     const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
       settings: workspaceCatalogSettings,
       accountId: grant.accountId,
       workspaceSettings,
       selections,
       organizationDefaults,
+      ...(creditBalance ? { creditBalance } : {}),
     });
     const catalog = projectWorkspaceModelCatalog(selections, {
       defaultSelection,
