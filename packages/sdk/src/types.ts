@@ -2665,7 +2665,8 @@ type SessionEventListCommonOptions = {
   /**
    * With `excludeTypes` containing `agent.toolCall.created`, keep the created
    * rows of presented tools (images, published files, Skill changes). Servers
-   * that predate this option ignore it and apply the plain type filter.
+   * that predate this option ignore it and apply the plain type filter; a
+   * server that applies it reports `SessionEventPage.conversationFilter`.
    */
   presentedToolCalls?: "include";
   /**
@@ -2781,6 +2782,13 @@ export type SessionEventPage = {
   nextAfter: number | null;
   nextBefore: number | null;
   forensicExact: boolean;
+  /**
+   * The conversation-filter version the server applied to a
+   * `presentedToolCalls: "include"` read (see
+   * `SESSION_EVENT_CONVERSATION_FILTER_VERSION`), or null when it announced
+   * none: an older server may have ignored `presentedToolCalls`.
+   */
+  conversationFilter?: number | null;
 };
 
 export type ToolAuthNeededPayload = {

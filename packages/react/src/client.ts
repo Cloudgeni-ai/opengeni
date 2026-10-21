@@ -219,6 +219,13 @@ export type EmbeddedSessionClientLike = Pick<
    * watches it. Without it the conversation works, but replies stay unread.
    */
   updateSessionAttention?: OpenGeniClient["updateSessionAttention"] | undefined;
+  /**
+   * Optional: lets conversation history see what the server's history filter
+   * applied and whether a page has more. Without it history stays correct on
+   * every server version, but keeps each long turn's tool calls and model
+   * bookkeeping in its reads.
+   */
+  listEventPage?: OpenGeniClient["listEventPage"] | undefined;
 };
 
 /** Event-read surface shared by hooks that optionally tail a session. */

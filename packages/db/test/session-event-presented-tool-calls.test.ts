@@ -10,6 +10,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  listSessionEventConversationBookkeeping,
   listSessionEventPage,
   listSessionEvents,
   withWorkspaceSubjectRls,
@@ -118,6 +119,148 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
     }),
   );
   expect(steps.map((event) => event.sequence)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 11]);
+
+  // A read that keeps tool calls (the reader's compat fallback) keeps
+  // presented and plain calls alike; turnless PTY rows stay the dock's.
+  const compat = await withWorkspaceSubjectRls(
+    client.db,
+    grant.workspaceId,
+    grant.subjectId,
+    (tx) =>
+      listSessionEvents(tx, grant.workspaceId, session.id, {
+        after: 0,
+        limit: 100,
+        excludeTypes: [
+          "agent.toolCall.output",
+          "agent.reasoning.delta",
+          "terminal.pty.output.delta",
+        ],
+        retainPresentedToolCalls: true,
+      }),
+  );
+  expect(compat.map((event) => event.sequence)).toEqual([1, 2, 5, 7, 8, 9, 10]);
+}, 120_000);
+
+test("conversation reads keep the bookkeeping their turns draw", async () => {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: suffix,
+    accountName: "Conversation bookkeeping",
+    workspaceExternalSource: "test",
+    workspaceExternalId: suffix,
+    workspaceName: "Bookkeeping",
+    subjectId: `bookkeeping-reader-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const [withTools, plain, failed] = [
+    crypto.randomUUID(),
+    crypto.randomUUID(),
+    crypto.randomUUID(),
+  ];
+  const rows: Array<[number, string, Record<string, unknown>, string | null]> = [
+    [1, "user.message", { text: "question" }, null],
+    [2, "turn.started", {}, withTools],
+    [3, "agent.model.request", { phase: "started" }, withTools],
+    [4, "agent.model.request", { phase: "headers" }, withTools],
+    [5, "agent.model.request", { phase: "first_byte", durationMs: 900 }, withTools],
+    [6, "agent.model.request", { phase: "completed" }, withTools],
+    [7, "agent.model.usage", { inputTokens: 10 }, withTools],
+    [8, "agent.toolCall.created", { id: "c1", name: "exec_command", arguments: {} }, withTools],
+    [9, "agent.toolCall.output", { id: "c1", output: "ok" }, withTools],
+    [10, "agent.model.request", { phase: "started" }, withTools],
+    [11, "agent.model.request", { phase: "first_event" }, withTools],
+    [12, "agent.model.request", { phase: "completed" }, withTools],
+    [13, "agent.model.usage", { inputTokens: 10 }, withTools],
+    [14, "agent.message.completed", { text: "answer" }, withTools],
+    [15, "turn.completed", {}, withTools],
+    [16, "user.message", { text: "thanks" }, null],
+    [17, "turn.started", {}, plain],
+    [18, "agent.model.request", { phase: "started" }, plain],
+    [19, "agent.model.request", { phase: "first_byte" }, plain],
+    [20, "agent.model.request", { phase: "completed" }, plain],
+    [21, "agent.model.usage", { inputTokens: 10 }, plain],
+    [22, "agent.message.completed", { text: "welcome" }, plain],
+    [23, "turn.completed", {}, plain],
+    [24, "user.message", { text: "again" }, null],
+    [25, "turn.started", {}, failed],
+    [26, "agent.model.request", { phase: "started" }, failed],
+    [27, "agent.model.request", { phase: "timed_out" }, failed],
+    [28, "turn.failed", {}, failed],
+  ];
+  for (const [sequence, type, payload, turnId] of rows) {
+    await shared.admin`
+      insert into session_events (account_id,workspace_id,session_id,turn_id,sequence,type,payload)
+      values (${grant.accountId},${grant.workspaceId},${session.id},${turnId},${sequence},${type},${shared.admin.json(payload as never)})`;
+  }
+  const read = (options: Parameters<typeof listSessionEventConversationBookkeeping>[3]) =>
+    withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (tx) =>
+      listSessionEventConversationBookkeeping(tx, grant.workspaceId, session.id, options),
+    );
+  const sequences = (events: Array<{ sequence: number }>) => events.map((event) => event.sequence);
+
+  // The page the bookkeeping is kept for: every step type excluded.
+  const page = await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (tx) =>
+    listSessionEventPage(tx, grant.workspaceId, session.id, {
+      before: Number.MAX_SAFE_INTEGER,
+      limit: 100,
+      excludeTypes: [...SESSION_EVENT_STEP_TYPES],
+      retainPresentedToolCalls: true,
+      payloadMode: "full",
+    }),
+  );
+  expect(sequences(page.events)).toEqual([1, 2, 14, 15, 16, 17, 22, 23, 24, 25, 28]);
+
+  const turns = [
+    { turnId: withTools, started: 2 },
+    { turnId: plain, started: 17 },
+    { turnId: failed, started: 25 },
+  ];
+  // The tool turn keeps its request rows through the first response; turns
+  // without other steps keep every bookkeeping row.
+  const kept = await read({ turns, after: 0 });
+  expect(sequences(kept)).toEqual([3, 4, 5, 18, 19, 20, 21, 26, 27]);
+  expect(kept[0]).toMatchObject({
+    type: "agent.model.request",
+    turnId: withTools,
+    payload: { phase: "started" },
+  });
+  // Only inside the page's bounds.
+  expect(sequences(await read({ turns, after: 3, before: 20 }))).toEqual([4, 5, 18, 19]);
+  // Without its start in the page, the stored start anchors the turn, so any
+  // page boundary splits the same rows.
+  expect(
+    sequences(
+      await read({
+        turns: [
+          { turnId: withTools, started: null },
+          { turnId: plain, started: null },
+          { turnId: "not-a-turn", started: 1 },
+        ],
+        after: 0,
+      }),
+    ),
+  ).toEqual([3, 4, 5, 18, 19, 20, 21]);
+  expect(await read({ turns: [], after: 0 })).toEqual([]);
+  // A page holding none of a turn's rows still carries those of the turn
+  // started at or below its lower bound.
+  expect(sequences(await read({ turns: [], after: 2 }))).toEqual([3, 4, 5]);
+  expect(sequences(await read({ turns: [], after: 2, before: 5 }))).toEqual([3, 4]);
+  expect(sequences(await read({ turns: [], after: 4 }))).toEqual([5]);
+  expect(sequences(await read({ turns: [], after: 16 }))).toEqual([]);
+  expect(sequences(await read({ turns: [], after: 17 }))).toEqual([18, 19, 20, 21]);
 }, 120_000);
 
 test("thousands of PTY rows never reach a conversation read; the dock reads them by type", async () => {

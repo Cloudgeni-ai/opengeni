@@ -897,6 +897,8 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -37264,6 +37266,161 @@ export async function listSessionEventPage(
       nextBefore: direction === "before" ? (first ?? before ?? null) : null,
       truncatedBy,
     };
+  });
+}
+
+export type SessionEventConversationTurn = {
+  turnId: string;
+  /**
+   * Sequence of the turn's first `turn.started` in the page, if the page holds
+   * one. The turn's first stored `turn.started` takes precedence.
+   */
+  started: number | null;
+};
+
+const SESSION_TURN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Bookkeeping rows one turn may add to a conversation page (normally a handful). */
+const SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN = 64;
+
+/**
+ * The bookkeeping rows (SESSION_EVENT_BOOKKEEPING_STEP_TYPES) a conversation
+ * page that excludes them still carries, strictly inside `(after, before)`,
+ * for the page's turns and the turn last started at or before `after` (its
+ * rows may continue into this page without any of its rows on it):
+ *
+ * - a turn with no content step at all (SESSION_EVENT_CONTENT_STEP_TYPES)
+ *   keeps every bookkeeping row, so its window skips no sequence and a reader
+ *   is not offered steps that are not there;
+ * - any other turn keeps its model request rows from its first `turn.started`
+ *   through its first model response: the only ones its startup phases draw.
+ *   Later request rows and all usage rows are steps. The segment depends only
+ *   on stored rows, so every page boundary splits it the same way.
+ *
+ * One statement plans the ids from indexes (per turn, at most
+ * SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN rows of each kind) and a
+ * second reads them, ascending.
+ */
+export async function listSessionEventConversationBookkeeping(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: {
+    turns: readonly SessionEventConversationTurn[];
+    after: number;
+    before?: number | undefined;
+    payloadMode?: SessionEventPayloadMode;
+  },
+): Promise<SessionEvent[]> {
+  const turns = options.turns.filter((turn) => SESSION_TURN_ID_PATTERN.test(turn.turnId));
+  const after = Math.max(0, Math.floor(options.after));
+  const before =
+    options.before !== undefined && Number.isFinite(options.before)
+      ? Math.min(POSTGRES_INT_MAX, Math.floor(options.before))
+      : POSTGRES_INT_MAX;
+  if (before <= after + 1) return [];
+  const turnIds = `{${turns.map((turn) => turn.turnId).join(",")}}`;
+  const anchors = `{${turns.map((turn) => (turn.started === null ? "NULL" : String(Math.floor(turn.started)))).join(",")}}`;
+  const contentTypes = `{${SESSION_EVENT_CONTENT_STEP_TYPES.join(",")}}`;
+  const bookkeepingTypes = `{${SESSION_EVENT_BOOKKEEPING_STEP_TYPES.join(",")}}`;
+  const perTurn = SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const planned = await rawRows<{ id: string }>(
+      scopedDb,
+      sql`with open_turn as (
+          select e.turn_id, e.sequence as anchor from session_events e
+          where e.workspace_id = ${workspaceId}::uuid
+            and e.session_id = ${sessionId}::uuid
+            and e.type = 'turn.started'
+            and e.sequence <= ${after}
+            and e.turn_id is not null
+          order by e.sequence desc
+          limit 1
+        ),
+        listed as (
+          select turn_id, anchor from unnest(${turnIds}::uuid[], ${anchors}::int[]) as t(turn_id, anchor)
+          union all
+          select turn_id, anchor from open_turn
+        ),
+        turn_list as (
+          select turn_id, min(anchor) as listed_anchor from listed group by turn_id
+        ),
+        page_turns as (
+          select t.turn_id, coalesce((
+            select min(s.sequence) from session_events s
+            where s.workspace_id = ${workspaceId}::uuid
+              and s.turn_id = t.turn_id
+              and s.type = 'turn.started'
+              and s.session_id = ${sessionId}::uuid
+          ), t.listed_anchor) as anchor, exists (
+            select 1 from session_events c
+            where c.workspace_id = ${workspaceId}::uuid
+              and c.turn_id = t.turn_id
+              and c.type = any(${contentTypes}::text[])
+              and c.session_id = ${sessionId}::uuid
+          ) as has_content
+          from turn_list t
+        ),
+        content_free as (
+          select b.id from page_turns p
+          cross join lateral (
+            select e.id from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.turn_id = p.turn_id
+              and e.type = any(${bookkeepingTypes}::text[])
+              and e.session_id = ${sessionId}::uuid
+              and e.sequence > ${after}
+              and e.sequence < ${before}
+            order by e.sequence
+            limit ${perTurn}
+          ) b
+          where not p.has_content
+        ),
+        startup as (
+          select r.id, p.turn_id, r.sequence, r.responded from page_turns p
+          cross join lateral (
+            select e.id, e.turn_id, e.sequence,
+              coalesce(e.payload ->> 'phase', '') in ('first_byte', 'first_event') as responded
+            from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.session_id = ${sessionId}::uuid
+              and e.type = 'agent.model.request'
+              and e.sequence > p.anchor
+              and e.sequence < ${before}
+            order by e.sequence
+            limit ${perTurn}
+          ) r
+          where p.has_content and p.anchor is not null and r.turn_id = p.turn_id
+        ),
+        startup_segment as (
+          select id from (
+            select id, sequence, coalesce(sum(case when responded then 1 else 0 end) over (
+              partition by turn_id order by sequence
+              rows between unbounded preceding and 1 preceding
+            ), 0) as earlier_responses
+            from startup
+          ) ranked
+          where earlier_responses = 0 and sequence > ${after}
+        )
+        select id from content_free
+        union
+        select id from startup_segment`,
+    );
+    if (planned.length === 0) return [];
+    const rows = await scopedDb
+      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          inArray(
+            schema.sessionEvents.id,
+            planned.map((row) => row.id),
+          ),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    return rows.map(mapProjectedEvent);
   });
 }
 
