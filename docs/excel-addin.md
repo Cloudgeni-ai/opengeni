@@ -11,12 +11,14 @@ Excel on the web, Windows and Mac.
   that origin, so two deployments never collide. It adds an Opengeni button to
   the Home tab and needs ExcelApi 1.7 and `ReadWriteDocument`.
 - **Install page.** `/excel` in the web app (public, linked from the account
-  menu as "Excel add-in") shows the steps for the person's platform: upload the
-  manifest in Excel on the web, a one-line Terminal command on Mac (saves it in
-  Excel's `wef` folder), a one-line PowerShell command on Windows (saves it and
-  lists it under the per-user `WEF\Developer` registry key), or the Microsoft
-  365 admin center's "Upload custom apps" with the manifest link for a whole
-  organization. When no workbook is connected, `excel_run` gives the agent this
+  menu as "Excel add-in") shows the steps for the person's platform, each
+  starting from the downloaded manifest file: upload it in Excel on the web;
+  on Mac, drop it in Excel's `wef` folder through Finder's Go to Folder; on
+  Windows, add it through a shared-folder Trusted Add-in Catalog. Mac and
+  Windows also offer an optional one-line Terminal or PowerShell command (the
+  Windows one lists the file under the per-user `WEF\Developer` registry key).
+  For a whole organization it shows the Microsoft 365 admin center's "Upload
+  custom apps" with the manifest link. When no workbook is connected, `excel_run` gives the agent this
   link to pass on. No connected machine is involved: the pane talks to the API
   directly.
 - **Pane.** `apps/web/office/` (built by `vite.office.config.ts` into

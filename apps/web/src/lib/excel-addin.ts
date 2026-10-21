@@ -1,7 +1,7 @@
-// Installing the Excel add-in from this deployment: its manifest URL and the
-// one-line commands that put the manifest where desktop Excel looks for
-// add-ins it should load (Mac: Excel's `wef` folder; Windows: the per-user
-// developer add-ins registry key).
+// Installing the Excel add-in from this deployment: its manifest URL, the
+// folder desktop Excel on Mac loads add-in files from, and optional one-line
+// commands for people who prefer a terminal (Mac: Excel's `wef` folder;
+// Windows: the per-user developer add-ins registry key).
 
 export const EXCEL_ADDIN_PATH = "/excel";
 const MANIFEST_PATH = "/office/manifest.xml";
@@ -21,13 +21,16 @@ export function excelPlatformFor(userAgent: string | undefined): ExcelPlatform {
   return "web";
 }
 
+/** The Finder folder that holds Excel's `wef` add-in folder on Mac. */
+export const MAC_EXCEL_DOCUMENTS = "~/Library/Containers/com.microsoft.Excel/Data/Documents";
+
 function singleQuoted(value: string): string {
   return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 /** Terminal: save the manifest in Excel's add-in folder. */
 export function macInstallCommand(manifestUrl: string): string {
-  const folder = "~/Library/Containers/com.microsoft.Excel/Data/Documents/wef";
+  const folder = `${MAC_EXCEL_DOCUMENTS}/wef`;
   return `mkdir -p ${folder} && curl -fsSL ${singleQuoted(manifestUrl)} -o ${folder}/opengeni.xml`;
 }
 

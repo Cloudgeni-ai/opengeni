@@ -138,7 +138,10 @@ export function SegmentedControl<Value extends string = string>({
               className={cn(
                 itemClasses(variant, size),
                 option.iconOnly && variant !== "underline" && "px-2",
+                // Equal-width segments center their label, so side padding only
+                // decides when a long label truncates in a narrow row.
                 fullWidth && "flex-1",
+                fullWidth && variant !== "underline" && "px-1.5",
               )}
             >
               {/* While saving, the content fades and a spinner takes its place, so
