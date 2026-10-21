@@ -2946,12 +2946,16 @@ resume a turn, modify session history, or claim recovery of unavailable writes.
 The managed browser exposes a separate public contract at
 `GET|POST /v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery`.
 GET is a bounded, provider-free projection. POST requires the canonical managed
-human cookie, current session-control authority, an operation UUID, explicit
-historical-checkpoint acceptance, and the exact selection returned by GET.
+human cookie or an organization key acting as one verified external user on
+that user's own behalf (`asUser`), current session-control authority, an
+operation UUID, explicit historical-checkpoint acceptance, and the exact
+selection returned by GET. The external proof is request-local: a copied grant
+or another workspace never qualifies.
 The exact built-in local human may read GET to see the system-selected Retry
 route; local mode cannot submit POST consent.
-Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
-routes, legacy/unregistered archives, and `archive.previous` are unsupported.
+Agents, delegated bearers, bare API keys, service initiators, shared groups,
+non-Modal homes, active foreign routes, legacy/unregistered archives, and
+`archive.previous` are unsupported.
 
 The selection binds session/group, tenancy and route epochs, lease identity/epoch,
 CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
@@ -3330,6 +3334,16 @@ retry that finds the root already absent (crash between release and the cold
 commit) completes teardown without recapture, but only when the capture is
 published, the daemon matches and the exact container is gone. Other providers
 and elected normal cold-continuity owners retain their existing rules.
+A drain that commits cold without capturing because the probe or attach
+reported the container missing (a mutation still in progress, a capture
+takeover, or a NotFound observed while the daemon was unhealthy) never released
+the host directory, so the workspace still exists. That cold commit keeps the
+lease's Docker continuity receipt (the same one a warm lost instance keeps), the
+exact provider state and a pending restore, instead of the archive-only shape
+that declared the workspace unrecoverable. The elected next owner restarts a
+container on that exact owned directory, or reattaches the one a false NotFound
+missed, and the chat continues without consent. Without an owned host root the
+commit stays unrecoverable as before.
 `bun run dev:clean` likewise removes the SDK workspace directories of the
 sandbox containers it force-removes (its database is deleted with them);
 plain `dev:down` keeps them for continuity.

@@ -1,11 +1,35 @@
 import type { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { consentPublicSandboxRecovery, readPublicSandboxRecovery } from "@opengeni/db";
-import { requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  externalAttributionForAuthorization,
+  requirePermission,
+  type AccessGrantAuthorization,
+} from "../access";
 import type { AppDependencies } from "../dependencies";
 import { requireSessionAuthorization } from "../session-authorization";
 import { requireCanonicalManagedHuman } from "./session-tenancy";
 
 type Dependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
+
+/** A human the request itself proves: the canonical managed cookie session, or
+ * an organization key acting as one verified external user on that user's own
+ * behalf (asUser). The external proof is request-local, so a copied grant
+ * never qualifies, and admission already refuses it beside a service
+ * initiator. Delegated OAuth bearers, agents and bare keys act for something
+ * other than the person and never accept data loss. */
+export function requireSandboxRecoveryConsentHuman(
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): void {
+  if (
+    authorization.contextIntegrity &&
+    authorization.authenticatedSubjectId === authorization.grant.subjectId &&
+    authorization.grant.workspaceId === workspaceId &&
+    externalAttributionForAuthorization(authorization, authorization.grant) !== null
+  )
+    return;
+  requireCanonicalManagedHuman(authorization, workspaceId);
+}
 
 /** The read-only projection also serves the exact built-in local human. Its
  * provenance stamp is set only by the local resolver, never a bearer claim. */
@@ -24,7 +48,7 @@ export function requireSandboxRecoveryPreviewHuman(
     !authorization.grant.serviceInitiator
   )
     return;
-  requireCanonicalManagedHuman(authorization, workspaceId);
+  requireSandboxRecoveryConsentHuman(authorization, workspaceId);
 }
 
 async function authorize(
@@ -34,11 +58,13 @@ async function authorize(
   sessionId: string,
   intent: "preview" | "consent" | "workspace",
 ) {
-  // Cookie-verification stamp, never principal-shape inference or an actor from
-  // the body. The exact local human may retry or explicitly continue empty;
-  // historical checkpoint consent remains managed-human only. Agents, API keys
-  // and delegated humans cannot accept data loss or broaden either mutation.
-  if (intent === "consent") requireCanonicalManagedHuman(authorization, workspaceId);
+  // Request-verified human proof, never principal-shape inference or an actor
+  // from the body. The exact local human may retry or explicitly continue
+  // empty; historical checkpoint consent needs the managed cookie human or a
+  // verified external user acting as themselves. Agents, bare API keys,
+  // services and delegated bearers cannot accept data loss or broaden either
+  // mutation.
+  if (intent === "consent") requireSandboxRecoveryConsentHuman(authorization, workspaceId);
   else requireSandboxRecoveryPreviewHuman(authorization, workspaceId);
   requirePermission(authorization.grant, "sessions:read");
   requirePermission(authorization.grant, "sessions:control");

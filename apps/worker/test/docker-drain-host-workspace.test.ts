@@ -11,7 +11,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -308,6 +308,99 @@ describe("Docker drain host workspace (live daemon)", () => {
       ]);
       expect(inspect.stdout.trim()).toBe("");
       cleanupContainers.delete(created.instanceId);
+    },
+    180_000,
+  );
+
+  test.skipIf(!enabled)(
+    "a container that vanished before the drain still has its host workspace saved and restored",
+    async () => {
+      const workspaceBaseDir = await mkdtemp(join(tmpdir(), "opengeni-docker-drain-missing-"));
+      cleanupRoots.add(workspaceBaseDir);
+      const settings = testSettings({
+        sandboxBackend: "docker",
+        dockerImage: image,
+        dockerWorkspaceBaseDir: workspaceBaseDir,
+        sandboxOwnershipEnabled: true,
+      });
+      const created = await establishSandboxSessionFromEnvelope(settings, null, {
+        sessionId: "docker-drain-missing",
+        recovery: "create-or-restore",
+        backendOverride: "docker",
+        environment: {},
+      });
+      cleanupContainers.add(created.instanceId);
+      const box = created.session as {
+        state: { workspaceRootPath: string };
+        exec(args: { cmd: string }): Promise<{ exitCode: number; stderr: string }>;
+      };
+      const root = box.state.workspaceRootPath;
+      expect(
+        await box.exec({ cmd: "printf 'kept on the host' > /workspace/notes.txt" }),
+      ).toMatchObject({ exitCode: 0 });
+      const envelope = await serializeEstablishedSandboxEnvelope(created);
+      expect(envelope).not.toBeNull();
+      // The container disappears (host memory pressure, a daemon restart or
+      // an operator) while its host workspace stays on disk.
+      await execFileAsync("docker", ["rm", "-f", created.instanceId]);
+      cleanupContainers.delete(created.instanceId);
+
+      const [account] = await admin<{ id: string }[]>`
+        insert into managed_accounts (name) values ('docker-drain-missing') returning id`;
+      const [workspace] = await admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${account!.id}, 'docker-drain-missing') returning id`;
+      await admin`insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspace!.id}, ${account!.id})`;
+      const sandboxGroupId = crypto.randomUUID();
+      await admin`
+        insert into sandbox_leases (account_id, workspace_id, sandbox_group_id, liveness,
+          refcount, turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+          resume_backend_id, resume_state, expires_at)
+        values (${account!.id}, ${workspace!.id}, ${sandboxGroupId}, 'draining', 0, 0, 0,
+          ${created.instanceId}, 'docker', ${EPOCH}, 'docker',
+          ${JSON.stringify(envelope)}::text::jsonb, now() - interval '1 second')`;
+
+      const activities = createSandboxLeaseActivities(services(settings));
+      const result = await activities.drainSandboxLease({
+        target: {
+          workspaceId: workspace!.id,
+          sandboxGroupId,
+          instanceId: created.instanceId,
+          leaseEpoch: EPOCH,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(result).toEqual({ status: "terminated" });
+
+      // The drain reads the surviving host workspace (no container is needed
+      // to read it, and none can write to it), publishes it and releases the
+      // directory, exactly like an ordinary drain.
+      const lease = await readLease(db, workspace!.id, sandboxGroupId);
+      expect(lease).toMatchObject({ liveness: "cold", instanceId: null });
+      expect(lease?.recovery.archive.status).toBe("available");
+      expect(lease?.recovery.restore.status).toBe("pending");
+      expect(existsSync(root)).toBe(false);
+
+      // The next turn restores the files into a new container.
+      const restored = await establishSandboxSessionFromEnvelope(
+        settings,
+        lease!.resumeState as Record<string, unknown>,
+        {
+          sessionId: "docker-drain-missing",
+          recovery: "create-or-restore",
+          backendOverride: "docker",
+          environment: {},
+        },
+      );
+      cleanupContainers.add(restored.instanceId);
+      expect(restored.instanceId).not.toBe(created.instanceId);
+      const restoredRoot = (restored.session as { state: { workspaceRootPath: string } }).state
+        .workspaceRootPath;
+      expect(await readFile(join(restoredRoot, "notes.txt"), "utf8")).toBe("kept on the host");
     },
     180_000,
   );

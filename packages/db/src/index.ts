@@ -53870,8 +53870,16 @@ export async function confirmDrainCold(
         // A pending empty-workspace decision whose box drained before warm
         // publication stays a blocked lost workspace, never a clean new lease.
         const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
+        // A missing Docker container is not a missing workspace: its owned host
+        // directory is the durable resource. Keep the same continuity receipt
+        // markWarmLeaseInstanceLost keeps, so the elected next owner restarts a
+        // container on that exact directory (or reattaches one a false NotFound
+        // missed) instead of the lineage being declared lost.
+        const continuity = workspaceLost
+          ? dockerContinuityRecoveryFromLeaseRow(row, row.instance_id)
+          : null;
         const restoreStatus: SandboxRestoreStatus =
-          current.archive.status === "available" && archiveComplete
+          continuity || (current.archive.status === "available" && archiveComplete)
             ? "pending"
             : hasArchive
               ? "degraded"
@@ -53928,11 +53936,13 @@ export async function confirmDrainCold(
             verifiedAt: null,
           },
           ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
+          ...(continuity ? { continuity } : {}),
         };
-        const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
+        const preserveRecovery =
+          hasArchive || restoreStatus === "unrecoverable" || continuity !== null;
         const resumeStateJson = preserveRecovery
           ? JSON.stringify(
-              archiveOnlyResumeState(
+              recoveryResumeState(
                 row,
                 recovery,
                 workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
