@@ -36833,8 +36833,8 @@ function sessionEventExcludeTypesFilter(
     return excluded;
   }
   // The name check reads only created rows (never tool outputs) and uses the
-  // trigger-filled tool_name column (migration 0888), so it never detoasts a
-  // call's arguments. Rows written before 0888 keep a NULL column; only they
+  // trigger-filled tool_name column (migration 0889), so it never detoasts a
+  // call's arguments. Rows written before 0889 keep a NULL column; only they
   // fall back to the payload name, which classifies them exactly as before.
   const patterns = sql.join(
     PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),

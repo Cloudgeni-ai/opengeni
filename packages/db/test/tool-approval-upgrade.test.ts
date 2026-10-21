@@ -115,7 +115,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // ...and the 0755 connection-account intent columns.
     await stageConnectionAccountIntentColumns(owned.ownerUrl);
     await stageSiteSessionAudienceColumns(owned.ownerUrl);
-    // The current event adapter projects 0810's nullable key and 0888's tool
+    // The current event adapter projects 0810's nullable key and 0889's tool
     // name. Only stage the reader columns for seeding; the real migrations must
     // create them.
     await owner`alter table session_events add column usage_source_key text, add column tool_name text`;

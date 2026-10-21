@@ -285,7 +285,7 @@ test("presented tool calls are classified by tool_name, falling back to the payl
     [12, null],
   ]);
 
-  // Rows written before migration 0888 were never named: clear the column on
+  // Rows written before migration 0889 were never named: clear the column on
   // a presented (5, 10) and a non-presented (6) call to model them.
   await shared.admin`
     update session_events set tool_name = null
@@ -396,7 +396,7 @@ test("SQL tool-name classification equals isPresentedSessionToolName, named or n
   );
   expect(kept.map((event) => event.sequence)).toEqual(expected);
   expect(expected.length).toBe(2 * 8);
-  // The regex the filter used before migration 0888 agrees on every row.
+  // The regex the filter used before migration 0889 agrees on every row.
   const previousFilter = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
   const previous = await shared.admin<{ sequence: number }[]>`
     select sequence from session_events
@@ -420,7 +420,7 @@ test("the application writer fills tool_name under row-level security", async ()
     where workspace_id = ${grant.workspaceId} and session_id = ${session.id}
       and type like 'agent.toolCall.%'
     order by sequence`;
-  expect(rows).toEqual([
+  expect([...rows]).toEqual([
     { type: "agent.toolCall.created", tool_name: "opengeni__sandbox_file_publish" },
     { type: "agent.toolCall.output", tool_name: null },
   ]);

@@ -123,7 +123,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // Remove it before replay so the actual attention backfill still runs.
     await owner`ALTER TABLE session_event_cursors
       ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
-    // Current event readers project 0810's usage source key and 0888's tool name.
+    // Current event readers project 0810's usage source key and 0889's tool name.
     await owner`ALTER TABLE session_events ADD COLUMN usage_source_key text, ADD COLUMN tool_name text`;
     // Current session/turn adapters project 0608's nullable context fields.
     // Stage only empty reader columns for historical seeds, not its authority
