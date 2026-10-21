@@ -782,6 +782,13 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 ## Deployment Work Notes
 
+Runtime posture tolerates securely shaped unknown tables and invoker routines,
+not changes to known contracts or unknown callable SECURITY DEFINER routines.
+Run the pinned previous-binary readiness test for schema changes and keep its
+production baseline advancement separate from migration PRs. The initial pin
+is bootstrap evidence until this compatibility binary ships; see
+`docs/migrations-expand-contract.md#pinned-previous-binary-readiness`.
+
 When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.
 
 Every new SQL migration must declare its reviewed production path on line 1: `-- deployment-mode: rolling` for online-compatible expand-and-contract work, or `-- deployment-mode: maintenance` for an incompatible one-way cutover. Rolling is the default: one maintenance migration drains every API, control and turn worker for its whole release. A new maintenance migration must carry `-- maintenance-justification: <why no expand/contract sequence works>` in its leading comment block, and a rolling migration that drops, renames, retypes or sets NOT NULL on an existing table must carry `-- contract-step: <migration or PR after which nothing uses the old shape, or why the previous release is unaffected>`; `bun run check:migration-deployment-mode` is the CI guard. Follow [`docs/migrations-expand-contract.md`](docs/migrations-expand-contract.md). The protected production gate hashes the ordered SQL history and rejects rewrites or unclassified additions.

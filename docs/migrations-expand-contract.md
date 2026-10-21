@@ -48,10 +48,9 @@ release must keep reading, writing and passing readiness after it commits.**
 1. **Expand** (rolling). Add the new shape next to the old one: nullable
    columns or columns with a `DEFAULT`, indexes (`-- opengeni:concurrent-index`
    on hot tables), and triggers that fill or sync the new shape from old
-   writers' rows. New tables are safe in `opengeni_private` without direct
-   runtime grants; a new data-schema table with RLS or runtime grants changes
-   the runtime posture the previous release checks on every readiness probe, so
-   follow the posture recipe below.
+   writers' rows. New ungranted tables and securely shaped FORCE-RLS tables with
+   runtime grants can be additive, once the previous release contains the
+   forward-compatible posture evaluator. Follow the posture recipe below.
 2. **Migrate** (code plus rolling backfill). Ship code that writes both shapes
    and reads the new one, falling back to the old one where it is still empty.
    Backfill existing rows with a `-- opengeni:batched-backfill` migration on
@@ -75,7 +74,8 @@ that already ignores it. Count on two to three releases for a full sequence:
 | Change a column type           | same as rename, with the new type                             | read new only                                                | drop old (`contract-step`) |
 | Make a column NOT NULL         | code always writes it; fill trigger or `DEFAULT`; backfill    | `CHECK ... NOT VALID`, validate, `SET NOT NULL` (`contract-step`) | -                     |
 | New writer protocol (fences)   | code follows old **and** new protocol                         | enforce new protocol (`contract-step`)                       | drop old protocol          |
-| New FORCE-RLS, grants, posture | posture evaluator accepts both postures                       | apply the new posture                                        | evaluator requires it      |
+| New FORCE-RLS table + grants   | ship forward-compatible evaluator once                       | add securely shaped table + its code                         | -                          |
+| Change a known posture        | evaluator accepts both exact postures                        | apply the new posture                                        | evaluator requires it      |
 
 Steps marked for a later release can wait longer; they cannot go sooner.
 
@@ -118,16 +118,63 @@ the column is `NOT NULL` without a default, drops that constraint or adds a
 default so release N's inserts succeed. Release N+1 drops it with
 `-- contract-step:`.
 
-**New FORCE-RLS, grants or other runtime-posture changes.** API readiness
-re-checks the exact database posture on every probe
-(`packages/db/src/runtime-posture.ts`), so the previous release's evaluator
-marks its pods unready when it sees data-schema tables, policies, grants or
-FORCE-RLS state it does not know. Either keep the new objects in
-`opengeni_private` with execute-only access (as the allowance accounting tables
-do), or first ship an evaluator that accepts both postures, apply the posture in
-a later release, then tighten the evaluator. Migrations 0404-0405 changed the
-posture and the evaluator in one release, which made them a maintenance
-boundary.
+**New FORCE-RLS tables and routines.** API and worker startup and worker readiness
+use `packages/db/src/runtime-posture.ts`. Once this forward-compatible binary
+is the **previous production release**, an entirely unknown table in the data
+schema or `opengeni_private` may have SELECT, INSERT, UPDATE and DELETE grants when RLS is enabled,
+forced, active for the runtime role, has at least one policy, and the runtime
+does not own it, and it has no inheritance or partition relationship. Parent
+queries use the parent's ACL/RLS rather than a known child's contract, so these
+relationships require explicit compatibility review, even when the unknown
+child has no direct grants (a known parent still exposes it). TRUNCATE, REFERENCES,
+TRIGGER, MAINTAIN and other non-row privileges are never tolerated on unknown
+tables. Ungranted unknown non-RLS tables are harmless; runtime grants
+(including column-only grants) on them still fail readiness. A data-schema
+table declaring RLS but not meeting the secure shape also fails. Private
+owner-only tables without grants remain inert. Existing default privileges can
+grant DML automatically on new tables; inspect effective grants, not merely the
+presence of GRANT statements in a migration.
+
+Unknown routines may be SECURITY INVOKER, or SECURITY DEFINER only when neither
+runtime nor PUBLIC can execute them and they are not trigger/event-trigger
+functions or bound in `pg_trigger`. PostgreSQL does not check EXECUTE when a
+trigger fires: owner-only trigger definers still require a prior explicit binary
+contract. Definers must also have no catalog dependents in `pg_depend`: aggregates
+and other support-function callers can invoke them without checking the support
+function's EXECUTE grant. Missing dependency metadata fails closed. Runtime ownership always fails. A fixed
+search path and a non-runtime owner cannot prove an unknown definer's body
+safe: it could expose an owner capability or disable owner RLS. Introduce an
+explicit, reviewed compatibility-binary contract before granting EXECUTE on
+such a definer. The old private-routine catalog's implicit EXECUTE contract is
+now frozen in `packages/db/src/runtime-posture-legacy-routines.json`; it is an
+inventory, not a provisioning grant list. Never regenerate it from a live
+database to silence findings. New named private capabilities need explicit
+registration and their own authority tests.
+
+Every existing check for **known** objects remains exact: missing objects and
+privileges, excess grants, owner relationships, RLS, capability predicates,
+search paths and cutover receipts. Caller-specific contract overrides cannot
+turn a binary-known table or routine into an unknown one. A known table's
+column grants do not satisfy its required table-level privileges.
+
+This is structural readiness, not policy/body verification. Migration review
+must still establish tenant isolation and the appropriateness of every grant;
+always-true policies remain outside this structural check. Non-row privileges
+and unknown trigger definers fail readiness rather than relying on review alone.
+
+The 0796/0797 headers describe a **historical** previous binary that rejected
+all new protected tables. Leave their bytes and maintenance markers unchanged.
+For future changes of that shape, do not copy that blanket maintenance
+justification once the compatible binary is in production. A new FORCE-RLS
+table and DML grants can then be rolling in one release; new callable definers
+or changes to known-object contracts can still need a prior compatibility
+release. Cite the actual incompatible operation, the pinned old-binary test
+failure and why an expand/contract sequence cannot work if maintenance is
+necessary. The presence of a new table alone is no longer a justification.
+
+**Changes to a known posture.** Ship an evaluator accepting both specific
+postures, change the schema in a later release, then tighten it. Forward
+compatibility never permits relaxing an old object's RLS or widening its grants.
 
 **Writer-protocol changes** (for example a trigger that rejects writes without
 a new advisory fence, as in 0345). First ship binaries that follow the old and
@@ -174,6 +221,55 @@ steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 `docs/maintenance-migrations/`.
 
 ## The CI guard
+
+### Pinned previous-binary readiness
+
+`scripts/runtime-posture-baseline.json` pins a full immutable source commit,
+not a moving branch or tag. `runtime-posture-compatibility.yml` runs on database
+PRs (including main PRs, whose broad CI is otherwise post-merge only) and pushes.
+It migrates a fresh PostgreSQL database as a NOSUPERUSER/NOBYPASSRLS owner,
+runs the current `provision-roles`, then calls **both the inspector and evaluator
+from the pin** as the restricted runtime login. The checked-out source's full
+named-object contracts are used, not a reconstructed subset of tables.
+This is the deterministic readiness-code equivalent of starting the old API
+and workers; it does not test their other queries or writer protocols.
+
+The test also adds safe unknown objects and deliberately weakens RLS, adds
+unsafe grants/definers and revokes known EXECUTE privileges. Both the current
+and pinned binary must reject the negative controls. Missing PostgreSQL, pin
+objects or extraction dependencies fail the dedicated job; there is no green
+fallback to current code. Existing per-feature old-reader harnesses (for
+example `fixtures/site-limits-2fef1581b.ts`) remain necessary for non-readiness
+compatibility. The release-schema hash tests and historical maintenance notes
+are complementary, not evidence that an old readiness probe passes.
+
+The historical production source `bcc60cd80f2fd557e9f64beee38c1562d629de8c`
+also runs as a negative control. Against the schema through 0887 it produces
+42 violations: undeclared RLS plus grants for `session_title_operations` and
+`site_session_access`, and 39 private helper EXECUTE expectations. The test
+replays the two safe table shapes and 19 non-trigger owner-only helpers under
+future names, preserving all current known objects, and requires both
+compatibility evaluators to accept them without granting EXECUTE. The other
+20 helpers are SECURITY DEFINER triggers: renamed unknown copies must still
+fail, even with EXECUTE revoked. Treating all 39 as inert would introduce an
+RLS-bypass path. Existing named trigger contracts remain unchanged. Later additions may add historical violations;
+intentional retirement of this witness needs an explicit test update.
+
+**Bootstrap:** the initial pin is explicitly `status: "bootstrap"`, pointing
+at the compatibility implementation commit in this PR. It is not a claim
+about today's production binary, which predates the fix. No additive rollout
+may rely on this tolerance until the fix has shipped. After this PR is merged
+and released, make a pin-only PR setting `sourceCommit` to the full released
+merge/source SHA, `status` to `production`, and `release` to its immutable
+production release receipt/tag. Repeat after each successful production
+release. Resolve tags to their source commit before recording them; do not
+follow "latest" at test time or advance the baseline in a migration PR to
+make an incompatibility disappear. Retain/fetch the exact pin commit when
+checking out shallow history. A legitimate incompatible maintenance change
+will fail this rolling-readiness proof and needs an explicitly coordinated
+compatibility release, not an automatic pin refresh or a skipped test.
+
+### Migration declaration checks
 
 `bun run check:migration-deployment-mode` (`scripts/check-migration-deployment-mode.ts`)
 runs in CI on every migration change. For every migration from ordinal 0786 on

@@ -424,6 +424,7 @@ function safePosture(): RuntimeDatabasePosture {
     tables: [
       {
         name: "tenant_rows",
+        hasInheritance: false,
         owner: "opengeni_migrator",
         rlsEnabled: true,
         rlsForced: true,
@@ -1280,6 +1281,19 @@ describe("runtime database posture evaluator", () => {
       "runtime role has forbidden direct artifact pin authority",
     );
     table.extraPrivileges = [];
+    for (const privilege of ["SELECT", "INSERT", "UPDATE", "REFERENCES"]) {
+      table.columnPrivileges = [privilege];
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "runtime role has forbidden direct artifact pin authority",
+      );
+      expect([table.select, table.insert, table.update, table.references]).toEqual([
+        false,
+        false,
+        false,
+        false,
+      ]);
+    }
+    table.columnPrivileges = [];
     table.rlsForced = false;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "artifact pin relation lacks active FORCE-RLS workspace isolation",
@@ -2937,7 +2951,7 @@ describe("runtime database posture evaluator", () => {
     expect(violations).toContain("table tenant_rows grants excess runtime privileges: TRIGGER");
   });
 
-  test("rejects missing and undeclared protected-table contract entries", () => {
+  test("rejects missing known tables even alongside a tolerated new protected table", () => {
     const posture = safePosture();
     posture.tables.push({
       ...posture.tables[0]!,
@@ -2957,9 +2971,233 @@ describe("runtime database posture evaluator", () => {
       expect.arrayContaining([
         "runtime privilege tables are missing: missing_tenant_rows",
         "protected tables are missing: missing_tenant_rows",
-        "RLS tables are absent from the declared contract: unreviewed_tenant_rows",
       ]),
     );
+  });
+
+  test("tolerates grants on an unknown securely shaped table", () => {
+    const posture = safePosture();
+    posture.tables.push({
+      ...posture.tables[0]!,
+      name: "future_tenant_rows",
+    });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  for (const unsafe of [
+    { rlsEnabled: false },
+    { rlsForced: false },
+    { rlsActive: false },
+    { policyCount: 0 },
+    { owner: "opengeni_app" },
+    { hasInheritance: true },
+    { hasInheritance: undefined },
+  ]) {
+    test(`rejects unknown table with unsafe shape ${JSON.stringify(unsafe)}`, () => {
+      const posture = safePosture();
+      posture.tables.push({ ...posture.tables[0]!, name: "future_tenant_rows", ...unsafe });
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "table future_tenant_rows grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      );
+    });
+  }
+
+  test("tolerates unknown ungranted non-RLS tables but rejects column grants", () => {
+    const posture = safePosture();
+    const table = { ...knowledgeAuthorityTables()[0]!, name: "future_owner_rows" };
+    posture.tables.push(table);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    table.columnPrivileges = ["SELECT"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "table future_owner_rows grants excess runtime privileges: SELECT",
+    );
+  });
+
+  test("rejects unknown ungranted non-RLS inheritance children in either schema", () => {
+    for (const inventory of ["tables", "privateTables"] as const) {
+      const posture = safePosture();
+      posture[inventory].push({
+        ...knowledgeAuthorityTables()[0]!,
+        name: "future_child",
+        hasInheritance: true,
+      });
+      expect(
+        evaluateRuntimeDatabasePosture(posture, options).some(
+          (v) => v.includes("future_child") && v.includes("inheritance or partition"),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  for (const grants of [
+    { truncate: true },
+    { references: true },
+    { trigger: true },
+    { columnPrivileges: ["REFERENCES"] },
+    { extraPrivileges: ["MAINTAIN"] },
+  ]) {
+    test(`rejects unknown non-row privileges in both schemas: ${JSON.stringify(grants)}`, () => {
+      for (const inventory of ["tables", "privateTables"] as const) {
+        const posture = safePosture();
+        posture[inventory].push({ ...posture.tables[0]!, name: "future_rows", ...grants });
+        expect(
+          evaluateRuntimeDatabasePosture(posture, options).some((v) => v.includes("future_rows")),
+        ).toBe(true);
+      }
+    });
+  }
+
+  for (const name of [
+    "connection_authority_convergence_audit_capabilities",
+    "document_migration_audit_capabilities",
+    "session_create_idempotency_guard",
+    "session_history_items_repair_audit",
+  ]) {
+    test(`preserves no-grant contract for existing ${name}`, () => {
+      const posture = safePosture();
+      posture.tables.push({ ...posture.tables[0]!, name });
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `table ${name} grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE`,
+      );
+    });
+  }
+
+  for (const [name, message] of [
+    [
+      "subscription_plan_catalog_revisions",
+      "runtime role cannot read the subscription plan catalog",
+    ],
+    ["credit_promotion_policy_revisions", "runtime role cannot read the credit promotion policy"],
+  ]) {
+    test(`column-only SELECT cannot satisfy known private ${name}`, () => {
+      const posture = safePosture();
+      const table = posture.privateTables.find((t) => t.name === name)!;
+      table.select = false;
+      table.columnPrivileges = ["SELECT"];
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(message!);
+    });
+  }
+
+  test("applies the same additive table rule to the private schema without relaxing known capabilities", () => {
+    const posture = safePosture();
+    const table: RuntimePrivateTablePosture = {
+      ...posture.tables[0]!,
+      name: "future_private_rows",
+    };
+    posture.privateTables.push(table);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    for (const unsafe of [
+      { rlsEnabled: false },
+      { rlsForced: false },
+      { rlsActive: false },
+      { policyCount: 0 },
+      { owner: "opengeni_app" },
+      { hasInheritance: true },
+    ]) {
+      const changed = {
+        ...posture,
+        privateTables: [...posture.privateTables.slice(0, -1), { ...table, ...unsafe }],
+      };
+      expect(evaluateRuntimeDatabasePosture(changed, options)).toContain(
+        "unknown private table future_private_rows has unsafe runtime privileges",
+      );
+    }
+  });
+
+  test("an override cannot make a binary-known table unknown", () => {
+    const posture = safePosture();
+    posture.tables.push({ ...posture.tables[0]!, name: "schema_migrations" });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "table schema_migrations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "RLS tables are absent from the declared contract: schema_migrations",
+    );
+  });
+
+  test("column grants never satisfy a known table's missing table-level privilege", () => {
+    const posture = safePosture();
+    posture.tables[0]!.select = false;
+    posture.tables[0]!.columnPrivileges = ["SELECT"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "table tenant_rows lacks required runtime privileges: SELECT",
+    );
+  });
+
+  for (const inventory of ["privateRoutines", "targetRoutines"] as const) {
+    test(`tolerates unknown invokers and uncallable definers in ${inventory}`, () => {
+      for (const execute of [true, false]) {
+        const posture = safePosture();
+        posture[inventory].push({
+          name: "future_helper(uuid)",
+          owner: "opengeni_migrator",
+          execute,
+          publicExecute: false,
+          securityDefiner: !execute,
+          triggerCallable: false,
+          hasDependents: false,
+        });
+        expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      }
+    });
+
+    for (const unsafe of [
+      { owner: "opengeni_app", securityDefiner: false },
+      { securityDefiner: true },
+      { execute: false, publicExecute: true, securityDefiner: true },
+      { execute: false, securityDefiner: true, triggerCallable: true },
+      { execute: false, securityDefiner: true, triggerCallable: undefined },
+      { execute: false, securityDefiner: true, hasDependents: true },
+      { execute: false, securityDefiner: true, hasDependents: undefined },
+    ]) {
+      test(`rejects unknown unsafe routine in ${inventory}: ${JSON.stringify(unsafe)}`, () => {
+        const posture = safePosture();
+        posture[inventory].push({
+          name: "future_helper(uuid)",
+          owner: "opengeni_migrator",
+          execute: true,
+          publicExecute: false,
+          triggerCallable: false,
+          hasDependents: false,
+          configuration: ["search_path=pg_catalog"],
+          ...unsafe,
+        });
+        expect(evaluateRuntimeDatabasePosture(posture, options).length).toBeGreaterThan(0);
+      });
+    }
+  }
+
+  test("keeps the implicit missing-EXECUTE check on a known private routine", () => {
+    const posture = safePosture();
+    posture.privateRoutines.push({
+      name: "current_account_id()",
+      owner: "opengeni_migrator",
+      execute: false,
+      publicExecute: false,
+      securityDefiner: false,
+    });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role lacks EXECUTE on private routine current_account_id()",
+    );
+  });
+
+  test("retired target signatures stay known and retain their retirement violation", () => {
+    const posture = safePosture();
+    const name = runtimePosture.SUBSCRIPTION_RETIRED_ROUTINES.find(
+      (r) => r.schema === "target",
+    )!.signature;
+    const retired = `routine public.${name}`;
+    posture.retiredSubscriptionObjects.push(retired);
+    posture.targetRoutines.push({
+      name,
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: true,
+    });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([
+      runtimePosture.retiredSubscriptionObjectViolation(retired),
+    ]);
   });
 
   test("rejects DML on a table outside the exact runtime allowlist", () => {
