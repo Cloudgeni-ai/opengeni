@@ -17,7 +17,9 @@ export function TurnStepsLoader({
 }) {
   const { state, load, retain } = steps;
   const [requested, setRequested] = useState(autoLoad);
-  useEffect(() => (requested ? retain() : undefined), [requested, retain]);
+  // An open row keeps its steps (live ones too) while mounted; only the
+  // read waits for the reader.
+  useEffect(() => retain(), [retain]);
   useEffect(() => {
     if (requested && state === "idle") load();
   }, [requested, state, load]);

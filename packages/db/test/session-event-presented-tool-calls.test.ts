@@ -59,11 +59,15 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
     [8, "agent.toolCall.created", { id: "c4", name: "my_skill_save", arguments: {} }],
     [9, "agent.toolCall.created", { id: "c5", name: "mcp__knowledge_save", arguments: {} }],
     [10, "agent.message.completed", { text: "answer" }],
+    // A step row without a turn (PTY output): no turn's step read finds it.
+    [11, "terminal.pty.output.delta", { data: "$ ls" }],
   ];
+  const turnId = crypto.randomUUID();
   for (const [sequence, type, payload] of rows) {
+    const rowTurnId = type === "terminal.pty.output.delta" ? null : turnId;
     await shared.admin`
-      insert into session_events (account_id,workspace_id,session_id,sequence,type,payload)
-      values (${grant.accountId},${grant.workspaceId},${session.id},${sequence},${type},${shared.admin.json(payload as never)})`;
+      insert into session_events (account_id,workspace_id,session_id,turn_id,sequence,type,payload)
+      values (${grant.accountId},${grant.workspaceId},${session.id},${rowTurnId},${sequence},${type},${shared.admin.json(payload as never)})`;
   }
   const excludeTypes = [...SESSION_EVENT_STEP_TYPES];
 
@@ -71,6 +75,7 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
     listSessionEvents(tx, grant.workspaceId, session.id, { after: 0, limit: 100, excludeTypes }),
   );
   expect(plain.map((event) => event.sequence)).toEqual([1, 10]);
+  expect(excludeTypes).toContain("terminal.pty.output.delta");
 
   const conversation = await withWorkspaceSubjectRls(
     client.db,
@@ -84,7 +89,7 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
         retainPresentedToolCalls: true,
       }),
   );
-  expect(conversation.map((event) => event.sequence)).toEqual([1, 5, 7, 9, 10]);
+  expect(conversation.map((event) => event.sequence)).toEqual([1, 5, 7, 9, 10, 11]);
 
   const page = await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (tx) =>
     listSessionEventPage(tx, grant.workspaceId, session.id, {
@@ -95,7 +100,7 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
       payloadMode: "full",
     }),
   );
-  expect(page.events.map((event) => event.sequence)).toEqual([7, 9, 10]);
+  expect(page.events.map((event) => event.sequence)).toEqual([9, 10, 11]);
   expect(page.hasMore).toBe(true);
 
   // Without excluding created rows the option changes nothing.
@@ -107,5 +112,5 @@ test("conversation reads exclude steps but keep presented tool calls", async () 
       retainPresentedToolCalls: true,
     }),
   );
-  expect(steps.map((event) => event.sequence)).toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
+  expect(steps.map((event) => event.sequence)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 11]);
 }, 120_000);

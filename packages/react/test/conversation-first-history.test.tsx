@@ -104,6 +104,10 @@ function serverRead(store: readonly SessionEvent[], options: SessionEventListOpt
     if (event.sequence <= after || event.sequence >= before) return false;
     if (include && !include.has(event.type)) return false;
     if (!exclude.has(event.type)) return true;
+    const retains =
+      options.presentedToolCalls === "include" && exclude.has("agent.toolCall.created");
+    // Turnless rows (PTY output) belong to no turn's step read.
+    if (retains && !event.turnId) return true;
     const name = (event.payload as { name?: unknown }).name;
     return (
       options.presentedToolCalls === "include" &&
@@ -125,6 +129,8 @@ function historyClient(input: {
   head?: () => { lastSequence: number; activeTurnId: string | null };
   withPages?: boolean;
   failSteps?: () => boolean;
+  /** Milliseconds before a page read answers. */
+  pageDelay?: (options: SessionEventListOptions) => number;
   /** Pause the live stream after this many events until `liveGate` resolves. */
   liveGate?: { after: number; open: Promise<void> };
 }) {
@@ -147,8 +153,14 @@ function historyClient(input: {
     },
     ...(input.withPages
       ? {
-          listEventPage: async (_workspaceId: string, _sessionId: string, options = {}) => {
+          listEventPage: async (
+            _workspaceId: string,
+            _sessionId: string,
+            options: SessionEventListOptions = {},
+          ) => {
             reads.push(options);
+            const delay = input.pageDelay?.(options) ?? 0;
+            if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
             return serverRead(input.store(), options) as never;
           },
         }
@@ -560,6 +572,175 @@ describe("conversation-first session history", () => {
     }
   });
 
+  for (const turnless of ["session.queue.changed", "terminal.pty.output.delta"] as const) {
+    test(`a turn starting before the window loads every step past turnless ${turnless} rows`, async () => {
+      // Each call of T1 has a turnless row (a queued prompt's queue change, or
+      // interactive terminal output) ahead of it, so the window's oldest
+      // event has no turn.
+      const store = longTurn({ start: 1, turnId: "T0", steps: 300 });
+      store.push(
+        at(700, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+        at(701, "turn.started", { turnId: "T1" }, "T1"),
+      );
+      let sequence = 702;
+      for (let index = 0; index < 2500; index += 1) {
+        const id = `T1-call-${index}`;
+        store.push(at(sequence, turnless, { data: `row ${index}` }, null));
+        store.push(at(sequence + 1, "agent.model.request", {}, "T1"));
+        store.push(at(sequence + 2, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+        store.push(at(sequence + 3, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+        sequence += 4;
+      }
+      store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+      store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+      const { client } = historyClient({ store: () => store, withPages: true });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await settle();
+        const window = hook.result.current.events;
+        expect(window.some((event) => event.type === "turn.started")).toBe(false);
+        expect(window[0]!.turnId).toBeNull();
+        // Turnless rows are history too: PTY output shows after a reload.
+        expect(window.filter((event) => event.type === turnless).length).toBeGreaterThan(100);
+        for (let page = 0; page < 60; page += 1) {
+          const marker = stepMarkers(hook.result.current.timeline).find(
+            (item) => item.turnId === "T1",
+          )!;
+          if (marker.state === "complete") break;
+          await actRun(() => marker.load());
+          await settle(5);
+        }
+        expect(
+          stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")?.state,
+        ).toBe("complete");
+        const steps = stepEvents(hook.result.current.events).filter((event) => event.turnId);
+        expect(steps).toHaveLength(5000);
+        expect(steps.every((event) => event.turnId === "T1")).toBe(true);
+        expect(steps[0]!.sequence).toBe(704);
+      } finally {
+        await hook.unmount();
+      }
+    });
+  }
+
+  test("a turn read to a guessed lower bound offers earlier steps once its start loads", async () => {
+    // A late row of the previous turn sits inside T1 and is the window's
+    // oldest event (the first read and its boundary page hold 2,000 rows): the
+    // first reads stop at it, above T1's earliest steps.
+    const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
+    store.push(
+      at(100, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+      at(101, "turn.started", { turnId: "T1" }, "T1"),
+    );
+    let sequence = 102;
+    const call = (index: number) => {
+      const id = `T1-call-${index}`;
+      store.push(at(sequence, "agent.model.request", {}, "T1"));
+      store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+      store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+      sequence += 3;
+    };
+    for (let index = 0; index < 2500; index += 1) call(index);
+    const late = sequence;
+    store.push(at(sequence++, "agent.model.usage", {}, "T0"));
+    for (let index = 2500; index < 4497; index += 1) call(index);
+    store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+    store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+    const { client } = historyClient({ store: () => store, withPages: true });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const marker = () =>
+      stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")!;
+    const loadAll = async () => {
+      for (let page = 0; page < 60 && marker().state !== "complete"; page += 1) {
+        await actRun(() => marker().load());
+        await settle(5);
+      }
+    };
+    try {
+      await settle();
+      expect(hook.result.current.events[0]!.sequence).toBe(late);
+      await loadAll();
+      expect(marker().state).toBe("complete");
+      expect(stepEvents(hook.result.current.events)).toHaveLength(1997 * 2);
+
+      for (let page = 0; page < 10; page += 1) {
+        if (hook.result.current.events.some((event) => event.type === "turn.started")) break;
+        await actRun(() => {
+          hook.result.current.loadOlder();
+        });
+        await settle(5);
+      }
+      expect(hook.result.current.events.some((event) => event.type === "turn.started")).toBe(true);
+      // The turn's start is now known: the steps below the old bound are not.
+      expect(marker().state).toBe("partial");
+      await loadAll();
+      expect(marker().state).toBe("complete");
+      const steps = stepEvents(hook.result.current.events).filter((event) => event.turnId === "T1");
+      expect(steps).toHaveLength(4497 * 2);
+      expect(steps[0]!.sequence).toBe(103);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("presented results are read at most eight at a time", async () => {
+    const store: SessionEvent[] = [
+      at(1, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+      at(2, "turn.started", { turnId: "T1" }, "T1"),
+    ];
+    let sequence = 3;
+    for (let index = 0; index < 120; index += 1) {
+      const id = `T1-publish-${index}`;
+      store.push(
+        at(sequence++, "agent.toolCall.created", { id, name: "sandbox_file_publish" }, "T1"),
+      );
+      store.push(at(sequence++, "agent.toolCall.output", { id, output: {} }, "T1"));
+    }
+    store.push(at(sequence, "turn.completed", { turnId: "T1" }, "T1"));
+    let inFlight = 0;
+    let peak = 0;
+    let presentedReads = 0;
+    const isPresentedRead = (options: SessionEventListOptions) =>
+      options.includeTypes?.length === 1 && options.includeTypes[0] === "agent.toolCall.output";
+    const { client } = historyClient({
+      store: () => store,
+      withPages: true,
+      pageDelay: (options) => {
+        if (!isPresentedRead(options)) return 0;
+        presentedReads += 1;
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        // Some reads are slow while others settle: settled reads must not
+        // start more than the free slots.
+        const delay = presentedReads % 4 === 1 ? 80 : 3;
+        setTimeout(() => {
+          inFlight -= 1;
+        }, delay);
+        return delay;
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const outputs = () =>
+      hook.result.current.events.filter((event) => event.type === "agent.toolCall.output");
+    try {
+      for (let round = 0; round < 60 && outputs().length < 120; round += 1) await settle(20);
+      expect(outputs()).toHaveLength(120);
+      expect(peak).toBeGreaterThan(1);
+      expect(peak).toBeLessThanOrEqual(8);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("presented results far behind parallel calls are found, beyond the first pass", async () => {
     // Twelve publishes and eight other calls in parallel: every output lands
     // after all twenty calls, the publishes' last.
@@ -798,7 +979,8 @@ describe("turn steps projection", () => {
     const root = createRoot(container);
     await actRun(() => root.render(<TurnStepsLoader steps={steps("idle")} autoLoad={false} />));
     expect(loads).toBe(0);
-    expect(retained).toBe(0);
+    // Open rows keep their (live) steps even before the reader asks.
+    expect(retained).toBe(1);
     const show = container.querySelector("button")!;
     expect(show.textContent).toBe("Show steps");
     await actRun(() => show.click());

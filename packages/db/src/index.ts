@@ -36767,7 +36767,9 @@ export type ListSessionEventsOptions = {
    * Keep `agent.toolCall.created` rows of presented tools (see
    * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
    * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. No effect unless the type is excluded.
+   * changes without loading every step. Excluded rows without a turn (PTY
+   * output) are kept too: no per-turn step read can find them. No effect
+   * unless `agent.toolCall.created` is excluded.
    */
   retainPresentedToolCalls?: boolean;
   /**
@@ -36788,11 +36790,13 @@ function sessionEventExcludeTypesFilter(
   if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
     return excluded;
   }
-  // Only created rows are read here; they are small and almost always stored
-  // inline, so the name check does not detoast large tool outputs.
+  // The name check reads only created rows (never tool outputs), but it still
+  // detoasts large arguments on each excluded call it scans.
   const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
   return or(
     excluded,
+    // Turnless rows (PTY output) belong to no turn's step read.
+    isNull(schema.sessionEvents.turnId),
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
       sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
