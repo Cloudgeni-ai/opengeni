@@ -24752,6 +24752,7 @@
         "$.groups[].queued": "integer!",
         "$.groups[].total": "integer!",
         "$.groups[].unread": "integer!",
+        "$.groups[].waiting": "integer?",
         "$.needsYouCount": "integer!"
       }
     },
