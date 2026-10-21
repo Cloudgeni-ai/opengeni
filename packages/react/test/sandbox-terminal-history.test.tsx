@@ -8,6 +8,7 @@ import {
   type UseSandboxTerminalResult,
 } from "../src/hooks/use-sandbox-terminal";
 import { registerSandboxTerminal } from "../src/lib/workbench-peers";
+import { markTurnlessOutputGap } from "../src/hooks/turnless-output-gaps";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
@@ -19,11 +20,12 @@ function row(
   type: SessionEvent["type"],
   payload: unknown,
   turnId: string | null = null,
+  sessionId = SESSION_ID,
 ): SessionEvent {
   return {
-    id: `evt-${sequence}`,
+    id: `${sessionId}-evt-${sequence}`,
     workspaceId: WORKSPACE_ID,
-    sessionId: SESSION_ID,
+    sessionId,
     sequence,
     type,
     payload,
@@ -33,10 +35,22 @@ function row(
   };
 }
 
-const pty = (sequence: number, chunk: string) =>
-  row(sequence, "terminal.pty.output.delta", { ptyId: "p1", stream: "stdout", chunk, seq: 0 });
+const pty = (sequence: number, chunk: string, sessionId = SESSION_ID) =>
+  row(
+    sequence,
+    "terminal.pty.output.delta",
+    { ptyId: "p1", stream: "stdout", chunk, seq: 0 },
+    null,
+    sessionId,
+  );
 const command = (sequence: number, chunk: string, turnId: string) =>
   row(sequence, "sandbox.command.output.delta", { stream: "stdout", chunk }, turnId);
+
+/** Wait until `done` holds, in real time (retries and re-reads are timed). */
+async function settleUntil(done: () => boolean, ms = 5_000) {
+  const deadline = Date.now() + ms;
+  while (!done() && Date.now() < deadline) await flush(50);
+}
 
 /**
  * A reloaded session: two finished turns with command output, and an
@@ -60,14 +74,20 @@ function reloadedSession() {
   const output = new Set(["terminal.pty.output.delta", "sandbox.command.output.delta"]);
   const conversation = store.filter((event) => !output.has(event.type));
   const reads: SessionEventListOptions[] = [];
-  const listEventPage = async (
+  const listEventPage = pageReader(store, reads);
+  return { store, conversation, reads, listEventPage };
+}
+
+/** A page read over `store` with the server's type filter, newest first. */
+function pageReader(store: SessionEvent[], reads: SessionEventListOptions[]) {
+  return async (
     _workspaceId: string,
-    _sessionId: string,
+    sessionId: string,
     options: SessionEventListOptions = {},
   ): Promise<SessionEventPage> => {
-    reads.push(options);
+    reads.push({ ...options });
     const include = new Set<string>(options.includeTypes ?? []);
-    const rows = store.filter((event) => include.has(event.type));
+    const rows = store.filter((event) => event.sessionId === sessionId && include.has(event.type));
     const page = rows.slice(-(options.limit ?? 500));
     return {
       events: page,
@@ -85,7 +105,6 @@ function reloadedSession() {
       forensicExact: true,
     };
   };
-  return { store, conversation, reads, listEventPage };
 }
 
 describe("sandbox terminal history", () => {
@@ -165,7 +184,7 @@ describe("sandbox terminal history", () => {
     }
   });
 
-  test("a failed history read is asked again when the terminal reopens", async () => {
+  test("a failed history read retries while the terminal stays open", async () => {
     const session = reloadedSession();
     let fail = true;
     const client = Object.assign(fakeClient({}), {
@@ -181,23 +200,83 @@ describe("sandbox terminal history", () => {
         return await session.listEventPage(workspaceId, sessionId, options);
       },
     });
+    // The dock keeps `history` on once its Terminal opened for the session.
     const hook = await renderHook(
-      (props: { history: boolean }) =>
+      () =>
         useSandboxTerminal(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
           events: session.conversation,
-          history: props.history,
+          history: true,
         }),
-      { history: true },
+      undefined,
     );
     try {
       await flush();
       expect(hook.result.current.chunks).toEqual([]);
-      await hook.rerender({ history: false });
-      await hook.rerender({ history: true });
+      await settleUntil(() => hook.result.current.chunks.length === 5);
+      expect(hook.result.current.chunks).toHaveLength(5);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a live gap reads the newest output again and fills the hole", async () => {
+    const session = reloadedSession();
+    const client = Object.assign(fakeClient({}), { listEventPage: session.listEventPage });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useSandboxTerminal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+        }),
+      { events: session.conversation },
+    );
+    try {
       await flush();
       expect(hook.result.current.chunks).toHaveLength(5);
+      // Rows 13 and 14 were written while the stream was away; 15 streams in.
+      session.store.push(pty(13, "$ make\r\n"), pty(14, "ok\r\n"), pty(15, "$ \r\n"));
+      await hook.rerender({ events: [...session.conversation, pty(15, "$ \r\n")] });
+      expect(hook.result.current.chunks.map((chunk) => chunk.seq)).toEqual([3, 4, 7, 8, 11, 15]);
+      await actRun(() => markTurnlessOutputGap(WORKSPACE_ID, SESSION_ID));
+      await settleUntil(() => hook.result.current.chunks.length === 8);
+      expect(hook.result.current.chunks.map((chunk) => chunk.seq)).toEqual([
+        3, 4, 7, 8, 11, 13, 14, 15,
+      ]);
+      expect(session.reads).toHaveLength(2);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("coming back to a session reads what it wrote meanwhile", async () => {
+    const other = "0b7a7c0e-1d0a-4f5e-9a1b-2c3d4e5f6a7b";
+    const store: SessionEvent[] = [pty(1, "one\r\n"), pty(2, "two\r\n"), pty(1, "b\r\n", other)];
+    const reads: SessionEventListOptions[] = [];
+    const client = Object.assign(fakeClient({}), { listEventPage: pageReader(store, reads) });
+    const hook = await renderHook(
+      (props: { sessionId: string; history: boolean }) =>
+        useSandboxTerminal(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          history: props.history,
+        }),
+      { sessionId: SESSION_ID, history: true },
+    );
+    try {
+      await flush();
+      expect(hook.result.current.chunks.map((chunk) => chunk.seq)).toEqual([1, 2]);
+      // Another session whose terminal is not shown.
+      await hook.rerender({ sessionId: other, history: false });
+      await flush();
+      store.push(pty(3, "three\r\n"), pty(4, "four\r\n"));
+      await hook.rerender({ sessionId: SESSION_ID, history: true });
+      await flush();
+      expect(hook.result.current.chunks.map((chunk) => chunk.seq)).toEqual([1, 2, 3, 4]);
+      expect(reads).toHaveLength(2);
     } finally {
       await hook.unmount();
     }

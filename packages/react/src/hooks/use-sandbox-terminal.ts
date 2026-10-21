@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionClientLike } from "../client";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import { useTurnlessOutputGap } from "./turnless-output-gaps";
 
 /**
  * Newest terminal output rows read when the terminal opens: one page, which
@@ -170,53 +171,106 @@ export function useSandboxTerminal(
   // Terminal history: conversation reads carry no PTY output and only the
   // turns a reader opened carry command output, so the terminal reads its own
   // newest page once it is enabled (the dock enables it when its Terminal
-  // opens). Live rows keep arriving through `events`.
-  const outputTypes: SessionEventType[] =
-    includeAgentFirehose && !ptyFilter
-      ? ["terminal.pty.output.delta", "sandbox.command.output.delta"]
-      : ["terminal.pty.output.delta"];
+  // opens). Live rows keep arriving through `events`; when the live stream may
+  // have skipped some (it rejoined at the head, or a burst overflowed its
+  // tail), the session's gap generation moves and the newest page is read
+  // again. A failed read retries with backoff while the terminal is enabled.
+  const outputTypes = useMemo<SessionEventType[]>(
+    () =>
+      includeAgentFirehose && !ptyFilter
+        ? ["terminal.pty.output.delta", "sandbox.command.output.delta"]
+        : ["terminal.pty.output.delta"],
+    [includeAgentFirehose, ptyFilter],
+  );
   const historyKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${outputTypes.join(",")}`;
   const historyEnabled = (options.history ?? true) && Boolean(sessionId);
+  const gapGeneration = useTurnlessOutputGap(workspaceId, sessionId);
   const [history, setHistory] = useState<TerminalHistory | null>(null);
-  // The history read asked for (its key) and not cancelled; a failed read is
-  // asked again the next time the terminal is enabled.
-  const requestedRef = useRef<string | null>(null);
+  const [historyTick, setHistoryTick] = useState(0);
+  const readRef = useRef<HistoryReadState>(historyReadState(historyKey));
+  const mountedRef = useRef(false);
   useEffect(() => {
-    if (!historyEnabled || !sessionId || requestedRef.current === historyKey) return;
-    requestedRef.current = historyKey;
-    let cancelled = false;
-    let answered = false;
-    const types = historyKey.split("\u0000")[2]!.split(",") as SessionEventType[];
-    void readTerminalHistory(client, workspaceId, sessionId, types).then(
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const state = readRef.current;
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = null;
+    };
+  }, []);
+  useEffect(() => {
+    let state = readRef.current;
+    // Another session (or set of types) forgets this one's page, so coming
+    // back reads what was written meanwhile.
+    if (state.key !== historyKey) {
+      if (state.timer) clearTimeout(state.timer);
+      state = historyReadState(historyKey);
+      readRef.current = state;
+      setHistory(null);
+    }
+    if (!historyEnabled || !sessionId || state.inFlight || state.timer) return;
+    if (!state.failed && state.generation === gapGeneration) return;
+    const now = Date.now();
+    const wait = state.failed
+      ? terminalHistoryRetryDelay(state.failures) - (now - state.startedAt)
+      : state.generation === null
+        ? 0
+        : SANDBOX_TERMINAL_REREAD_MIN_MS - (now - state.startedAt);
+    if (wait > 0) {
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        if (mountedRef.current) setHistoryTick((tick) => tick + 1);
+      }, wait);
+      return;
+    }
+    const generation = gapGeneration;
+    state.inFlight = true;
+    state.startedAt = now;
+    const current = () => mountedRef.current && readRef.current === state;
+    void readTerminalHistory(client, workspaceId, sessionId, outputTypes).then(
       (page) => {
-        answered = true;
-        if (cancelled) return;
-        setHistory({ key: historyKey, events: page.events, complete: page.complete });
+        state.inFlight = false;
+        if (!current()) return;
+        state.failed = false;
+        state.failures = 0;
+        state.generation = generation;
+        setHistory({ key: state.key, events: page.events, complete: page.complete });
+        // A gap marked during the read is read again.
+        setHistoryTick((tick) => tick + 1);
       },
       () => {
-        answered = true;
-        if (cancelled) return;
-        if (requestedRef.current === historyKey) requestedRef.current = null;
+        state.inFlight = false;
+        if (!current()) return;
+        state.failed = true;
+        state.failures += 1;
+        setHistoryTick((tick) => tick + 1);
       },
     );
-    return () => {
-      cancelled = true;
-      // A read cancelled before its answer is asked again.
-      if (!answered && requestedRef.current === historyKey) requestedRef.current = null;
-    };
-  }, [historyEnabled, historyKey, client, workspaceId, sessionId]);
+  }, [
+    historyEnabled,
+    historyKey,
+    gapGeneration,
+    historyTick,
+    outputTypes,
+    client,
+    workspaceId,
+    sessionId,
+  ]);
 
   // Live output rows seen in `events`, kept after they leave it (a host's
   // event window keeps only a short tail of them).
-  const liveRef = useRef<LiveTerminalRows>({ key: historyKey, rows: new Map() });
+  const liveRef = useRef<LiveTerminalRows>({ key: historyKey, rows: new Map(), below: 0 });
 
   const { chunks, openPty, supportsInput } = useMemo(() => {
     // Track PTY lifecycle so `running`/`write` reflect the latest state.
     const open = new Map<string, { supportsInput: boolean }>();
     let lastOpened: string | null = null;
     let lastSupportsInput = false;
-    if (liveRef.current.key !== historyKey) liveRef.current = { key: historyKey, rows: new Map() };
-    const live = liveRef.current.rows;
+    if (liveRef.current.key !== historyKey) {
+      liveRef.current = { key: historyKey, rows: new Map(), below: 0 };
+    }
+    const liveRows = liveRef.current;
+    const live = liveRows.rows;
     const types = new Set<string>(outputTypes);
 
     for (const event of options.events) {
@@ -239,9 +293,12 @@ export function useSandboxTerminal(
         }
         continue;
       }
-      if (types.has(event.type) && !live.has(event.id)) live.set(event.id, event);
+      // Rows below the trimmed floor stay out (an opened turn's older steps).
+      if (types.has(event.type) && event.sequence >= liveRows.below && !live.has(event.id)) {
+        live.set(event.id, event);
+      }
     }
-    trimLiveRows(live);
+    trimLiveRows(liveRows);
 
     const loaded = history?.key === historyKey ? history : null;
     // Rows older than an incomplete history page are outside what the
@@ -267,9 +324,7 @@ export function useSandboxTerminal(
       openPty: activePty,
       supportsInput: lastSupportsInput,
     };
-    // `outputTypes` is derived from `historyKey`.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [options.events, history, historyKey, ptyFilter, workspaceId, sessionId]);
+  }, [options.events, history, historyKey, outputTypes, ptyFilter, workspaceId, sessionId]);
 
   // The PTY this hook actively drives: the one it opened (interactive) wins so
   // `write` is live the instant the open resolves — even before the
@@ -328,15 +383,57 @@ type TerminalHistory = {
   complete: boolean;
 };
 
-type LiveTerminalRows = { key: string; rows: Map<string, SessionEvent> };
+type LiveTerminalRows = {
+  key: string;
+  rows: Map<string, SessionEvent>;
+  /** Rows below this sequence were trimmed and are not taken again. */
+  below: number;
+};
 
-/** Keep the newest {@link SANDBOX_TERMINAL_MAX_ROWS} live rows. */
-function trimLiveRows(rows: Map<string, SessionEvent>): void {
-  if (rows.size <= SANDBOX_TERMINAL_MAX_ROWS) return;
-  const oldest = [...rows.values()]
-    .sort((left, right) => left.sequence - right.sequence)
-    .slice(0, rows.size - SANDBOX_TERMINAL_MAX_ROWS);
-  for (const event of oldest) rows.delete(event.id);
+/**
+ * Keep the newest {@link SANDBOX_TERMINAL_MAX_ROWS} live rows, trimming in
+ * batches so a long-running terminal sorts rarely.
+ */
+function trimLiveRows(live: LiveTerminalRows): void {
+  const { rows } = live;
+  if (rows.size <= SANDBOX_TERMINAL_MAX_ROWS + SANDBOX_TERMINAL_MAX_ROWS / 4) return;
+  const sorted = [...rows.values()].sort((left, right) => left.sequence - right.sequence);
+  const drop = sorted.length - SANDBOX_TERMINAL_MAX_ROWS;
+  for (const event of sorted.slice(0, drop)) rows.delete(event.id);
+  live.below = Math.max(live.below, sorted[drop]!.sequence);
+}
+
+/** Where the terminal's history read stands for one session and set of types. */
+type HistoryReadState = {
+  key: string;
+  /** The gap generation the last successful read started at. */
+  generation: number | null;
+  inFlight: boolean;
+  failed: boolean;
+  failures: number;
+  /** When the latest read started (ms). */
+  startedAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+function historyReadState(key: string): HistoryReadState {
+  return {
+    key,
+    generation: null,
+    inFlight: false,
+    failed: false,
+    failures: 0,
+    startedAt: 0,
+    timer: null,
+  };
+}
+
+/** Re-reads after live gaps start at most this often. */
+const SANDBOX_TERMINAL_REREAD_MIN_MS = 1000;
+
+/** Backoff after failed history reads: 1 s, doubling, at most 30 s. */
+function terminalHistoryRetryDelay(failures: number): number {
+  return Math.min(30_000, 1000 * 2 ** Math.max(0, failures - 1));
 }
 
 function terminalChunk(event: SessionEvent, ptyFilter: string | undefined): TerminalChunk | null {
@@ -400,6 +497,8 @@ async function readTerminalHistory(
   const sorted = [...events].sort((left, right) => left.sequence - right.sequence);
   return {
     events: sorted,
-    complete: page ? !page.hasMore : sorted.length < SANDBOX_TERMINAL_HISTORY_ROWS,
+    // Without a continuation fact, only an empty read is known complete: the
+    // server's byte bound can cut a page short of the row limit.
+    complete: page ? !page.hasMore : sorted.length === 0,
   };
 }

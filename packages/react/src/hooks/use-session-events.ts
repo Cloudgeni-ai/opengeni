@@ -18,6 +18,7 @@ import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
+import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -247,6 +248,11 @@ export function useSessionEvents(
   // short tail outside the window. The sandbox dock reads their history itself.
   const [turnlessSteps, setTurnlessSteps] = useState<TurnlessSteps>(EMPTY_TURNLESS_STEPS);
   const turnlessStepsRef = useRef<TurnlessSteps>(EMPTY_TURNLESS_STEPS);
+  // Live turnless rows appended since the last render that showed the tail.
+  const unrenderedTurnlessRef = useRef(0);
+  useEffect(() => {
+    unrenderedTurnlessRef.current = 0;
+  }, [turnlessSteps]);
   // Retires step reads issued for a previous stream identity.
   const stepGenerationRef = useRef(0);
   // Each step read's id; a store answers only its newest read.
@@ -346,10 +352,15 @@ export function useSessionEvents(
   const appendLiveSteps = useCallback(
     (steps: readonly SessionEvent[]) => {
       if (steps.some((event) => !event.turnId)) {
-        const turnless = appendTurnlessSteps(
-          turnlessStepsRef.current,
-          steps.filter((event) => !event.turnId),
-        );
+        const incoming = steps.filter((event) => !event.turnId);
+        const turnless = appendTurnlessSteps(turnlessStepsRef.current, incoming);
+        unrenderedTurnlessRef.current += incoming.length;
+        // A burst larger than the tail dropped rows no render showed: the
+        // terminal re-reads them.
+        if (unrenderedTurnlessRef.current > turnless.events.length) {
+          unrenderedTurnlessRef.current = turnless.events.length;
+          if (sessionId) markTurnlessOutputGap(workspaceId, sessionId);
+        }
         turnlessStepsRef.current = turnless;
         setTurnlessSteps(turnless);
       }
@@ -381,7 +392,7 @@ export function useSessionEvents(
       }
       commitStepStores(boundStepStores(next, retainedTurnsRef.current));
     },
-    [commitStepStores],
+    [commitStepStores, workspaceId, sessionId],
   );
 
   /**
@@ -443,7 +454,7 @@ export function useSessionEvents(
         }),
       );
       void readEventPage(client, workspaceId, sessionId, {
-        includeTypes: [...SESSION_EVENT_STEP_TYPES],
+        includeTypes: [...TURN_STEP_READ_TYPES],
         after: Math.max(0, lower),
         before: upper,
         direction: "before",
@@ -739,6 +750,9 @@ export function useSessionEvents(
       newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
       lastSequenceRef.current = Math.max(lastSequenceRef.current, head);
       streamResumeSequenceRef.current = Math.max(streamResumeSequenceRef.current, head);
+      // The stream rejoins at the head: terminal output written since the
+      // cursor is in no read the conversation made, so the terminal re-reads.
+      markTurnlessOutputGap(workspaceId, sessionId);
       if (status !== undefined) setSessionStatusProjection(status);
       if (fresh.length > 0) setEventWindow(retained);
       if (retained.truncated) {
@@ -2230,6 +2244,15 @@ export const SESSION_TURN_STEP_PAGE_SIZE = 200;
 // A collapsed live turn only shows its latest step; keep a short tail.
 export const SESSION_TURN_LIVE_STEP_TAIL = 200;
 const SESSION_TURN_LIVE_STEP_TAIL_BYTES = 2 * 1024 * 1024;
+// Live turnless output kept for the sandbox terminal between its renders.
+// It reads its own history; a burst past this tail makes it re-read.
+const TURNLESS_STEP_TAIL = 1000;
+const TURNLESS_STEP_TAIL_BYTES = 4 * 1024 * 1024;
+// A turn's step reads skip PTY output: it never belongs to a turn's work rows,
+// and a turn with only terminal output in its span finds nothing in one read.
+const TURN_STEP_READ_TYPES: readonly SessionEventType[] = SESSION_EVENT_STEP_TYPES.filter(
+  (type) => type !== "terminal.pty.output.delta",
+);
 // Steps of turns nobody is viewing; least recently used turns are dropped
 // first and reload when reopened. Opened turns are never evicted.
 export const SESSION_STEP_BROWSER_MAX_BYTES = 16 * 1024 * 1024;
@@ -2287,7 +2310,7 @@ const EMPTY_TURNLESS_STEPS: TurnlessSteps = { events: [], bytes: 2, ranges: [] }
 // bursts, so a run usually spans many rows.
 const TURNLESS_STEP_MAX_RANGES = 4096;
 
-/** Add live turnless steps, keeping a short tail like a collapsed live turn. */
+/** Add live turnless steps, keeping a bounded tail for the sandbox terminal. */
 function appendTurnlessSteps(
   current: TurnlessSteps,
   incoming: readonly SessionEvent[],
@@ -2308,15 +2331,12 @@ function appendTurnlessSteps(
     ranges.splice(0, ranges.length - TURNLESS_STEP_MAX_RANGES);
   }
   const next = appendStepEvents(current, incoming);
-  if (
-    next.events.length <= SESSION_TURN_LIVE_STEP_TAIL &&
-    next.bytes <= SESSION_TURN_LIVE_STEP_TAIL_BYTES
-  ) {
+  if (next.events.length <= TURNLESS_STEP_TAIL && next.bytes <= TURNLESS_STEP_TAIL_BYTES) {
     return { ...next, ranges };
   }
   const kept = boundBrowserSessionEventWindow(next.events, {
-    maxCount: SESSION_TURN_LIVE_STEP_TAIL,
-    maxBytes: SESSION_TURN_LIVE_STEP_TAIL_BYTES,
+    maxCount: TURNLESS_STEP_TAIL,
+    maxBytes: TURNLESS_STEP_TAIL_BYTES,
   });
   return { events: kept.events, bytes: kept.bytes, ranges };
 }
@@ -2331,11 +2351,11 @@ function withTurnlessSteps(
   turnless: TurnlessSteps,
 ): readonly SessionEvent[] {
   const first = window[0]?.sequence;
-  const last = window.at(-1)?.sequence;
-  if (first === undefined || last === undefined || turnless.ranges.length === 0) return window;
+  if (first === undefined || turnless.ranges.length === 0) return window;
   const placeholders: SessionEvent[] = [];
   for (const [start, end] of turnless.ranges) {
-    if (end <= first || start >= last) continue;
+    // Runs past the window's newest event still fill a live turn's span.
+    if (end < first) continue;
     placeholders.push({
       id: `turnless-steps-${start}`,
       workspaceId: window[0]!.workspaceId,
@@ -2368,14 +2388,14 @@ export function isConversationHistoryEvent(
   presentedCallIds: ReadonlySet<string>,
 ): boolean {
   if (!STEP_TYPES.has(event.type)) return true;
-  // Turnless steps (PTY and background command output) are no turn's steps:
-  // the sandbox dock reads them, and they never crowd the conversation.
-  if (!event.turnId) return false;
   const payload = event.payload as Record<string, unknown> | null;
+  // Presented results stay, with or without a turn (the server keeps them too).
   if (event.type === "agent.toolCall.created") return isPresentedSessionToolName(payload?.name);
   if (event.type === "agent.toolCall.output") {
     return typeof payload?.id === "string" && presentedCallIds.has(payload.id);
   }
+  // Other steps, including turnless PTY and background command output, which
+  // the sandbox terminal reads itself so they never crowd the conversation.
   return false;
 }
 

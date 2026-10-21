@@ -14,6 +14,7 @@ import {
   isConversationHistoryEvent,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
+import { useSandboxTerminal } from "../src/hooks/use-sandbox-terminal";
 import {
   buildTimeline,
   groupTimeline,
@@ -28,6 +29,10 @@ registerDom();
 
 const t = createOpenGeniText();
 const STEP_TYPES = new Set<string>(SESSION_EVENT_STEP_TYPES);
+// A turn's step reads skip PTY output, which never belongs to a turn.
+const TURN_STEP_READ_TYPES = SESSION_EVENT_STEP_TYPES.filter(
+  (type) => type !== "terminal.pty.output.delta",
+);
 // Tests that page through thousands of steps take seconds on a busy machine.
 const HEAVY_TEST_TIMEOUT_MS = 30_000;
 
@@ -207,6 +212,31 @@ async function settle(ms = 30) {
   await flush(ms);
 }
 
+const ptyRow = (sequence: number) =>
+  at(
+    sequence,
+    "terminal.pty.output.delta",
+    { ptyId: "p1", stream: "stdout", chunk: `line ${sequence}\r\n`, seq: sequence },
+    null,
+  );
+
+/** The chat and its sandbox terminal, as the dock wires them. */
+function chatWithTerminal(client: ReturnType<typeof historyClient>["client"]) {
+  const session = useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID });
+  const terminal = useSandboxTerminal(SESSION_ID, {
+    client,
+    workspaceId: WORKSPACE_ID,
+    events: session.events,
+  });
+  return { session, terminal };
+}
+
+/** Wait until `done` holds, in real time (terminal re-reads are throttled). */
+async function settleUntil(done: () => boolean, ms = 5_000) {
+  const deadline = Date.now() + ms;
+  while (!done() && Date.now() < deadline) await flush(50);
+}
+
 describe("conversation-first session history", () => {
   test("the first load reads only the conversation and offers each turn's steps", async () => {
     const store = [
@@ -259,7 +289,7 @@ describe("conversation-first session history", () => {
       await settle();
       expect(reads).toEqual([
         {
-          includeTypes: [...SESSION_EVENT_STEP_TYPES],
+          includeTypes: [...TURN_STEP_READ_TYPES],
           after: 1,
           // Bounded by the turn's settlement.
           before: 605,
@@ -444,10 +474,10 @@ describe("conversation-first session history", () => {
       expect(reads.map((read) => read.includeTypes ?? read.excludeTypes)).toEqual([
         [...SESSION_EVENT_STEP_TYPES],
         [...SESSION_EVENT_STEP_TYPES],
-        [...SESSION_EVENT_STEP_TYPES],
+        [...TURN_STEP_READ_TYPES],
       ]);
       expect(reads[1]).toMatchObject({ after: 4003, before: 4053 });
-      expect(reads[2]).toMatchObject({ includeTypes: [...SESSION_EVENT_STEP_TYPES], before: 4053 });
+      expect(reads[2]).toMatchObject({ includeTypes: [...TURN_STEP_READ_TYPES], before: 4053 });
       expect(streamCalls).toEqual([4052]);
       const steps = stepEvents(hook.result.current.events);
       expect(steps).toHaveLength(SESSION_TURN_STEP_PAGE_SIZE);
@@ -901,10 +931,9 @@ describe("conversation-first session history", () => {
         ).toHaveLength(4);
         expect(result.hasOlder).toBe(false);
         // Live PTY rows reach `events` (the sandbox dock's live feed) as a
-        // short tail outside the window.
+        // bounded tail outside the window; none was read with the conversation.
         const ptyRows = result.events.filter((event) => event.type === "terminal.pty.output.delta");
-        expect(ptyRows.length).toBeGreaterThan(0);
-        expect(ptyRows.length).toBeLessThanOrEqual(SESSION_TURN_LIVE_STEP_TAIL);
+        expect(ptyRows).toHaveLength(600);
         expect(ptyRows.every((event) => event.sequence > sequence)).toBe(true);
         expect(result.windowBytes).toBeLessThan(64 * 1024);
         // The text-only live turn has no hidden steps: PTY rows are not its.
@@ -944,6 +973,181 @@ describe("conversation-first session history", () => {
       expect(
         hook.result.current.events.some((event) => event.type === "terminal.pty.output.delta"),
       ).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test(
+    "a live burst of terminal output reaches the terminal without holes",
+    async () => {
+      const store = longTurn({ start: 1, turnId: "T1", steps: 1 });
+      const start = store.at(-1)!.sequence + 1;
+      // Far more than one flush or the live tail holds, streamed at once.
+      const live: SessionEvent[] = [];
+      for (let sequence = start; sequence < start + 2500; sequence += 1) {
+        live.push(ptyRow(sequence));
+      }
+      const written = [...store];
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      const { client } = historyClient({
+        store: () => written,
+        live: () => live,
+        withPages: true,
+        liveGate: { after: 0, open: gate },
+      });
+      const hook = await renderHook(() => chatWithTerminal(client), undefined);
+      try {
+        await settle(60);
+        expect(hook.result.current.terminal.chunks).toEqual([]);
+        // The rows are durable as they stream, all at once.
+        written.push(...live);
+        await actRun(() => open());
+        const last = live.at(-1)!.sequence;
+        const seqs = () => hook.result.current.terminal.chunks.map((chunk) => chunk.seq);
+        const contiguous = (values: number[]) =>
+          values.every((seq, index) => index === 0 || seq === values[index - 1]! + 1);
+        // Rows the live tail dropped before any render showed them are read
+        // again (at most once a second), so the transcript ends up whole.
+        await settleUntil(() => seqs().at(-1) === last && contiguous(seqs()));
+        await settle(60);
+        expect(seqs().at(-1)).toBe(last);
+        expect(contiguous(seqs())).toBe(true);
+        // At least the newest page (the terminal's scrollback) is there.
+        expect(seqs().length).toBeGreaterThanOrEqual(1000);
+        // The conversation never took them.
+        expect(hook.result.current.session.windowBytes).toBeLessThan(64 * 1024);
+      } finally {
+        await hook.unmount();
+      }
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
+
+  test("terminal output written while the tab was hidden is read again on return", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 1 });
+    const first = store.at(-1)!.sequence + 1;
+    for (let sequence = first; sequence < first + 10; sequence += 1) store.push(ptyRow(sequence));
+    const live: SessionEvent[] = [];
+    const { client, reads } = historyClient({
+      store: () => store,
+      live: () => live,
+      withPages: true,
+    });
+    const hook = await renderHook(() => chatWithTerminal(client), undefined);
+    try {
+      await settle(60);
+      expect(hook.result.current.terminal.chunks).toHaveLength(10);
+
+      jest.useFakeTimers();
+      visibility = "hidden";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(() => jest.advanceTimersByTime(2_000));
+      expect(hook.result.current.session.connectionState).toBe("idle");
+      // A hundred rows while away: more than the stream replays, so it
+      // rejoins at the head and the terminal reads them itself.
+      for (let sequence = first + 10; sequence < first + 110; sequence += 1) {
+        const row = ptyRow(sequence);
+        store.push(row);
+        live.push(row);
+      }
+      visibility = "visible";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(async () => {
+        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+        jest.advanceTimersByTime(20);
+        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+      });
+      jest.useRealTimers();
+      await settleUntil(() => hook.result.current.terminal.chunks.length === 110);
+      expect(hook.result.current.terminal.chunks.map((chunk) => chunk.seq)).toEqual(
+        Array.from({ length: 110 }, (_, index) => first + index),
+      );
+      const terminalReads = reads.filter((read) =>
+        read.includeTypes?.includes("terminal.pty.output.delta"),
+      );
+      expect(terminalReads).toHaveLength(2);
+    } finally {
+      jest.useRealTimers();
+      await hook.unmount();
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      } else {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    }
+  });
+
+  test("terminal output between a live turn's start and its first step is not hidden steps", async () => {
+    const store = [at(1, "user.message", { text: "go", routing: "accepted_for_execution" }, null)];
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const live = [
+      at(2, "turn.started", { turnId: "T1" }, "T1"),
+      ptyRow(3),
+      ptyRow(4),
+      at(5, "agent.toolCall.created", { id: "c", name: "exec_command" }, "T1"),
+      at(6, "agent.toolCall.output", { id: "c", output: "ok" }, "T1"),
+    ];
+    const { client, reads } = historyClient({
+      store: () => store,
+      live: () => live,
+      liveGate: { after: 3, open: gate },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle(60);
+      await actRun(() => open());
+      await settle(60);
+      expect(stepEvents(hook.result.current.events).map((event) => event.sequence)).toEqual([
+        3, 4, 5, 6,
+      ]);
+      expect(stepMarkers(hook.result.current.timeline)[0]?.state).toBe("complete");
+      expect(reads.filter((read) => read.includeTypes)).toEqual([]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a text-only turn with terminal output in its span opens in one step read", async () => {
+    const store: SessionEvent[] = [
+      at(1, "user.message", { text: "status?", routing: "accepted_for_execution" }, null),
+      at(2, "turn.started", { turnId: "T1" }, "T1"),
+    ];
+    for (let sequence = 3; sequence < 1003; sequence += 1) store.push(ptyRow(sequence));
+    store.push(at(1003, "agent.message.completed", { text: "all good" }, "T1"));
+    store.push(at(1004, "turn.completed", { turnId: "T1" }, "T1"));
+    const { client, reads } = historyClient({ store: () => store, withPages: true });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle(60);
+      const marker = stepMarkers(hook.result.current.timeline)[0];
+      if (marker) {
+        reads.length = 0;
+        await actRun(() => marker.load());
+        await settle(60);
+        expect(reads).toHaveLength(1);
+        expect(reads[0]!.includeTypes).not.toContain("terminal.pty.output.delta");
+        expect(stepMarkers(hook.result.current.timeline)[0]?.state).toBe("complete");
+      }
+      expect(stepEvents(hook.result.current.events)).toEqual([]);
     } finally {
       await hook.unmount();
     }
