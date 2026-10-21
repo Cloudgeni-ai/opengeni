@@ -38,6 +38,7 @@ use crate::init::InitError;
 use crate::keys::Keys;
 pub use crate::keys::key_digest;
 use crate::link::LinkKeys;
+use crate::metrics::{Metrics, Outcome, track};
 use crate::service::{Drained, Failure, Service, request_digest};
 use crate::store::{AgentRef, SandboxRow, Spec, Store};
 
@@ -102,7 +103,9 @@ impl IntoResponse for ApiError {
             code: self.code,
             message: self.message,
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        response.extensions_mut().insert(Outcome(self.code));
+        response
     }
 }
 
@@ -638,8 +641,13 @@ async fn undrain<S: Store>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The public API's routes, with `operator` the team that manages hosts.
-pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
+/// The public API's routes, with `operator` the team that manages hosts,
+/// each request counted in `metrics`.
+pub fn router<S: Store>(
+    service: Arc<Service<S>>,
+    operator: String,
+    metrics: Arc<Metrics>,
+) -> Router {
     let api = Api(Arc::new(Inner {
         service,
         operator,
@@ -658,5 +666,6 @@ pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
         .route("/v1/hosts", get(hosts::<S>))
         .route("/v1/hosts/{name}/drain", post(drain::<S>))
         .route("/v1/hosts/{name}/undrain", post(undrain::<S>))
+        .route_layer(axum::middleware::from_fn_with_state(metrics, track))
         .with_state(api)
 }

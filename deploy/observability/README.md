@@ -97,6 +97,22 @@ BatchSandbox and Pod state is aggregated at source by the Opengeni control
 worker into fixed-label gauges. The base profile leaves those integrations
 disabled so a cluster without the optional CRDs remains unaffected.
 
+Add `--compute` when the Opengeni release runs Opengeni compute's control
+service (`computeControl`):
+
+```bash
+bun run deployment:observability -- --profile single-node --compute
+```
+
+That flag adds `values.compute.yaml`, turning on Prometheus's OTLP receiver
+with `host.name`, `service.version` and `compute.memory_profile` promoted to
+labels. Set `computeControl.metrics.hostsTo` in the application release to
+`http://<release>-kub-prometheus.<namespace>:9090/api/v1/otlp/v1/metrics` and
+run the hosts with `--otlp-metrics-to-control`: they post their metrics to the
+control service over their mutual TLS with it, and it passes them on. The
+receiver takes writes from anything that reaches Prometheus's Service, so the
+base profile leaves it off.
+
 The plan deliberately installs only the wrapper. It never upgrades or rolls
 back Opengeni application workloads and never executes application hooks. After
 the wrapper is ready, include `opengeni.values.example.yaml` in the next

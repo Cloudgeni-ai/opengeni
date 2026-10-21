@@ -166,6 +166,12 @@ enabling it changes no session's backend.
    copy (ADR 18). `--checkpoint-every-s` (through
    `computeControl.extraArgs`) sets that target for the fleet; 0 takes
    none.
+10. **Metrics.** The service's own metrics are on by default
+   (`computeControl.metrics.port`); `observability.serviceMonitor` and
+   `observability.prometheusRule` add their ServiceMonitor and alerts. For
+   the hosts' metrics, set `computeControl.metrics.hostsTo` to
+   Prometheus's OTLP receiver and add `--otlp-metrics-to-control` to the
+   hosts' `host_args` ([Observing](#observing)).
 
 A minimal values file:
 
@@ -668,13 +674,40 @@ before users move to compute from Modal:
 
 What the agent reports is in [ADR 16](adr/0016-observability.md).
 
+- **Metrics in Prometheus.** In a fleet, the control service and its
+  hosts report to the Prometheus that Opengeni's chart already feeds
+  (`deploy/observability`), with no collector or credentials on the hosts:
+  - The control service serves `GET /metrics` on `--metrics-listen`
+    (`computeControl.metrics.port`, 9464), which the chart's
+    ServiceMonitor scrapes. Every replica reports its API requests by route
+    and outcome (`compute_control_requests_total`, with their latency),
+    whether it leads, and the hosts' metrics it passed on; the leader alone
+    reports the fleet as it reads it: each host's state, what it has and
+    can still promise for memory, processors and disk, its sandboxes, how
+    long ago its lease was renewed, and the host group
+    (`compute_fleet_*`).
+  - Hosts run with `--otlp-metrics-to-control` (on GCP, in the Terraform
+    module's `host_args`) and post their metrics every ten seconds
+    to the control service over the same mutual TLS as their lease. The
+    service checks that every resource in an export names the host by its
+    own certificate (`host.name`, which the host sets to its name in the
+    fleet), and passes it on to `--host-metrics-to`
+    (`computeControl.metrics.hostsTo`): Prometheus's OTLP receiver,
+    `/api/v1/otlp/v1/metrics`, which `deploy/observability`'s
+    `values.compute.yaml` turns on with `host.name` promoted to the
+    `host_name` label. Events stay in the host's journal.
+  - The chart's PrometheusRule alerts on both (with
+    `observability.prometheusRule.enabled`), scoping each host to its
+    release through the leader's `compute_fleet_host_info`, and the
+    **Opengeni · Compute** dashboard shows them.
 - **Run a collector next to each host.** Pass `--otlp-endpoint
   http://127.0.0.1:4318` to send events as OTLP log records and metrics
   every ten seconds (`--otlp-metrics-every`); add `--otlp-header
   name=value` for a remote collector that needs a token. Without it,
   events go only to the agent's log, one JSON line each under the
   `compute_event` target, which the journal keeps. `--no-journal-events`
-  turns that copy off once a collector takes them.
+  turns that copy off once a collector takes them. With
+  `--otlp-metrics-to-control` as well, only events go to the collector.
 - **Run the canary** with `--canary-every 5m` and, if the guest image
   serves a port, `--canary-port`. It costs one 128 MiB sandbox kept awake
   and one created and removed per round, and a little store traffic. Its

@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 
 type Manifest = {
   kind: string;
-  metadata: { name: string; annotations?: any };
+  metadata: { name: string; annotations?: any; labels?: any };
   spec?: any;
   data?: any;
 };
@@ -521,5 +521,72 @@ describe("computeControl", () => {
     expect(
       fixed!.spec.template.spec.containers[0].args.some((a: string) => a.startsWith("--scale-")),
     ).toBe(false);
+  });
+
+  test("serves its metrics to the scraper only, and passes its hosts' on when asked", async () => {
+    const monitoring = {
+      namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "observability" } },
+      podSelector: {},
+    };
+    const store = "http://prometheus.observability:9090/api/v1/otlp/v1/metrics";
+    const manifests = await render(
+      {
+        ...enabled,
+        computeControl: { ...enabled.computeControl, metrics: { hostsTo: store } },
+        networkPolicy: { enabled: true, monitoring },
+        observability: { serviceMonitor: { enabled: true } },
+      },
+      ["--api-versions", "monitoring.coreos.com/v1"],
+    );
+    const deployment = find(manifests, "Deployment", "cc-opengeni-compute-control");
+    const container = deployment.spec.template.spec.containers[0];
+    expect(container.args).toContain("--metrics-listen=0.0.0.0:9464");
+    expect(container.args).toContain(`--host-metrics-to=${store}`);
+    expect(container.ports).toContainEqual({ name: "metrics", containerPort: 9464 });
+
+    const api = find(manifests, "Service", "cc-opengeni-compute-control");
+    expect(api.metadata.labels?.["opengeni.ai/metrics-endpoint"]).toBe("true");
+    expect(api.spec.ports).toContainEqual({
+      name: "metrics",
+      port: 9464,
+      targetPort: "metrics",
+      protocol: "TCP",
+    });
+    const hosts = find(manifests, "Service", "cc-opengeni-compute-control-hosts");
+    expect(hosts.spec.ports.map((port: any) => port.name)).toEqual(["hosts"]);
+
+    const monitor = find(manifests, "ServiceMonitor", "cc-opengeni-compute-control");
+    expect(monitor.spec.selector.matchLabels["opengeni.ai/metrics-endpoint"]).toBe("true");
+    expect(monitor.spec.endpoints[0].port).toBe("metrics");
+
+    const policy = find(manifests, "NetworkPolicy", "cc-opengeni-compute-control");
+    const scraped = policy.spec.ingress.find((rule: any) =>
+      rule.ports.some((port: any) => port.port === 9464),
+    );
+    expect(scraped.from).toEqual([monitoring]);
+  });
+
+  test("has no metrics listener or ServiceMonitor without a port, and passes no hosts' metrics by default", async () => {
+    const manifests = await render(
+      {
+        ...enabled,
+        computeControl: { ...enabled.computeControl, metrics: { port: null } },
+        observability: { serviceMonitor: { enabled: true } },
+      },
+      ["--api-versions", "monitoring.coreos.com/v1"],
+    );
+    const container = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template
+      .spec.containers[0];
+    expect(container.args.some((a: string) => a.startsWith("--metrics-listen"))).toBe(false);
+    expect(container.args.some((a: string) => a.startsWith("--host-metrics-to"))).toBe(false);
+    expect(
+      manifests.some(
+        (m) => m.kind === "ServiceMonitor" && m.metadata.name === "cc-opengeni-compute-control",
+      ),
+    ).toBe(false);
+    const byDefault = find(await render(enabled), "Deployment", "cc-opengeni-compute-control").spec
+      .template.spec.containers[0];
+    expect(byDefault.args).toContain("--metrics-listen=0.0.0.0:9464");
+    expect(byDefault.args.some((a: string) => a.startsWith("--host-metrics-to"))).toBe(false);
   });
 });

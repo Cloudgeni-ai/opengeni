@@ -29,6 +29,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::group::{Fenced, GcpGroup, Member, Started};
+use crate::metrics::{GroupSeen, Metrics};
 use crate::store::{self, Store};
 use crate::view::{GroupHost, View};
 
@@ -106,6 +107,7 @@ pub async fn lead<S: Store>(
     view: Arc<View>,
     terms: LeaseTerms,
     scaling: Option<Scaling>,
+    metrics: Arc<Metrics>,
 ) {
     loop {
         let lead = match store.try_lead().await {
@@ -121,7 +123,9 @@ pub async fn lead<S: Store>(
             }
         };
         tracing::info!("this replica leads");
-        led(&store, &view, terms, scaling.as_ref(), lead).await;
+        metrics.leads(true);
+        led(&store, &view, terms, scaling.as_ref(), &metrics, lead).await;
+        metrics.leads(false);
         tracing::warn!("this replica no longer leads");
     }
 }
@@ -131,10 +135,12 @@ async fn led<S: Store>(
     view: &View,
     terms: LeaseTerms,
     scaling: Option<&Scaling>,
+    metrics: &Arc<Metrics>,
     mut lead: S::Lead,
 ) {
     let group = scaling.map(|scaling| Arc::clone(&scaling.group));
-    let mut leading = Leading::new(Arc::clone(store), terms, group);
+    let mut leading =
+        Leading::new(Arc::clone(store), terms, group).reporting_to(Arc::clone(metrics));
     let mut tick = tokio::time::interval(EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut scaled: Option<Instant> = None;
@@ -145,13 +151,20 @@ async fn led<S: Store>(
             return;
         }
         leading.tick(view).await;
+        metrics.still(leading.still());
         if let Some(scaling) = scaling
             && scaled.is_none_or(|when| when.elapsed() >= scaling.every)
         {
             scaled = Some(Instant::now());
             match scale(scaling, view, &mut boots).await {
-                Ok(prefix) => leading.prefix = Some(prefix),
-                Err(error) => tracing::warn!(%error, "sizing the host group failed"),
+                Ok((prefix, seen)) => {
+                    leading.prefix = Some(prefix);
+                    metrics.group(seen);
+                }
+                Err(error) => {
+                    metrics.group_failed();
+                    tracing::warn!(%error, "sizing the host group failed");
+                }
             }
         }
     }
@@ -172,6 +185,7 @@ pub struct Leading<L> {
     fencing: HashMap<tokio::task::Id, HostId>,
     /// Hosts whose last fence failed, and when the next may start.
     again_at: HashMap<HostId, Instant>,
+    metrics: Arc<Metrics>,
 }
 
 type FenceResult = (HostId, Result<Option<usize>, String>);
@@ -198,7 +212,20 @@ impl<L: Leases> Leading<L> {
             fences: JoinSet::new(),
             fencing: HashMap::new(),
             again_at: HashMap::new(),
+            metrics: Arc::default(),
         }
+    }
+
+    /// Counts what it gives up on and the fences that fail in `metrics`.
+    #[must_use]
+    pub fn reporting_to(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// How long each host's renewal count has stood still, as seen now.
+    pub fn still(&self) -> impl Iterator<Item = (HostId, Duration)> + '_ {
+        self.expiry.still(self.clock.now())
     }
 
     /// Reads every host's renewal count and gives up on, or fences, each
@@ -300,10 +327,12 @@ impl<L: Leases> Leading<L> {
                 self.expiry.forget(host);
                 self.again_at.remove(&host);
                 if let Some(sandboxes) = given_up {
+                    self.metrics.gave_up();
                     tracing::warn!(host = host.0, sandboxes, "gave up on a host");
                 }
             }
             Err(error) => {
+                self.metrics.give_up_failed();
                 tracing::warn!(%error, host = host.0, "giving up on a host failed");
                 self.again_at.insert(host, Instant::now() + FENCE_AGAIN);
             }
@@ -507,7 +536,13 @@ fn grown_size(target_size: u32, seen: &GroupView, usable: u32, max_hosts: u32) -
 /// as booting for [`Scaling::boot_within`]; one stalled past that keeps
 /// its place in the group but brings nothing, so the group grows past it.
 /// Returns the prefix of its instances' names.
-async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Result<String> {
+/// Sizes the group once; answers its instances' name prefix and how it
+/// looked.
+async fn scale(
+    scaling: &Scaling,
+    view: &View,
+    boots: &mut Boots,
+) -> anyhow::Result<(String, GroupSeen)> {
     let described = scaling.group.describe().await?;
     let prefix = format!("{}-", described.base_instance_name);
     let members = scaling.group.members().await?;
@@ -542,7 +577,12 @@ async fn scale(scaling: &Scaling, view: &View, boots: &mut Boots) -> anyhow::Res
         }
         ScaleDecision::Hold => {}
     }
-    Ok(prefix)
+    let seen = GroupSeen {
+        view: seen,
+        size: described.target_size,
+        max: scaling.policy.max_hosts,
+    };
+    Ok((prefix, seen))
 }
 
 #[cfg(test)]

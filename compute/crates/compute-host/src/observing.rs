@@ -6,21 +6,33 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Args;
+use compute_host::fleet::FleetConfig;
 use compute_host::observe::canary::{CanaryConfig, CanaryIds};
 use compute_host::observe::{ExportConfig, ObserveConfig, Observer};
 use compute_host::protocol::About;
+
+/// How long one request with the host's metrics to the control service
+/// may take, as for a collector.
+const METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Args)]
 pub struct ObserveArgs {
     /// Send events and metrics to this OpenTelemetry collector, over
     /// OTLP/HTTP with JSON encoding, such as `http://127.0.0.1:4318`.
-    /// Without it they stay on the host.
+    /// Without it events stay on the host, and metrics too unless
+    /// `--otlp-metrics-to-control` sends them to the control service.
     #[arg(long)]
     otlp_endpoint: Option<String>,
-    /// A header every export carries, as `name=value`, such as an
-    /// authorization. Repeatable.
+    /// A header every export to the collector carries, as `name=value`,
+    /// such as an authorization. Repeatable.
     #[arg(long = "otlp-header", value_parser = parse_header)]
     otlp_headers: Vec<(String, String)>,
+    /// Send metrics to the fleet's control service, over the fleet's
+    /// mutual TLS, which passes them on to its metrics store; the host
+    /// needs no collector or credentials of its own for them. Needs a
+    /// fleet. Events still go to `--otlp-endpoint`, if set.
+    #[arg(long)]
+    otlp_metrics_to_control: bool,
     /// How often metrics are exported.
     #[arg(long, default_value = "10s", value_parser = parse_period)]
     otlp_metrics_every: Duration,
@@ -57,20 +69,42 @@ fn parse_period(text: &str) -> Result<Duration, String> {
 }
 
 impl ObserveArgs {
-    /// Starts reporting for the agent described by `about`.
-    pub fn observer(&self, about: &About) -> anyhow::Result<Observer> {
-        let export = self.otlp_endpoint.as_ref().map(|endpoint| ExportConfig {
+    /// Starts reporting for the agent described by `about`, a host in
+    /// `fleet` if it is in one.
+    pub fn observer(&self, about: &About, fleet: Option<&FleetConfig>) -> anyhow::Result<Observer> {
+        if let Some(endpoint) = &self.otlp_endpoint {
+            reqwest::Url::parse(endpoint).with_context(|| format!("--otlp-endpoint {endpoint}"))?;
+        }
+        let control = if self.otlp_metrics_to_control {
+            let fleet = fleet
+                .context("--otlp-metrics-to-control sends metrics to a fleet's control service")?;
+            Some(fleet.metrics_route(METRICS_TIMEOUT)?)
+        } else {
+            None
+        };
+        // The control service accepts a host's metrics only under its
+        // name in the fleet.
+        let host = match &control {
+            Some(route) => route.name.clone(),
+            None => std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .map(|name| name.trim().to_owned())
+                .unwrap_or_default(),
+        };
+        let base = match (&self.otlp_endpoint, control) {
+            (endpoint, Some(route)) => Some(ExportConfig {
+                endpoint: endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.trim_end_matches('/').to_owned()),
+                ..ExportConfig::to_control(route.url, route.client)
+            }),
+            (Some(endpoint), None) => Some(ExportConfig::new(endpoint.clone())),
+            (None, None) => None,
+        };
+        let export = base.map(|base| ExportConfig {
             headers: self.otlp_headers.clone(),
             metrics_every: self.otlp_metrics_every,
-            ..ExportConfig::new(endpoint.clone())
+            ..base
         });
-        if let Some(export) = &export {
-            reqwest::Url::parse(&export.endpoint)
-                .with_context(|| format!("--otlp-endpoint {}", export.endpoint))?;
-        }
-        let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .map(|name| name.trim().to_owned())
-            .unwrap_or_default();
         // As the semantic conventions name processor architectures.
         let arch = match std::env::consts::ARCH {
             "x86_64" => "amd64",

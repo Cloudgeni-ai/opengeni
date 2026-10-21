@@ -513,6 +513,14 @@ impl Expiry {
             .filter(move |(_, (_, since))| self.terms.is_lost(*since, now))
             .map(|(host, (count, _))| (*host, *count))
     }
+
+    /// How long each watched host's count has stood still at `now`: about
+    /// how long ago its last renewal was accepted, as this watcher saw it.
+    pub fn still(&self, now: At) -> impl Iterator<Item = (HostId, Duration)> + '_ {
+        self.seen
+            .iter()
+            .map(move |(host, (_, since))| (*host, now.saturating_since(*since)))
+    }
 }
 
 #[cfg(test)]

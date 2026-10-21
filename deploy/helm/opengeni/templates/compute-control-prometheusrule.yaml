@@ -1,0 +1,272 @@
+{{- /*
+Alerts for Opengeni compute: the control service's replicas, which the
+ServiceMonitor scrapes, and its hosts, whose metrics the service passes on
+to Prometheus (computeControl.metrics.hostsTo). A host's series carry its
+name in the fleet (host_name) and no release labels of their own; they are
+this release's when the release's leader lists the host in
+compute_fleet_host_info, which is how every host alert is scoped.
+*/ -}}
+{{- $cc := .Values.computeControl }}
+{{- if and $cc.enabled ($cc.metrics).port ((.Values.observability).serviceMonitor).enabled ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
+{{- $scope := printf "namespace=%s,release=%s" (toJson .Release.Namespace) (toJson .Release.Name) }}
+{{- $hosts := printf "compute_fleet_host_info{%s}" $scope }}
+{{- $liveHosts := printf "compute_fleet_host_info{%s,state=\"live\"}" $scope }}
+{{- $runbook := "https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "opengeni.computeControl.name" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: compute-control
+    {{- with ((.Values.observability).prometheusRule).labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with ((.Values.observability).prometheusRule).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: opengeni.compute.rules
+      labels:
+        namespace: {{ .Release.Namespace | quote }}
+        environment: {{ $environment | quote }}
+        release: {{ .Release.Name | quote }}
+      rules:
+        - alert: OpenGeniComputeControlDown
+          expr: |
+            absent(up{ {{- $scope }},opengeni_workload_component="compute-control"} == 1)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'No replica of the compute control service answers Prometheus.'
+            headline: 'Compute control service down'
+            user_impact: 'New sandboxes cannot be created, and sleeping ones cannot wake, so chats on compute stall.'
+            next_step: 'Check the compute-control pods, their logs, and their database.'
+            runbook_url: {{ printf "%s#the-control-service" $runbook }}
+        - alert: OpenGeniComputeNoLeader
+          expr: |
+            max(compute_control_leader{ {{- $scope }}}) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'No compute control replica leads, so nothing gives up on lost hosts or sizes the host group.'
+            headline: 'Compute control has no leader'
+            user_impact: 'Sandboxes on a host that dies stay unreachable, and the fleet does not grow when it fills.'
+            next_step: 'Check the replicas'' logs for why none takes the store''s lock.'
+            runbook_url: {{ printf "%s#the-control-service" $runbook }}
+        - alert: OpenGeniComputeHostGivenUp
+          expr: |
+            sum(increase(compute_control_hosts_given_up_total{ {{- $scope }}}[30m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The compute control service gave up on a host whose lease ran out; its sandboxes move to other hosts from their stored copies.'
+            headline: 'Compute host lost'
+            value: '{{ "{{ printf `%.0f` $value }}" }} host(s) (30 min)'
+            user_impact: 'Sandboxes that were awake on the host lost their running programs and come back from their last saved copy.'
+            next_step: 'Find out why the host stopped renewing: its instance, its network, or its agent.'
+        - alert: OpenGeniComputeHostGiveUpFailing
+          expr: |
+            sum(increase(compute_control_give_up_failures_total{ {{- $scope }}}[10m])) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'Giving up on a lost compute host keeps failing, in its fence or in the store.'
+            headline: 'Lost compute host cannot be fenced'
+            value: '{{ "{{ printf `%.0f` $value }}" }} failure(s) (10 min)'
+            user_impact: 'Sandboxes on the lost host stay unreachable until it is fenced.'
+            next_step: 'Check the leader''s logs and the cloud API it fences hosts through.'
+            runbook_url: {{ printf "%s#hosts" $runbook }}
+        - alert: OpenGeniComputeHostRenewalsLate
+          expr: |
+            max by (host_name) (max_over_time(compute_fleet_host_renewal_age_seconds{ {{- $scope }}}[10m])) > 7
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host keeps renewing its lease late (twice the usual interval or more), close to being given up on.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} renews late'
+            value: '{{ "{{ printf `%.0f` $value }}" }}s since a renewal'
+            user_impact: 'None yet; if renewals stop, its awake sandboxes lose their running programs.'
+            next_step: 'Check the host''s network to the control service and its agent''s load.'
+        - alert: OpenGeniComputeHostGroupFailing
+          expr: |
+            sum(increase(compute_control_group_failures_total{ {{- $scope }}}[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Sizing the compute host group keeps failing.'
+            headline: 'Compute host group cannot be sized'
+            value: '{{ "{{ printf `%.0f` $value }}" }} failure(s) (15 min)'
+            user_impact: 'The fleet does not grow when it fills, so new sandboxes may be refused.'
+            next_step: 'Check the leader''s logs and its access to the cloud''s instance group API.'
+        - alert: OpenGeniComputeHostsStalled
+          expr: |
+            max(compute_fleet_group_hosts{ {{- $scope }},state="stalled"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'New compute hosts started but did not register with the control service in time.'
+            headline: 'New compute hosts do not register'
+            value: '{{ "{{ printf `%.0f` $value }}" }} host(s)'
+            user_impact: 'The fleet cannot grow, so new sandboxes may be refused when it fills.'
+            next_step: 'Check a stalled instance''s serial console and agent log, and its route to the control service.'
+        - alert: OpenGeniComputeNoCapacity
+          expr: |
+            sum(increase(compute_control_requests_total{ {{- $scope }},outcome="no_capacity"}[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The compute control service keeps refusing sandboxes because no host has room.'
+            headline: 'Compute fleet out of room'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refusal(s) (10 min)'
+            user_impact: 'New sandboxes or wakes fail, so some chats cannot run commands.'
+            next_step: 'Check whether the host group is at its maximum size, and raise it or the hosts'' size.'
+        - alert: OpenGeniComputeApiErrors
+          expr: |
+            (
+              sum(rate(compute_control_requests_total{ {{- $scope }},outcome=~"internal|host|unavailable|unknown_outcome|init_failed"}[10m]))
+              /
+              sum(rate(compute_control_requests_total{ {{- $scope }}}[10m]))
+            ) > 0.05
+            and
+            sum(increase(compute_control_requests_total{ {{- $scope }}}[10m])) >= 20
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'More than 5% of compute API requests fail in the service, a host or the store.'
+            headline: 'Compute API requests failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} failing'
+            user_impact: 'Some sandbox commands, file operations or wakes fail.'
+            next_step: 'Check compute_control_requests_total by route and outcome, and the replicas'' logs.'
+        - alert: OpenGeniComputeHostDiskLow
+          expr: |
+            max by (host_name) (compute_fleet_host_disk_free_bytes{ {{- $scope }}})
+            /
+            max by (host_name) (compute_fleet_host_disk_bytes{ {{- $scope }}} > 0)
+            < 0.1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host has less than 10% of its sandbox disk free.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} disk almost full'
+            value: '{{ "{{ $value | humanizePercentage }}" }} free'
+            user_impact: 'Sandboxes on the host may be refused, or archived sooner, until it has room again.'
+            next_step: 'Check the host''s state disk and its archive traffic; give hosts larger disks if it recurs.'
+        {{- if ($cc.metrics).hostsTo }}
+        - alert: OpenGeniComputeHostMetricsFailing
+          expr: |
+            sum(increase(compute_control_host_metrics_total{ {{- $scope }},outcome!="forwarded"}[10m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The compute control service keeps failing to pass hosts'' metrics on to Prometheus, or refusing them.'
+            headline: 'Compute host metrics not stored'
+            value: '{{ "{{ printf `%.0f` $value }}" }} export(s) (10 min)'
+            user_impact: 'None directly; the host alerts and dashboard go blind.'
+            next_step: 'Check the replicas'' logs and that Prometheus''s OTLP receiver is on and reachable.'
+        - alert: OpenGeniComputeHostMetricsMissing
+          expr: |
+            max by (host_name) ({{ $liveHosts }})
+            unless on (host_name)
+            compute_sample_age_seconds
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A live compute host sends no metrics.'
+            headline: 'No metrics from compute host {{ "{{ $labels.host_name }}" }}'
+            user_impact: 'None directly; problems on the host go unnoticed.'
+            next_step: 'Check that the host runs with --otlp-metrics-to-control, and its agent''s log.'
+        - alert: OpenGeniComputeHostAgentStuck
+          expr: |
+            max by (host_name) (compute_sample_age_seconds and on (host_name) {{ $hosts }}) > 60
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: 'A compute host''s agent has not sampled its sandboxes for over a minute: its loop is stuck.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} agent stuck'
+            value: '{{ "{{ $value | humanizeDuration }}" }} since a sample'
+            user_impact: 'Sandboxes on the host may not sleep, wake or answer.'
+            next_step: 'Check the agent''s log on the host; restart it if it does not recover.'
+            runbook_url: {{ printf "%s#observing" $runbook }}
+        - alert: OpenGeniComputeHostAlarm
+          expr: |
+            sum by (host_name, compute_alarm) (increase(compute_alarm_count_total[15m])) > 0
+            and on (host_name)
+            {{ $hosts }}
+          labels:
+            severity: critical
+          annotations:
+            summary: 'Something that must never happen happened on a compute host: a copy lost, failing verification or quarantined, or a sandbox broken or its programs lost.'
+            headline: 'Compute alarm {{ "{{ $labels.compute_alarm }}" }} on {{ "{{ $labels.host_name }}" }}'
+            value: '{{ "{{ printf `%.0f` $value }}" }} time(s) (15 min)'
+            user_impact: 'A sandbox may have lost work or become unusable.'
+            next_step: 'Find the compute.alarm event in the host''s journal; it names the sandbox or stored object.'
+            runbook_url: {{ printf "%s#observing" $runbook }}
+        - alert: OpenGeniComputeSandboxesUnhealthy
+          expr: |
+            max by (host_name, compute_health) (compute_sandbox_unhealthy and on (host_name) {{ $hosts }}) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'Sandboxes on a compute host are broken, blocked or cannot be saved, and need a person.'
+            headline: '{{ "{{ $labels.compute_health }}" }} sandboxes on {{ "{{ $labels.host_name }}" }}'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es)'
+            user_impact: 'Their chats cannot use their sandboxes.'
+            next_step: 'List the host''s sandboxes with compute-host status and look at their last events.'
+        - alert: OpenGeniComputeStepStuck
+          expr: |
+            max by (host_name, compute_step) (compute_step_oldest_age_seconds and on (host_name) {{ $hosts }}) > 900
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A sandbox operation on a compute host has run for over fifteen minutes.'
+            headline: 'Compute {{ "{{ $labels.compute_step }}" }} stuck on {{ "{{ $labels.host_name }}" }}'
+            value: '{{ "{{ $value | humanizeDuration }}" }} running'
+            user_impact: 'The sandbox it works on is unusable until it ends.'
+            next_step: 'Look at the host''s compute.step events and its store traffic.'
+        - alert: OpenGeniComputeHostMemoryPressure
+          expr: |
+            max by (host_name) (
+              rate(compute_host_pressure_stall_microseconds_total{compute_resource="memory",compute_pressure="full"}[5m])
+              and on (host_name) {{ $hosts }}
+            ) / 1e6 > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host spends over 10% of its time with every task stalled waiting for memory.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} short of memory'
+            value: '{{ "{{ $value | humanizePercentage }}" }} stalled'
+            user_impact: 'Sandboxes on the host run slowly.'
+            next_step: 'Check how much memory its sandboxes hold, and whether hosts need more memory.'
+        - alert: OpenGeniComputeHostTelemetryDropped
+          expr: |
+            sum by (host_name) (increase(compute_export_dropped_total[15m]) and on (host_name) {{ $hosts }}) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A compute host drops metrics or events it could not export.'
+            headline: 'Compute host {{ "{{ $labels.host_name }}" }} drops telemetry'
+            value: '{{ "{{ printf `%.0f` $value }}" }} record(s) (15 min)'
+            user_impact: 'None directly; the host''s metrics have gaps.'
+            next_step: 'Check the host''s route to the control service, and the service''s to Prometheus.'
+        {{- end }}
+{{- end }}
