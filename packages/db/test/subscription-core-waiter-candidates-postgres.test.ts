@@ -13,6 +13,7 @@ const {
   enqueueSessionWorkflowWakeInTransaction,
   ensureManagedAccessForUser,
   mutateSessionControlInTransaction,
+  submitHumanPromptInTransaction,
   mutateWorkspaceControlInTransaction,
   peekSessionWork,
   reconcileSubscriptionCoreCapacityWait,
@@ -160,6 +161,32 @@ async function control(
       actor: { type: "human", subjectId: f.subjectId },
     }),
   );
+}
+
+/** Re-parent the waiter's session under a fresh parent session. */
+async function adoptParent(f: Awaited<ReturnType<typeof fixture>>) {
+  const parent = await withSessionRlsActorContext({ subjectId: f.subjectId }, () =>
+    createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "parent",
+      resources: [],
+      metadata: {},
+      model: "codex/gpt-5.5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      subjectId: f.subjectId,
+      createdBy: { kind: "subject", subjectId: f.subjectId },
+      createdByContext: {},
+    }),
+  );
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update sessions set parent_session_id = ${parent.id}::uuid,
+      root_session_id = ${parent.id}::uuid where id = ${f.sessionId}::uuid`;
+  });
+  return parent;
 }
 
 describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence", () => {
@@ -326,27 +353,7 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
 
   test("ancestor and workspace Pause defer delivery with the override algebra", async () => {
     const f = await fixture([]);
-    const parent = await withSessionRlsActorContext({ subjectId: f.subjectId }, () =>
-      createSession(client.db, {
-        accountId: f.accountId,
-        workspaceId: f.workspaceId,
-        initialMessage: "parent",
-        resources: [],
-        metadata: {},
-        model: "codex/gpt-5.5",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        subjectId: f.subjectId,
-        createdBy: { kind: "subject", subjectId: f.subjectId },
-        createdByContext: {},
-      }),
-    );
-    await shared.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`update sessions set parent_session_id = ${parent.id}::uuid,
-        root_session_id = ${parent.id}::uuid where id = ${f.sessionId}::uuid`;
-    });
+    const parent = await adoptParent(f);
     await control(f, "pause", parent.id);
     let baseline = await deliveries(f);
     await wake(f, "codex");
@@ -394,6 +401,44 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
     expect(await peekSessionWork(client.db, f.workspaceId, f.sessionId)).toMatchObject({
       kind: "capacity-wait",
       ref: { waiterId: f.armed.waiter.waiterId, wakeRevision: revision + 1 },
+    });
+  }, 180_000);
+
+  test("a Steer that auto-resumes a paused branch wakes its waiting descendants", async () => {
+    const f = await fixture([]);
+    const parent = await adoptParent(f);
+    await control(f, "pause", parent.id);
+    // The paused child's workflow closed and every earlier wake was delivered.
+    await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
+      where session_id = ${f.sessionId}::uuid`;
+    const baseline = await deliveries(f);
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("idle");
+
+    await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.subjectId, (db) =>
+      submitHumanPromptInTransaction(db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: parent.id,
+        subjectId: f.subjectId,
+        actor: { type: "human", subjectId: f.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "steer",
+        text: "carry on",
+        resources: [],
+        model: "codex/gpt-5.5",
+        reasoningEffort: "medium",
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+
+    const [wakeRow] = await shared.admin`select reason, wake_revision > delivered_revision as due
+      from session_workflow_wake_outbox where session_id = ${f.sessionId}::uuid`;
+    expect(wakeRow).toMatchObject({ reason: "session_auto_resume", due: true });
+    expect((await deliveries(f)).generic).toBe(baseline.generic + 1);
+    expect(await peekSessionWork(client.db, f.workspaceId, f.sessionId)).toMatchObject({
+      kind: "capacity-wait",
+      ref: { waiterId: f.armed.waiter.waiterId },
     });
   }, 180_000);
 
