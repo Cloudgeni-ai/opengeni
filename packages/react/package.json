@@ -214,7 +214,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun run build:css && bun ../../scripts/generate-visualization-assets.ts && bun ../../scripts/build-typescript-package.ts",
     "build:css": "bun scripts/build-compiled-css.ts",
     "check:css": "bun scripts/build-compiled-css.ts --check",

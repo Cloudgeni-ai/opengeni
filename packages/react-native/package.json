@@ -61,7 +61,7 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsrs --noEmit -p tsconfig.json",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

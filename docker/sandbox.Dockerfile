@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.3
 FROM python:3.12-slim AS checkov-runtime
 
 ARG CHECKOV_VERSION=3.2.526

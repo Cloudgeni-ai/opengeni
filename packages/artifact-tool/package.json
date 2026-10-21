@@ -111,7 +111,7 @@
     "test:perf": "bun test --timeout 30000 test/perf",
     "fuzz:check": "bun ../../scripts/artifact-kernel-rust.ts cargo check --manifest-path kernel/fuzz/Cargo.toml",
     "fuzz:smoke": "bun kernel/fuzz/smoke.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

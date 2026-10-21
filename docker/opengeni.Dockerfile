@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.0
+ARG BUN_VERSION=1.4.3
 # Share the frozen-install inputs without tying them to a CPU architecture.
 FROM scratch AS workspace-manifests
 
