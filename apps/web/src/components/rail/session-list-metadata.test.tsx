@@ -44,14 +44,14 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain("motion-reduce:animate-none");
   });
 
-  test("a session parked until it wakes shows a still clock, not the working spinner", () => {
+  test("a session parked until it wakes shows a still hourglass, not the working spinner", () => {
     const markup = renderToStaticMarkup(
       <RailTrailingMetadata
         summary={{ kind: "waiting", count: 1, total: 1, label: "1 waiting to resume" }}
       />,
     );
 
-    expect(markup).toContain("lucide-alarm-clock");
+    expect(markup).toContain("lucide-hourglass");
     expect(markup).toContain('title="1 waiting to resume"');
     expect(markup).not.toContain("animate-spin");
   });

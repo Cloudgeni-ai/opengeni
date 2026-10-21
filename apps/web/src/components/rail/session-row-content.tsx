@@ -1,7 +1,7 @@
 import {
-  AlarmClockIcon,
   CalendarClockIcon,
   Clock3Icon,
+  HourglassIcon,
   Loader2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -53,7 +53,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   }
   if (summary.kind === "waiting") {
     // Parked until input or its wake-up time: nothing is executing, so no spinner.
-    return <AlarmClockIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />;
+    return <HourglassIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />;
   }
   if (summary.kind === "active_work") {
     return <ActiveWorkMark />;
