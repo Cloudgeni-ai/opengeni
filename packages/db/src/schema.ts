@@ -6095,6 +6095,7 @@ export const sessionPins = pgTable(
       table.workspaceId,
       table.sessionId,
     ),
+    sessionSubject: index("session_pins_session_subject_idx").on(table.sessionId, table.subjectId),
     subjectPinned: index("session_pins_workspace_subject_pinned_idx").on(
       table.workspaceId,
       table.subjectId,
