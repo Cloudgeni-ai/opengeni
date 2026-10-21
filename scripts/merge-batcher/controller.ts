@@ -220,12 +220,11 @@ export class Controller {
       Object.fromEntries(
         Object.entries(stages).map(([id, { observedAt: _, ...sample }]) => [id, sample]),
       );
-    if (
+    const checkpoint =
       this.config.mode === "active" &&
-      action.kind === "wait" &&
       (digest(stamp(records.stages)) !== digest(stamp(observation.ledger.stages)) ||
-        digest(records.missingRuns) !== digest(observation.ledger.missingRuns))
-    )
+        digest(records.missingRuns) !== digest(observation.ledger.missingRuns));
+    if (action.kind === "wait" && checkpoint)
       action = {
         kind: "record",
         ledger: structuredClone(observation.ledger),
@@ -266,16 +265,22 @@ export class Controller {
       }
       if (result.manifest) {
         if (!action.publish) {
-          await this.stage(observation, result);
-          return result;
+          if (!checkpoint) {
+            await this.stage(observation, result);
+            return result;
+          }
+          // A locally built successor must not strand missing-history recovery
+          // solely in the disposable journal. Persist monitoring under the same
+          // fence, without publishing the speculative candidate.
+        } else {
+          bindings = action.spec.pulls;
+          effect = {
+            kind: "publish",
+            branch: `${this.config.branchPrefix}${result.manifest.batchId}`,
+            manifest: result.manifest,
+          };
+          if (action.recoveryIndex !== null) ledger.recovery.splice(action.recoveryIndex, 1);
         }
-        bindings = action.spec.pulls;
-        effect = {
-          kind: "publish",
-          branch: `${this.config.branchPrefix}${result.manifest.batchId}`,
-          manifest: result.manifest,
-        };
-        if (action.recoveryIndex !== null) ledger.recovery.splice(action.recoveryIndex, 1);
       }
     } else if (action.kind === "record") ledger = action.ledger;
     else if (action.kind === "land") {

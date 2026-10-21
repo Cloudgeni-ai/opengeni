@@ -844,6 +844,66 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       ),
     ).toHaveLength(2);
   });
+  test("landed missing history has durable audited recovery after cache loss without releasing late CI", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null; // Disposable provider cache is unavailable after restart.
+    f.change();
+    const blocked = await f.controller().step();
+    expect(blocked.action.kind).toBe("build");
+    if (blocked.action.kind === "build") expect(blocked.action.publish).toBe(false);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toMatchObject({
+      kind: "historical-run-history",
+      status: "holding",
+      firstSeenAt: NOW,
+    });
+    f.advance(900);
+    await f.controller().step();
+    const held = await f.state();
+    expect(held.ledger.missingRuns[old.batchId]?.status).toBe("abandoned");
+    await expect(f.executor().recoverMissingRun(old.batchId, held.sha!, false)).rejects.toThrow(
+      "confirmation",
+    );
+    await expect(f.executor().recoverMissingRun(old.batchId, "a".repeat(40), true)).rejects.toThrow(
+      "CAS",
+    );
+    const late = f.verdict(old, "unknown");
+    late.status = "queued";
+    await expect(f.executor().recoverMissingRun(old.batchId, held.sha!, true)).rejects.toThrow(
+      "provider run",
+    );
+    f.api.workflowRuns = [];
+    await f.executor().recoverMissingRun(old.batchId, held.sha!, true);
+    const recovered = await f.state();
+    expect(recovered.sha).not.toBe(held.sha);
+    expect(recovered.ledger.missingRuns[old.batchId]).toMatchObject({
+      status: "released",
+      kind: "historical-run-history",
+      recovery: {
+        confirmedNoRun: true,
+        controllerId: "controller-a",
+        tipSha: old.tipSha,
+        previousStateSha: held.sha,
+      },
+    });
+    // The release remains Git-backed if the disposable journal also disappears.
+    await rm(f.controller().journal.path, { force: true });
+    f.api.workflowRuns = [late];
+    const stillBusy = await f.controller().step();
+    expect(stillBusy.action.kind).toBe("build");
+    if (stillBusy.action.kind === "build") expect(stillBusy.action.publish).toBe(false);
+    late.status = "completed";
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]?.recovery).toEqual(
+      recovered.ledger.missingRuns[old.batchId]?.recovery,
+    );
+    expect((await f.state()).ledger.ejected).toEqual([]);
+  });
   test("failed landing does not record fabricated measured landed time", async () => {
     const f = await fixture(),
       manifest = await f.publish();

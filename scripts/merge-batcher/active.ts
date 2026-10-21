@@ -665,7 +665,19 @@ export class GitHubActiveExecutor implements Executor {
     if (manifest.batchId !== id || (await this.reads.runs(manifest, branch)).length)
       throw new Error("Candidate has a provider run; missing-run recovery refused");
     await this.persist(state, (ledger) => {
-      ledger.missingRuns[id] = { ...missing, status: "released", updatedAt: this.now() };
+      const at = this.now();
+      ledger.missingRuns[id] = {
+        ...missing,
+        status: "released",
+        updatedAt: at,
+        recovery: {
+          confirmedNoRun: true,
+          at,
+          controllerId: this.owner,
+          tipSha: manifest.tipSha,
+          previousStateSha: state.sha,
+        },
+      };
     });
   }
   /** Explicit operator recovery, never an automatic uncertain-effect replay. */

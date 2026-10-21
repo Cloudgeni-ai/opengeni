@@ -425,6 +425,10 @@ polls); provider backoff adds delay. They may overlap independently started work
 A published candidate with no exact workflow initially reserves the hosted slot.
 Head/evidence invalidation and abandonment do not release that reservation;
 only terminal workflow evidence or explicit infrastructure recovery does.
+This also applies to candidates already contained in main when retained provider
+run history becomes unavailable (for example, after cache loss). Their missing-run
+record is marked `historical-run-history` and ages from first observation of that
+gap, not an old publication time. Main containment is not proof that CI is idle.
 After BATCHER_MISSING_RUN_SECONDS from known publication or first observation it
 becomes an **abandoned infrastructure hold**, not a PR failure or code-red retry.
 The hold is persisted and visible, with explicit recovery instead of an opaque
@@ -438,7 +442,12 @@ bun scripts/merge-batcher/main.ts recover-missing-run \
 ```
 
 Active recovery CAS-updates the Git ledger under the lease and rereads provider
-runs. Shadow modes update only their local observation journal. No mode deletes
+runs. Shadow recovery also bypasses cached run observations, but updates only its
+local journal. Provider read failures or any observed run refuse recovery. The
+release receipt records explicit no-run confirmation, timestamp, exact tip SHA,
+previous state SHA, and (for active mode) the recovering controller identity; the
+Git state commit history retains the active audit. This is not a verified human
+identity or proof that GitHub cannot deliver a run after the read. No mode deletes
 the candidate ref, cancels CI, comments blame or changes readiness. The exact
 released snapshot is not automatically republished; a changed head/new ready
 event can return. A late run is still observed and consumes capacity. GitHub

@@ -188,12 +188,17 @@ export class ObservationJournal {
       // Seeing main ancestry establishes containment, not its actual landing timestamp.
       sample.observedAt = o.now;
       data.stages[id] = sample;
-      if (!candidate.runs.length && !candidate.containedInBase) {
+      if (!candidate.runs.length) {
+        const historical = candidate.containedInBase || o.ledger.landed.includes(id);
         const missing = data.missing[id] ?? {
-          firstSeenAt: sample.publishedAt ?? o.now,
+          // Main containment cannot prove that a historical workflow is idle.
+          // Age newly unavailable history from its observation, not an old
+          // publication timestamp that would immediately abandon the hold.
+          firstSeenAt: historical ? o.now : (sample.publishedAt ?? o.now),
           status: "holding" as const,
           updatedAt: o.now,
         };
+        missing.kind ??= historical ? "historical-run-history" : "workflow-admission";
         if (
           missing.status === "holding" &&
           Date.parse(o.now) - Date.parse(missing.firstSeenAt) >=
@@ -246,7 +251,18 @@ export class ObservationJournal {
       throw new Error(
         "Missing-run recovery requires abandoned exact candidate, no observed run and explicit confirmation",
       );
-    data.missing[id] = { ...data.missing[id]!, status: "released", updatedAt: o.now };
+    data.missing[id] = {
+      ...data.missing[id]!,
+      status: "released",
+      updatedAt: o.now,
+      recovery: {
+        confirmedNoRun: true,
+        at: o.now,
+        controllerId: null,
+        tipSha: candidate.manifest.tipSha,
+        previousStateSha: o.stateSha,
+      },
+    };
     await this.save(o.now);
   }
 }

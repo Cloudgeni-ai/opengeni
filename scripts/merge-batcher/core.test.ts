@@ -40,6 +40,7 @@ import { classifyExit, verifyResult } from "./result";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { ObservationJournal, latencySummary } from "./journal";
 import { DiskCache } from "./cache";
+import { recoverLocalMissing } from "./main";
 
 const NOW = "2026-10-21T11:00:00.000Z";
 const SHA = "a".repeat(40);
@@ -1627,6 +1628,84 @@ describe("review regressions: observation, admission and telemetry", () => {
     const action = plan(o, settings);
     expect(action.kind).toBe("build");
     if (action.kind === "build") expect(action.publish).toBe(false);
+  });
+  test("landed unknown history ages across restart, needs explicit recovery, and late runs reserve again", async () => {
+    const root = await mkdtemp(join(tmpdir(), "merge-batcher-landed-history-"));
+    roots.push(root);
+    const settings = { ...cfg, outputDir: root },
+      old = candidate();
+    old.containedInBase = true;
+    const o = observation([pull(2)], [old]);
+    o.ledger.landed.push(old.manifest.batchId);
+    const id = old.manifest.batchId;
+    await new ObservationJournal(settings).event(
+      old.manifest,
+      "publishedAt",
+      "2026-10-20T12:00:00.000Z",
+    );
+    const first = await new ObservationJournal(settings).observe(o);
+    expect(first.missingRuns?.[id]).toMatchObject({
+      kind: "historical-run-history",
+      status: "holding",
+      firstSeenAt: o.now,
+    });
+    const pending = plan(first, settings);
+    expect(pending.kind).toBe("build");
+    if (pending.kind === "build") expect(pending.publish).toBe(false);
+    const later = await new ObservationJournal(settings).observe({
+      ...o,
+      now: "2026-10-21T14:00:00.000Z",
+    });
+    expect(later.missingRuns?.[id]?.status).toBe("abandoned");
+    const held = plan(later, settings);
+    if (held.kind === "build") expect(held.publish).toBe(false);
+    const journal = new ObservationJournal(settings);
+    await expect(journal.recoverMissing(id, later, false)).rejects.toThrow("confirmation");
+    let providerCalls = 0;
+    const queued = { ...run(old, "unknown"), status: "queued" as const };
+    const provider = {
+      runs: async () => {
+        providerCalls++;
+        return [queued];
+      },
+    };
+    // Even though the observation has no runs, recovery must bypass that cache.
+    await expect(recoverLocalMissing(journal, later, provider, id)).rejects.toThrow(
+      "no observed run",
+    );
+    expect(providerCalls).toBe(1);
+    await expect(
+      recoverLocalMissing(
+        journal,
+        later,
+        {
+          runs: async () => {
+            throw new Error("provider unavailable");
+          },
+        },
+        id,
+      ),
+    ).rejects.toThrow("provider unavailable");
+    await recoverLocalMissing(journal, later, { runs: async () => [] }, id);
+    const released = await new ObservationJournal(settings).observe(later);
+    expect(released.missingRuns?.[id]).toMatchObject({
+      status: "released",
+      kind: "historical-run-history",
+      recovery: {
+        confirmedNoRun: true,
+        at: later.now,
+        controllerId: null,
+        tipSha: old.manifest.tipSha,
+        previousStateSha: null,
+      },
+    });
+    const permitted = plan(released, settings);
+    expect(permitted.kind).toBe("build");
+    if (permitted.kind === "build") expect(permitted.publish).toBe(true);
+    released.candidates[0]!.runs = [queued];
+    const late = plan(released, settings);
+    expect(late.kind).toBe("build");
+    if (late.kind === "build") expect(late.publish).toBe(false);
   });
   test("baseline reads are cached and rate limits back off without another HTTP request", async () => {
     const f = await fixture();

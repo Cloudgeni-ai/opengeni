@@ -95,6 +95,14 @@ export interface MissingRun {
   firstSeenAt: string;
   status: "holding" | "abandoned" | "released";
   updatedAt: string;
+  kind?: "workflow-admission" | "historical-run-history";
+  recovery?: {
+    confirmedNoRun: true;
+    at: string;
+    controllerId: string | null;
+    tipSha: string;
+    previousStateSha: string | null;
+  };
 }
 export interface Ledger {
   schemaVersion: 1;

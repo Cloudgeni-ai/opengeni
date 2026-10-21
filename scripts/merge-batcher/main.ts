@@ -6,7 +6,20 @@ import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { GitHubActiveExecutor } from "./active";
 import { GitHubAuth, GitHubReader, GitHubMutations, ProviderError } from "./github";
 import { ObservationJournal } from "./journal";
-import { assertSha, config, type Config } from "./model";
+import { assertSha, config, type Config, type Observation } from "./model";
+
+export async function recoverLocalMissing(
+  journal: ObservationJournal,
+  observation: Observation,
+  github: Pick<GitHubReader, "runs">,
+  id: string,
+): Promise<void> {
+  const candidate = observation.candidates.find((item) => item.manifest.batchId === id);
+  // Recovery bypasses historical sampling/cache, just like active recovery.
+  // Provider errors abort; an unknown response must never become an empty list.
+  if (candidate) candidate.runs = await github.runs(candidate.manifest, candidate.branch);
+  await journal.recoverMissing(id, observation, true);
+}
 
 export async function main(
   argv: string[],
@@ -98,7 +111,7 @@ export async function main(
     else {
       const journal = new ObservationJournal(settings);
       const observation = await journal.observe(await reader.observe());
-      await journal.recoverMissing(values["batch-id"]!, observation, true);
+      await recoverLocalMissing(journal, observation, github, values["batch-id"]!);
     }
     console.log(
       JSON.stringify({ batchId: values["batch-id"], status: "released-infrastructure-only" }),
