@@ -544,6 +544,14 @@ Independent package defaults inherit without replacing host `--og-*` values;
 derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
 
+`compiled.css` covers the documented embeddable components. The
+`@opengeni/react/ui/*` subpaths are first-party building blocks for the
+Opengeni web app, not a documented public API, and `compiled.css` does not
+style them. A host that imports them anyway must compile them through the
+Tailwind source bridge below. Some use Tailwind's `dark:` variant, which
+follows the host's own `dark` variant (Tailwind's default is the operating
+system's color scheme), not `data-og-theme`.
+
 The original Tailwind v4 bridge remains available for hosts that intentionally
 want Opengeni utilities compiled into their own Tailwind entry:
 
