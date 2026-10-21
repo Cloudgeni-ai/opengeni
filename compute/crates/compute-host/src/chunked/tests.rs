@@ -909,3 +909,38 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     let none = ahead.sweep(false).await.unwrap();
     assert_eq!((none.named, none.unnamed), (0, none.stored));
 }
+
+/// A host reads only the current stored-copy format: a copy of any other
+/// version is refused, both by a wake and by a sweep's accounting.
+#[tokio::test]
+async fn a_stored_copy_of_another_version_is_refused() {
+    let chunks = ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("archive"));
+    let store = Chunked::new(chunks);
+    let head = |version| {
+        serde_json::to_vec(&serde_json::json!({
+            "version": version,
+            "disk": "0".repeat(64),
+            "memory": null,
+            "profile": null,
+            "pack": null,
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        parse_head("test", &head(HEAD_VERSION)).unwrap().version,
+        HEAD_VERSION
+    );
+    for version in [0, 1, HEAD_VERSION - 1, HEAD_VERSION + 1] {
+        assert!(
+            parse_head("test", &head(version)).is_err(),
+            "version {version}"
+        );
+        assert!(
+            matches!(
+                store.names(&head(version)).await,
+                Err(StorageError::Invalid(_))
+            ),
+            "version {version}"
+        );
+    }
+}

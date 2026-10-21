@@ -288,20 +288,16 @@ can be built and tested.
   raises the epoch past it: a give-up and a reclaim.
   So a stale copy can never count as whole, while needless boots from
   files are confined to rare paths: a hand-off whose answer was lost, of
-  a sandbox whose copy was not whole when it was given. The mark cannot
-  be a "lost" flag that a give-up sets, because a replica of the earlier
-  release, still serving during a rolling upgrade or after a rollback,
-  gives up on hosts without setting it; nor can a clear vouch for a copy
-  unless the owner proved it handed the state off, because an owner that
-  held nothing may itself have been given a lost owner's copy. The fleet
+  a sandbox whose copy was not whole when it was given. The mark names
+  what is whole rather than what is lost, so a change that does not set
+  it costs only a boot from files, never a restore of a stale image; nor
+  can a clear vouch for a copy unless the owner proved it handed the
+  state off, because an owner that held nothing may itself have been
+  given a lost owner's copy. The fleet
   simulation checks the rule: every adopt that restores memory finds the
   archive holding every write of the sandbox's latest run.
 
-  An earlier host ignores `whole` and always restores the memory image,
-  so every host must run this release before the service does
-  (operations.md, Upgrades); a replica of the earlier service still
-  serving during the rollout, or after a rollback, then only ever has
-  copies booted from their files. Before the host pauses a guest to
+  Before the host pauses a guest to
   save or checkpoint it, it asks the guest to write what it holds for
   its disks to them (`sync` on the notice port), so a disk copied while
   its guest ran holds what the guest had written. A sandbox asleep in
