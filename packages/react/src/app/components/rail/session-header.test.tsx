@@ -1,11 +1,30 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { act, type ReactNode } from "react";
+import { createRoot as createReactRoot } from "react-dom/client";
 
+import { AppContext, type AppContextValue } from "../../app-context";
 import type { Session } from "../../types";
 
 import { SessionHeader } from "./session-header";
+
+// The header only renders inside the session shell, which always has the app
+// context; its chat actions (copy link, pin) run through it. None of these
+// tests run one, so any read of the context fails loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    throw new Error(`The SessionHeader test's app context has no ${String(key)}`);
+  },
+});
+
+function createRoot(container: Element) {
+  const root = createReactRoot(container);
+  return {
+    render: (node: ReactNode) =>
+      root.render(<AppContext.Provider value={appContext}>{node}</AppContext.Provider>),
+    unmount: () => root.unmount(),
+  };
+}
 
 beforeAll(() => {
   GlobalRegistrator.register();
