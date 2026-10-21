@@ -25,14 +25,14 @@ test("logical flush advances the requested delay and commits its React update", 
 });
 
 test("logical flush yields to native asynchronous work, not only microtasks", async () => {
-  let result: ArrayBuffer | undefined;
+  const state: { result?: ArrayBuffer } = {};
   const digest = crypto.subtle
     .digest("SHA-256", new TextEncoder().encode("fixture"))
     .then((value) => {
-      result = value;
+      state.result = value;
     });
-  for (let turn = 0; turn < 100 && !result; turn += 1) await flush();
-  expect(result?.byteLength).toBe(32);
+  for (let turn = 0; turn < 100 && !state.result; turn += 1) await flush();
+  expect(state.result?.byteLength).toBe(32);
   await digest;
 });
 
