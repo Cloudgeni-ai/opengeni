@@ -17,7 +17,10 @@ export function Keycaps(props: {
   const keys = chordKeys(props.chord, props.platform);
   if (props.keyLabel) keys[keys.length - 1] = props.keyLabel;
   return (
+    // role="img" makes the label count: browsers and screen readers ignore
+    // aria-label on a plain span, and the caps themselves are hidden.
     <span
+      role="img"
       className={cn("inline-flex shrink-0 items-center gap-0.5", props.className)}
       aria-label={props.ariaLabel ?? chordLabel(props.chord, props.platform)}
     >
