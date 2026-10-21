@@ -1,8 +1,11 @@
 //! A small disk: every VM whose state is not saved yet books what its next
-//! save may write and what its disk may still grow by, a wake the disk
-//! cannot book is refused at once as host full, saying so, and goes through
-//! once another VM's state is saved. A save that cannot be written shows in
-//! the sandbox's status and succeeds once there is room.
+//! save may write and what its disk may still grow by, a create whose
+//! first wake the disk cannot book is refused at once as host full, saying
+//! so, and goes through once another VM's state is saved. A save that
+//! cannot be written shows in the sandbox's status and succeeds once there
+//! is room.
+
+use compute_host::protocol::ErrorCode;
 
 use super::*;
 
@@ -104,6 +107,47 @@ async fn sleep_to_saved(agent: &Agent, sandbox: Id) {
     assert_eq!(agent.client.call(&request).await.unwrap(), Reply::Done);
 }
 
+/// Creates `sandbox` of 512 MiB that never sleeps by itself: `Err` with
+/// the message when the host is full.
+async fn try_create(agent: &Agent, sandbox: Id) -> Result<(), String> {
+    let reply = agent
+        .client
+        .call(&Request::Create {
+            id: sandbox,
+            config: SandboxConfig::new(1, 512, NEVER),
+        })
+        .await
+        .unwrap();
+    match reply {
+        Reply::Done => Ok(()),
+        Reply::Error {
+            code: ErrorCode::HostFull,
+            message,
+        } => Err(message),
+        other => panic!("create {sandbox}: {other:?}"),
+    }
+}
+
+/// Creates and wakes sandboxes until the disk cannot book the first wake
+/// of one more: that create is refused before anything of it is made.
+/// Returns the awake ones, the refused one, its refusal and how long the
+/// refusal took.
+async fn wake_until_refused(agent: &Agent) -> (Vec<Id>, Id, String, Duration) {
+    let mut awake = Vec::new();
+    loop {
+        let sandbox = id(awake.len());
+        let begin = Instant::now();
+        if let Err(message) = try_create(agent, sandbox).await {
+            return (awake, sandbox, message, begin.elapsed());
+        }
+        super::admission::connect(&agent.client, sandbox)
+            .await
+            .unwrap_or_else(|message| panic!("{sandbox} was taken but not woken: {message}"));
+        awake.push(sandbox);
+        assert!(awake.len() < 8, "never ran out of disk");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
     let Some(lab) = lab() else {
@@ -122,18 +166,7 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         .wait_until("a disk reading", |status| status.disk.is_some())
         .await;
 
-    // Sandboxes wake until the disk cannot book one more save.
-    let mut awake = Vec::new();
-    let (refused, message, refusal) = loop {
-        let sandbox = id(awake.len());
-        agent.create(sandbox, NEVER).await;
-        let begin = Instant::now();
-        match super::admission::connect(&agent.client, sandbox).await {
-            Ok(_) => awake.push(sandbox),
-            Err(message) => break (sandbox, message, begin.elapsed()),
-        }
-        assert!(awake.len() < 8, "never ran out of disk");
-    };
+    let (awake, refused, message, refusal) = wake_until_refused(&agent).await;
     assert!(awake.len() >= 2, "{message}");
     assert!(
         message.contains("disk"),
@@ -144,8 +177,8 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         "a save and a disk's growth: {message}"
     );
     let count = awake.len() as u64;
-    // The refused sandbox's first files stay booked until a reading after
-    // they were written.
+    // A refused create wrote nothing, so once a reading follows the last
+    // wake only the awake sandboxes are booked.
     let awake_books = count * (SAVE + growth - BOOT_WRITES)..=count * (SAVE + growth);
     agent
         .wait_until("only the awake sandboxes booked", |status| {
@@ -163,11 +196,11 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         booked.booked / MIB
     );
 
-    // Once one VM's state is saved it books nothing, and the refused wake
-    // goes through. Until a disk reading shows what the save wrote, what it
-    // booked stays booked, so a wake asked for at once, short by no more
-    // than that, waits for the next reading, about a second away, which
-    // admits it, rather than being refused for room that is there.
+    // Once one VM's state is saved it books nothing, and the refused
+    // create goes through. Until a disk reading shows what the save wrote,
+    // what it booked stays booked, so a create asked for at once, short by
+    // no more than that, waits for the next reading, about a second away,
+    // which admits it, rather than being refused for room that is there.
     let begin = Instant::now();
     sleep_to_saved(&agent, awake[0]).await;
     agent
@@ -177,16 +210,20 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         .await;
     let saved = begin.elapsed();
     let asked = Instant::now();
+    try_create(&agent, refused)
+        .await
+        .expect("a create short only by a finished save's unread booking waits for a reading");
+    let waited = asked.elapsed();
     super::admission::connect(&agent.client, refused)
         .await
-        .expect("a wake short only by a finished save's unread booking waits for a reading");
-    let waited = asked.elapsed();
+        .expect("a sandbox taken wakes");
     assert!(
         waited < Duration::from_secs(10),
         "waited {waited:?} for a disk reading"
     );
     eprintln!(
-        "saved the first in {saved:?}; the refused one, asked for at once, woke {waited:?} later"
+        "saved the first in {saved:?}; the refused one, asked for at once, was taken {waited:?} \
+         later and woke"
     );
 
     // A save the disk cannot hold shows in the status and is retried.
