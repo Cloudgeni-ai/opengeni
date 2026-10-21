@@ -48,9 +48,11 @@ bun run test:e2e
 ## Pull Requests
 
 - Keep changes focused.
-- Main merges follow the [merge-queue runbook](docs/merge-queue.md): full relevant
+- Main merges follow the [merge-batcher runbook](docs/merge-batcher.md): full relevant
   local suites, independent agent review, exact-head evidence comment, then
-  queueing. Fast queue green is not full-suite/release green.
+  the configured ready signal after activation. During shadow rollout, the
+  existing reviewed merge process remains in force. Fast batch green is not
+  full-suite/release green; the native queue and vendor drafts stay inactive.
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.

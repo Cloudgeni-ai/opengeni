@@ -21,6 +21,10 @@
       "sha256": "474f26fa2e86ea63beae0c1a2604401e61f74b350d390b5cebad116bfeb6459e"
     },
     {
+      "path": ".github/workflows/batch-ci.yml",
+      "sha256": "5688d37ac67f135f41749b4d83a9d72f821d3a0d4784587c67cb4ce7f6024271"
+    },
+    {
       "path": ".github/workflows/browser-engine-pins.yml",
       "sha256": "db9e34041155dcdd512dabf16dce76b1990f7479ea5d3cc5fcf251306caca928"
     },
@@ -114,7 +118,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "d258b09d9315c186ffd48e9c19029a4e2ddf232d7b9c53cccf6ad6df6174b90d"
+      "sha256": "64bdde85544855219207534b659ae9638e233e486c00480c21f23f4d090172fb"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -126,7 +130,7 @@
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
-      "sha256": "2812ab07372c1b8a594a6823eccf845e5bc68a672c2f72d4b9a19096f1b988d2"
+      "sha256": "579b718c63349de28d25d41a6184b072c9f9b0f273b0009fe24626b5e3c2a4f7"
     },
     {
       "path": ".github/workflows/release.yml",
@@ -574,6 +578,54 @@
       "job": "wasm",
       "step": "Verify exact source",
       "sha256": "7c01541f3dc7c536488a007902ea1453cd191ebb6c348edcbac345077c0dcb25"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "plan",
+      "step": "Verify candidate provenance and plan the complete combined tree",
+      "sha256": "174176c895ef72cebb813592e508df2ee3b4d9c42f256a2412b2da89d7cf4510"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "ready",
+      "step": "Bind receipts to this exact candidate and run attempt",
+      "sha256": "832b0e6d57c17cd4e8bc49d127e2f594eab948e617643ec4675850f3903ede3d"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "ready",
+      "step": "Prepare isolated receipt directory",
+      "sha256": "924ef8421d9129139de75cc2f6ff19793f881de4394d13b5a5068379cf9f0cf6"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "source",
+      "step": "Install with deterministic lockfile failure evidence",
+      "sha256": "17558f50348b565a9a3f48e6f273ebe6d9b3c9103cb16146d6429a00f08a6bb5"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "source",
+      "step": "Run source contracts and record an exact code verdict",
+      "sha256": "c74e6723098254dfd42dae57a16316a7aadce24a905587c25ef922ca7b6a0ea8"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "units",
+      "step": "Install with deterministic lockfile failure evidence",
+      "sha256": "248fb61f37cd327dfd332133f367c08887ea43cc2de329fcdc364b75062366b7"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "units",
+      "step": "Run all selected unit files with the unchanged per-attempt deadline",
+      "sha256": "274b8ecad9c9ddcaad2170f99bb27bc07469eac7e982e83e276f5af5f291eed8"
+    },
+    {
+      "workflow": ".github/workflows/batch-ci.yml",
+      "job": "units",
+      "step": "Separate real database infrastructure setup from test assertions",
+      "sha256": "d9b2870eaea9339456bdc148fca3efd67be3042a174e8c4eafcd7de79a9ddc29"
     },
     {
       "workflow": ".github/workflows/browser-engine-pins.yml",
@@ -1898,8 +1950,14 @@
     {
       "workflow": ".github/workflows/release-source-admission.yml",
       "job": "verify",
+      "step": "Restore protected main history as Git data for the descendant merge audit",
+      "sha256": "69ac3710659e143481667807b4dbe8bfafe2cc82a729f0ab8007799889b54051"
+    },
+    {
+      "workflow": ".github/workflows/release-source-admission.yml",
+      "job": "verify",
       "step": "Verify controller identity and exact reviewed merge provenance",
-      "sha256": "46e8543cfaf9a0fcd101cc4996e20e36a7605b8938cab4afdb09a4ffc48416c3"
+      "sha256": "77094b22e5108af0dd359e7cb23ba329964a99ed564b527289a8cd106aae735e"
     },
     {
       "workflow": ".github/workflows/release.yml",

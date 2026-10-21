@@ -795,7 +795,7 @@ enforcement and vendor installation stay off. The batcher starts in read-only
 shadow mode; only the rollout owner's explicit go permits activation.
 Before activation, use the repository's normal squash merge after the same
 local-test and independent-review evidence. Once active, submit the documented
-ready signal (configured ready label or auto-merge) and observe the **Batch ready**
+ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and observe the **Batch ready**
 result and exact landed SHA. Never use `--admin`, a direct merge API or a direct
 main push. Do not rebase merely because main advanced: the batcher tests the
 combined tree. Any head change invalidates earlier evidence and requires a new

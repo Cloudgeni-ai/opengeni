@@ -180,7 +180,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - run: mkdir -p "$RUNNER_TEMP/batch-receipts"
+      - name: Prepare isolated receipt directory
+        run: mkdir -p "$RUNNER_TEMP/batch-receipts"
       - uses: actions/download-artifact@v4
         with:
           pattern: batch-receipt-${{ github.run_attempt }}-*
