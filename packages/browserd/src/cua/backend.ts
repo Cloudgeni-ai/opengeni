@@ -1103,7 +1103,9 @@ export class CuaComputerBackend implements ComputerBackend {
             ? this.identity.platform === "macos"
               ? "This element cannot take the keyboard focus: invoke it, or set its value"
               : "Elements cannot be focused on their own here: invoke the element, or set its value"
-            : "CUA element does not advertise this semantic action",
+            : node.actions.length > 0
+              ? `This element does not offer ${action.action}; use one it offers: ${node.actions.join(", ")}`
+              : "This element offers no actions; act on a nearby control or its window instead",
         );
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))

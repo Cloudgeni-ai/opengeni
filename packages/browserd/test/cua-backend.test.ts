@@ -444,7 +444,11 @@ describe("CUA desktop boundary", () => {
             value: "Rejected",
           },
         }),
-      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element offers no actions; act on a nearby control or its window instead",
+      });
       expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
     } finally {
       await backend.close();
