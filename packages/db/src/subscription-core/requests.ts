@@ -225,6 +225,10 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
           forUpdate: true,
         });
       await lockRequestSource(tx, identity.accountId, ref.connectionId);
+      // KEY SHARE holds the lease until the reservation commits. Placement
+      // releases a lease without the connection lock, so an unlocked check
+      // could pass and the insert's lease guard then fail with a raw error
+      // instead of lease_lost. Renewal (a non-key update) is not blocked.
       const [lease] = await rawRows<{ current: boolean }>(
         tx,
         sql`select exists (
@@ -242,6 +246,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
         and session.status = 'running' and session.active_turn_id = turn.id
         and turn.active_attempt_id = ${request.attemptId}::uuid
         and turn.execution_generation = ${request.executionGeneration}
+      for key share of lease
     ) as current`,
       );
       if (!lease?.current) throw provider.errors.leaseLost();
