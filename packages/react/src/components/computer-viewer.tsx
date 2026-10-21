@@ -2451,6 +2451,8 @@ function computerFailureMessage(t: OpenGeniText, session: ComputerSession): stri
     case "machine_locked":
       return t("computerViewer.unlockTheConnectedMacThen");
     case "controller_heartbeat_expired":
+    // The sandbox it ran in was lost or replaced.
+    case "placement_instance_lost":
       return t("computerViewer.theDesktopConnectionWasLost");
     case "controller_transition_expired":
       return session.placement.kind === "attached_device"

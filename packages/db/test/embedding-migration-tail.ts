@@ -358,5 +358,8 @@ export const embeddingMigrationTail = [
   "0876_connection_validation_shared_locks.sql",
   // Reads the shared-core waiter table from withheld 0642; replay after it.
   "0882_continuable_core_capacity_waits.sql",
+  // Patches the interaction reaper by its post-0345/0564/0705 anchors; replay
+  // after the fence graph it edits.
+  "0883_retired_instance_interactions.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
