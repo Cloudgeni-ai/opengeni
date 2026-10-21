@@ -102,7 +102,7 @@
     },
     {
       "path": ".github/workflows/queue-health.yml",
-      "sha256": "09b78220e3e94debd0dbff03f97e079f83a9820ab9db011cc7d0acbc691caea4"
+      "sha256": "4eed3e3b7fd8146aefaa7b449bd348c86f98f4e22235dcbddcc6ba5157e13739"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",

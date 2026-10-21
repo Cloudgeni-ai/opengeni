@@ -1,7 +1,7 @@
 name: Queue and main health
 on:
   workflow_run:
-    workflows: [Merge queue, CI]
+    workflows: [Merge queue, Batch CI, CI]
     types: [completed]
   schedule:
     - cron: "37 * * * *"
@@ -17,7 +17,7 @@ jobs:
   report:
     # Filter before claiming a concurrency slot: cheap PR-entry completions must
     # neither consume runners nor displace the hourly reconciliation.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'merge_group' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/ci.yml') }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'merge_group' || (github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'queue/') && github.event.workflow_run.path == '.github/workflows/batch-ci.yml') || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/ci.yml') }}
     concurrency:
       group: queue-health-${{ github.event_name == 'workflow_run' && 'event' || 'reconcile' }}
       cancel-in-progress: false

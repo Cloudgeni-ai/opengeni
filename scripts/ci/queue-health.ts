@@ -54,6 +54,70 @@ export function publicAlertsEnabled(
   return !event.workflow_run && setting === "true";
 }
 
+export function isBatchRun(run: Run): boolean {
+  return (
+    run.path === ".github/workflows/batch-ci.yml" &&
+    run.event === "push" &&
+    run.head_branch.startsWith("queue/")
+  );
+}
+
+/** Provider timing only. A failed workflow is not a verified code-failure receipt,
+ * and deterministic Git commit dates are not candidate construction timestamps. */
+export function batchTiming(run: Run, jobs: Job[]) {
+  const row = queueTiming(run, jobs, {
+    number: 0,
+    url: "",
+    mergedAt: null,
+    timelineItems: { nodes: [] },
+  });
+  return {
+    runId: run.id,
+    attempt: run.run_attempt,
+    sha: run.head_sha,
+    branch: run.head_branch,
+    url: run.html_url,
+    candidateObservedAt: run.created_at,
+    ciStartedAt: row.ciStartedAt,
+    ciFinishedAt: row.ciFinishedAt,
+    providerConclusion: run.conclusion,
+    verifiedOutcome: "unknown" as const,
+    readyAt: null,
+    builtAt: null,
+    landedAt: null,
+  };
+}
+
+export function summarizeBatches(rows: ReturnType<typeof batchTiming>[]) {
+  const durations = rows
+    .map((row) => minutes(row.ciStartedAt, row.ciFinishedAt))
+    .filter((value): value is number => value !== null);
+  const waits = rows
+    .map((row) => minutes(row.candidateObservedAt, row.ciStartedAt))
+    .filter((value): value is number => value !== null);
+  return {
+    samples: rows.length,
+    ci: {
+      samples: durations.length,
+      medianMinutes: percentile(durations, 0.5),
+      p95Minutes: percentile(durations, 0.95),
+    },
+    providerStartDelay: {
+      samples: waits.length,
+      medianMinutes: percentile(waits, 0.5),
+      p95Minutes: percentile(waits, 0.95),
+    },
+    cancellations: rows.filter((row) => row.providerConclusion === "cancelled").length,
+    providerRedRuns: rows.filter((row) =>
+      ["failure", "timed_out"].includes(row.providerConclusion ?? ""),
+    ).length,
+    queueWait: { samples: 0, p95Minutes: null },
+    stopSignal: null,
+    interpretation:
+      "Provider timings only; ready/build/landing stages and verified code versus infrastructure outcomes require the controller stage ledger. Unknown queue wait is not a healthy capacity verdict.",
+  };
+}
+
 export function queueTiming(run: Run, jobs: Job[], pull: Pull): QueueTiming {
   const candidateAt = run.head_commit?.timestamp ?? run.created_at;
   const enqueues = pull.timelineItems.nodes.filter(
@@ -213,6 +277,21 @@ export function collectQueueTimings(api: Api, repository: string, runs: Run[]): 
   return rows;
 }
 
+export function collectBatchTimings(api: Api, repository: string, runs: Run[]) {
+  return runs
+    .filter(isBatchRun)
+    .map((run) =>
+      batchTiming(
+        run,
+        paginated(
+          api,
+          `repos/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
+          "jobs",
+        ),
+      ),
+    );
+}
+
 /** The associated landing PR is a suspect, not proven causality: coalesced full
  * CI covers intervening commits too. Never automatically revert it. */
 export function reportRedMain(api: Api, repository: string, run: Run) {
@@ -264,6 +343,7 @@ if (import.meta.main) {
   if (event.workflow_run) {
     const run: Run = gh(`repos/${repository}/actions/runs/${event.workflow_run.id}`);
     const rows = collectQueueTimings(gh, repository, [run]);
+    const batchRows = collectBatchTimings(gh, repository, [run]);
     const alert = {
       reported: false,
       redMain: isRedMain(run),
@@ -271,7 +351,11 @@ if (import.meta.main) {
     };
     writeFileSync(
       "queue-health.json",
-      JSON.stringify({ generatedAt: now, rows, alert }, null, 2) + "\n",
+      JSON.stringify(
+        { generatedAt: now, rows, batchRows, batchSummary: summarizeBatches(batchRows), alert },
+        null,
+        2,
+      ) + "\n",
     );
   } else {
     const since = new Date(Date.now() - 86400000).toISOString();
@@ -282,6 +366,13 @@ if (import.meta.main) {
     ) as Run[];
     const rows = collectQueueTimings(gh, repository, runs);
     const summary = summarizeQueue(rows, now);
+    const batchRuns = paginated(
+      gh,
+      `repos/${repository}/actions/workflows/batch-ci.yml/runs?event=push&created=%3E%3D${encodeURIComponent(since)}`,
+      "workflow_runs",
+    ) as Run[];
+    const batchRows = collectBatchTimings(gh, repository, batchRuns);
+    const batchSummary = summarizeBatches(batchRows);
     // The report lane coalesces pending invocations. Reconcile completed red
     // main runs too, so a queue-report burst cannot hide a full-CI failure.
     const redRuns = paginated(
@@ -298,12 +389,16 @@ if (import.meta.main) {
       );
     writeFileSync(
       "queue-health.json",
-      JSON.stringify({ ...summary, rows, alertsEnabled, alerts }, null, 2) + "\n",
+      JSON.stringify(
+        { ...summary, rows, batchRows, batchSummary, alertsEnabled, alerts },
+        null,
+        2,
+      ) + "\n",
     );
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(
         process.env.GITHUB_STEP_SUMMARY,
-        `## Queue health\n\n${summary.recommendation}\n\n\`\`\`json\n${JSON.stringify(summary, null, 2)}\n\`\`\`\n`,
+        `## Queue health\n\n${summary.recommendation}\n\n\`\`\`json\n${JSON.stringify({ nativeQueue: summary, batchCi: batchSummary }, null, 2)}\n\`\`\`\n`,
       );
     if (summary.stopSignal) console.log("::warning::" + summary.recommendation);
   }

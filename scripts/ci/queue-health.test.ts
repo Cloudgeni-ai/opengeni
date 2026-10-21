@@ -1,6 +1,10 @@
 import { test, expect } from "bun:test";
 import {
   isRedMain,
+  isBatchRun,
+  batchTiming,
+  collectBatchTimings,
+  summarizeBatches,
   publicAlertsEnabled,
   queuePullNumber,
   queueTiming,
@@ -46,6 +50,71 @@ const jobs = [
     conclusion: "success",
   },
 ];
+
+test("batch telemetry binds exact attempt jobs but never invents readiness, build, landing or culprit evidence", () => {
+  const candidate = {
+    ...run,
+    event: "push",
+    head_branch: "queue/shadow-traffic/abc",
+    path: ".github/workflows/batch-ci.yml",
+    run_attempt: 2,
+    conclusion: "failure",
+  };
+  const calls: string[] = [];
+  const rows = collectBatchTimings(
+    (path, method) => {
+      expect(method).toBeUndefined();
+      calls.push(path);
+      return { jobs };
+    },
+    "owner/repo",
+    [candidate, run],
+  );
+  expect(calls).toEqual(["repos/owner/repo/actions/runs/42/attempts/2/jobs?per_page=100&page=1"]);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({
+    attempt: 2,
+    readyAt: null,
+    builtAt: null,
+    landedAt: null,
+    verifiedOutcome: "unknown",
+    providerConclusion: "failure",
+  });
+  const summary = summarizeBatches(rows);
+  expect(summary.ci.p95Minutes).toBe(14);
+  expect(summary.providerStartDelay.p95Minutes).toBe(1);
+  expect(summary.providerRedRuns).toBe(1);
+  expect(summary.queueWait.p95Minutes).toBeNull();
+  expect(summary.stopSignal).toBeNull();
+});
+
+test("batch run filtering excludes ordinary pushes and unrelated workflow paths", () => {
+  expect(
+    isBatchRun({
+      ...run,
+      event: "push",
+      head_branch: "queue/live/abc",
+      path: ".github/workflows/batch-ci.yml",
+    }),
+  ).toBe(true);
+  expect(
+    isBatchRun({
+      ...run,
+      event: "push",
+      head_branch: "main",
+      path: ".github/workflows/batch-ci.yml",
+    }),
+  ).toBe(false);
+  expect(isBatchRun({ ...run, event: "push", head_branch: "queue/live/abc" })).toBe(false);
+});
+
+test("batch cancellation is not a failing PR and empty samples remain unknown", () => {
+  const summary = summarizeBatches([batchTiming({ ...run, conclusion: "cancelled" }, jobs)]);
+  expect(summary.cancellations).toBe(1);
+  expect(summary.providerRedRuns).toBe(0);
+  expect(summarizeBatches([]).ci.p95Minutes).toBeNull();
+  expect(batchTiming({ ...run, status: "in_progress" }, jobs).ciFinishedAt).toBeNull();
+});
 
 test("stage evidence binds queue event, exact attempt jobs and landed PR; metadata update time is not CI finish", () => {
   expect(queuePullNumber(run.head_branch)).toBe(123);

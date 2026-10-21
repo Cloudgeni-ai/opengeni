@@ -251,6 +251,14 @@ percentiles. A rolling-day p95 enqueue-to-CI-start wait over 30 minutes sets
 `stopSignal: true` and recommends true batching (option B). Reports are retained
 for 30 days; no pre-activation native stage times are invented.
 
+The in-house batcher adds `Batch CI` completion receipts and hourly reconciliation
+to the same report. `batchRows` and `batchSummary` contain exact-attempt provider
+job timing and separate cancellation/provider-red counts. A provider-red run is
+not itself a verified code-failure verdict. These rows deliberately leave ready,
+actual build and landing timestamps unknown: deterministic candidate commit dates
+are not build timestamps. The controller stage ledger owns those stages and its
+rolling-day wait signal; an unknown batch queue wait must not be read as healthy.
+
 Landing instrumentation does **not** post public comments or issues. Explicit
 rollout opt-in `QUEUE_HEALTH_ALERTS=true` enables the hourly/manual reconciliation
 lane as the sole public writer. For red **push CI on main**, it comments on the
