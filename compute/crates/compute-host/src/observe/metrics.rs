@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 use compute_core::{Failure, Level, Outcome, Step};
+// Every way a step ends, and the classes durations are kept by, as named
+// on events and metrics.
+use compute_protocol::host_metrics::{
+    DIRECTIONS, HEALTH, OUTCOME_CLASSES, PRESSURES, SIGNALS, STEP_OUTCOMES as OUTCOMES,
+};
 
 use crate::protocol::ErrorCode;
 
@@ -218,18 +223,6 @@ fn result_index(result: Option<ErrorCode>) -> usize {
     })
 }
 
-/// Every way a step ends, as named on events and metrics.
-const OUTCOMES: [&str; 8] = [
-    "done",
-    "cancelled",
-    "transient",
-    "untrusted",
-    "remote_untrusted",
-    "memory_lost",
-    "unsavable",
-    "fatal",
-];
-
 fn outcome_index(outcome: Outcome) -> usize {
     match outcome {
         Outcome::Done => 0,
@@ -259,8 +252,6 @@ fn outcome_class(outcome: Outcome) -> usize {
         Outcome::Failed(_) => 2,
     }
 }
-const OUTCOME_CLASSES: [&str; 3] = ["done", "cancelled", "failed"];
-
 /// A canary path; see [`crate::observe::canary`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanaryPath {
@@ -351,9 +342,7 @@ impl DropReason {
 
 /// Upper bounds of duration histogram buckets, in seconds: from a resume
 /// (milliseconds) to a slow archive (minutes).
-pub const BOUNDS: [f64; 16] = [
-    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0,
-];
+pub use compute_protocol::host_metrics::BOUNDS;
 
 /// A histogram of durations over [`BOUNDS`].
 #[derive(Debug)]
@@ -446,7 +435,7 @@ pub struct Gauges {
 
 /// The resources pressure stall information covers, in
 /// [`Gauges::pressure`] order.
-pub const PRESSURE_RESOURCES: [&str; 3] = ["memory", "io", "cpu"];
+pub use compute_protocol::host_metrics::PRESSURE_RESOURCES;
 
 /// Every metric the agent keeps; see the module documentation.
 #[derive(Debug)]
@@ -664,7 +653,7 @@ impl Metrics {
         each.sum("compute.stream.opened", &[], opened);
         each.sum("compute.stream.closed", &[], closed);
         each.gauge("compute.stream.open", &[], opened.saturating_sub(closed));
-        for (direction, bytes) in ["to_guest", "to_client"].iter().zip(&self.stream_bytes) {
+        for (direction, bytes) in DIRECTIONS.iter().zip(&self.stream_bytes) {
             each.sum(
                 "compute.stream.bytes",
                 &label(&[("compute.direction", direction)]),
@@ -681,7 +670,7 @@ impl Metrics {
             );
         }
         self.visit_canary(each);
-        for (signal, reasons) in ["logs", "metrics"].iter().zip(&self.dropped) {
+        for (signal, reasons) in SIGNALS.iter().zip(&self.dropped) {
             for (reason, count) in DropReason::ALL.iter().zip(reasons) {
                 each.sum(
                     "compute.export.dropped",
@@ -782,11 +771,10 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
             Duration::from_millis(gauges.oldest_ms[step.index()]).as_secs_f64(),
         );
     }
-    for (health, count) in [
-        ("broken", gauges.broken),
-        ("blocked", gauges.blocked),
-        ("unsavable", gauges.unsavable),
-    ] {
+    for (health, count) in HEALTH
+        .iter()
+        .zip([gauges.broken, gauges.blocked, gauges.unsavable])
+    {
         each.gauge(
             "compute.sandbox.unhealthy",
             &[("compute.health", health)],
@@ -807,7 +795,7 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
         }
     }
     for (resource, kinds) in PRESSURE_RESOURCES.iter().zip(&gauges.pressure) {
-        for (kind, total) in ["some", "full"].iter().zip(kinds) {
+        for (kind, total) in PRESSURES.iter().zip(kinds) {
             if let Some(total) = total {
                 each.sum_since_boot(
                     "compute.host.pressure.stall",
@@ -852,6 +840,40 @@ pub(crate) trait Visitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compute_protocol::host_metrics as listed;
+
+    #[test]
+    fn labels_take_the_values_the_control_service_passes_on() {
+        let names = |all: &[&'static str]| all.to_vec();
+        assert_eq!(names(&Cause::ALL.map(Cause::name)), listed::CAUSES);
+        assert_eq!(names(&Alarm::ALL.map(Alarm::name)), listed::ALARMS);
+        assert_eq!(
+            names(&RequestKind::ALL.map(RequestKind::name)),
+            listed::REQUESTS
+        );
+        let results: Vec<&str> = std::iter::once(None)
+            .chain(ERROR_CODES.map(Some))
+            .map(result_name)
+            .collect();
+        assert_eq!(results, listed::RESULTS);
+        assert_eq!(
+            names(&CanaryPath::ALL.map(CanaryPath::name)),
+            listed::CANARY_PATHS
+        );
+        assert_eq!(
+            names(&CanaryOutcome::ALL.map(CanaryOutcome::name)),
+            listed::CANARY_OUTCOMES
+        );
+        assert_eq!(
+            names(&DropReason::ALL.map(DropReason::name)),
+            listed::DROP_REASONS
+        );
+        assert_eq!(names(&LEVELS.map(level_name)), listed::LEVELS);
+        assert_eq!(
+            names(&Step::ALL.map(crate::protocol::step_name)),
+            listed::STEPS
+        );
+    }
 
     #[test]
     fn durations_land_in_the_first_bucket_that_holds_them() {

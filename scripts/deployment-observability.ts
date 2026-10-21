@@ -3,6 +3,7 @@ export type ObservabilityStackProfile = "single-node" | "production";
 interface ObservabilityStackOptions {
   profile?: ObservabilityStackProfile;
   opensandbox?: boolean;
+  compute?: boolean;
   namespace?: string;
   releaseName?: string;
   appNamespace?: string;
@@ -18,6 +19,7 @@ export interface ObservabilityStackPlan {
   appReleaseName: string;
   environment: string;
   opensandbox: boolean;
+  compute: boolean;
   chartPath: "deploy/observability";
   chartVersion: "0.1.9";
   kubePrometheusStackVersion: "87.16.1";
@@ -37,6 +39,7 @@ interface Args {
   appReleaseName: string;
   environment?: string;
   opensandbox: boolean;
+  compute: boolean;
   json: boolean;
 }
 
@@ -50,6 +53,7 @@ if (import.meta.main) {
     appReleaseName: args.appReleaseName,
     environment: args.environment,
     opensandbox: args.opensandbox,
+    compute: args.compute,
   });
 
   if (args.json) {
@@ -92,11 +96,13 @@ export function observabilityStackPlanFor(
     input.environment ?? (profile === "production" ? "production" : "self-hosted"),
   );
   const opensandbox = input.opensandbox ?? false;
+  const compute = input.compute ?? false;
   const profileValues =
     profile === "production" ? "deploy/observability/values.production.example.yaml" : null;
   const valuesFiles = [
     ...(profileValues ? [profileValues] : []),
     ...(opensandbox ? ["deploy/observability/values.opensandbox.yaml"] : []),
+    ...(compute ? ["deploy/observability/values.compute.yaml"] : []),
   ];
   const valuesArgs = valuesFiles.map((path) => ` --values ${path}`).join("");
   const revisionExpression = "${OPENGENI_SOURCE_REVISION:-$(git rev-parse HEAD)}";
@@ -111,6 +117,7 @@ export function observabilityStackPlanFor(
     appReleaseName,
     environment,
     opensandbox,
+    compute,
     chartPath: "deploy/observability",
     chartVersion: "0.1.9",
     kubePrometheusStackVersion: "87.16.1",
@@ -134,6 +141,9 @@ export function observabilityStackPlanFor(
       opensandbox
         ? "OpenSandbox monitoring is enabled: install the pinned OpenSandbox CRDs and controller metrics Service before this wrapper."
         : "OpenSandbox custom-resource and controller monitoring remains disabled unless --opensandbox is selected.",
+      compute
+        ? "Opengeni compute host metrics are enabled: Prometheus's OTLP receiver is on; set computeControl.metrics.hostsTo in the application release to its /api/v1/otlp/v1/metrics endpoint, and run hosts with --otlp-metrics-to-control."
+        : "Prometheus's OTLP receiver for Opengeni compute host metrics remains off unless --compute is selected.",
       "Install the wrapper first so the Prometheus Operator CRDs exist before the Opengeni chart renders ServiceMonitor and PrometheusRule resources.",
       "Integrate deploy/observability/opengeni.values.example.yaml into the next ordinary Opengeni application release with its exact chart version and authoritative values; the observability plan never upgrades or rolls back application workloads and never runs application hooks.",
       "Prometheus discovers monitoring resources only in namespaces labeled opengeni.ai/monitoring=enabled.",
@@ -183,6 +193,7 @@ function parseArgs(values: string[]): Args {
     appNamespace: "opengeni",
     appReleaseName: "opengeni",
     opensandbox: false,
+    compute: false,
     json: false,
   };
 
@@ -194,6 +205,10 @@ function parseArgs(values: string[]): Args {
     }
     if (value === "--opensandbox") {
       out.opensandbox = true;
+      continue;
+    }
+    if (value === "--compute") {
+      out.compute = true;
       continue;
     }
     const [key, inline] = value.split("=", 2);

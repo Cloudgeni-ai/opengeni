@@ -7,6 +7,9 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: compute-control
+    {{- if ($cc.metrics).port }}
+    opengeni.ai/metrics-endpoint: "true"
+    {{- end }}
 spec:
   type: ClusterIP
   ports:
@@ -14,6 +17,12 @@ spec:
       port: {{ $cc.service.apiPort }}
       targetPort: http
       protocol: TCP
+    {{- with ($cc.metrics).port }}
+    - name: metrics
+      port: {{ int64 . }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: compute-control

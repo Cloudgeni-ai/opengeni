@@ -21,6 +21,9 @@
 //! issues its own host-endpoint certificate and each host's, for the
 //! instance an identity token proves ([`identity`]) or the name a current
 //! certificate holds.
+//!
+//! Each replica may serve its metrics for Prometheus on a listener of its
+//! own, and pass hosts' metrics on to a metrics store ([`metrics`]).
 
 pub mod api;
 pub mod authority;
@@ -33,6 +36,7 @@ pub mod init;
 pub mod keys;
 pub mod leader;
 pub mod link;
+pub mod metrics;
 pub mod service;
 pub mod store;
 pub mod tls;
@@ -51,6 +55,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::hosts::Hosts;
 use crate::leader::Scaling;
+use crate::metrics::Metrics;
 use crate::service::{Service, Settings};
 use crate::store::Store;
 use crate::tls::Tls;
@@ -86,6 +91,11 @@ pub struct Config {
     /// Where the E2B front door listens, and how it runs; `None` for no
     /// front door.
     pub e2b: Option<e2b::listen::Listen>,
+    /// Where Prometheus scrapes the replica's metrics; `None` for nowhere.
+    pub metrics: Option<SocketAddr>,
+    /// The OTLP/HTTP metrics endpoint hosts' metrics are passed on to;
+    /// `None` takes none.
+    pub host_metrics: Option<String>,
 }
 
 /// A running replica; dropping it stops it.
@@ -97,6 +107,8 @@ pub struct Running<S> {
     pub hosts: SocketAddr,
     /// Where its E2B front door listens, if it has one.
     pub e2b: Option<SocketAddr>,
+    /// Where its metrics are served, if they are.
+    pub metrics: Option<SocketAddr>,
     pub service: Arc<Service<S>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -131,6 +143,12 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         .with_context(|| format!("listening for callers on {}", config.api))?;
     let hosts = host_listener.local_addr()?;
     let api = api_listener.local_addr()?;
+    let metrics = Arc::new(Metrics::default());
+    let host_metrics = config
+        .host_metrics
+        .as_deref()
+        .map(|url| hostapi::HostMetrics::new(url, Arc::clone(&metrics)).map(Arc::new))
+        .transpose()?;
     let acceptor = TlsAcceptor::from(Arc::clone(&config.tls.server));
     let certificates = Arc::new(hostapi::Certificates {
         authority: Arc::clone(&config.tls.authority),
@@ -142,8 +160,9 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         terms,
         service.settings().links.clone(),
         certificates,
+        host_metrics,
     );
-    let api_router = api::router(Arc::clone(&service), config.operator);
+    let api_router = api::router(Arc::clone(&service), config.operator, Arc::clone(&metrics));
     let mut tasks = vec![
         tokio::spawn(view::follow(Arc::clone(&view), Arc::clone(&store))),
         tokio::spawn(leader::lead(
@@ -151,6 +170,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             Arc::clone(&view),
             terms,
             config.scaling,
+            Arc::clone(&metrics),
         )),
         tokio::spawn(hostapi::serve(host_listener, acceptor, host_router)),
         tokio::spawn(Arc::clone(&config.tls.own).keep_fresh()),
@@ -162,6 +182,18 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         )),
         tokio::spawn(prune_requests(Arc::clone(&service))),
     ];
+    let metrics = match config.metrics {
+        Some(address) => {
+            let listener = TcpListener::bind(address)
+                .await
+                .with_context(|| format!("listening for Prometheus on {address}"))?;
+            let bound = listener.local_addr()?;
+            let router = metrics::router(metrics, Arc::clone(&view));
+            tasks.push(tokio::spawn(metrics::serve(listener, router)));
+            Some(bound)
+        }
+        None => None,
+    };
     let e2b = match config.e2b {
         Some(e2b::listen::Listen {
             address,
@@ -184,6 +216,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         api,
         hosts,
         e2b,
+        metrics,
         service,
         tasks,
     })

@@ -19,8 +19,8 @@ use compute_control::tls::Tls;
 use compute_control::{Config, Running};
 use compute_fleet::{LeaseTerms, OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
-    Answer, Answered, Capacity, Envelope, Held, HostInfo, REGISTER_PATH, RENEW_PATH, ReadyClones,
-    Register, Registered, Renew, Renewed, Verdict,
+    Answer, Answered, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH, RENEW_PATH,
+    ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
 use compute_protocol::host::{ErrorCode, Id, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
@@ -260,6 +260,19 @@ impl Fleet {
 
     /// A fleet whose leader sizes `scaling`, with `settings` adjusted.
     pub async fn start_with(scaling: Option<Scaling>, adjust: impl FnOnce(&mut Settings)) -> Self {
+        Self::start_full(scaling, None, adjust).await
+    }
+
+    /// A fleet that passes hosts' metrics on to `store`.
+    pub async fn start_passing_metrics_to(store: &str) -> Self {
+        Self::start_full(None, Some(store.to_owned()), |_| {}).await
+    }
+
+    async fn start_full(
+        scaling: Option<Scaling>,
+        host_metrics: Option<String>,
+        adjust: impl FnOnce(&mut Settings),
+    ) -> Self {
         let pki = Pki::new();
         let store = Arc::new(MemoryStore::new());
         for (key, team) in [
@@ -295,6 +308,8 @@ impl Fleet {
                 scaling,
                 seed: 7,
                 e2b: None,
+                metrics: Some(loopback),
+                host_metrics,
             },
         )
         .await
@@ -311,6 +326,23 @@ impl Fleet {
 
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.running.api)
+    }
+
+    /// The replica's metrics, as Prometheus scrapes them.
+    pub async fn scrape(&self) -> String {
+        let address = self.running.metrics.expect("a metrics listener");
+        let response = self
+            .http
+            .get(format!("http://{address}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            compute_control::metrics::CONTENT_TYPE
+        );
+        response.text().await.unwrap()
     }
 
     /// A request to the public API with `key`.
@@ -554,6 +586,26 @@ impl FakeHost {
     pub async fn register_again(&self) -> Registered {
         let attempt = self.inner.attempt.load(Ordering::SeqCst);
         send_register(&self.inner, attempt).await
+    }
+
+    /// Posts `export` as its metrics, over its mutual TLS; answers the
+    /// status, the `Retry-After` it was given, if any, and the body.
+    pub async fn post_metrics(&self, export: &Value) -> (u16, Option<String>, String) {
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{METRICS_PATH}", self.inner.hosts_url))
+            .json(export)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        (status, retry_after, response.text().await.unwrap())
     }
 
     /// Stops or resumes its renewals.

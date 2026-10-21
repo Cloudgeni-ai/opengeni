@@ -746,7 +746,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     // A host in a fleet keeps agent links for the sandboxes that run
     // Opengeni's agent; its tokens come from the control service.
     let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
-    let observer = args.observe.observer(&about)?;
+    let observer = args.observe.observer(&about, fleet.as_ref())?;
     let canary = args.observe.canary(&args.root, args.store.is_some())?;
     // The canary makes sandboxes of its own, which a fleet's service would
     // not know of: the host would drop them when it registers.

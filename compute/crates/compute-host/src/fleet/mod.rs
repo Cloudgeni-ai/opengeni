@@ -37,6 +37,7 @@ pub use gate::{LeaseGate, boot_now};
 pub use guard::{GuardConfig, STEP as GUARD_STEP, guard_ready, hold_lock, ready_lock, run_guard};
 pub use lease::{terms_of, wire_terms};
 pub use leased::Leased;
+pub use link::MetricsRoute;
 pub use record::LeaseFile;
 pub use tls::{Tls, TlsFiles};
 

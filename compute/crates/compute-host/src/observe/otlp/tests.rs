@@ -203,6 +203,121 @@ fn every_metric_has_a_unit_and_description() {
     }
 }
 
+/// Metrics with every label value a host can record.
+fn every_series() -> Metrics {
+    use compute_core::{Failure, Outcome, Step};
+
+    use super::super::metrics::{Cause, DropReason, RequestKind, Signal};
+    use crate::protocol::ErrorCode;
+
+    let metrics = Metrics::default();
+    let outcomes = [
+        Outcome::Done,
+        Outcome::Cancelled,
+        Outcome::Failed(Failure::Transient),
+        Outcome::Failed(Failure::Untrusted),
+        Outcome::Failed(Failure::RemoteUntrusted),
+        Outcome::Failed(Failure::MemoryLost),
+        Outcome::Failed(Failure::Unsavable),
+        Outcome::Failed(Failure::Fatal),
+    ];
+    for step in Step::ALL {
+        for cause in Cause::ALL {
+            for outcome in outcomes {
+                metrics.step(step, cause, outcome, Duration::from_millis(3));
+            }
+        }
+    }
+    let codes = [
+        ErrorCode::Invalid,
+        ErrorCode::NotFound,
+        ErrorCode::Exists,
+        ErrorCode::Busy,
+        ErrorCode::Broken,
+        ErrorCode::Blocked,
+        ErrorCode::Removed,
+        ErrorCode::Stale,
+        ErrorCode::Unreachable,
+        ErrorCode::HostFull,
+        ErrorCode::Unavailable,
+        ErrorCode::Expired,
+        ErrorCode::Internal,
+    ];
+    for kind in RequestKind::ALL {
+        for result in std::iter::once(None).chain(codes.map(Some)) {
+            metrics.request(kind, result, Duration::from_millis(1));
+        }
+    }
+    metrics.stream_opened();
+    metrics.stream_closed(10, 20);
+    for alarm in Alarm::ALL {
+        metrics.alarm(alarm);
+    }
+    for path in CanaryPath::ALL {
+        for outcome in CanaryOutcome::ALL {
+            metrics.canary(path, outcome, Duration::from_millis(5), 1_700_000_000_000);
+        }
+    }
+    for signal in [Signal::Logs, Signal::Metrics] {
+        for reason in [DropReason::Full, DropReason::Rejected, DropReason::Failed] {
+            metrics.dropped(signal, reason, 1);
+        }
+    }
+    metrics.set_gauges(&Gauges {
+        sampled_unix_ms: 9_000,
+        available: Some(1),
+        zswap_stored: Some(1),
+        zswap_original: Some(1),
+        huge_pages_free: Some(1),
+        pressure: [[Some(1); 2]; 3],
+        transfers_foreground: Some(1),
+        transfers_background: Some(1),
+        ..Gauges::default()
+    });
+    metrics
+}
+
+#[test]
+fn the_control_service_passes_on_every_data_point_a_host_sends() {
+    let metrics = every_series();
+    let origin = Origin {
+        resource: vec![
+            ("service.name".into(), "compute-host".into()),
+            ("service.version".into(), "0.0.0-sha.abc123".into()),
+            ("service.instance.id".into(), "lab-1".into()),
+            ("host.name".into(), "lab-1".into()),
+            ("host.arch".into(), "amd64".into()),
+            ("os.type".into(), "linux".into()),
+            ("compute.memory_profile".into(), "bare_metal".into()),
+        ],
+        ..origin()
+    };
+    let (body, points) =
+        super::metrics(&origin, &metrics, Some(Process::default()), 10_000_000_000);
+    let checked = compute_protocol::host_metrics::check(&body, &["lab-1".to_owned()]).unwrap();
+    assert_eq!(checked.problem, None);
+    assert_eq!((checked.kept, checked.rejected), (points as u64, 0));
+    let listed = compute_protocol::host_metrics::METRICS.len();
+    let sent = parse(&body)["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(sent, listed, "every listed metric is one a host sends");
+    let keys = |body: &[u8]| -> Vec<String> {
+        parse(body)["resourceMetrics"][0]["resource"]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attribute| attribute["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        keys(&checked.export),
+        compute_protocol::host_metrics::RESOURCE,
+        "only the service's name and the host's go on"
+    );
+}
+
 #[test]
 fn partial_success_counts_what_was_rejected() {
     assert_eq!(rejected(b""), Ok((0, None)));

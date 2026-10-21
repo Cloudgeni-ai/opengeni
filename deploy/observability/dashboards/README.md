@@ -1,6 +1,6 @@
 # Opengeni Grafana dashboards
 
-Dashboards-as-code for the Opengeni control plane. Eight boards, each answering a
+Dashboards-as-code for the Opengeni control plane. Nine boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
@@ -13,8 +13,9 @@ different "manage and fix problems as soon as they arise" question:
 | `google-drive-sync.json` | **Opengeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
 | `api-latency.json` | **Opengeni · API Latency** | Is each interactive API route meeting 500 ms P95 for successful requests, with enough samples and without increasing failures? Compares the selected window with the preceding equal window and keeps all-status history separate. |
 | `runtime-failures.json` | **Opengeni · Runtime Failures** | Are alerts firing, scrape targets healthy, synthetic probes fresh, turn workers restarting, recovery exhausted, turns failing or recovering, MCP connections or tool calls broken or slow, sandboxes/providers failing, the API returning 5xx, or the durable write path saturated? |
+| `compute.json` | **Opengeni · Compute** | Is Opengeni compute healthy and does it have room — hosts by state with the memory, processors and disk they can still promise, lease renewals and the host group as the control service's leader sees them, the control service's API by route and outcome, and each host's sandboxes, memory, pressure, operations and alarms from the metrics it passes on? Host panels follow the release's hosts through `compute_fleet_host_info`. |
 
-All eight are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All nine are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded. The Turn Startup dashboard additionally requires one exact
 `$namespace`, `$environment`, and `$release` selection so a shared Prometheus

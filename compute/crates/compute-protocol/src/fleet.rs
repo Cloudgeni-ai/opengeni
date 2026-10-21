@@ -30,6 +30,10 @@ pub const LINK_TOKENS_PATH: &str = "/v1/hosts/link-tokens";
 /// ([`CertificateAsked`]), the one route a caller without a certificate
 /// may use.
 pub const CERTIFICATE_PATH: &str = "/v1/hosts/certificate";
+/// See [`REGISTER_PATH`]: where a host posts its metrics, an OTLP/HTTP
+/// metrics export in JSON whose resource names the host (`host.name`),
+/// for the service to pass on to its metrics store.
+pub const METRICS_PATH: &str = "/v1/hosts/metrics";
 
 /// How long a lease lasts and how often it is renewed, as the service
 /// tells a host when it registers.

@@ -1,6 +1,8 @@
 //! The exporter: takes every event off the agent's hands, writes it to the
 //! local journal, and sends events and metrics to an OpenTelemetry
-//! collector over OTLP/HTTP with JSON encoding.
+//! collector over OTLP/HTTP with JSON encoding. Metrics may go to the
+//! control service instead, over the fleet's mutual TLS, which passes them
+//! on to its metrics store.
 //!
 //! Nothing here can slow the agent. Events wait in a bounded buffer while
 //! the collector is slow or away; when it is full the oldest go, counted.
@@ -31,11 +33,18 @@ const MAX_RESPONSE: usize = 64 << 10;
 /// Where and how often to export.
 #[derive(Clone, Debug)]
 pub struct ExportConfig {
-    /// The collector's OTLP/HTTP base URL, such as `http://127.0.0.1:4318`;
-    /// requests go to `/v1/logs` and `/v1/metrics` under it.
-    pub endpoint: String,
-    /// Headers every request carries, such as an authorization.
+    /// The collector's OTLP/HTTP base URL, such as `http://127.0.0.1:4318`:
+    /// events go to `/v1/logs` under it, and metrics to `/v1/metrics`
+    /// unless they go to the control service. Without it events stay on
+    /// the host.
+    pub endpoint: Option<String>,
+    /// Headers every request to the collector carries, such as an
+    /// authorization.
     pub headers: Vec<(String, String)>,
+    /// Where metrics go instead of the collector: the control service's
+    /// metrics route ([`compute_protocol::fleet::METRICS_PATH`]), with a
+    /// client that reaches it over the fleet's mutual TLS.
+    pub control: Option<(String, reqwest::Client)>,
     /// How long one attempt may take.
     pub timeout: Duration,
     /// How long a request may keep retrying before its batch is dropped.
@@ -57,8 +66,26 @@ impl ExportConfig {
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
-            endpoint: endpoint.into().trim_end_matches('/').to_owned(),
+            endpoint: Some(endpoint.into().trim_end_matches('/').to_owned()),
+            ..Self::nowhere()
+        }
+    }
+
+    /// Sends metrics to the control service at `url` through `client`,
+    /// and keeps events on the host, with the defaults of [`Self::new`].
+    #[must_use]
+    pub fn to_control(url: impl Into<String>, client: reqwest::Client) -> Self {
+        Self {
+            control: Some((url.into(), client)),
+            ..Self::nowhere()
+        }
+    }
+
+    fn nowhere() -> Self {
+        Self {
+            endpoint: None,
             headers: Vec::new(),
+            control: None,
             timeout: Duration::from_secs(10),
             retry_for: Duration::from_secs(60),
             logs_every: Duration::from_secs(1),
@@ -156,7 +183,10 @@ pub(crate) async fn run(
             message = messages.recv() => {
                 match message {
                     Some(Message::Event(event)) => {
-                        let buffer = client.as_ref().map(|_| (&mut pending, capacity));
+                        let buffer = client
+                            .as_ref()
+                            .filter(|exporter| exporter.sends_logs())
+                            .map(|_| (&mut pending, capacity));
                         deliver(&sinks, event, buffer, &metrics);
                     }
                     Some(Message::Flush(done)) => {
@@ -174,7 +204,7 @@ pub(crate) async fn run(
                     logs = Some(exporter.send_logs(&mut pending));
                 }
             }
-            _ = metrics_tick.tick(), if client.is_some() && points.is_none() => {
+            _ = metrics_tick.tick(), if client.as_ref().is_some_and(Exporter::sends_metrics) && points.is_none() => {
                 if let Some(exporter) = &client {
                     points = Some(exporter.send_metrics());
                 }
@@ -216,9 +246,11 @@ async fn drain(
         let (sent, count) = finished(&mut last).await;
         account(metrics, Signal::Logs, sent, count);
     }
-    let mut last = Some(exporter.send_metrics());
-    let (sent, count) = finished(&mut last).await;
-    account(metrics, Signal::Metrics, sent, count);
+    if exporter.sends_metrics() {
+        let mut last = Some(exporter.send_metrics());
+        let (sent, count) = finished(&mut last).await;
+        account(metrics, Signal::Metrics, sent, count);
+    }
 }
 
 /// Hands one event to the journal, the tap and the collector's buffer,
@@ -258,16 +290,47 @@ fn account(metrics: &Metrics, signal: Signal, sent: Sent, count: u64) {
     }
 }
 
-/// Sends requests to one collector.
+/// Sends requests to the collector, and metrics to the control service
+/// when they go there.
 #[derive(Clone)]
 struct Exporter {
+    /// The collector's client.
     client: reqwest::Client,
     config: ExportConfig,
     origin: Origin,
     metrics: Arc<Metrics>,
 }
 
+/// The path of metrics requests to a collector.
+const METRICS: &str = "/v1/metrics";
+
 impl Exporter {
+    /// Whether events go anywhere but the journal.
+    fn sends_logs(&self) -> bool {
+        self.config.endpoint.is_some()
+    }
+
+    /// Whether metrics go anywhere.
+    fn sends_metrics(&self) -> bool {
+        self.config.endpoint.is_some() || self.config.control.is_some()
+    }
+
+    /// Where requests for `path` go: the client that reaches it, its URL,
+    /// and whether they carry the collector's headers.
+    fn target(&self, path: &str) -> (&reqwest::Client, String, bool) {
+        match &self.config.control {
+            Some((url, client)) if path == METRICS => (client, url.clone(), false),
+            _ => (
+                &self.client,
+                format!(
+                    "{}{path}",
+                    self.config.endpoint.as_deref().unwrap_or_default()
+                ),
+                true,
+            ),
+        }
+    }
+
     /// Starts sending up to a batch of the oldest pending events.
     fn send_logs(&self, pending: &mut VecDeque<Event>) -> InFlight {
         let take = pending.len().min(self.config.batch.max(1));
@@ -282,7 +345,7 @@ impl Exporter {
     fn send_metrics(&self) -> InFlight {
         let (body, points) =
             otlp::metrics(&self.origin, &self.metrics, process(), unix_nanos_now());
-        InFlight(self.spawn("/v1/metrics", body), points as u64)
+        InFlight(self.spawn(METRICS, body), points as u64)
     }
 
     fn spawn(&self, path: &'static str, body: Vec<u8>) -> JoinHandle<Sent> {
@@ -292,20 +355,21 @@ impl Exporter {
 
     /// Posts `body` to `path`, retrying what is worth retrying.
     async fn post(&self, path: &str, body: Vec<u8>) -> Sent {
-        let url = format!("{}{path}", self.config.endpoint);
+        let (client, url, collector) = self.target(path);
         let body = bytes::Bytes::from(body);
         // Durations only: a collector may ask for any delay, and adding
         // one that large to an instant would overflow.
         let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(500);
         loop {
-            let mut request = self
-                .client
+            let mut request = client
                 .post(&url)
                 .header("content-type", "application/json")
                 .body(body.clone());
-            for (name, value) in &self.config.headers {
-                request = request.header(name, value);
+            if collector {
+                for (name, value) in &self.config.headers {
+                    request = request.header(name, value);
+                }
             }
             let (problem, wait) = match request.send().await {
                 Ok(response) if response.status().is_success() => match read_body(response).await {
