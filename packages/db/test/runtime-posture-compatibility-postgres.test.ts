@@ -103,7 +103,7 @@ realTest(
       const routine = future.privateRoutines.find((entry) => entry.name === name)!;
       expect(routine.execute).toBe(false);
       const renamed = { ...routine, name: `future_${name}` };
-      if (routine.securityDefiner && routine.triggerCallable) {
+      if (routine.securityDefiner && (routine.triggerCallable || routine.hasDependents)) {
         // Revoked EXECUTE does not prevent trigger invocation. These additions
         // require an explicit compatibility contract; never widen their ACLs.
         unsafeTriggerNames.push(renamed.name);
@@ -217,6 +217,27 @@ realTest(
       await expectUnready("future_posture_trigger() exposes SECURITY DEFINER execution");
       await admin`DROP FUNCTION opengeni_private.future_posture_trigger()`;
 
+      await admin.unsafe(`SET ROLE "${owner}";
+        CREATE FUNCTION opengeni_private.future_posture_sfunc(state text, value integer) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 'BEGIN RETURN current_user::text; END';
+        REVOKE ALL ON FUNCTION opengeni_private.future_posture_sfunc(text, integer) FROM PUBLIC, opengeni_app;
+        CREATE AGGREGATE opengeni_private.future_posture_aggregate(integer) (sfunc=opengeni_private.future_posture_sfunc, stype=text);
+        RESET ROLE;`);
+      await expectUnready("future_posture_sfunc(text, integer) exposes SECURITY DEFINER execution");
+      const { sql } = await import("drizzle-orm");
+      await expect(
+        Promise.resolve(
+          client!.db.execute(sql`SELECT opengeni_private.future_posture_sfunc('x', 1)`),
+        ),
+      ).rejects.toThrow();
+      // PostgreSQL checks EXECUTE on the aggregate, not its support function.
+      const aggregateRows = await client!.db.execute(
+        sql`SELECT opengeni_private.future_posture_aggregate(1) AS owner`,
+      );
+      expect(Array.from(aggregateRows as unknown as { owner: string }[])[0]?.owner).toBe(owner);
+      await admin`DROP AGGREGATE opengeni_private.future_posture_aggregate(integer)`;
+      await expectReady();
+      await admin`DROP FUNCTION opengeni_private.future_posture_sfunc(text, integer)`;
+
       for (const name of [
         "subscription_plan_catalog_revisions",
         "credit_promotion_policy_revisions",
@@ -289,6 +310,8 @@ realTest(
       RESET ROLE;
       DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = 'deployment_model_catalog'::regclass AND inhparent = to_regclass('future_parent')) THEN ALTER TABLE deployment_model_catalog NO INHERIT future_parent; END IF; END $$;
       DROP TABLE IF EXISTS future_posture_rows, future_owner_only_rows, future_parent, future_partition_parent CASCADE;
+      DROP AGGREGATE IF EXISTS opengeni_private.future_posture_aggregate(integer);
+      DROP FUNCTION IF EXISTS opengeni_private.future_posture_sfunc(text, integer);
       DROP FUNCTION IF EXISTS future_posture_invoker(), opengeni_private.future_posture_invoker(), opengeni_private.future_posture_definer(), opengeni_private.future_posture_trigger();
     `);
     }

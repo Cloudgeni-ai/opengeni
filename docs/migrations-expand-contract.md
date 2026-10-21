@@ -138,7 +138,9 @@ Unknown routines may be SECURITY INVOKER, or SECURITY DEFINER only when neither
 runtime nor PUBLIC can execute them and they are not trigger/event-trigger
 functions or bound in `pg_trigger`. PostgreSQL does not check EXECUTE when a
 trigger fires: owner-only trigger definers still require a prior explicit binary
-contract. Runtime ownership always fails. A fixed
+contract. Definers must also have no catalog dependents in `pg_depend`: aggregates
+and other support-function callers can invoke them without checking the support
+function's EXECUTE grant. Missing dependency metadata fails closed. Runtime ownership always fails. A fixed
 search path and a non-runtime owner cannot prove an unknown definer's body
 safe: it could expose an owner capability or disable owner RLS. Introduce an
 explicit, reviewed compatibility-binary contract before granting EXECUTE on
