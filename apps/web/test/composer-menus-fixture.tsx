@@ -6,7 +6,7 @@ import {
   type RepositoryContextPickerProps,
 } from "../src/components/repository-picker";
 import { FollowUpRepositoryMenuBody } from "../src/components/follow-up-repository-menu-body";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   SessionSecretsMenuBody,
   draftSecretsRows,

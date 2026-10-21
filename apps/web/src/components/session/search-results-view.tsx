@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useLayoutEffect, useRef, type KeyboardEvent, type RefObject } from "react";
 import { MarkdownText } from "@/components/markdown";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { SearchMarkdown } from "./search-markdown-highlight";
 import { SearchText } from "./search-text";
 import { cn } from "@/lib/utils";

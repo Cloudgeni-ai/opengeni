@@ -13,8 +13,8 @@ import {
 } from "lucide-react";
 import type { MouseEvent } from "react";
 
-import type { DetailBackLink } from "@/components/ui/detail-page";
-import { LogoTile } from "@/components/ui/logo-tile";
+import type { DetailBackLink } from "@opengeni/react/ui/detail-page";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { artifactKindLabel, type ArtifactKind } from "@/lib/artifact-catalog";
 import { artifactLibraryFilters, artifactLibrarySearch } from "@/lib/artifact-library-navigation";
 import type { ArtifactReturnSearch } from "@/lib/routes";

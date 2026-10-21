@@ -11,7 +11,7 @@ import {
   codexUsageReadings,
   planReportsNoResets,
 } from "./codex-connection";
-import { UsageMeter } from "./ui/usage-meter";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 
 beforeAll(() => {
   GlobalRegistrator.register();

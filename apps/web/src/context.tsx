@@ -6,7 +6,7 @@ import {
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "@/lib/shared-query";
@@ -66,12 +66,12 @@ import {
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { SecureContextWarning } from "@/components/secure-context-warning";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { NativeSignInProvider } from "@/lib/native-sign-in-context";
 import { PersonalSecurityProvider } from "@/lib/personal-security-context";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";

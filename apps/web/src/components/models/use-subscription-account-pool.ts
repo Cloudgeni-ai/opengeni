@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SubscriptionPoolSettings } from "@opengeni/sdk";
 import { ApiError } from "@/api";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "@/lib/shared-query";
 
 export type SubscriptionPoolAccount = {

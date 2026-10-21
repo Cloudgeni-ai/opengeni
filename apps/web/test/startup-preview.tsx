@@ -18,7 +18,7 @@ import type { Session, SessionEvent } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../../../packages/react/test/fake-client";
 import { useSessionStartupTimeline } from "../src/lib/session-startup-timeline";
 import { SessionWaitStatus } from "../src/components/session/session-wait-status";
-import { Button } from "../src/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import "../src/styles.css";
 
 // Production presentation with synthetic, locally controlled lifecycle events.

@@ -2,9 +2,9 @@ import { workspaceDefaultMachine } from "@/lib/workspace-default-machine";
 import { useState } from "react";
 import { toast } from "sonner";
 import { RowSelect } from "@/components/settings/row-select";
-import { SettingRow } from "@/components/ui/setting-row";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 

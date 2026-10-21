@@ -6,10 +6,10 @@
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { Field, FieldStack, TextInput, useField } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { useAppContext } from "@/context";
 import type { ScheduledTask } from "@/types";
 

@@ -8,8 +8,8 @@
 import { CheckIcon, ChevronRightIcon, LockIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { ConnectorAction } from "@/components/ui/composer-menu-action";
-import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
+import { ConnectorAction } from "@opengeni/react/ui/composer-menu-action";
+import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "@opengeni/react/ui/composer-menu";
 import {
   AGENT_CAPABILITY_GROUPS,
   UNAVAILABLE_CAPABILITY_REASON,

@@ -14,16 +14,16 @@ import {
   type IntegrationToolsBlock,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
-import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Select } from "@opengeni/react/ui/select";
 import {
   Dialog as Sheet,
   DialogDescription as SheetDescription,
   DialogHeader as SheetHeader,
   DialogTitle as SheetTitle,
-} from "@/components/ui/dialog";
+} from "@opengeni/react/ui/dialog";
 import { cn } from "@/lib/utils";
 
 /** Stable element id for a disclosure so affordances can aria-describedby it. */

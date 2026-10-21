@@ -15,23 +15,23 @@ import {
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
 import { ACCOUNT_ENABLED_LABELS, EnableAccountRow } from "./subscription-account-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import {
   DetailFact,
   DetailFacts,
   DetailSection,
   DetailSkeleton,
-} from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+} from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 export type SubscriptionAccountPlaces = {
   scopeName: string;

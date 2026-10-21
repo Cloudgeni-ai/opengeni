@@ -2,7 +2,7 @@ import type { SVGProps } from "react";
 import { OpenRouterMark, OpperMark } from "@opengeni/react";
 
 import { ChatGptMark } from "@/components/chatgpt-mark";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
 
 /* ----------------------------------------------------------------------------
    Provider marks for the Models page preview. The ChatGPT mark is the app's

@@ -3,15 +3,15 @@ import type { ProviderVaultMeta, VaultMode, VaultSummary } from "@opengeni/react
 import { Building2Icon, PlusIcon, UserIcon, UsersIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { Section } from "@/components/ui/section";
-import { SelectMenu } from "@/components/ui/select-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section } from "@opengeni/react/ui/section";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 
 import { ProviderTile } from "./provider-marks";
 import {

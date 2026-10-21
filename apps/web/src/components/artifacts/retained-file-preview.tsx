@@ -18,7 +18,7 @@ import {
 } from "@opengeni/react";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@/lib/utils";
 import {
   PRIVATE_FILE_PRESENTATION,

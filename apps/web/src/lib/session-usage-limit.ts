@@ -15,7 +15,7 @@ import {
 } from "@opengeni/sdk/session-usage-limits";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 // Not "@/lib/usage-allowances": that module belongs to the lazy budget pages'
 // chunk, which would then load with every chat.
 import { parseDollars } from "@/lib/dollars";

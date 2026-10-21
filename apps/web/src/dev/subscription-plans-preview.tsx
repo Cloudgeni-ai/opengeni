@@ -5,8 +5,8 @@ import { SubscriptionPlans } from "@/components/organization/subscription-plans"
 import { PlanSeats, SeatLimitNotice } from "@/components/organization/plan-seats";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
-import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
-import { SettingRowGroup } from "@/components/ui/setting-row";
+import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
+import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import type { BillingSummary } from "@/types";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */

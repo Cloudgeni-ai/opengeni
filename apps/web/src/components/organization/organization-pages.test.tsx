@@ -8,7 +8,7 @@ import * as RouterPackage from "@tanstack/react-router";
 import * as SonnerPackage from "sonner";
 
 import * as DestructiveModule from "@/components/ui/destructive-confirm";
-import * as DropdownModule from "@/components/ui/dropdown-menu";
+import * as DropdownModule from "@opengeni/react/ui/dropdown-menu";
 import type { OrganizationAdminIdentity } from "@/lib/organization-admin";
 import type {
   OrganizationAdministrationOverview,
@@ -33,7 +33,7 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
   useNavigate: () => navigate,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   ...DropdownModule,
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,

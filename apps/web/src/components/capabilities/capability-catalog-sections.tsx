@@ -3,10 +3,10 @@ import { GlobeIcon, Loader2Icon, PlugIcon, SearchIcon } from "lucide-react";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { LoadErrorState } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Input } from "@opengeni/react/ui/input";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
   capabilityFilterLabel,
   capabilityItemKindLabel,

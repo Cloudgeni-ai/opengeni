@@ -81,7 +81,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const { SwitcherBlock, useNewOrganizationMenuItem } = await import("./switcher-block");
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
-  await import("@/components/ui/dropdown-menu");
+  await import("@opengeni/react/ui/dropdown-menu");
 
 function AccountMenuProbe() {
   const newOrganization = useNewOrganizationMenuItem();

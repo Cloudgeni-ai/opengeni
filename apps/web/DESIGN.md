@@ -6,8 +6,10 @@ code disagree, this file wins; bring the code in line when you touch it.
 - Live reference: the DEV-only component studio at `/dev/ui-kit` (`bun run dev:web`, then
   `http://homeserver:3140/dev/ui-kit` or your dev URL). Every primitive below is shown there with
   its states, and the Pages group shows whole pages built from these decisions.
-- Primitives live in `src/components/ui/`. Reuse them. If a pattern will appear on a second route,
-  extract it into `components/ui` before shipping the second copy.
+- Primitives live in `packages/react/src/ui/` and are imported as `@opengeni/react/ui/<name>`, so
+  the web app and every embedded Opengeni surface draw the same controls. Reuse them. If a pattern
+  will appear on a second route,
+  extract it into the shared primitives before shipping the second copy.
 - Decided 27 Sep 2026 by Bendik. The kit keeps the retired alternatives visible for the history,
   marked with the "Decided" tag on the chosen one.
 
@@ -44,7 +46,7 @@ code disagree, this file wins; bring the code in line when you touch it.
 
 Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, no shadcn aliases
 (`bg-background`, `text-muted-foreground`, `bg-accent`), no `dark:` overrides inside
-`components/ui`, no `text-[10px]` / `text-[11px]` literals.
+the shared primitives, no `text-[10px]` / `text-[11px]` literals.
 
 | Token | Use |
 | --- | --- |
@@ -260,7 +262,7 @@ opacity-muted text.
 One surface and one row for every menu, in both themes: the workspace picker, the project folder
 picker, the composer "+" menu and its drill-ins, the model and voice pickers, row and header ⋯
 menus, right-click menus, selects, comboboxes and hover cards. The classes live in
-`components/ui/menu-styles.ts` (the SDK mirrors them in `packages/react/src/lib/menu-styles.ts`);
+`packages/react/src/ui/menu-styles.tsx` (the older SDK components mirror them in `packages/react/src/lib/menu-styles.ts`);
 the Radix primitives (`dropdown-menu.tsx`, `context-menu.tsx`, `select-menu.tsx`) already apply
 them, so a call site sets a width and nothing else.
 
@@ -509,7 +511,7 @@ URL (`/variable-sets/aws-production`, `/models/accounts/ops`), the page renders 
 area (the rail, or the settings rail, stays), and a back link returns to the list with its scroll
 and filters intact.
 
-The detail page anatomy (`components/ui/detail-page.tsx`, following Claude's skill page):
+The detail page anatomy (`@opengeni/react/ui/detail-page`, following Claude's skill page):
 
 ```
 ← Variable sets                                     DetailPage back
@@ -578,11 +580,11 @@ reload and browser Back work, and its back link returns to the tab or list it wa
 Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 `FlushFormPage` (or `FLUSH_FORM_PAGE_CLASS`) for `FormPage`, and the flush `AccessList`, so the
 back link, title and rows start where the section header does. Page actions use `RowButton` and
-`MoreMenu` from `components/ui/page-actions.tsx`.
+`MoreMenu` from `@opengeni/react/ui/page-actions`.
 
 **Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
-knowledge entry. Use `FormPage` from `components/ui/form-dialog.tsx`: a back link, a 20/600
+knowledge entry. Use `FormPage` from `@opengeni/react/ui/form-dialog`: a back link, a 20/600
 title, one 640px column of fields, server errors inside the form, and a sticky footer with Cancel
 (ghost) and one primary (below 640px wide the footer follows the last field instead, so it never
 covers the form). A step that waits (a sign-in code) hides the footer: the step holds its own
@@ -599,7 +601,7 @@ page. After a create, go to the new object's page.
 
 Never: a right-side sheet or panel for anything, a sheet opened from a sheet, an inline create form
 that pushes the list down, or a dialog with tabs or a list in it. `DetailSheet` and `FormSheet`
-remain in `components/ui` only for existing call sites that have not moved yet; do not add new
+remain in the shared primitives only for existing call sites that have not moved yet; do not add new
 uses.
 
 ## 9. Decided component picks

@@ -3,13 +3,13 @@ import { Suspense, type ReactNode } from "react";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
-import { ComposerMenuRowsSkeleton, lazyComposerPanel } from "@/components/ui/composer-menu";
-import { Button } from "@/components/ui/button";
+import { ComposerMenuRowsSkeleton, lazyComposerPanel } from "@opengeni/react/ui/composer-menu";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { repoCountLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 

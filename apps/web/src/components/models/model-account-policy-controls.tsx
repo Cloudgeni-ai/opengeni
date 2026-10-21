@@ -3,13 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { RowButton } from "@/components/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { ModelPicker } from "@/components/pickers";
-import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { invalidateSharedQueries, sharedQueryWriter, useSharedQuery } from "@/lib/shared-query";
 
 /** Edit one exact preferred-model mapping. Never infer model equivalence. */

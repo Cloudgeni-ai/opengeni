@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 /** Keep token entry, ownership and vault selection in the protected Secrets flow. */
 export function OnePasswordCatalogLink({

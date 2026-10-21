@@ -26,7 +26,7 @@ mock.module("sonner", () => ({
   ),
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     confirmLabel,
     description,
@@ -58,7 +58,7 @@ mock.module("@/components/ui/confirm-dialog", () => ({
 // Keep mutation/reconciliation tests independent of Radix portal geometry.
 // The production module remains Radix-backed; this semantic stand-in exposes
 // the same trigger/menuitem interaction in the test document.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <>{children}</>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,

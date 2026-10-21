@@ -15,7 +15,7 @@ import {
   type CadenceFrequency,
   type CadenceScheduleSpec,
   type CadenceValue,
-} from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/cadence-picker";
 import {
   agentConfigFromFormState,
   newScheduledTaskFormState,

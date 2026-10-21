@@ -4,13 +4,13 @@ import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from
 import { toast } from "sonner";
 
 import { ModelsFormPage } from "@/components/models/models-ui";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { ErrorMessage, TechnicalDetails } from "@/components/ui/error-message";
-import { CheckboxField, FieldStack } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
-import { SettingNavRow, SettingRow } from "@/components/ui/setting-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { ErrorMessage, TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { CheckboxField, FieldStack } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingNavRow, SettingRow } from "@opengeni/react/ui/setting-row";
 import {
   notifyModelConnectionsChanged,
   MODEL_SETTINGS_STALE_TIME_MS,
@@ -23,7 +23,7 @@ import {
   apiErrorTechnicalFacts,
   isPermissionDenied,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 
 /* ----------------------------------------------------------------------------
    What one model connection can serve: its models, and at organization scope

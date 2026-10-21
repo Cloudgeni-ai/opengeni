@@ -9,17 +9,17 @@ import { useNavigate } from "@tanstack/react-router";
 import { ArchiveIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Toolbar, ToolbarGroup, ToolbarSearch } from "@/components/ui/toolbar";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Toolbar, ToolbarGroup, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@/context";
-import { apiErrorFacts } from "@/lib/api-error";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 type SortBy = "updatedAt" | "createdAt" | "name";
 const SORT_OPTIONS: Array<{ value: SortBy; label: string }> = [

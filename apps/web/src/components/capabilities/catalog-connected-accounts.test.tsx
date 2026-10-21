@@ -4,7 +4,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
 // The Radix dialog is a portal; this inline stand-in keeps its contract.
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     title,

@@ -3,7 +3,7 @@ import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { PierreFile } from "@opengeni/react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { decodeRetainedText, TEXT_PREVIEW_MAX_BYTES } from "./retained-text-preview-policy";
 
 // Highlighted file views load @pierre/diffs lazily, only where they render.

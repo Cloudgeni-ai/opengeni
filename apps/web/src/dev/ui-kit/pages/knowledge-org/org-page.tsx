@@ -20,24 +20,24 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { AccessList } from "@/components/ui/access-list";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { AccessList } from "@opengeni/react/ui/access-list";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { PageHeader } from "@/components/ui/page-header";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { SettingRow } from "@/components/ui/setting-row";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
-import { StatGroup, StatTile } from "@/components/ui/stat-tile";
-import { Switch } from "@/components/ui/switch";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
+import { StatGroup, StatTile } from "@opengeni/react/ui/stat-tile";
+import { Switch } from "@opengeni/react/ui/switch";
 
 import {
   KIT_NOW,

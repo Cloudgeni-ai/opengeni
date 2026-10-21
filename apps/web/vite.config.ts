@@ -151,7 +151,7 @@ export default defineConfig({
               // feedback Textarea into every direct session. Coalesce only the
               // tiny shared form chunks, not the whole mixed-consumer group.
               name: "workspace-form-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark|settings[\\/]organization-workspace-administration)\.tsx$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/]components|packages[\\/]react[\\/]src)[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark|settings[\\/]organization-workspace-administration)\.tsx$/,
               includeDependenciesRecursively: false,
               entriesAware: true,
               entriesAwareMergeThreshold: 4 * 1024,
@@ -179,7 +179,7 @@ export default defineConfig({
               // eager helper out of reciprocal entry-aware session chunks;
               // optional panel bodies stay behind their dynamic imports.
               name: "composer-menu-runtime",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/]composer-menu\.tsx$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/]components|packages[\\/]react[\\/]src)[\\/]ui[\\/]composer-menu\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -201,7 +201,7 @@ export default defineConfig({
               // that shared leaf to session grouping makes its main.tsx import
               // pull the session workbench and lazy dependencies into startup.
               name: "ui-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|composer-menu|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/](?:cn|scrollbars)\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|(?:apps[\\/]web[\\/]src[\\/]components|packages[\\/]react[\\/]src)[\\/]ui[\\/](?:button|composer-menu|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/](?:cn|scrollbars)\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
@@ -221,7 +221,7 @@ export default defineConfig({
               // keep those tiny parsers here instead of a separate startup
               // request.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|workspace-management-location|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|developer-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|workspace-management-location|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|developer-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx)|packages[\\/]react[\\/]src[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
             },
@@ -245,7 +245,7 @@ export default defineConfig({
               // Session creation resolves the agent's capabilities, so their
               // helpers are startup code too.
               name: "startup-context",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              test: /(?:packages[\\/]react[\\/]src[\\/]ui[\\/]api-error\.tsx$|apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -390,7 +390,7 @@ export default defineConfig({
               // graphs. Keep them in a leaf chunk (React, icons and class
               // helpers only) so no chunk cycle can evaluate a caller first.
               name: "composer-menu-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:composer-menu\.tsx|menu-styles\.ts)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/]components|packages[\\/]react[\\/]src)[\\/]ui[\\/](?:composer-menu\.tsx|menu-styles\.tsx?)$/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
@@ -442,7 +442,7 @@ export default defineConfig({
               // rendered by the session retention control, so they stay out of
               // this group; pinning them here loads the whole group with chats.
               name: "management-ui-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|settings-nav|sheet|status-badge|usage-meter)\.tsx$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/]components|packages[\\/]react[\\/]src)[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|settings-nav|sheet|status-badge|usage-meter)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 19,
             },

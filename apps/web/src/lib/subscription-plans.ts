@@ -1,5 +1,5 @@
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
-import { apiErrorFacts } from "@/lib/api-error";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 export type CatalogPlan = BillingSubscriptionCatalog["plans"][number];
 export type PlanAction = "checkout" | "upgrade" | "downgrade" | "cancel";

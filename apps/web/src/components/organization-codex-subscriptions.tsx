@@ -11,7 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   invalidateSharedQueries,
   MODEL_SETTINGS_STALE_TIME_MS,

@@ -2,10 +2,10 @@ import type { SlackChannelRoute, SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
-import { FormPage } from "@/components/ui/form-dialog";
-import { Button } from "@/components/ui/button";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -13,8 +13,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/ui/dialog";
+import { Select } from "@opengeni/react/ui/select";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";

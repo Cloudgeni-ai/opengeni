@@ -9,10 +9,10 @@ import {
 } from "@/components/insights/usage-search";
 import { WorkspaceActivity } from "@/components/insights/workspace-activity";
 import type { InsightsRange } from "@/components/insights/activity-data";
-import { ContentPage } from "@/components/ui/content-layout";
-import { BackLink } from "@/components/ui/detail-page";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { PageHeader } from "@/components/ui/page-header";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { BackLink } from "@opengeni/react/ui/detail-page";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { ReturnTo } from "@/lib/return-to";

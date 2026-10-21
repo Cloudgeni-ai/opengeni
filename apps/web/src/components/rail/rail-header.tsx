@@ -3,8 +3,8 @@ import { ChevronsLeftIcon, ChevronsRightIcon, XIcon } from "lucide-react";
 import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { useRail } from "@/components/rail/rail-context";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
-import { Button } from "@/components/ui/button";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Button } from "@opengeni/react/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { windowControlsInPage as windowControlsInRail } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 

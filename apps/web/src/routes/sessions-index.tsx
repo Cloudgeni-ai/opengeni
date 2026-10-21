@@ -95,7 +95,7 @@ import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
@@ -104,11 +104,11 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "@/lib/transient-retry";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { StatusDot } from "@/components/ui/status-dot";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
@@ -197,7 +197,7 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   newSessionCreateSnapshot,
   runNewSessionRouteSubmission,

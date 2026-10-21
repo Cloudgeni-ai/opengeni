@@ -7,10 +7,10 @@ import {
 import { OpenGeniApiError, type ClaudeSubscriptionOAuthStartResponse } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type { ProviderConnectionView } from "../ai-gateway-connection";
-import { Button } from "../ui/button";
-import { Disclosure } from "../ui/disclosure";
-import { Field, FieldStack } from "../ui/field";
-import { SecretInput } from "../ui/secret-field";
+import { Button } from "@opengeni/react/ui/button";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { SecretInput } from "@/components/ui/secret-field";
 import { ModelsFormPage, ProviderTile } from "./models-ui";
 import { ClaudeTokenInstructions } from "./claude-setup";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";

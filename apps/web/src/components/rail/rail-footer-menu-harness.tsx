@@ -86,7 +86,7 @@ export async function loadRailFooterMenuHarness() {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
   const { RailFooter } = await import("./rail-footer");
-  const { DropdownMenuItem } = await import("@/components/ui/dropdown-menu");
+  const { DropdownMenuItem } = await import("@opengeni/react/ui/dropdown-menu");
 
   async function renderOpenAccountMenu(config: RailFooterMenuConfig): Promise<() => Promise<void>> {
     footer = config;

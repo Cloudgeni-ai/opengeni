@@ -2,7 +2,7 @@ import { Link, type ErrorComponentProps } from "@tanstack/react-router";
 import type { ErrorInfo } from "react";
 
 import { ProblemPanel } from "@/components/common";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   hasObservedChunkLoadFailure,
   isChunkLoadError,

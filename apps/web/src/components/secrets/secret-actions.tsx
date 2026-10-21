@@ -3,9 +3,9 @@ import { CheckIcon, CopyIcon, EyeIcon, EyeOffIcon, LinkIcon } from "lucide-react
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { copyText } from "@/components/ui/copy-field";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Button } from "@opengeni/react/ui/button";
+import { copyText } from "@opengeni/react/ui/copy-field";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 import { vaultErrorText } from "./vault-model";

@@ -4,11 +4,11 @@ import type { ModelContextInstructionLayer, SessionModelContextResponse } from "
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ArrowLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { ScrollArea } from "@opengeni/react/ui/scroll-area";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { SessionEvent } from "@/types";
 
 const PAGE_SIZE = 30;

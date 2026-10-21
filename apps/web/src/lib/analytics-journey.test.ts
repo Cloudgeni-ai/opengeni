@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ANALYTICS_ACTIONS } from "./analytics-actions";
+import { ANALYTICS_ACTIONS } from "@opengeni/react/ui/analytics-actions";
 import {
   journeyAction,
   journeyMilestone,

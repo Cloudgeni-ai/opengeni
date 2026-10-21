@@ -9,7 +9,7 @@ import { ModelCompactionPage } from "../../../src/components/models/model-compac
 import { OrganizationDefaultsSection } from "../../../src/components/models/organization-models-list";
 import { useOrganizationModelDefaults } from "../../../src/components/models/use-organization-model-defaults";
 import { WorkspaceDefaultsSection } from "../../../src/components/models/workspace-models-page";
-import { SectionStack } from "../../../src/components/ui/section";
+import { SectionStack } from "@opengeni/react/ui/section";
 import "../../../src/styles.css";
 
 const params = new URLSearchParams(window.location.search);

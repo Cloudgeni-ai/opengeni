@@ -3,7 +3,7 @@ import { OpenGeniProvider } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { Toaster } from "sonner";
 import { SessionList } from "../src/components/rail/session-list";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { client, workspaceId, evidence } from "./project-rename-context";
 import "../src/styles.css";
 import {

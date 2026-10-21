@@ -3,8 +3,8 @@ import { useMemo } from "react";
 
 import { UsageDashboard } from "@/components/insights/usage-dashboard";
 import { parseUsageSearch, type UsageSearch } from "@/components/insights/usage-search";
-import { ContentPage } from "@/components/ui/content-layout";
-import { PageHeader } from "@/components/ui/page-header";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { workspaceSessionPath } from "@/lib/routes";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 

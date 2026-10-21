@@ -4,17 +4,22 @@ import { ChevronDownIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { userErrorText } from "@/lib/api-error";
+} from "@opengeni/react/ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@opengeni/react/ui/tooltip";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 export type Audience = "private" | "workspace";
 

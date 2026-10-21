@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 export function McpAuthDiscoveryNotice({
   checking,

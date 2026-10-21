@@ -2,10 +2,10 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SitePlatformUsage } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 
-import { Notice } from "@/components/ui/notice";
-import { Section } from "@/components/ui/section";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { apiErrorFacts } from "@/lib/api-error";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section } from "@opengeni/react/ui/section";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import { PLATFORM_METER_LABELS, formatPlatformAmount } from "@/lib/site-publishing";
 import { formatCredits } from "@/lib/usage-allowances";
 

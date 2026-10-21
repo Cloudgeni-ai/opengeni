@@ -11,8 +11,8 @@ import type { WorkspaceBackgroundCommand } from "@opengeni/sdk";
 import { MachinesDashboard } from "@opengeni/react/machines";
 import { onlineMachine } from "../../../packages/react/demo/machines-fixtures";
 import { WorkspaceCommands } from "../src/components/machines/workspace-commands";
-import { ContentPage } from "../src/components/ui/content-layout";
-import { PageHeader } from "../src/components/ui/page-header";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import "../src/styles.css";
 
 const now = Date.parse("2026-10-18T12:00:00Z");

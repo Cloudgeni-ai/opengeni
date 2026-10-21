@@ -9,7 +9,7 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 
 const GROUPS: Record<SessionBrowseGroupBy, string> = {
   activity: "Last activity",

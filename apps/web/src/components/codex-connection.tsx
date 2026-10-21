@@ -34,12 +34,12 @@ import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-co
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { formatAbsoluteTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import type { UsageWindowReading } from "@/components/ui/usage-meter";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import type { UsageWindowReading } from "@opengeni/react/ui/usage-meter";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   ApiError,
   prepareCodexResetRedemption,

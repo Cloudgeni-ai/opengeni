@@ -5,7 +5,7 @@ import { SettingsIcon } from "lucide-react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { isWorkspaceConfigPath } from "@/components/rail/workspace-nav-data";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 export type {

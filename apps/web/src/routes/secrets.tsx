@@ -63,9 +63,9 @@ import {
   type VaultConnection,
 } from "@/components/secrets/vault-providers";
 import { SecretsMissing, VaultPage, VaultPageLoading } from "@/components/secrets/vault-page";
-import { ContentPage } from "@/components/ui/content-layout";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";

@@ -9,10 +9,10 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Field, FieldStack } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { useAppContext } from "@/context";
 import { hasInbox } from "@/lib/inbox";
 

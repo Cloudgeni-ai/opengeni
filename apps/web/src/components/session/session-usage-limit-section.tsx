@@ -17,13 +17,13 @@ import {
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Field, TextInput } from "@/components/ui/field";
-import { HelpLink, HelpTip, InlineHelp } from "@/components/ui/inline-help";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusDot } from "@/components/ui/status-dot";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { HelpLink, HelpTip, InlineHelp } from "@opengeni/react/ui/inline-help";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {

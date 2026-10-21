@@ -10,17 +10,17 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { MoreMenu } from "@/components/ui/page-actions";
-import { PageHeader } from "@/components/ui/page-header";
+} from "@opengeni/react/ui/line-tabs";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";

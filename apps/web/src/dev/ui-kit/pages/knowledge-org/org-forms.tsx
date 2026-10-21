@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import {
   CheckboxField,
@@ -10,11 +10,11 @@ import {
   TextArea,
   TextInput,
   useFieldControlProps,
-} from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RoleSelect } from "@/components/ui/role-select";
+} from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RoleSelect } from "@opengeni/react/ui/role-select";
 import { cn } from "@/lib/utils";
 
 import { organization, type OrganizationRole, type WorkspaceRole } from "../../fixtures";
