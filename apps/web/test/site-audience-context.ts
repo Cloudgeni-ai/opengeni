@@ -1,5 +1,5 @@
 import type { ArtifactCatalogItem, WorkspaceArtifact } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 // `?viewer=other` opens the Site as another member; `?audience=workspace`
 // starts it shared; `?only-me-off` turns Only me off; `?share-error` makes the

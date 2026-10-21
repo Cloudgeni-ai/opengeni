@@ -207,7 +207,7 @@ describe("readable per-turn rows", () => {
       expect(topLevelMessages(r.container)).toEqual(["Final response"]);
       const trigger = statusTrigger(r.container);
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
-      expect(trigger.textContent).toContain("2 steps");
+      expect(trigger.textContent).toBe("Worked for 35s");
       await act(async () => trigger.click());
       const details = r.container.querySelector("[data-og-fold-content]")!;
       expect(details.querySelector("strong")?.textContent).toBe("progress");

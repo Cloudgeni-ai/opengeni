@@ -100,6 +100,9 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
           expectedConnectionEpoch: input.expectedConnectionEpoch,
           rotate: input.rotate,
           ...(input.language ? { language: input.language } : {}),
+          ...(input.voiceSettings && Object.keys(input.voiceSettings).length > 0
+            ? { voiceSettings: input.voiceSettings }
+            : {}),
         },
         { signal: input.signal },
       );

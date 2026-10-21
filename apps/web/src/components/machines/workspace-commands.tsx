@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { MonitorIcon, RefreshCwIcon } from "lucide-react";
 import { SessionCommandsPanel, useWorkspaceBackgroundCommands } from "@opengeni/react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 export function commandElapsed(startedAt: string, now: number): string {
   const seconds = Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000));

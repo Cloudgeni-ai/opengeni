@@ -38,6 +38,7 @@ import {
 } from "react";
 
 import { DropdownMenu } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
@@ -61,6 +62,8 @@ import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-c
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const DropdownMenuContainedPortal = containedPortal(DropdownMenu.Portal);
 
 // Queued prompts can be long; menu rows wrap instead of truncating.
 const QUEUE_MENU_ITEM_CLASS = `${MENU_ITEM_CLASS} whitespace-normal break-words`;
@@ -882,7 +885,7 @@ function SortableQueueRow({
                 )}
               </button>
             </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
+            <DropdownMenuContainedPortal>
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
@@ -930,7 +933,7 @@ function SortableQueueRow({
                   <ArrowDownToLineIcon /> {t("queueSurfaceImplementation.moveToBottom")}
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
-            </DropdownMenu.Portal>
+            </DropdownMenuContainedPortal>
           </DropdownMenu.Root>
         </div>
       </div>

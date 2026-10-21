@@ -2,6 +2,8 @@ import {
   ComputerNativeCommand,
   ComputerNativeReceipt,
   ComputerOperationReceipt,
+  parseInteractionDriverDiagnostic,
+  type InteractionDriverDiagnostic,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -19,6 +21,10 @@ import {
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
@@ -49,6 +55,9 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
+  type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
+  type BrowserRecordingSummary as BrowserRecordingSummaryValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDomReadRequest as BrowserDomReadRequestValue,
@@ -528,6 +537,9 @@ export class BrowserControlRequestError extends Error {
   constructor(
     readonly status: number,
     readonly error: InteractionErrorValue,
+    /** Operator-only context the controller sent beside a driver failure;
+     * logged, never shown to callers. */
+    readonly diagnostic: InteractionDriverDiagnostic | null = null,
   ) {
     super(error.message);
     this.retryable = error.retryable;
@@ -1893,6 +1905,65 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
+  async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("recordings"),
+        token: this.controlToken,
+        body: BrowserRecordingStartRequest.parse({ targetId }),
+      });
+    } catch (error) {
+      // A controller older than browser recording has no such route; say so
+      // instead of surfacing a bare "route not found".
+      if (isLegacyRouteMiss(error)) throw browserControllerCompatibilityError("browser recording");
+      throw error;
+    }
+    return BrowserRecordingSummary.parse(data);
+  }
+
+  async recording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path(`recordings/${id}`),
+        token: this.viewToken,
+      }),
+    );
+  }
+
+  async stopRecording(recordingId: string): Promise<BrowserRecordingSummaryValue> {
+    const id = requireUuid(recordingId, "recording id");
+    return BrowserRecordingSummary.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${id}/stop`),
+        token: this.controlToken,
+        body: {},
+      }),
+    );
+  }
+
+  async exportRecording(
+    requestInput: BrowserRecordingExportRequestValue,
+  ): Promise<BrowserRecordingExportReceiptValue> {
+    const request = BrowserRecordingExportRequest.parse(requestInput);
+    const receipt = BrowserRecordingExportReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${request.recordingId}/exports`),
+        token: this.controlToken,
+        body: request,
+      }),
+    );
+    if (receipt.recordingId !== request.recordingId) {
+      throw new BrowserControlProtocolError("browser controller returned another recording");
+    }
+    return receipt;
+  }
+
   async openTarget(url?: string): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
@@ -2881,7 +2952,15 @@ function parseEnvelope(body: string, status: number): unknown {
   if (value.ok === true && status >= 200 && status < 300 && "data" in value) return value.data;
   if (value.ok === false && status >= 400 && status <= 599) {
     const parsed = InteractionError.safeParse(value.error);
-    if (parsed.success) throw new BrowserControlRequestError(status, parsed.data);
+    if (parsed.success) {
+      throw new BrowserControlRequestError(
+        status,
+        parsed.data,
+        parsed.data.code === "driver_failed"
+          ? parseInteractionDriverDiagnostic(value.diagnostic)
+          : null,
+      );
+    }
   }
   throw new BrowserControlProtocolError("browser controller response envelope is invalid");
 }

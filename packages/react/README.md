@@ -544,6 +544,14 @@ Independent package defaults inherit without replacing host `--og-*` values;
 derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
 
+`compiled.css` covers the documented embeddable components. The
+`@opengeni/react/ui/*` subpaths are first-party building blocks for the
+Opengeni web app, not a documented public API, and `compiled.css` does not
+style them. A host that imports them anyway must compile them through the
+Tailwind source bridge below. Some use Tailwind's `dark:` variant, which
+follows the host's own `dark` variant (Tailwind's default is the operating
+system's color scheme), not `data-og-theme`.
+
 The original Tailwind v4 bridge remains available for hosts that intentionally
 want Opengeni utilities compiled into their own Tailwind entry:
 
@@ -802,7 +810,39 @@ language. By default that is the `OpenGeniProvider` locale, else the browser's
 language; the model menu's Language page stores another choice on the device
 (`useRealtimeLanguagePreference`). Custom layouts pass
 `useRealtimeModelSelection().languageFor(model)` as `useSessionRealtime`'s
-`language` (and to `prestartSessionRealtime`).
+`language` and `voiceSettingsFor(model, hostSettings)` as its `voiceSettings`
+(and both to `prestartSessionRealtime`).
+
+The voice, conversation language and turn eagerness are configurable wherever
+the selected model offers them (see the catalog entry's `voices`/`customVoice`,
+`languages` and `turnEagerness`; settings a model does not offer are ignored).
+To set them for every voice session in a workspace, save them once with the
+SDK; Settings > Models > Voice edits the same setting:
+
+```ts
+await client.updateWorkspaceSettings(workspaceId, {
+  realtimeVoice: {
+    "workspace-elevenlabs/eleven_realtime_v1_max": {
+      voice: "<ElevenLabs voice id>",
+      language: "no",
+      turnEagerness: "high",
+    },
+  },
+});
+```
+
+For Eleven Realtime, the voice is one of the built-in names in the catalog
+entry's `voices` or the id of a voice in the ElevenLabs account's My Voices. A
+voice from the ElevenLabs voice library must be added to My Voices first;
+otherwise ElevenLabs rejects it and voice fails to start with
+`ELEVENLABS_REALTIME_VOICE_UNAVAILABLE`.
+
+To set them per session instead, pass `voiceSettings` to the stock control,
+for example `<OpenGeniChat conversationProps={{ realtimeVoiceProps: {
+voiceSettings: { voice: "<ElevenLabs voice id>", language: "no" } } }} />`, or
+to `SessionRealtimeControl`, `useSessionRealtime` or `prestartSessionRealtime`
+(SDK controllers take `getVoiceSettings`). Each set field overrides the
+workspace's value; a language the person picks in the voice menu overrides both.
 
 The reference consumer is `demo/realtime.html`. Run `bun run demo` from
 `packages/react`, then open `http://localhost:3100/realtime.html?mode=mock` for
@@ -1041,6 +1081,38 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- History is conversation-first: windowed reads exclude a turn's steps
+  (`SESSION_EVENT_STEP_TYPES`: tool calls, tool outputs, reasoning and command
+  output deltas, and the model request and usage rows of each model call) but
+  keep presented tool results such as images and published files, and the
+  model request rows up to a turn's first model response (its startup phases).
+  Each turn with unloaded steps gets a `turn-steps` timeline item, which
+  readable work rows render when opened. Opening a turn reads its newest
+  `SESSION_TURN_STEP_PAGE_SIZE` steps, and "Show earlier steps" pages back.
+  Live steps go to per-turn stores outside the conversation window, so a long
+  turn never evicts the conversation. A collapsed live turn keeps its latest
+  `SESSION_TURN_LIVE_STEP_TAIL` steps, an opened turn keeps every step, and
+  steps of turns nobody has open are limited to
+  `SESSION_STEP_BROWSER_MAX_BYTES`. `replay: "full"` still reads everything.
+  Turnless step rows (PTY and background command output) are not part of the
+  conversation window either: the sandbox terminal reads its own newest
+  1,000 PTY and command-output rows by type the first time it is shown for a
+  session, and live output keeps streaming in. When `useSessionEvents` rejoins
+  the stream past unread terminal output (opening a chat, returning from a
+  hidden tab or from history) or a burst overflows its live tail, the terminal
+  reads its newest page again. That signal comes from this package's
+  `useSessionEvents`; a terminal fed with `events` from elsewhere reads its
+  history only when opened.
+- The package and the Opengeni server can be upgraded in either order. A
+  server that applies the conversation filter says so in the
+  `X-OpenGeni-Conversation-Filter` response header
+  (`SESSION_EVENT_CONVERSATION_FILTER_VERSION`). Without it, history reads keep
+  tool calls and model bookkeeping and drop non-presented calls in the browser,
+  so an older server that ignores `presentedToolCalls` loses no image,
+  published file or Skill card. The header is read through `listEventPage`:
+  a client without it (for example a host proxy exposing only `listEvents`)
+  always uses that fallback. `createEmbeddedSessionClient` keeps
+  `listEventPage` when the base client has it.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
   The live working set is at most 16 MiB or 20,000 events. One event larger than

@@ -26,8 +26,7 @@ const resolvedConfig =
 const configs = Array.isArray(resolvedConfig) ? resolvedConfig : [resolvedConfig];
 
 for (const config of configs) {
-  // TypeScript 7 exposes its stable compiler through the tsc CLI. tsup 8's
-  // declaration bundler requires the removed legacy compiler API, so retain
+  // tsup 8's declaration bundler requires the legacy compiler API, so retain
   // tsup for JavaScript and source maps while emitting declarations below.
   await build({ ...config, dts: false });
 }
@@ -67,7 +66,9 @@ await writeFile(
         paths: {},
       },
       include: ["../src/**/*.ts", "../src/**/*.tsx"],
-      exclude: [],
+      // Tests and their DOM fixtures sit beside the code they cover; they are
+      // not part of a package's published types.
+      exclude: ["../src/**/*.test.ts", "../src/**/*.test.tsx", "../src/**/*.dom-fixture.tsx"],
     },
     null,
     2,
@@ -76,9 +77,9 @@ await writeFile(
 );
 
 try {
-  const tscPath = join(import.meta.dir, "../node_modules/typescript/bin/tsc");
+  const compilerPath = join(import.meta.dir, "../node_modules/tsrs/bin/tsrs");
   const child = Bun.spawn({
-    cmd: ["bun", tscPath, "--project", declarationConfigPath],
+    cmd: ["node", compilerPath, "--project", declarationConfigPath],
     cwd: packageDirectory,
     stdin: "ignore",
     stdout: "inherit",
@@ -86,7 +87,7 @@ try {
   });
   const status = await child.exited;
   if (status !== 0) {
-    throw new Error(`TypeScript declaration emit failed with exit code ${status}`);
+    throw new Error(`tsrs declaration emit failed with exit code ${status}`);
   }
   await rewriteDeclarationModuleSpecifiers(join(packageDirectory, "dist"));
 } finally {
@@ -101,7 +102,11 @@ try {
  */
 async function rewriteDeclarationModuleSpecifiers(directory: string): Promise<void> {
   for (const path of await declarationFiles(directory)) {
-    const source = await readFile(path, "utf8");
+    // A stylesheet a component imports for its side effect is the bundle's
+    // concern, not a type: consumers without CSS module declarations could not
+    // resolve it.
+    const original = await readFile(path, "utf8");
+    const source = original.replace(/^import\s+["'][^"']+\.css["'];\n/gmu, "");
     const rewritten = source.replace(
       /(["'])(\.\.?(?:\/[^"'?#]+)?)\1/gu,
       (literal, quote: string, specifier: string, offset: number) => {
@@ -117,7 +122,7 @@ async function rewriteDeclarationModuleSpecifiers(directory: string): Promise<vo
         return literal;
       },
     );
-    if (rewritten !== source) await writeFile(path, rewritten, "utf8");
+    if (rewritten !== original) await writeFile(path, rewritten, "utf8");
   }
 }
 

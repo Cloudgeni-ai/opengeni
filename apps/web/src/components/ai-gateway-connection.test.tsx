@@ -17,7 +17,7 @@ import {
   peekSharedQuery,
   retainSharedQueries,
   sharedQueryWriter,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 import { renderHook } from "../../../../packages/react/test/render-hook";
 
 const listConnections = mock(async (_workspaceId: string): Promise<ConnectionMetadata[]> => []);
@@ -117,7 +117,7 @@ const context = {
   },
 };
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => context,
 }));
 
@@ -125,7 +125,7 @@ mock.module("sonner", () => ({
   toast: { error: toastError, success: toastSuccess },
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     confirmLabel,
@@ -154,8 +154,8 @@ mock.module("@/components/ui/confirm-dialog", () => ({
 
 // The one-field Replace key prompt renders its real form frame inline: the
 // Radix dialog around it is a portal.
-const actualFormDialog = await import("@/components/ui/form-dialog");
-mock.module("@/components/ui/form-dialog", () => ({
+const actualFormDialog = await import("@opengeni/react/ui/form-dialog");
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   ...actualFormDialog,
   FormDialog: ({
     open,
@@ -176,7 +176,7 @@ mock.module("@/components/ui/form-dialog", () => ({
 }));
 
 // Menus and the disconnect confirm as plain buttons: the real ones are Radix portals.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -186,7 +186,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     onConfirm,
@@ -219,7 +219,8 @@ const {
   PROVIDER_CONNECTION_CONFIGS,
   useProviderConnection,
 } = await import("./ai-gateway-connection");
-const { useWorkspaceModelCatalog } = await import("@/lib/use-workspace-model-catalog");
+const { useWorkspaceModelCatalog } =
+  await import("@opengeni/react/app/lib/use-workspace-model-catalog");
 
 /** The status in the provider page header; "…" while it's still loading. */
 function statusText(container: HTMLElement): string {

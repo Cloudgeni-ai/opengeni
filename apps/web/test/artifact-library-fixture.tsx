@@ -8,11 +8,11 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { ArtifactsRoute } from "../src/routes/artifacts";
-import { RetainedArtifactRoute } from "../src/routes/retained-artifact";
-import { SessionEditableArtifactsWorkspace } from "../src/components/session/editable-artifacts-workspace";
-import { artifactReturnSearch } from "../src/lib/routes";
-import { invalidateArtifactCatalog } from "../src/lib/use-artifact-catalog";
+import { ArtifactsRoute } from "@opengeni/react/app/routes/artifacts";
+import { RetainedArtifactRoute } from "@opengeni/react/app/routes/retained-artifact";
+import { SessionEditableArtifactsWorkspace } from "@opengeni/react/app/components/session/editable-artifacts-workspace";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
+import { invalidateArtifactCatalog } from "@opengeni/react/app/lib/use-artifact-catalog";
 import {
   workspaceId,
   sessionId,

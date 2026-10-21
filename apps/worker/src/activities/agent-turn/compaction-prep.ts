@@ -44,7 +44,7 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { type SessionEvent } from "@opengeni/contracts";
 
-import { promptCacheKeyForTurn } from "./codex";
+import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
   safeErrorDiagnostic,
   compactionFailureTurnEventPayload,
@@ -259,10 +259,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     return preparedCompactionRequest(remotePrefix.agent);
   };
 
-  const promptCacheKey = promptCacheKeyForTurn(resolvedModel, {
-    accountId: input.accountId,
-    sessionId: input.sessionId,
-  });
+  const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
   let compactionCreditPolicyRevision: number | undefined;
   const recordCompactionUsage = async (usage: ModelResponseUsage) => {

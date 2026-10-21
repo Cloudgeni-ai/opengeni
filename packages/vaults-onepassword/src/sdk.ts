@@ -130,7 +130,7 @@ export interface OnePasswordSdk {
 }
 
 export const ONEPASSWORD_SDK_VERSION = "0.5.0";
-export const ONEPASSWORD_INTEGRATION_NAME = "OpenGeni";
+export const ONEPASSWORD_INTEGRATION_NAME = "Opengeni";
 
 let sdkPromise: Promise<OnePasswordSdk> | null = null;
 

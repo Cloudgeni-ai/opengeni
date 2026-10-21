@@ -1,21 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section } from "@/components/ui/section";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { formatMoneyMicros } from "@/lib/format";
-import { userErrorText } from "@/lib/api-error";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section } from "@opengeni/react/ui/section";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   planDate,
   planSeats,
   subscriptionAction,
   type CatalogPlan,
   type PlanAction,
-} from "@/lib/subscription-plans";
+} from "@opengeni/react/app/lib/subscription-plans";
 
 type Selection = { target: CatalogPlan; action: PlanAction; idempotencyKey: string };
 

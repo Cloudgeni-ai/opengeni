@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 
-const newSession = await Bun.file(new URL("./sessions-index.tsx", import.meta.url)).text();
+const newSession = await Bun.file(
+  new URL("../../../../packages/react/src/app/routes/sessions-index.tsx", import.meta.url),
+).text();
 // The schedule form (with its connection-account picker) lives in components/schedules.
 const schedules = await Bun.file(
   new URL("../components/schedules/schedule-form-page.tsx", import.meta.url),

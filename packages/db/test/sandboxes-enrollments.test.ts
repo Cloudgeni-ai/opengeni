@@ -11,6 +11,7 @@ import {
   getEnrollment,
   getLiveEnrollmentConnection,
   getSandbox,
+  getSandboxForAttempt,
   getSession,
   ingestMachineMetricsSample,
   insertMachineMetricsSeries,
@@ -297,6 +298,45 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     });
     expect(sameProcess).toMatchObject({ claimed: true, connectionGeneration: 1 });
 
+    const renewal = await renewEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: firstInstance,
+      leaseMs: 60_000,
+    });
+    expect(renewal).toMatchObject({
+      renewed: true,
+      enrollment: {
+        id: enrollment.id,
+        accountId,
+        workspaceId,
+        connectionInstanceId: firstInstance,
+      },
+    });
+    expect(
+      Date.parse(renewal.enrollment!.connectionLeaseExpiresAt!) -
+        Date.parse(renewal.enrollment!.lastSeenAt!),
+    ).toBe(60_000);
+    const other = await freshWorkspace();
+    expect(
+      await renewEnrollmentConnection(db, {
+        accountId: other.accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: firstInstance,
+        leaseMs: 60_000,
+      }),
+    ).toEqual({ renewed: false, enrollment: null });
+    expect(
+      renewEnrollmentConnection(db, {
+        accountId: "",
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: firstInstance,
+        leaseMs: 60_000,
+      }),
+    ).rejects.toThrow("non-empty accountId");
+
     // Expire the lease deterministically; a successor then advances generation and
     // owns a different subject. Late traffic from the old process cannot renew or
     // release the successor.
@@ -328,7 +368,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
         connectionInstanceId: firstInstance,
         leaseMs: 60_000,
       }),
-    ).toEqual({ renewed: false });
+    ).toEqual({ renewed: false, enrollment: null });
     expect(
       await releaseEnrollmentConnection(db, {
         accountId,
@@ -645,6 +685,31 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
 
     const fetched = await getSandbox(db, workspaceId, selfhosted.id);
     expect(fetched?.id).toBe(selfhosted.id);
+
+    // A name (or any other non-id) finds nothing instead of failing the uuid cast.
+    expect(await getSandbox(db, workspaceId, "my laptop")).toBeNull();
+    expect(
+      await getSandbox(
+        db,
+        { accountId, workspaceId, subjectId: `user:${crypto.randomUUID()}` },
+        "my laptop",
+      ),
+    ).toBeNull();
+    expect(
+      await getSandboxForAttempt(
+        db,
+        {
+          accountId,
+          workspaceId,
+          subjectId: null,
+          sessionId: crypto.randomUUID(),
+          turnId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          executionGeneration: 1,
+        },
+        "my laptop",
+      ),
+    ).toBeNull();
 
     const list = await listSandboxes(db, workspaceId);
     expect(list.length).toBe(2);

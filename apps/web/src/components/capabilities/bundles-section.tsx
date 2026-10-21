@@ -24,11 +24,11 @@ import { InstalledPackagePage } from "@/components/capabilities/package-page";
 
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { useSourcePackages } from "@/components/capabilities/use-source-packages";
-import { LoadErrorState } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import { LoadErrorState } from "@opengeni/react/app/components/common";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 
 /** Stable identity for the bundle search result count. */
 const BUNDLE_COUNT_ID = "bundles-visible-count";

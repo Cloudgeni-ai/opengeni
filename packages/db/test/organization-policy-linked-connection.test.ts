@@ -11,7 +11,10 @@ test("linked explicit admin without connections:read cannot reach native credent
   const context = spyOn(database, "withRlsContext").mockImplementation(async (_db, _scope, run) =>
     run({} as never),
   );
-  const linked = spyOn(linkedWork, "getExternalLinkTurnAuthorization").mockResolvedValue({
+  const linked = spyOn(
+    linkedWork,
+    "getExternalLinkTurnAuthorizationInTransaction",
+  ).mockResolvedValue({
     authorized: true,
     permissions: ["workspace:admin"],
     permissionMode: "explicit",

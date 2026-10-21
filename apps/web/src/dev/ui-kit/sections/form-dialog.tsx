@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ClipboardPasteIcon, KeyRoundIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   CheckboxField,
   Field,
@@ -10,15 +10,15 @@ import {
   TextArea,
   TextInput,
   useField,
-} from "@/components/ui/field";
-import { FormDialog, FormFrame, FormInline, FormPage } from "@/components/ui/form-dialog";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader } from "@/components/ui/page-header";
+} from "@opengeni/react/ui/field";
+import { FormDialog, FormFrame, FormInline, FormPage } from "@opengeni/react/ui/form-dialog";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 import { EnvPastePreview, SecretOnce, parseEnvText } from "@/components/ui/secret-field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { cn } from "@/lib/utils";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { Alternative, Fork, KitBlock, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import {
   apiKeyExpiryOptions,

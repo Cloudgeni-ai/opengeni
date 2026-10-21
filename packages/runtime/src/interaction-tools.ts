@@ -24,6 +24,9 @@ import {
   BrowserDownloadListResponse,
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
+  BrowserRecordingSaveRequest,
+  BrowserRecordingSaveResponse,
+  BrowserRecordingSummary,
   BrowserDomReadResponse,
   BrowserDomReadLocator,
   BrowserDomReadSelector,
@@ -404,6 +407,7 @@ const TOOL_PERMISSION = {
   browser_debug: "sessions:read",
   browser_downloads: "sessions:read",
   browser_download_save: ["sessions:control", "files:upload"],
+  browser_record: ["sessions:control", "files:upload"],
   browser_auth: "sessions:control",
   interaction_request_human: "sessions:control",
   browser_identity: "sessions:control",
@@ -953,11 +957,48 @@ const BrowserDownloadsInput = z
 const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: true })
   .extend({ browserSessionId: z.string().uuid(), downloadId: z.string().uuid() })
   .strict();
+const BrowserRecordInput = z
+  .object({
+    operation: z.enum(["start", "stop"]),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId.describe(
+      "start only: the tab to record first. Omit to use the tab you used last.",
+    ),
+    recordingId: z.string().uuid().optional().describe("stop only: the id start returned."),
+    destinationPath: BrowserRecordingSaveRequest.shape.destinationPath.describe(
+      "stop only: workspace-relative .mp4 path. Defaults to recordings/browser-<time>.mp4.",
+    ),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.operation === "stop") !== (value.recordingId !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["recordingId"],
+        message: "recordingId is required only for operation=stop",
+      });
+    }
+    if (value.operation === "start" && value.destinationPath !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["destinationPath"],
+        message: "destinationPath is set on operation=stop",
+      });
+    }
+  });
 
 export type CreateInteractionAttemptToolsInput = {
   /** The session's API client. Publishing is optional so narrower transports
-   * still work; an upload by path then reports that it is unavailable. */
-  transport: InteractionTransport & Partial<Pick<OpenGeniClient, "publishSandboxFileArtifact">>;
+   * still work; an upload by path then reports that it is unavailable. The
+   * session read is optional too: without it, a placement-less open reuses a
+   * live session on any non-personal placement. */
+  transport: InteractionPlacementTransport &
+    Partial<
+      Pick<
+        OpenGeniClient,
+        "publishSandboxFileArtifact" | "startBrowserRecording" | "saveBrowserRecording"
+      >
+    >;
   workspaceId: string;
   sessionId: string;
   selectedTools?: readonly FirstPartyMcpToolName[];
@@ -1887,6 +1928,53 @@ export function createInteractionAttemptToolDefinitions(
         response.destinationPath !== value.destinationPath
       ) {
         throw new Error("Browser download save returned another operation binding");
+      }
+      return response;
+    },
+  });
+
+  add({
+    name: "browser_record",
+    codemodePath: ["interaction", "browser", "record"],
+    title: "Record browser video",
+    description:
+      "Record a browser flow as a video, for proof of work or a demo. operation=start records the tab and follows the tabs you act on, open or select; frames are captured only when the page changes, so waiting costs nothing. Work normally, then operation=stop with the returned recordingId. Stop saves an MP4 in the workspace (default recordings/browser-<time>.mp4) with a .actions.json log beside it giving the time of each action, and returns the video's artifactId: show it with ![what it shows](artifact:<artifactId>). For edits such as cutting idle parts, speeding up, captions or narration, use ffmpeg (or install another tool), take timings from the action log, then publish the result with sandbox_file_publish. One recording per browser at a time, up to 30 minutes. Requires sessions:control and files:upload.",
+    input: BrowserRecordInput,
+    output: z.union([BrowserRecordingSummary, BrowserRecordingSaveResponse]),
+    readOnly: false,
+    idempotent: false,
+    execute: async (value, context) => {
+      const { startBrowserRecording, saveBrowserRecording } = input.transport;
+      if (!startBrowserRecording || !saveBrowserRecording) {
+        throw new Error("browser recording is unavailable here");
+      }
+      if (value.operation === "start") {
+        return await onTab(
+          value,
+          context,
+          "report",
+          async ({ browserSessionId, targetId }) =>
+            await startBrowserRecording.call(
+              input.transport,
+              input.workspaceId,
+              browserSessionId,
+              targetId,
+            ),
+        );
+      }
+      const browser = await currentTab.session(value.browserSessionId);
+      const response = await saveBrowserRecording.call(
+        input.transport,
+        input.workspaceId,
+        browser.browserSessionId,
+        value.recordingId!,
+        {
+          operationId: context.operationId,
+          ...(value.destinationPath ? { destinationPath: value.destinationPath } : {}),
+        },
+      );
+      if (response.recording.recordingId !== value.recordingId) {
+        throw new Error("Browser recording save returned another recording");
       }
       return response;
     },
@@ -2926,7 +3014,7 @@ async function actInComputerNativeBatch(
 }
 
 async function openBrowser(
-  transport: InteractionTransport,
+  transport: InteractionPlacementTransport,
   workspaceId: string,
   sourceSessionId: string,
   value: z.output<typeof BrowserOpenInput>,
@@ -2948,7 +3036,7 @@ async function openBrowser(
     // resolution adds no sequential round trip.
     const resolveProfile =
       value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
-    const [listed, attachedInventory] = await Promise.all([
+    const [listed, attachedInventory, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
         : transport.listBrowserSessions(workspaceId, {
@@ -2958,6 +3046,9 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
+      value.mode === "new" || value.placement
+        ? null
+        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
@@ -2972,7 +3063,11 @@ async function openBrowser(
               (candidate) =>
                 candidate.headless === requestedHeadless &&
                 browserSessionStorageMode(candidate) === (value.storageMode ?? "private_profile") &&
-                compatibleInteractionPlacement(candidate.placement, value.placement) &&
+                compatibleInteractionPlacement(
+                  candidate.placement,
+                  value.placement,
+                  currentPlacement,
+                ) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
                   candidate.baseRevisionId === value.baseRevisionId) &&
@@ -3191,7 +3286,7 @@ function sameBrowserUrl(left: string, right: string): boolean {
 }
 
 async function openComputer(
-  transport: InteractionTransport,
+  transport: InteractionPlacementTransport,
   workspaceId: string,
   sourceSessionId: string,
   value: z.output<typeof ComputerOpenInput>,
@@ -3201,16 +3296,20 @@ async function openComputer(
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
-    const listed =
+    const [listed, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
-        : await transport.listComputerSessions(workspaceId, {
+        : transport.listComputerSessions(workspaceId, {
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
-          });
+          }),
+      value.mode === "new" || value.placement
+        ? null
+        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+    ]);
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
-        compatibleInteractionPlacement(candidate.placement, value.placement),
+        compatibleInteractionPlacement(candidate.placement, value.placement, currentPlacement),
       ),
       sourceSessionId,
     );
@@ -3234,12 +3333,45 @@ async function openComputer(
   };
 }
 
+type InteractionPlacementTransport = InteractionTransport &
+  Partial<Pick<OpenGeniClient, "getSession">>;
+
+/** Where a placement-less open creates its session: the machine the chat is
+ * routed to now. No active sandbox means the session's own group sandbox; a
+ * swapped chat uses the machine it swapped to. Read at call time, since
+ * sandbox_swap can move the chat mid-turn. Null when the transport cannot
+ * read the session. */
+async function readCurrentInteractionPlacement(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<z.infer<typeof InteractionPlacement> | null> {
+  if (!transport.getSession) return null;
+  const session = await transport.getSession(workspaceId, sessionId, { fresh: true });
+  return session.activeSandboxId === null
+    ? { kind: "sandbox_group", sandboxGroupId: session.sandboxGroupId }
+    : { kind: "connected_machine", sandboxId: session.activeSandboxId };
+}
+
 function compatibleInteractionPlacement(
   candidate: z.infer<typeof InteractionPlacement>,
   requested: z.infer<typeof BrowserOpenPlacement> | undefined,
+  current: z.infer<typeof InteractionPlacement> | null = null,
 ): boolean {
-  if (!requested) return candidate.kind !== "attached_device";
-  return Object.entries(requested).every(
+  if (!requested) {
+    if (candidate.kind === "attached_device") return false;
+    // Without a placement only a session on the chat's current machine is
+    // reused, never one left on a machine the chat has since swapped away from.
+    return current === null || placementFieldsMatch(candidate, current);
+  }
+  return placementFieldsMatch(candidate, requested);
+}
+
+function placementFieldsMatch(
+  candidate: z.infer<typeof InteractionPlacement>,
+  wanted: z.infer<typeof BrowserOpenPlacement> | z.infer<typeof InteractionPlacement>,
+): boolean {
+  return Object.entries(wanted).every(
     ([key, value]) => (candidate as Record<string, unknown>)[key] === value,
   );
 }

@@ -1,9 +1,13 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { ConnectProvider } from "@opengeni/connect";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 import { IntegrationPage } from "./integration-page";
-import type { IntegrationViewModel } from "./integration-view-model";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import {
   nativeCatalogItemNotice,
   nativeCatalogItemVisible,
@@ -11,7 +15,7 @@ import {
   nativeIntegrationModel,
   nativeIntegrationVisible,
   type NativeConnectCatalog,
-} from "./native-connect-readiness";
+} from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { featuredConnectors } from "./featured-connectors";
 
 function catalog(providers: Array<[string, ConnectProvider["readiness"]]>): NativeConnectCatalog {

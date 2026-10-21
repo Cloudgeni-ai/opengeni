@@ -10,7 +10,7 @@ import {
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
-import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, eq, getTableColumns, inArray, sql, type SQL } from "drizzle-orm";
 import { anyOf } from "./sql-arrays";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
@@ -703,6 +703,63 @@ export type SessionEventWriteLocks = {
   attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
 };
 
+type SessionEventWriteProjectionInput = SessionEventWriteLockInput & {
+  /** Event-only appenders need identity, ownership and projection fields, not frozen inputs. */
+  rowProjection?: "full" | "event";
+};
+
+const eventWorkspaceColumns = {
+  id: schema.workspaces.id,
+  accountId: schema.workspaces.accountId,
+};
+const eventSessionColumns = {
+  id: schema.sessions.id,
+  accountId: schema.sessions.accountId,
+  workspaceId: schema.sessions.workspaceId,
+  activeTurnId: schema.sessions.activeTurnId,
+  lastSequence: schema.sessions.lastSequence,
+  authorityEpoch: schema.sessions.authorityEpoch,
+  executionAuthorityEpoch: schema.sessions.executionAuthorityEpoch,
+  visibility: schema.sessions.visibility,
+  ownerOrganizationMembershipId: schema.sessions.ownerOrganizationMembershipId,
+};
+const eventTurnColumns = {
+  id: schema.sessionTurns.id,
+  accountId: schema.sessionTurns.accountId,
+  workspaceId: schema.sessionTurns.workspaceId,
+  sessionId: schema.sessionTurns.sessionId,
+  executionGeneration: schema.sessionTurns.executionGeneration,
+  activeAttemptId: schema.sessionTurns.activeAttemptId,
+  status: schema.sessionTurns.status,
+  metadata: schema.sessionTurns.metadata,
+  createdAt: schema.sessionTurns.createdAt,
+  version: schema.sessionTurns.version,
+};
+const eventAttemptColumns = {
+  id: schema.sessionTurnAttempts.id,
+  accountId: schema.sessionTurnAttempts.accountId,
+  workspaceId: schema.sessionTurnAttempts.workspaceId,
+  sessionId: schema.sessionTurnAttempts.sessionId,
+  turnId: schema.sessionTurnAttempts.turnId,
+  executionGeneration: schema.sessionTurnAttempts.executionGeneration,
+  state: schema.sessionTurnAttempts.state,
+  authorityEpoch: schema.sessionTurnAttempts.authorityEpoch,
+  authorityVisibility: schema.sessionTurnAttempts.authorityVisibility,
+  authorityOwnerOrganizationMembershipId:
+    schema.sessionTurnAttempts.authorityOwnerOrganizationMembershipId,
+};
+
+export type SessionEventWriteFenceLocks = {
+  control: WorkspaceControlRow | null;
+  workspace: Pick<typeof schema.workspaces.$inferSelect, keyof typeof eventWorkspaceColumns> | null;
+  sessions: Array<Pick<typeof schema.sessions.$inferSelect, keyof typeof eventSessionColumns>>;
+  cursors: SessionEventWriteLocks["cursors"];
+  turns: Array<Pick<typeof schema.sessionTurns.$inferSelect, keyof typeof eventTurnColumns>>;
+  attempts: Array<
+    Pick<typeof schema.sessionTurnAttempts.$inferSelect, keyof typeof eventAttemptColumns>
+  >;
+};
+
 /**
  * Establish the one canonical lock prefix for every `session_events` writer:
  *
@@ -742,10 +799,22 @@ export type SessionEventWriteLocks = {
  * first: PostgreSQL fires those FK checks in catalog name/OID order, which can
  * be attempt-then-turn and otherwise deadlocks against this helper.
  */
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput & { rowProjection: "event" },
+): Promise<SessionEventWriteFenceLocks>;
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput & { rowProjection?: "full" },
+): Promise<SessionEventWriteLocks>;
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteProjectionInput,
+): Promise<SessionEventWriteFenceLocks>;
 export async function lockSessionEventWriteRows(
   db: Database,
-  input: SessionEventWriteLockInput,
-): Promise<SessionEventWriteLocks> {
+  input: SessionEventWriteProjectionInput,
+): Promise<SessionEventWriteFenceLocks> {
   await lockSiteRuntimeAdmission(db, input.workspaceId, input.sessionIds ?? []);
   const controlLock = input.controlLock;
   const control =
@@ -753,10 +822,12 @@ export async function lockSessionEventWriteRows(
       ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
       : null;
 
-  let workspace: typeof schema.workspaces.$inferSelect | null = null;
+  const eventOnly = input.rowProjection === "event";
+  const sessionColumns = eventOnly ? eventSessionColumns : getTableColumns(schema.sessions);
+  let workspace: SessionEventWriteFenceLocks["workspace"] = null;
   if ((input.workspaceLock ?? "key_share") === "key_share") {
     const [lockedWorkspace] = await db
-      .select()
+      .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
       .from(schema.workspaces)
       .where(eq(schema.workspaces.id, input.workspaceId))
       .for("key share")
@@ -769,7 +840,7 @@ export async function lockSessionEventWriteRows(
   let sessions =
     sessionIds.length > 0
       ? await db
-          .select()
+          .select(sessionColumns)
           .from(schema.sessions)
           .where(
             and(
@@ -810,7 +881,7 @@ export async function lockSessionEventWriteRows(
     // Re-read only after owning the cursor so the attempt fence evaluates the
     // latest committed session state while later semantic writers wait here.
     sessions = await db
-      .select()
+      .select(sessionColumns)
       .from(schema.sessions)
       .where(
         and(
@@ -849,7 +920,7 @@ export async function lockSessionEventWriteRows(
   const turns =
     turnIds.length > 0
       ? await db
-          .select()
+          .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
           .from(schema.sessionTurns)
           .where(
             and(
@@ -865,7 +936,7 @@ export async function lockSessionEventWriteRows(
   const attempts =
     attemptIds.length > 0
       ? await db
-          .select()
+          .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
           .from(schema.sessionTurnAttempts)
           .where(
             and(
@@ -4214,6 +4285,15 @@ export async function autoResumeSessionBranchInTransaction(
     automatic: true,
     reason: input.reason,
     actor: input.actor,
+  });
+  // The override unblocks the whole branch, exactly like an explicit Resume:
+  // descendants whose workflows closed under the Pause (capacity waits, parked
+  // recoveries, active goals, pending updates, decided approvals) need the
+  // same fresh wake. The steered session's own input carries its wake too.
+  await registerDescendantWakes(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    reason: "session_auto_resume",
   });
   return {
     revision,

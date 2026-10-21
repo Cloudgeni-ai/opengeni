@@ -14,7 +14,7 @@
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "12db03d6711e4cc9f33dd6be5b70738bcf19843f451cbd889fbc17b623bcbd65"
+      "sha256": "e5bdede31aecd86a0b065842042af6d7060f676829a86dc5dbc3635b744dabf3"
     },
     {
       "path": ".github/workflows/backup-image.yml",
@@ -26,11 +26,11 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ab5f8efc7a399d0561618a24c1a5090e3eb39467579d82614ed54b44b0b25788"
+      "sha256": "2cd8a9448b7a4c2837f5e43aad74fc3f9dec602ebeccb58070c56e0b15ade424"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "16ffc44d2ff8b13f639f1618ee2d1ce17a463c591f02de471a53ac5f8bfd01f3"
+      "sha256": "d459027f6a9669b83ec4eb6cb1587d055383e1ce7d8e06d3945283350b34fc89"
     },
     {
       "path": ".github/workflows/compute-release.yml",
@@ -51,6 +51,14 @@
     {
       "path": ".github/workflows/local-startup.yml",
       "sha256": "fb1ee347cf037689810c03a4105bfc09de906fa19d1392484763f6b7d4a7b715"
+    },
+    {
+      "path": ".github/workflows/merge-content.yml",
+      "sha256": "e73d479146d440c32179858f7ab8ea5e6fb7339262c7ab093fb552badc1e4a0b"
+    },
+    {
+      "path": ".github/workflows/merge-queue.yml",
+      "sha256": "7f6480d34b2c78cf0c79c7b8b982c1d5cdc7b350a145352bd2d3d117a805b53d"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -78,7 +86,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "d4d7ab1c0aaa8314f2005cc74a287a75684f2f55ea917cb07e26a008bb2ac1e0"
+      "sha256": "1efaf114d5c527f2b989e02e2efd7f4891afed81c9c055219c9b7f4d1bafbd5b"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -87,6 +95,10 @@
     {
       "path": ".github/workflows/publish-stable.yml",
       "sha256": "892dc87af9b030ce92a848f4fc8faae97d6aa04f13b7e5b65f4957bb5bab64bb"
+    },
+    {
+      "path": ".github/workflows/queue-health.yml",
+      "sha256": "09b78220e3e94debd0dbff03f97e079f83a9820ab9db011cc7d0acbc691caea4"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
@@ -102,7 +114,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "2bd474695cf7dd2c1f113d589d24620173bde07f5dd7b67161d6e46339eae772"
+      "sha256": "d258b09d9315c186ffd48e9c19029a4e2ddf232d7b9c53cccf6ad6df6174b90d"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -123,6 +135,10 @@
     {
       "path": ".github/workflows/retain-release-controller.yml",
       "sha256": "0e23abea6dedd011ac5280d5bf9c6abab2c91bffc06e77a5fc251c409b05e23c"
+    },
+    {
+      "path": ".github/workflows/runtime-posture-compatibility.yml",
+      "sha256": "b0655e3225e8e61a6686372847fae324f4b0d49ccfb5a7689181504ba110816c"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -637,6 +653,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "automation-report",
+      "step": "Report queue entry check for the admitted Version PR",
+      "sha256": "15c35345a5835ec42287692e6f1d888076944b5d9445734107f904841bdc748e"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "browser-acceptance",
       "step": "Capabilities control-center browser acceptance",
       "sha256": "fa2d16a4ad98e618faf02d3a01621110009be34290ccaa3488e224f6027bb937"
@@ -757,6 +779,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "full-green",
+      "step": "Publish exact-SHA full CI evidence",
+      "sha256": "15a3e340925b8e1cfca75586fd6d43f7d12c191e5d81eb59bdaee7ed999b1351"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
       "sha256": "a3af46be51b64462bbe19dfc3a19f52773b66ef09f962bf3a1b68d9bafa03c00"
@@ -772,6 +800,12 @@
       "job": "integration-shards",
       "step": "Install dependencies",
       "sha256": "65141fa57adc4b2d61605a21690d287eb6b334ed6033355d6809e2bc8fef7258"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "merge-content",
+      "step": "Recompute landed merge trees from their parents",
+      "sha256": "c376ad8f0cda757c317e3d7658eace34e2cdddb8b7737b40f1d66c12514ccc0b"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -885,7 +919,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "5019ac6e5a9e7de2044e2fab17edc9432de6e26a0307b96d52cfa187325567b7"
+      "sha256": "449dd01a3d370129eba3121a92cbb7ff8e0b04a243c19e2312ba06050d84a43d"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -951,7 +985,7 @@
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "deploy",
       "step": "e2e environment and suite",
-      "sha256": "5f13978a7bff282d3bc0d7be388a5b59d0357f50fc323ef74fff5efa89890d41"
+      "sha256": "3042fdd873932bb7c19240386b1d3704f1ce90ae10a9fa88f6fce2cc9280a6ec"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -1236,6 +1270,72 @@
       "sha256": "13753204e14b60ac778c84fa19b0c08b7a529710253a322d3ef40f64119448fa"
     },
     {
+      "workflow": ".github/workflows/merge-content.yml",
+      "job": "content",
+      "step": "Recompute landed merge content",
+      "sha256": "58808325ef978e67fac85965381b0808323d1adb509b66a3bba9530e37523799"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
+      "step": "Check committed Site browser runtime before builds",
+      "sha256": "fc4ba920e6a51460ee5b60430c35ebd5f1ee2c381818d52b7469bbc69250f1f4"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
+      "step": "Check impacted static contracts",
+      "sha256": "0038f7e1f78ea88c0d7b707a7d34301c2a345949f0975aa3111fe332181b73a6"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
+      "step": "Check impacted types",
+      "sha256": "83df402e5776c5500e4a6cd33786a86469d35463f3bb084141f82740040808cc"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
+      "step": "Install dependencies",
+      "sha256": "d5b0a12f3e1afc3cd05865491a3bf95c58af7dcd39f56255a055748af1915f0d"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
+      "step": "Validate the combined tree's outstanding changeset release plan",
+      "sha256": "3275ae311590a1a9e902f864ddbe40f4999aa3f9b2df72ef549c3f86e5bf4c1e"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "entry",
+      "step": "Explain queue entry and auditable local verification",
+      "sha256": "f5de78c2ef796ee3594f82f158f851a67e17870ce0ab85c743bbe34fab22f9ee"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "plan",
+      "step": "Plan the complete combined tree, not only the last PR",
+      "sha256": "5a6b6762717faa59410ac30d72110199103a7af21d0e7d53ec192e472a52ddd0"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "ready",
+      "step": "Fail closed on failed, cancelled or unexpectedly skipped work",
+      "sha256": "fa9620a2271737540fa508c63b2d402670e3f7746373a762bb302d6e4f119ac3"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "units",
+      "step": "Install dependencies",
+      "sha256": "0395a50ea3b1adf9e6e4c8d117bec9d005e3e590b56ab435dfd890c4f60db1d2"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "units",
+      "step": "Run every impact-selected unit file with real database enforcement",
+      "sha256": "3ea69456ef607e6a771bb1333de88b05f85af34eb5426192358f417b93482f2b"
+    },
+    {
       "workflow": ".github/workflows/open-version-pr.yml",
       "job": "version",
       "step": "Detect versionable changesets",
@@ -1450,6 +1550,12 @@
       "job": "publish",
       "step": "Verify exact source",
       "sha256": "d7a6ea98d18789bfa7cefb07dc532bd7d386b9a11c4f6ccf9e38c9c2d814c78a"
+    },
+    {
+      "workflow": ".github/workflows/queue-health.yml",
+      "job": "report",
+      "step": "Record stage timings and report failed full main CI",
+      "sha256": "26e46f3d1cfca19888d8634cdbd63147fe4fa668c7fe6b7f78a2ca195fb166e6"
     },
     {
       "workflow": ".github/workflows/reconcile-canary-publication.yml",
@@ -1948,6 +2054,42 @@
       "job": "retain",
       "step": "Retain exact current-main workflow authority",
       "sha256": "ef34014d19f61bc9bd00e3aa06615e8b4f396c7c6d3ca798f65face133452cd8"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Database package typecheck",
+      "sha256": "e9cd13e489a44a5698a122ed3dd5383d80b8bf4eaff7b16921da6dfa0c1184af"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Fetch the exact pinned source (including the bootstrap PR commit)",
+      "sha256": "216c86899001f6a44c47535461f435cc371a45bd64f22b8528ac9b4c28b1179c"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Install dependencies",
+      "sha256": "6485dcd2a7ad5c3a60909d2ebf74fcf89a326a553c0c096d0547b315bb3ed5b0"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Migrate, provision restricted roles and run pinned readiness",
+      "sha256": "e0bdb8e121d2550455a25cf91f6439dacb93f5d10851582147f385eacb2e9844"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Unit regressions and baseline validation",
+      "sha256": "df1c3c249feaa261b1447215d1d76fbd344eeeab531733ca43c256171b9cf3f5"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Validate baseline advancement scope",
+      "sha256": "8405c48a52927764784dc531e96339f791883d9a4c7d217270f83a699ac7ca63"
     },
     {
       "workflow": ".github/workflows/seal-release-head.yml",

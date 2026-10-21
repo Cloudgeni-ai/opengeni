@@ -1,0 +1,563 @@
+{
+  "schemaVersion": 39,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h"],
+    "time_options": ["1h", "6h", "24h", "7d", "30d"]
+  },
+  "uid": "opengeni-api-latency",
+  "title": "Opengeni \u00b7 API Latency",
+  "description": "Per-route successful API latency, 500 ms target, volume, failures and historical comparison for one exact deployment.",
+  "version": 1,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "tags": ["opengeni", "observability", "api", "latency"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(up{opengeni_workload_component=~\"api|worker-control|worker-turns\"}, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(up{opengeni_workload_component=~\"api|worker-control|worker-turns\"}, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "method",
+        "label": "Method",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\"}, method)",
+          "refId": "method"
+        },
+        "definition": "label_values(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\"}, method)",
+        "current": {
+          "text": "POST",
+          "value": "POST"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "route",
+        "label": "Route",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\"}, route)",
+          "refId": "route"
+        },
+        "definition": "label_values(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\"}, route)",
+        "current": {
+          "text": "/v1/workspaces/:workspaceId/sessions",
+          "value": "/v1/workspaces/:workspaceId/sessions"
+        },
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to compare",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 7
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Read successful latency alongside volume and failures\nChoose one deployment and the same method/route before and after a change. The default is session creation. Each line or value remains a separate method + route; replicas are combined before quantiles.\n\n**P95 target: below 500 ms.** The exact \u2264500 ms bucket fraction is stronger evidence near that threshold than the interpolated histogram P95. The selected-window cards compare with the immediately preceding equal window. Use at least 200 successful requests per route as a practical P95 screening threshold; this is not a confidence guarantee. Low volume, traffic mix, deployments and cold starts can distort comparisons. Compare equivalent windows and inspect errors too.\n\nSuccess-only data starts with the `status_class` rollout. Old samples cannot be recovered as successful; during a mixed rollout, successful sample counts cover only updated processes. The all-status history includes both old and new samples. Missing or zero-traffic quantiles stay missing, never healthy zeroes. Counts use Prometheus increase and may be fractional estimates.\n\nThese are API-handler timings and include probes and automation. They do not measure browser latency or completed model/tool work. Treat SSE, streaming proxy, realtime and long-running tool endpoints separately from the 500 ms interactive API target."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Successful P95 \u00b7 selected vs previous window",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 10,
+        "h": 5
+      },
+      "description": "Success-only P95 over the full selected window and immediately preceding equal window, evaluated at the selected end time. Previous is missing before status-class telemetry exists.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__range])))",
+          "legendFormat": "Selected {{method}} {{route}}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__range] offset $__range)))",
+          "legendFormat": "Previous {{method}} {{route}}",
+          "instant": true,
+          "range": false,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Successful requests \u2264500 ms",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 7,
+        "w": 7,
+        "h": 5
+      },
+      "description": "Fraction of 2xx requests in the exact 0.5-second bucket over the selected window. A 95% fraction is the P95 threshold. No traffic produces no value.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal"
+      },
+      "targets": [
+        {
+          "expr": "sum by (method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\",le=\"0.5\"}[$__range])) / sum by (method, route) (increase(opengeni_http_request_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__range]))",
+          "legendFormat": "{{method}} {{route}}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Successful samples \u00b7 selected vs previous window",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 17,
+        "y": 7,
+        "w": 7,
+        "h": 5
+      },
+      "description": "Estimated 2xx observation count over each comparison window. Always inspect sample count before trusting a tail percentile.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal"
+      },
+      "targets": [
+        {
+          "expr": "sum by (method, route) (increase(opengeni_http_request_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__range]))",
+          "legendFormat": "Selected {{method}} {{route}}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (method, route) (increase(opengeni_http_request_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__range] offset $__range))",
+          "legendFormat": "Previous {{method}} {{route}}",
+          "instant": true,
+          "range": false,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Successful latency over time",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 14,
+        "h": 9
+      },
+      "description": "Rolling success-only quantiles. Aggregates histogram buckets across replicas before calculating each method/route percentile. Sparse intervals can be missing.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__rate_interval])))",
+          "legendFormat": "P50 {{method}} {{route}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__rate_interval])))",
+          "legendFormat": "P95 {{method}} {{route}}",
+          "instant": false,
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\",status_class=\"2xx\"}[$__rate_interval])))",
+          "legendFormat": "P99 {{method}} {{route}}",
+          "instant": false,
+          "range": true,
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Request rate by status",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 12,
+        "w": 10,
+        "h": 9
+      },
+      "description": "All responses, including denials, missing resources, server errors, and successes. A lower successful P95 does not establish an improvement if errors rise.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (method, route, status) (rate(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\"}[$__rate_interval]))",
+          "legendFormat": "{{status}} {{method}} {{route}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "All-status P95 \u00b7 historical comparison",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 14,
+        "h": 9
+      },
+      "description": "Includes legacy unlabelled and new status-class buckets, so historical continuity is retained. Fast failures can make this percentile look better. Compare this only with all-status history, never with success-only P95. Previous is the immediately preceding equal-length window.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\"}[$__rate_interval])))",
+          "legendFormat": "Selected {{method}} {{route}}",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, method, route) (increase(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\"}[$__rate_interval] offset $__range)))",
+          "legendFormat": "Previous {{method}} {{route}}",
+          "instant": false,
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Response count by status \u00b7 selected window",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 21,
+        "w": 10,
+        "h": 9
+      },
+      "description": "Estimated request count per exact HTTP status. Includes all process versions during a rolling deployment.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No samples",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal"
+      },
+      "targets": [
+        {
+          "expr": "sum by (method, route, status) (increase(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=~\"$method\",route=~\"$route\"}[$__range]))",
+          "legendFormat": "{{status}} {{method}} {{route}}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

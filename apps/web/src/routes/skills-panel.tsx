@@ -16,22 +16,22 @@ import {
 } from "@/components/capabilities/capability-page-slot";
 import { humanizeName } from "@/components/capabilities/skill-copy";
 import { SkillPage, skillStatus } from "@/components/capabilities/skill-page";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { DetailPage } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { MoreMenu } from "@/components/ui/page-actions";
-import { useAppContext, type AppContextValue } from "@/context";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { DetailPage } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
+import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/api-error";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 /** What failed, and the error behind it: the UI shows advice, never the raw API string. */
 type SkillsFailure = { title: string; cause: unknown };

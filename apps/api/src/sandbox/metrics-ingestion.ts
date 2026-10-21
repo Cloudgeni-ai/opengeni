@@ -124,7 +124,7 @@ function payloadIsHeartbeat(payload: Uint8Array): boolean {
 
 /**
  * Drain agent events without making every Connected Machine wait behind one
- * deployment-wide serial DB queue. Each exact process subject retains FIFO order;
+ * deployment-wide serial DB queue. Within this consumer, each exact process subject retains FIFO order;
  * separate subjects drain concurrently. Consecutive pending heartbeats for one
  * subject are latest-wins because they are point-in-time liveness/metrics samples,
  * while GoingOffline and update-progress events remain ordered barriers. Exit
@@ -460,15 +460,14 @@ function wireBrowserArchitecture(architecture: Arch): "x64" | "arm64" {
 async function ingestAttachedBrowserInventory(
   db: Database,
   input: {
+    accountId: string;
     workspaceId: string;
     agentId: string;
     inventory: WireAttachedBrowserInventorySnapshot;
   },
 ): Promise<void> {
-  const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
-  if (!enrollment) return;
   await reconcileAttachedBrowserInventory(db, {
-    accountId: enrollment.accountId,
+    accountId: input.accountId,
     workspaceId: input.workspaceId,
     enrollmentId: input.agentId,
     snapshot: wireAttachedBrowserInventoryToContract(input.inventory),
@@ -744,17 +743,16 @@ export async function handleAgentEventPayload(
     return; // an unknown event kind → not a metrics point.
   }
   const heartbeat = event.event.heartbeat;
-  const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId).catch(() => null);
-  if (!enrollment || enrollment.connectionInstanceId !== ids.connectionInstanceId) return;
+  let enrollment: Awaited<ReturnType<typeof getEnrollment>>;
   try {
     const renewed = await renewEnrollmentConnection(db, {
-      accountId: enrollment.accountId,
       workspaceId: ids.workspaceId,
       enrollmentId: ids.agentId,
       connectionInstanceId: ids.connectionInstanceId,
       leaseMs: AGENT_CONNECTION_LEASE_MS,
     });
-    if (!renewed.renewed) return;
+    if (!renewed.renewed || !renewed.enrollment) return;
+    enrollment = renewed.enrollment;
   } catch (error) {
     observability?.warn?.("Failed to renew a machine connection heartbeat", {
       subject,
@@ -769,6 +767,7 @@ export async function handleAgentEventPayload(
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
+        accountId: enrollment.accountId,
         workspaceId: ids.workspaceId,
         agentId: ids.agentId,
         inventory: heartbeat.attachedBrowserInventory,
@@ -842,7 +841,7 @@ export function startMetricsIngestion(deps: {
   bus: EventBus;
   observability?: Observability;
   agentUpdates?: AutomaticAgentUpdater | null;
-}): () => void {
+}): (() => void) & { whenIdle: () => Promise<void> } {
   const scheduler = createAgentEventIngestionScheduler(
     (payload, subject) =>
       handleAgentEventPayload(
@@ -861,13 +860,21 @@ export function startMetricsIngestion(deps: {
         }),
     },
   );
-  const unsubscribe = deps.bus.subscribeAgentEvents(AGENT_EVENTS_SUBJECT, (payload, subject) => {
-    scheduler.enqueue(payload, subject);
-  });
-  return () => {
-    unsubscribe();
-    scheduler.close();
-  };
+  // This handler persists shared state; running it in every API replica repeats
+  // every lease, inventory and metrics write. Other agent-event subscribers keep
+  // broadcast delivery. Exact-runner database fences still own authority.
+  const unsubscribe = deps.bus.subscribeAgentEvents(
+    AGENT_EVENTS_SUBJECT,
+    (payload, subject) => scheduler.enqueue(payload, subject),
+    { queue: "opengeni-agent-state-ingestion" },
+  );
+  return Object.assign(
+    () => {
+      unsubscribe();
+      scheduler.close();
+    },
+    { whenIdle: scheduler.whenIdle },
+  );
 }
 
 // ── Connect-Hello display refresh ─────────────────────────────────────────────
@@ -1208,7 +1215,10 @@ export function startHelloIngestion(deps: {
   bus: EventBus;
   observability?: Observability;
 }): () => void {
-  return deps.bus.subscribeAgentEvents(AGENT_HELLO_SUBJECT, (payload, subject) =>
-    handleHelloPayload(deps.db, deps.observability, payload, subject, deps.bus),
+  return deps.bus.subscribeAgentEvents(
+    AGENT_HELLO_SUBJECT,
+    (payload, subject) =>
+      handleHelloPayload(deps.db, deps.observability, payload, subject, deps.bus),
+    { queue: "opengeni-agent-state-ingestion" },
   );
 }

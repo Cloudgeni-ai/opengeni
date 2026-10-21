@@ -20,7 +20,7 @@ import {
   type RefObject,
 } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { skillReleaseMessage, skillInstallationMessage } from "./skill-release-message";
 import { pluginRemovalMessage } from "./plugin-removal-result";
 
@@ -39,7 +39,7 @@ import type {
   PluginInstallationSummary,
   PluginUninstallPreview,
   SkillUninstallPreview,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type SourceRemoveTarget =
   | {

@@ -1,12 +1,12 @@
 import { useState } from "react";
-import { RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   invalidateModelSettingsQueries,
   invalidateSharedQueries,
   useSharedQueryActivity,
-} from "@/lib/shared-query";
-import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
+} from "@opengeni/react/app/lib/shared-query";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
 
 export function ModelsRefreshControl({ client }: { client: object }) {
   const activity = useSharedQueryActivity(client, [

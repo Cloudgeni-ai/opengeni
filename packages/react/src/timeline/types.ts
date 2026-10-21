@@ -153,6 +153,22 @@ export type ToolCallTruncation = {
   };
 };
 
+/**
+ * A tool output a step read delivered as a bounded preview: long strings keep
+ * their head and tail (`structured`), or the output is the head and tail of
+ * its text (`text`). The exact output is retained; `load` reads it, and the
+ * row then re-renders with it.
+ */
+export type ToolOutputPreview = {
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
+  /** `preview` until `load` is called; `error` when the exact read failed. */
+  state: "preview" | "loading" | "error";
+  /** Read the exact output. Absent when the timeline has no reader for it. */
+  load?: (() => void) | undefined;
+};
+
 export type ToolCallItem = {
   kind: "tool-call";
   id: string;
@@ -163,6 +179,8 @@ export type ToolCallItem = {
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;
+  /** Set while `output` is a bounded preview of the exact output. */
+  outputPreview?: ToolOutputPreview | null | undefined;
   /**
    * The provider-native tool item (`agent.toolCall.created.payload.raw`). Carries
    * `type` (e.g. `apply_patch_call`, `computer_call`, `hosted_tool_call`) and the
@@ -620,9 +638,41 @@ export type TimelineItem = (
   | KnowledgeItem
   | FleetDecisionItem
   | TurnEndItem
+  | TurnStepsItem
 ) & {
   /** Durable identities, independent of renderer/reconciliation keys. */
   sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
+};
+
+/**
+ * Load state of a turn's steps (tool calls, their outputs, streamed reasoning
+ * and command output). Conversation-first history reads only a turn's
+ * conversation; its steps load when a reader opens the turn.
+ * - `idle`: none loaded yet.
+ * - `partial`: the newest steps are loaded; earlier ones remain.
+ * - `complete`: every step is loaded.
+ */
+export type TurnStepsState = "idle" | "loading" | "partial" | "complete" | "error";
+
+/**
+ * Marks a turn whose steps are not all in the browser. It is not a step: the
+ * readable grouping attaches it to the turn's work row (`work.steps`), which
+ * keeps the row expandable and lets the opened row load the steps.
+ */
+export type TurnStepsItem = {
+  kind: "turn-steps";
+  id: string;
+  turnId: string;
+  /** The turn's start, so a turn whose work is all hidden keeps its duration. */
+  occurredAt: string;
+  state: TurnStepsState;
+  /** Load the newest steps, or the next earlier page once some are loaded. */
+  load: () => void;
+  /**
+   * Keep this turn's loaded steps while it is open: the browser never evicts
+   * steps a reader is looking at. Returns the release function.
+   */
+  retain: () => () => void;
 };
 
 /**
@@ -684,6 +734,8 @@ export type TimelineGroup =
          * `summary` is the latest wait reason, shown under the collapsed row.
          */
         cycles?: { count: number; summary?: string };
+        /** Steps of this turn that are not loaded yet (see TurnStepsItem). */
+        steps?: TurnStepsItem;
       };
     }
   | {

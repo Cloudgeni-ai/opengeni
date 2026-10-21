@@ -30,6 +30,7 @@ export type ComputerTextTarget = {
   processId: number | null;
   bounds: { x: number; y: number; width: number; height: number } | null;
   focused: boolean;
+  offScreen?: true | undefined;
 };
 
 export type ComputerTextObservation = {
@@ -321,6 +322,7 @@ export function computerTargetLine(target: ComputerTextTarget): string {
   const bounds = target.kind === "app" ? null : boundsText(target.bounds);
   if (bounds) parts.push(bounds);
   if (target.focused) parts.push("focused");
+  if (target.offScreen) parts.push("off screen");
   return parts.join(" ");
 }
 
@@ -440,8 +442,14 @@ export function computerSessionLine(session: {
 
 export function computerTargetsText(targets: readonly ComputerTextTarget[]): string {
   if (targets.length === 0) return "No apps, windows or screens are available.";
-  return [`${plural(targets.length, "target")}:`, ...targets.map(computerTargetLine)].join("\n");
+  const lines = [`${plural(targets.length, "target")}:`, ...targets.map(computerTargetLine)];
+  if (targets.some((target) => target.offScreen)) lines.push(OFF_SCREEN_NOTE);
+  return lines.join("\n");
 }
+
+/** Fixed text, so a listing renders identically for the same targets. */
+const OFF_SCREEN_NOTE =
+  "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.";
 
 export function computerOpenText(output: {
   session: Parameters<typeof computerSessionLine>[0];

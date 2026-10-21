@@ -1,6 +1,6 @@
 import type { CodexAccount, CodexAccountOverview, CodexUsage } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 export function useOrganizationCodexOverview(
   client: OpenGeniBrowserClient,
@@ -31,7 +31,7 @@ export function useOrganizationCodexUsage(
   const data: CodexUsage | null = usage
     ? { status: usage.error ? "error" : (usage.value?.status ?? "no-data"), usage: usage.value }
     : null;
-  return { ...query, data, source: usage?.source };
+  return { ...query, data, source: usage?.source, resetCredits: query.data?.resetCredits };
 }
 
 /** Mounted with list rows: opening a detail reuses these exact retained keys. */

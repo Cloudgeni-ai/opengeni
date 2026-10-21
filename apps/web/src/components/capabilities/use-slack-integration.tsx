@@ -12,7 +12,10 @@ import type {
   SlackReactionChannel,
 } from "@opengeni/sdk";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { toast } from "sonner";
 
 import type {
@@ -22,15 +25,15 @@ import type {
   IntegrationFooter,
   IntegrationOption,
   IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { SlackChannelRoutingDialog } from "@/components/capabilities/slack-channel-routing-dialog";
 import { SlackReactionChannelsDialog } from "@/components/capabilities/slack-reaction-channels-dialog";
 import { useSlackInstallationDiscovery } from "@/components/capabilities/use-slack-installation-discovery";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
   enableNewSlackAccountTools,
@@ -49,7 +52,7 @@ import type {
   ConnectionMetadata,
   ConnectorDocumentDestinationAuthority,
   SlackInstallationBinding,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 // The publication dialog and its SDK client stay behind a lazy boundary: they
 // are admin-only detail and would otherwise fold the memory-slack client into

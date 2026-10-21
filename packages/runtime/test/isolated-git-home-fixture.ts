@@ -174,15 +174,23 @@ export function hostShellSession(home: string, options: HostShellSessionOptions 
       }
       // Content-addressed setup programs are verified by hash before they run,
       // so never rewrite them in place: the launcher checks the original and
-      // then executes a host-mapped copy.
-      const setupProgram = cmd.match(/opengeni_setup_program='([^']+)'/u);
-      if (setupProgram && options.rewriteCommand && existsSync(setupProgram[1]!)) {
-        const mapped = `${setupProgram[1]!}.host-mapped`;
-        writeFileSync(mapped, options.rewriteCommand(readFileSync(setupProgram[1]!, "utf8")));
-        cmd = cmd.replace(
-          'exec /bin/sh "$opengeni_setup_program"',
-          `exec ${options.shell === "bash" ? "bash --noprofile --norc" : "/bin/sh"} '${mapped}'`,
-        );
+      // then executes a host-mapped copy. Programs can be installed (or decoded
+      // for one run) by the same command, so the copy is mapped in-shell with
+      // the workspace prefix this session's rewrite applies.
+      const workspacePrefix = options.rewriteCommand?.("'/workspace/");
+      if (workspacePrefix && workspacePrefix !== "'/workspace/") {
+        const runner = options.shell === "bash" ? "bash --noprofile --norc" : "/bin/sh";
+        const mapTo = (source: string, target: string) =>
+          `sed "s#'/workspace/#${workspacePrefix}#g" "${source}" > "${target}"`;
+        cmd = cmd
+          .replace(
+            'exec /bin/sh "$opengeni_setup_program"',
+            `${mapTo("$opengeni_setup_program", "$opengeni_setup_program.host-mapped")} && exec ${runner} "$opengeni_setup_program.host-mapped"`,
+          )
+          .replace(
+            '/bin/sh "$opengeni_setup_payload"',
+            `( ${mapTo("$opengeni_setup_payload", "$opengeni_setup_payload.host-mapped")} && ${runner} "$opengeni_setup_payload.host-mapped"; host_status=$?; rm -f "$opengeni_setup_payload.host-mapped"; exit "$host_status" )`,
+          );
       }
       const child = Bun.spawn(
         [

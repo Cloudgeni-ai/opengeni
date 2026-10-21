@@ -268,6 +268,42 @@ afterAll(async () => {
 }, 180_000);
 
 describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => {
+  test("optional inventory and metrics failures cannot roll back the accepted heartbeat lease", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
+    await admin`update enrollments set connection_lease_expires_at = now() - interval '1 second', last_seen_at = null where id = ${enrollment.id}`;
+    const warnings: string[] = [];
+    await handleAgentEventPayload(
+      db,
+      { warn: (message: string) => warnings.push(message) } as never,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: {
+            $case: "heartbeat",
+            heartbeat: {
+              attachedBrowserInventory: {
+                bridgeGeneration: "bridge",
+                revision: "18446744073709551615",
+                devices: [],
+              },
+              metrics: { sampledAtMs: "9223372036854775807" },
+            },
+          },
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${connectionInstanceId}.events`,
+    );
+    expect(warnings).toEqual([
+      "Failed to ingest an attached-browser inventory",
+      "Failed to ingest a machine metrics heartbeat",
+    ]);
+    const renewed = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(renewed!.connectionInstanceId).toBe(connectionInstanceId);
+    expect(Date.parse(renewed!.connectionLeaseExpiresAt!)).toBeGreaterThan(Date.now());
+    expect(renewed!.lastSeenAt).not.toBeNull();
+  });
+
   test("heartbeat restores desktop after wake without changing connection or release identity", async () => {
     if (!available) return;
     const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);

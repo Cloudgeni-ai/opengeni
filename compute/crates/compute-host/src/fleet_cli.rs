@@ -83,7 +83,7 @@ pub struct Described<'a> {
     pub memory_profile: String,
     pub cpu_template: String,
     pub memory_bytes: u64,
-    pub cpu_millis: Option<u64>,
+    pub cpu_millis: u64,
 }
 
 impl FleetArgs {

@@ -7,16 +7,16 @@ import type {
   DesktopAppShotShortcut,
   DesktopAppShotStatus,
   DesktopPlatform,
-} from "@opengeni/desktop/contract";
+} from "@opengeni/sdk/desktop-bridge";
 import { CheckIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Section } from "@/components/ui/section";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { desktopCapability } from "@/lib/desktop";
+import { Button } from "@opengeni/react/ui/button";
+import { Section } from "@opengeni/react/ui/section";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { desktopCapability } from "@opengeni/react/app/lib/desktop";
 
 const MODIFIER_NAMES: Record<DesktopAppShotModifier, { mac: string; other: string }> = {
   command: { mac: "⌘ Command", other: "Windows" },

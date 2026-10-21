@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
 // Machines: the workspace's bring-your-own-compute fleet — enrolled selfhosted
 // machines, each with its connection-status pill, state badges, latest metrics
 // (CPU/load/mem/disk/GPU), and an enroll affordance. The session-scoped attach/
@@ -28,19 +28,22 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
-import { DesktopThisComputerPanel } from "@/components/desktop/this-computer";
+import { DesktopThisComputerPanel } from "@opengeni/react/app/components/desktop/this-computer";
 import { AppShotsSettings } from "@/components/desktop/app-shots-settings";
-import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
+import { ConnectMachineDialog } from "@opengeni/react/app/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ContentPage } from "@/components/ui/content-layout";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { useAppContext } from "@/context";
-import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  apiErrorTechnicalFacts,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */

@@ -10,8 +10,9 @@
  *   (b) a publishable package is missing npm-public package metadata or a build.
  *   (c) @opengeni/sdk / @opengeni/react stop honoring the client-clean closure:
  *       the SDK depends only on contracts and headless Connect, React depends
- *       only on SDK and Connect, and its browser-safe artifact engine is an optional peer
- *       for the isolated artifact subpaths.
+ *       only on SDK, contracts (already in the SDK's closure) and Connect, and
+ *       its browser-safe artifact engine is an optional peer for the isolated
+ *       artifact subpaths.
  *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
  *   (e) the BUILT runtime leaves OpenAI Agents or Zod externally resolved,
  *       allowing an embedding host to change their runtime schema identity.
@@ -333,20 +334,25 @@ if (
   );
 }
 
-// (b) React uses the client SDK and headless Connect. The artifact
-// engine stays an optional peer so ordinary React/session consumers do not
-// install its format codecs or native rasterizer.
+// (b) React uses the client SDK, the shared contracts the SDK already installs
+// (the session app layer reads them directly) and headless Connect. The
+// artifact engine stays an optional peer so ordinary React/session consumers do
+// not install its format codecs or native rasterizer.
 const reactPkg = readPkg("packages/react");
 const reactOpengeniDeps = opengeniRuntimeDeps(reactPkg);
-const allowedReactOpengeniDeps = new Set(["@opengeni/sdk", "@opengeni/connect"]);
+const allowedReactOpengeniDeps = new Set([
+  "@opengeni/sdk",
+  "@opengeni/contracts",
+  "@opengeni/connect",
+]);
 const reactForbidden = reactOpengeniDeps.filter((name) => !allowedReactOpengeniDeps.has(name));
 if (reactForbidden.length > 0) {
   failures.push(
-    `@opengeni/react may only depend on SDK and Connect among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
+    `@opengeni/react may only depend on SDK, contracts and Connect among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
   );
 }
 if ([...allowedReactOpengeniDeps].some((name) => !reactOpengeniDeps.includes(name))) {
-  failures.push(`@opengeni/react must keep SDK and Connect as runtime dependencies.`);
+  failures.push(`@opengeni/react must keep SDK, contracts and Connect as runtime dependencies.`);
 }
 const connectPkg = readPkg("packages/connect");
 if (
@@ -436,6 +442,36 @@ function compiledTarget(sourceTarget: string, kind: "runtime" | "types"): string
   return `./dist/${stem}${kind === "types" ? ".d.ts" : ".js"}`;
 }
 
+/**
+ * A subpath pattern export ("./ui/*" -> "./src/ui/*.tsx") publishes every
+ * matching source module (tests and fixtures excluded). Return the concrete
+ * package-relative source targets so each one's compiled output is checked.
+ */
+function expandSourcePattern(pkgDir: string, sourceTarget: string): string[] {
+  const [prefix, suffix = ""] = sourceTarget.split("*") as [string, string?];
+  const root = join(repoRoot, pkgDir, dirname(`${prefix}x`));
+  const matches: string[] = [];
+  const visit = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+        continue;
+      }
+      const relative = `./${path
+        .slice(join(repoRoot, pkgDir).length + 1)
+        .split("\\")
+        .join("/")}`;
+      if (!relative.startsWith(prefix) || !relative.endsWith(suffix)) continue;
+      const match = relative.slice(prefix.length, relative.length - suffix.length);
+      if (/\.(test|browser|dom-fixture)$|\.test\./.test(match)) continue;
+      matches.push(relative);
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return matches.sort();
+}
+
 function assertBuiltExportTargets(pkg: WorkspacePackage): void {
   const exports = (pkg.packageJson as PackageJson & { exports?: Record<string, unknown> }).exports;
   if (!exports || typeof exports !== "object") return;
@@ -456,12 +492,20 @@ function assertBuiltExportTargets(pkg: WorkspacePackage): void {
     }
 
     for (const target of targets) {
-      const compiled = compiledTarget(target.source, target.kind);
-      if (!compiled) continue;
-      if (!existsSync(join(repoRoot, pkg.dir, compiled))) {
-        failures.push(
-          `${pkg.name} export ${subpath} compiles from ${target.source} but is missing ${compiled}.`,
-        );
+      const sources = target.source.includes("*")
+        ? expandSourcePattern(pkg.dir, target.source)
+        : [target.source];
+      if (target.source.includes("*") && sources.length === 0) {
+        failures.push(`${pkg.name} export ${subpath} matches no source module.`);
+      }
+      for (const source of sources) {
+        const compiled = compiledTarget(source, target.kind);
+        if (!compiled) continue;
+        if (!existsSync(join(repoRoot, pkg.dir, compiled))) {
+          failures.push(
+            `${pkg.name} export ${subpath} compiles from ${source} but is missing ${compiled}.`,
+          );
+        }
       }
     }
   }

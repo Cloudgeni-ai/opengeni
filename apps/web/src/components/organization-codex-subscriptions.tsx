@@ -1,5 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import type {
   CodexAccount,
   CodexConnectPoll,
@@ -11,12 +11,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   invalidateSharedQueries,
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows

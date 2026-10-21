@@ -4,7 +4,7 @@ import {
   beginIntegrationConnect,
   integrationConnectErrorOutcome,
   modelConnectionClass,
-} from "@/lib/integration-connect-analytics";
+} from "@opengeni/react/app/lib/integration-connect-analytics";
 import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
@@ -18,13 +18,13 @@ import { toast } from "sonner";
 
 import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
 import { useClaudeUsage } from "@/components/models/claude-usage";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   invalidateSharedQueries,
   peekSharedQuery,
   sharedQueryWriter,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 // Organization API-key providers (Vercel AI Gateway, OpenRouter, Opper) shared with
 // the organization's workspaces. Returns the same view as the workspace hook,

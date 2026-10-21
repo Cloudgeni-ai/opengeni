@@ -1,8 +1,8 @@
 import { createRoot } from "react-dom/client";
 import type { SandboxRecoveryProjection } from "@opengeni/sdk";
-import { SandboxRecoveryActions } from "../src/components/session/sandbox-recovery-actions";
-import { Button } from "../src/components/ui/button";
-import type { SandboxRecoveryClient } from "../src/lib/sandbox-recovery";
+import { SandboxRecoveryActions } from "@opengeni/react/app/components/session/sandbox-recovery-actions";
+import { Button } from "@opengeni/react/ui/button";
+import type { SandboxRecoveryClient } from "@opengeni/react/app/lib/sandbox-recovery";
 import "../src/styles.css";
 
 // Real production controls/styles with synthetic failed-restore evidence.

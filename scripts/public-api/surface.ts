@@ -21,6 +21,7 @@
  *   parsed and its exported names (value or type-only) collected transitively.
  *
  * A method whose JSDoc carries `@internal` is excluded (web-app-only surface).
+ * Export subpaths listed in `INTERNAL_PACKAGE_SUBPATHS` are excluded too.
  */
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -30,6 +31,19 @@ export const SNAPSHOT_PATH = "scripts/public-api/surface.gen.json";
 export const ALLOWLIST_PATH = "scripts/public-api/breaking-changes.json";
 
 const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Package export subpaths that are first-party implementation, not public
+ * surface. `@opengeni/react/app/*` is the Opengeni web app's session UI layer:
+ * the web app, the desktop app and the package's own embeds import it, but it
+ * carries no compatibility promise; embedders use the curated entry points.
+ * `@opengeni/sdk/desktop-bridge` is the contract between the desktop shell and
+ * the web app it hosts.
+ */
+const INTERNAL_PACKAGE_SUBPATHS: Record<string, readonly string[]> = {
+  "@opengeni/react": ["./app/*"],
+  "@opengeni/sdk": ["./desktop-bridge"],
+};
 
 /**
  * Public routes that no SDK method calls: ingress formats third parties post
@@ -776,9 +790,40 @@ function packageEntryFiles(packageDir: string, packageName: string): Record<stri
       typeof target === "string" ? target : (target.types ?? target.default ?? target.import);
     const entryName =
       subpath === "." ? packageName : `${packageName}/${subpath.replace(/^\.\//, "")}`;
-    if (file) out[entryName] = resolve(packageDir, file);
+    if (!file) continue;
+    if (INTERNAL_PACKAGE_SUBPATHS[packageName]?.includes(subpath)) continue;
+    if (subpath.includes("*")) {
+      // A subpath pattern ("./ui/*" -> "./src/ui/*.tsx") exposes every matching
+      // module, so each one is its own entry point.
+      for (const [match, path] of expandSubpathPattern(packageDir, file)) {
+        out[entryName.replace("*", match)] = path;
+      }
+      continue;
+    }
+    out[entryName] = resolve(packageDir, file);
   }
   return out;
+}
+
+function expandSubpathPattern(packageDir: string, target: string): [string, string][] {
+  const [prefix, suffix = ""] = resolve(packageDir, target).split("*") as [string, string?];
+  const root = dirname(`${prefix}x`);
+  const matches: [string, string][] = [];
+  const visit = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!path.startsWith(prefix) || !path.endsWith(suffix)) continue;
+      const match = path.slice(prefix.length, path.length - suffix.length);
+      if (/\.(test|browser|dom-fixture)$|\.test\./.test(match)) continue;
+      matches.push([match.split("\\").join("/"), path]);
+    }
+  };
+  if (existsSync(root)) visit(root);
+  return matches.sort(([a], [b]) => a.localeCompare(b));
 }
 
 function packageEntryExports(

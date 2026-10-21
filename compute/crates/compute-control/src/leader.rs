@@ -484,22 +484,13 @@ fn bring(seen: &mut GroupView, host: &GroupHost, policy: &ScalePolicy) {
         seen.memory_rooms = seen
             .memory_rooms
             .saturating_add(policy.rooms(host.free_memory_mib, None));
-        if let (Some(cpu), Some(free)) = (host.cpu_millis, host.free_cpu_millis) {
-            seen.cpu_millis += cpu;
-            seen.free_cpu_millis += free;
-            seen.most_cpu_millis = seen.most_cpu_millis.max(cpu);
-            seen.host_cpu_millis = seen
-                .host_cpu_millis
-                .max(host.registered_cpu_millis.unwrap_or(cpu));
-            seen.rooms = seen
-                .rooms
-                .saturating_add(policy.rooms(host.free_memory_mib, Some(free)));
-        } else {
-            seen.cpu_unreported += 1;
-            seen.rooms = seen
-                .rooms
-                .saturating_add(policy.rooms(host.free_memory_mib, None));
-        }
+        seen.cpu_millis += host.cpu_millis;
+        seen.free_cpu_millis += host.free_cpu_millis;
+        seen.most_cpu_millis = seen.most_cpu_millis.max(host.cpu_millis);
+        seen.host_cpu_millis = seen.host_cpu_millis.max(host.registered_cpu_millis);
+        seen.rooms = seen
+            .rooms
+            .saturating_add(policy.rooms(host.free_memory_mib, Some(host.free_cpu_millis)));
     }
 }
 
@@ -683,9 +674,9 @@ mod tests {
             draining: false,
             memory_mib: 64 * GIB,
             free_memory_mib: free_gib * GIB,
-            cpu_millis: None,
-            free_cpu_millis: None,
-            registered_cpu_millis: None,
+            cpu_millis: 30_000,
+            free_cpu_millis: 30_000,
+            registered_cpu_millis: 30_000,
         }
     }
 
@@ -803,9 +794,9 @@ mod tests {
     #[tokio::test]
     async fn spare_in_slivers_across_hosts_holds_no_room_and_grows_the_group() {
         let sliver = GroupHost {
-            cpu_millis: Some(7500),
-            free_cpu_millis: Some(1500),
-            registered_cpu_millis: Some(7500),
+            cpu_millis: 7500,
+            free_cpu_millis: 1500,
+            registered_cpu_millis: 7500,
             ..live(64)
         };
         let members = [
@@ -838,9 +829,9 @@ mod tests {
     #[tokio::test]
     async fn hosts_guaranteeing_no_processor_time_now_grow_the_group() {
         let none = GroupHost {
-            cpu_millis: Some(0),
-            free_cpu_millis: Some(0),
-            registered_cpu_millis: Some(7500),
+            cpu_millis: 0,
+            free_cpu_millis: 0,
+            registered_cpu_millis: 7500,
             ..live(64)
         };
         let members = [
@@ -858,13 +849,12 @@ mod tests {
         let seen = Boots::default().count(4, &members, &registered, BOOTING, &POLICY);
         assert_eq!(
             (
-                seen.cpu_unreported,
                 seen.cpu_millis,
                 seen.host_cpu_millis,
                 seen.most_cpu_millis,
                 seen.rooms
             ),
-            (0, 0, 7500, 0, 0),
+            (0, 7500, 0, 0),
             "{seen:?}"
         );
         assert_eq!(POLICY.decide(&seen), ScaleDecision::Grow { to: 5 });

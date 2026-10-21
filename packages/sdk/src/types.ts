@@ -129,6 +129,12 @@ export type SessionRealtimeWebsocketRequest = {
    * detect the spoken language themselves.
    */
   language?: string | undefined;
+  /**
+   * Voice settings for this connection. Each set field overrides the
+   * workspace's saved settings for the model; `voiceSettings.language` also
+   * overrides `language`.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
 };
 /** @deprecated Use SessionRealtimeWebsocketRequest. */
 export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
@@ -403,6 +409,33 @@ export type WorkspaceRealtimeModelCatalogItem = {
    * language codes. Absent when the model detects the spoken language itself.
    */
   languages?: string[] | undefined;
+  /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+  voices?: { id: string; label: string }[] | undefined;
+  /** Whether any provider voice id is accepted as `voice`, beyond the listed `voices`. */
+  customVoice?: boolean | undefined;
+  /** Turn eagerness values this model accepts. Absent when it cannot be chosen. */
+  turnEagerness?: RealtimeTurnEagerness[] | undefined;
+  /** The provider's defaults for the settings it offers, other than language. */
+  voiceDefaults?: RealtimeVoiceSettings | undefined;
+  /** The workspace's saved voice settings for this model. */
+  workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
+};
+
+/** How readily a realtime voice model decides the speaker is done and answers. */
+export type RealtimeTurnEagerness = "low" | "medium" | "high";
+
+/**
+ * Voice settings for a realtime voice model. Unset fields keep the provider's
+ * default. A model offers only the settings its catalog entry lists
+ * (`voices`/`customVoice`, `languages`, `turnEagerness`); a value it does not
+ * offer is ignored rather than failing the call.
+ */
+export type RealtimeVoiceSettings = {
+  /** A listed voice id, or any provider voice id where `customVoice` is offered. */
+  voice?: string | undefined;
+  /** Conversation language (a catalog `languages` code or a BCP 47 tag), for models that need one. */
+  language?: string | undefined;
+  turnEagerness?: RealtimeTurnEagerness | undefined;
 };
 
 export type WorkspaceRealtimeModelCatalogResponse = {
@@ -1999,6 +2032,8 @@ export type SessionListTotals = {
     queued: number;
     unread: number;
     activeWork: number;
+    /** Idle sessions parked on their own wake-up; already included in `active`. */
+    waiting?: number;
   }>;
 };
 
@@ -2627,6 +2662,35 @@ type SessionEventListCommonOptions = {
   direction?: SessionEventReadDirection;
   payloadMode?: SessionEventPayloadMode;
   resultMode?: "events";
+  /**
+   * With `excludeTypes` containing `agent.toolCall.created`, keep the created
+   * rows of presented tools (images, published files, Skill changes). Servers
+   * that predate this option ignore it and apply the plain type filter; a
+   * server that applies it reports `SessionEventPage.conversationFilter`.
+   */
+  presentedToolCalls?: "include";
+  /**
+   * With `payloadMode: "full"`, return large `agent.toolCall.output` payloads
+   * as bounded previews carrying an `outputPreview` fact (see
+   * {@link SessionEventToolOutputPreview}). Read one row's exact output with
+   * an ordinary full read around its sequence. Servers that predate this
+   * option ignore it and return exact outputs.
+   */
+  toolOutputs?: "preview";
+};
+
+/**
+ * The fact a previewed `agent.toolCall.output` payload carries in
+ * `payload.outputPreview`. `structured` keeps the output's shape with long
+ * strings shortened to their head and tail around an omission marker; `text`
+ * replaces the output with the head and tail of its text.
+ */
+export type SessionEventToolOutputPreview = {
+  truncated: true;
+  reason: "tool_output_preview";
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &
@@ -2718,6 +2782,13 @@ export type SessionEventPage = {
   nextAfter: number | null;
   nextBefore: number | null;
   forensicExact: boolean;
+  /**
+   * The conversation-filter version the server applied to a
+   * `presentedToolCalls: "include"` read (see
+   * `SESSION_EVENT_CONVERSATION_FILTER_VERSION`), or null when it announced
+   * none: an older server may have ignored `presentedToolCalls`.
+   */
+  conversationFilter?: number | null;
 };
 
 export type ToolAuthNeededPayload = {
@@ -3925,6 +3996,7 @@ export type FirstPartyMcpToolName =
   | "browser_debug"
   | "browser_downloads"
   | "browser_download_save"
+  | "browser_record"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"
@@ -5944,6 +6016,11 @@ export type WorkspaceSettings = {
   busySend?: "queue" | "steer" | undefined;
   /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
   codeSearchEnabled?: boolean | null | undefined;
+  /**
+   * Realtime voice settings by realtime model id. Read one model's settings
+   * from the realtime model catalog's `workspaceVoiceSettings`.
+   */
+  realtimeVoice?: Record<string, unknown> | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6043,6 +6120,13 @@ export type UpdateWorkspaceSettingsRequest = {
   agentHumanInputEnabled?: boolean | undefined;
   busySend?: "queue" | "steer" | undefined;
   codeSearchEnabled?: boolean | null | undefined;
+  /**
+   * Voice settings by realtime model id, for example
+   * `{ "workspace-elevenlabs/eleven_realtime_v1_max": { voice: "<voice id>", language: "no" } }`.
+   * Each listed model's settings are replaced; null removes that model's
+   * settings; models not listed keep theirs.
+   */
+  realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */

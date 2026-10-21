@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { registerDom, renderHook } from "../../../../packages/react/test/render-hook";
-import type { AccessContext } from "@/types";
-import { useRepositoryCatalogRefresh } from "./use-follow-up-repositories";
+import type { AccessContext } from "@opengeni/react/app/types";
+import { useRepositoryCatalogRefresh } from "@opengeni/react/app/lib/use-follow-up-repositories";
 
 registerDom();
 afterEach(() => mock.restore());

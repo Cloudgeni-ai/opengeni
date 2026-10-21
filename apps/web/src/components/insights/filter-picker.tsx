@@ -9,13 +9,13 @@ import {
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { useMemo, useRef, useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   MENU_BUTTON_CLASS,
   MENU_LABEL_CLASS,
   MENU_SURFACE_CLASS,
-} from "@/components/ui/menu-styles";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/menu-styles";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 export type FilterOption = {
   /** One or more raw ids joined by "," (one option can stand for several ids). */

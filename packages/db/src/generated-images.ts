@@ -1,5 +1,5 @@
 import type { FileAsset, FileStatus, FileUploadStatus } from "@opengeni/contracts";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
@@ -479,6 +479,43 @@ export async function getGeneratedImageArtifact(
 ): Promise<GeneratedImageArtifact | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await generatedImageArtifactByIdTx(scopedDb, workspaceId, artifactId);
+  });
+}
+
+/** Metadata only. Callers must separately prove file read authority for every id. */
+export async function getGeneratedImageArtifacts(
+  db: Database,
+  workspaceId: string,
+  artifactIds: readonly string[],
+): Promise<GeneratedImageArtifact[]> {
+  const ids = [...new Set(artifactIds)];
+  if (ids.length === 0) return [];
+  return withWorkspaceRls(db, workspaceId, async (tx) => {
+    const rows = await tx
+      .select({
+        artifact: schema.generatedImageArtifacts,
+        file: schema.files,
+        uploadStatus: schema.fileUploads.status,
+      })
+      .from(schema.generatedImageArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.generatedImageArtifacts.workspaceId),
+          eq(schema.files.id, schema.generatedImageArtifacts.artifactId),
+        ),
+      )
+      .leftJoin(
+        schema.fileUploads,
+        eq(schema.fileUploads.id, schema.generatedImageArtifacts.uploadId),
+      )
+      .where(
+        and(
+          eq(schema.generatedImageArtifacts.workspaceId, workspaceId),
+          inArray(schema.generatedImageArtifacts.artifactId, ids),
+        ),
+      );
+    return rows.map((row) => mapGeneratedImageArtifact(row.artifact, row.file, row.uploadStatus));
   });
 }
 

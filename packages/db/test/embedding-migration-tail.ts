@@ -5,6 +5,8 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
+  // Session list notifications reference the final imported/archive/site fields.
+  "0888_session_list_invalidation.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -277,6 +279,8 @@ export const embeddingMigrationTail = [
   "0769_private_visibility_never_blocks.sql",
   "0763_queue_steer_admission_recheck_repair.sql",
   "0764_interrupted_turn_recovery.sql",
+  // Replaces the recovery inventory 0764 rewrote; replay after it.
+  "0880_quiescence_repair_skips_parked_waits.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501
@@ -284,6 +288,8 @@ export const embeddingMigrationTail = [
   "0738_private_sessions_share_sandboxes.sql",
   // Replaces the 0585 cursor trigger routine over its withheld column.
   "0775_session_usage_limit_attention_cursor.sql",
+  // Patches the semantic projection in the cursor trigger restored by 0775.
+  "0877_single_semantic_event_projection.sql",
   // Reads subscription_connections and the owner-capability routine from
   // withheld 0645/0707 and later subscription-core migrations.
   "0777_workspace_admin_subscription_connections.sql",
@@ -350,5 +356,14 @@ export const embeddingMigrationTail = [
   // Patches the account-binding fence as rewritten by withheld 0501 and the
   // trigger from withheld 0836; replay after both.
   "0873_mcp_binding_delegation_revocation.sql",
+  // Rewrites the resolver installed by withheld 0478; replay after it.
+  "0876_connection_validation_shared_locks.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the interaction reaper by its post-0345/0564/0705 anchors; replay
+  // after the fence graph it edits.
+  "0883_retired_instance_interactions.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

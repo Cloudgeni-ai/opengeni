@@ -6,9 +6,9 @@
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useRef } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import type { RigCheck } from "@/types";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import type { RigCheck } from "@opengeni/react/app/types";
 
 export type RigDefinitionDraft = {
   setupScript: string;

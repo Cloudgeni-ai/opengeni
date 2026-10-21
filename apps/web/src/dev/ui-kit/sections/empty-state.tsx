@@ -10,15 +10,15 @@ import {
   TrendingUpIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   EmptyState,
   EmptyStateLink,
   EmptyStateTemplate,
   EmptyStateTemplates,
-} from "@/components/ui/empty-state";
-import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { PageHeader } from "@/components/ui/page-header";
+} from "@opengeni/react/ui/empty-state";
+import { ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { PageHeader } from "@opengeni/react/ui/page-header";
 
 import { scheduleTemplates, you } from "../fixtures";
 import {

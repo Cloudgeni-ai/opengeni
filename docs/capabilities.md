@@ -694,7 +694,7 @@ enabled strip carries only `mcp`/`api` rows, so its one remove affordance is
 
 The Connectors search and kind filters are scoped to Connectors. The catalog is
 narrowed to `kind: "mcp"` and `kind: "api"` items once
-(`isConnectorCatalogItem` in `apps/web/src/lib/capabilities.ts`) before the
+(`isConnectorCatalogItem` in `packages/react/src/app/lib/capabilities.tsx`) before the
 Featured, Enabled, Browse, and count projections are derived, so no Skill,
 or Plugin row can appear in any of them and the chip counts describe what
 that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly

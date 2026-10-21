@@ -8,6 +8,7 @@ import {
   looksBinary,
   parseExecBannerSessionId,
   parseToolArgs,
+  retainedToolResultImages,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -1611,6 +1612,46 @@ export function presentedToolKind(item: ToolCallItem): PresentedToolKind {
     return "machine";
   }
   return "generic";
+}
+
+/** Presentations whose collapsed row reads correctly from an output preview. */
+const PREVIEW_READABLE_KINDS: ReadonlySet<PresentedToolKind> = new Set([
+  "exec",
+  "write_stdin",
+  "apply_patch",
+  "generic",
+]);
+
+/**
+ * Whether the shared presentation of `item` reads correctly while its output
+ * is a bounded preview (`item.outputPreview`): long strings keep their head and
+ * tail, so an exit code, a tail peek, a patch summary or an error snippet stay
+ * right, and the body is shown only after the exact output is read. Every
+ * other tool needs its exact output first. True for an exact output.
+ */
+export function presentsToolOutputPreview(item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  if (item.outputPreview.shape !== "structured") return false;
+  const shown = invokedToolCall(item);
+  const kind = presentedToolKind(shown);
+  if (!PREVIEW_READABLE_KINDS.has(kind)) return false;
+  if (kind !== "generic") return true;
+  // A generic row draws retained images from its result, and parses JSON
+  // result text whole (an MCP `content[].text` included) for its error flag:
+  // cut JSON would not parse.
+  if (hasCutJsonText(shown.output, 0)) return false;
+  return retainedToolResultImages(shown.output).images.length === 0;
+}
+
+const OUTPUT_PREVIEW_OMISSION = / characters omitted from this preview\]…\n/u;
+
+function hasCutJsonText(value: unknown, depth: number): boolean {
+  if (typeof value === "string") {
+    return /^\s*[[{]/u.test(value) && OUTPUT_PREVIEW_OMISSION.test(value);
+  }
+  if (depth >= 4 || value === null || typeof value !== "object") return false;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  return children.some((child) => hasCutJsonText(child, depth + 1));
 }
 
 export function toolRowPresentation(

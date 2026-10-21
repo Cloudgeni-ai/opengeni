@@ -275,9 +275,7 @@ can be built and tested.
   deletes the memory image from the store's copy as it claims it, under
   the claim's next save, and the next wake boots the copy's disk, as
   after a crash. Programs end; files are as the copy left them; a new
-  guest agent starts and connects afresh. Vouching rather than warning
-  keeps a service from before the field safe on new hosts: its adopts
-  never say `whole`, so they always boot from files.
+  guest agent starts and connects afresh.
 
   The row says which copy it may restore whole: `whole_epoch`, the owner
   epoch under which the store's copy is the sandbox's whole latest state.
@@ -287,25 +285,19 @@ can be built and tested.
   nothing of the sandbox carries it on to the change's new epoch: a give
   (to a host that adopts it, or to another after one refused it outright)
   and clearing an owner that answered it holds nothing. Every other change
-  raises the epoch past it: a give-up, a reclaim, and any change by a
-  replica from before the column, which writes epochs but not the mark.
+  raises the epoch past it: a give-up and a reclaim.
   So a stale copy can never count as whole, while needless boots from
   files are confined to rare paths: a hand-off whose answer was lost, of
-  a sandbox whose copy was not whole when it was given, and rows from
-  before the column, which start with no mark. The mark cannot
-  be a "lost" flag that a give-up sets, because a replica of the earlier
-  release, still serving during a rolling upgrade or after a rollback,
-  gives up on hosts without setting it; nor can a clear vouch for a copy
-  unless the owner proved it handed the state off, because an owner that
-  held nothing may itself have been given a lost owner's copy. The fleet
+  a sandbox whose copy was not whole when it was given. The mark names
+  what is whole rather than what is lost, so a change that does not set
+  it costs only a boot from files, never a restore of a stale image; nor
+  can a clear vouch for a copy unless the owner proved it handed the
+  state off, because an owner that held nothing may itself have been
+  given a lost owner's copy. The fleet
   simulation checks the rule: every adopt that restores memory finds the
   archive holding every write of the sandbox's latest run.
 
-  An earlier host ignores `whole` and always restores the memory image,
-  so every host must run this release before the service does
-  (operations.md, Upgrades); a replica of the earlier service still
-  serving during the rollout, or after a rollback, then only ever has
-  copies booted from their files. Before the host pauses a guest to
+  Before the host pauses a guest to
   save or checkpoint it, it asks the guest to write what it holds for
   its disks to them (`sync` on the notice port), so a disk copied while
   its guest ran holds what the guest had written. A sandbox asleep in

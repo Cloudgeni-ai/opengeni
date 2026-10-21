@@ -302,7 +302,7 @@ async function main() {
       ],
       [
         "bun",
-        "node_modules/typescript/bin/tsc",
+        "node_modules/tsrs/bin/tsrs",
         "--project",
         "scripts/bench-insights-postgres-2768/tsconfig.json",
         "--noEmit",

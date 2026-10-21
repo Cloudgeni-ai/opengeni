@@ -11148,11 +11148,12 @@ function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: stri
 }
 
 function objectStorageFileMount(settings: Settings, prefix: string): any {
-  // Descriptor-driven: a nativeBucketMount backend (modal) mounts via the
+  // Descriptor-driven: a native bucket-mount backend (modal) mounts via the
   // provider's own bucket-mount strategy and cannot mount Azure Blob entries —
   // it needs pre-signed downloads instead. Reading the descriptor (not a
   // hard-coded backend name) keeps this honest as providers are added.
-  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
+  const nativeBucketMount =
+    CAPABILITY_DESCRIPTORS[settings.sandboxBackend].bucketMount === "native";
   if (settings.objectStorageBackend === "azure-blob") {
     if (nativeBucketMount) {
       throw new Error(
@@ -13297,9 +13298,14 @@ const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 // Modal's command transport caps aggregate argv at 64 KiB. Cancellation and
 // run-as wrappers duplicate/expand this command, so stage moderate scripts too.
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
-// Both cancellation and the SDK run-as wrapper repeat the payload three times.
-// Leave room for their fixed shell programs under Modal's 64-KiB argv ceiling.
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
+// Base64 command payloads (staged chunks and the single-command repository
+// setup programs). Cancellation carries a command once (about 5.5 KiB of fixed
+// shell around it) and the SDK run-as wrapper repeats the result three times,
+// so 12 KiB leaves about 10 KiB under Modal's 64-KiB argv ceiling. Each staged
+// chunk costs one sandbox round trip, so chunks are as large as is safe.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 12 * 1024;
+const REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES = 12 * 1024;
+const REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT = "/tmp/opengeni/repository-setup-payloads";
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
 // Content-addressed repository setup programs live in the persisted workspace
@@ -13320,13 +13326,23 @@ function repositorySetupProgramPath(program: string, runAs: string | undefined):
 
 /** One command: export this turn's seeds, then run the staged program only if
  * it is present and (where sha256sum exists) matches its content hash. A
- * missing or mismatched program reports the sentinel instead of running. */
+ * missing or mismatched program reports the sentinel instead of running.
+ *
+ * With `embedded`, the launcher also carries the gzip-compressed program and
+ * installs it in the same command when the box lacks a verified copy, so a
+ * fresh box clones in one round trip instead of probing, staging chunks,
+ * decoding and launching again. Boxes without base64 or gzip still report the
+ * sentinel and take the staged fallback. */
 function repositorySetupProgramLauncher(
   program: string,
   programPath: string,
   seedPrefix: string,
+  embedded?: { gzipBase64: string },
 ): string {
   const digest = createHash("sha256").update(program, "utf8").digest("hex");
+  const verified =
+    '[ -f "$opengeni_setup_program" ] && { ! command -v sha256sum >/dev/null 2>&1 || ' +
+    `printf '%s  %s\\n' ${shellQuote(digest)} "$opengeni_setup_program" | sha256sum -c >/dev/null 2>&1; }`;
   return [
     "set +x",
     ...(seedPrefix ? [seedPrefix] : []),
@@ -13334,11 +13350,19 @@ function repositorySetupProgramLauncher(
     // Programs for older repository sets or runtime versions, and transfers a
     // crashed turn abandoned, are pruned in-box once they are a day old.
     `find ${shellQuote(posixPath.dirname(programPath))} -maxdepth 1 -type f \\( -name '*.sh' ! -name ${shellQuote(`${digest}.sh`)} -o -name '*.b64' -o -name '*.tmp' \\) -mtime +0 -exec rm -f {} + 2>/dev/null || true`,
-    'if [ -f "$opengeni_setup_program" ]; then',
-    "  if ! command -v sha256sum >/dev/null 2>&1 || printf '%s  %s\\n' " +
-      `${shellQuote(digest)} "$opengeni_setup_program" | sha256sum -c >/dev/null 2>&1; then`,
-    '    exec /bin/sh "$opengeni_setup_program"',
-    "  fi",
+    ...(embedded
+      ? [
+          // Concurrent holders decode privately, then rename atomically.
+          `if ! { ${verified}; } && command -v base64 >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1; then`,
+          '  opengeni_setup_transfer="$opengeni_setup_program.$$.tmp"',
+          `  if ! ( umask 077 && mkdir -p ${shellQuote(posixPath.dirname(programPath))} && printf '%s' ${shellQuote(embedded.gzipBase64)} | base64 -d | gzip -dc > "$opengeni_setup_transfer" && chmod 0700 "$opengeni_setup_transfer" && mv -f "$opengeni_setup_transfer" "$opengeni_setup_program" ); then`,
+          '    rm -f "$opengeni_setup_transfer"',
+          "  fi",
+          "fi",
+        ]
+      : []),
+    `if ${verified}; then`,
+    '  exec /bin/sh "$opengeni_setup_program"',
     "fi",
     `echo ${shellQuote(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)}`,
     `exit ${REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE}`,
@@ -13350,6 +13374,31 @@ function repositorySetupProgramMissing(result: unknown): boolean {
     sandboxCommandExitCode(result) === REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE &&
     sandboxCommandOutput(result).includes(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)
   );
+}
+
+/** One command for a program unique to this turn (it carries this turn's seeds
+ * or broker routes): decode the compressed program into a private temporary
+ * file, run it, and remove it. Null when it does not fit inline. Boxes without
+ * base64 or gzip report the missing-program sentinel and stage instead. */
+function repositorySetupOneShotCommand(program: string, payloadPath: string): string | null {
+  const encoded = gzipSync(Buffer.from(program, "utf8")).toString("base64");
+  const command = [
+    "set +x",
+    `opengeni_setup_payload=${shellQuote(payloadPath)}`,
+    "if command -v base64 >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1 && " +
+      `( umask 077 && mkdir -p ${shellQuote(posixPath.dirname(payloadPath))} && printf '%s' ${shellQuote(encoded)} | base64 -d | gzip -dc > "$opengeni_setup_payload" ); then`,
+    '  /bin/sh "$opengeni_setup_payload"',
+    "  opengeni_setup_status=$?",
+    '  rm -f "$opengeni_setup_payload"',
+    '  exit "$opengeni_setup_status"',
+    "fi",
+    'rm -f "$opengeni_setup_payload"',
+    `echo ${shellQuote(REPOSITORY_SETUP_PROGRAM_MISSING_SENTINEL)}`,
+    `exit ${REPOSITORY_SETUP_PROGRAM_MISSING_EXIT_CODE}`,
+  ].join("\n");
+  return Buffer.byteLength(command, "utf8") <= REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES
+    ? command
+    : null;
 }
 
 export type RigSetupScriptCommandOptions = {
@@ -13796,6 +13845,8 @@ export async function runRepositoryCloneHook(
     staged: [],
   };
   let stagedCloneScript: string | null = null;
+  // A successful program has moved every staged broker seed into its token file.
+  let brokerSeedsConsumed = false;
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -13851,13 +13902,38 @@ export async function runRepositoryCloneHook(
       // program through several round trips on every turn.
       const program = sandboxGitProvisioningCommand(cloneCommand);
       const programPath = repositorySetupProgramPath(program, context.runAs);
-      const launcher = repositorySetupProgramLauncher(program, programPath, seedPrefix);
+      const plainLauncher = repositorySetupProgramLauncher(program, programPath, seedPrefix);
+      // A fresh box would otherwise pay probe, bootstrap, chunk and decode
+      // round trips before cloning; carry the compressed program when it fits.
+      const selfInstallingLauncher = repositorySetupProgramLauncher(
+        program,
+        programPath,
+        seedPrefix,
+        {
+          gzipBase64: gzipSync(Buffer.from(program, "utf8")).toString("base64"),
+        },
+      );
+      const launcher =
+        Buffer.byteLength(selfInstallingLauncher, "utf8") <= REPOSITORY_SETUP_SELF_INSTALL_MAX_BYTES
+          ? selfInstallingLauncher
+          : plainLauncher;
       // Per-turn staging of the complete (seeded) program remains the fallback
       // when the seeds alone are too large to ride inline, or when the
       // persisted program cannot be installed and verified on this box.
       const stageForThisTurn = async () => {
+        // One round trip when the compressed program fits: decode it into a
+        // private temporary file, run it, and remove it in the same command.
+        const oneShotPath = `${REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+        const oneShot = repositorySetupOneShotCommand(inlineCommand, oneShotPath);
+        if (oneShot) {
+          // Until the command reports an exit, the box may still hold the file.
+          stagedCloneScript = oneShotPath;
+          const attempt = await runClone(oneShot);
+          if (sandboxCommandExitCode(attempt) !== null) stagedCloneScript = null;
+          if (!repositorySetupProgramMissing(attempt)) return attempt;
+        }
         stagedCloneScript = await stageRigSetupScript(session, inlineCommand, context, {
-          payloadRoot: "/tmp/opengeni/repository-setup-payloads",
+          payloadRoot: REPOSITORY_SETUP_ONE_SHOT_PAYLOAD_ROOT,
           label: "Repository setup payload staging",
         });
         return await runClone(`exec /bin/sh ${shellQuote(stagedCloneScript)}`);
@@ -13866,7 +13942,7 @@ export async function runRepositoryCloneHook(
       // the turn and would never be reused, so it is not persisted.
       if (
         stagedBrokerSeeds.staged.length > 0 ||
-        Buffer.byteLength(launcher, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES
+        Buffer.byteLength(plainLauncher, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES
       ) {
         result = await stageForThisTurn();
       } else {
@@ -13887,6 +13963,7 @@ export async function runRepositoryCloneHook(
       }
     }
     assertSandboxCommandSucceeded(result, "Repository clone hook");
+    brokerSeedsConsumed = true;
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
       sandboxCommandOutput(result),
       resources,
@@ -13927,7 +14004,7 @@ export async function runRepositoryCloneHook(
         context.commandRunner,
       ).catch(() => undefined);
     }
-    if (stagedBrokerSeeds.editor) {
+    if (stagedBrokerSeeds.editor && !brokerSeedsConsumed) {
       await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
     }
   }

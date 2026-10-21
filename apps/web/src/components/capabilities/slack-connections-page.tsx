@@ -1,30 +1,37 @@
 import { useEffect, useMemo, useState } from "react";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { toast } from "sonner";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { openGeniSlackBotConnections, openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
 import {
   personalSlackCapability,
   enableNewSlackAccountTools,
   hostedSlackConnections,
 } from "@/lib/personal-slack";
-import type { CapabilityCatalogItem, ConnectionMetadata, SlackInstallationBinding } from "@/types";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { RowList, ListRow } from "@/components/ui/list-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Notice } from "@/components/ui/notice";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  SlackInstallationBinding,
+} from "@opengeni/react/app/types";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { RowList, ListRow } from "@opengeni/react/ui/list-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Notice } from "@opengeni/react/ui/notice";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { CapabilityPage, CapabilityMark } from "./capability-page";
 import { SlackChannelRoutingDialogBody } from "./slack-channel-routing-dialog";
 import { SlackBotAccessSection } from "./slack-bot-access-section";
-import { ConnectorToolPermissions } from "./connector-tool-permissions";
-import { Disclosure } from "@/components/ui/disclosure";
+import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { IntegrationPage, OptionRow } from "./integration-page";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 import { useSlackInstallationDiscovery } from "./use-slack-installation-discovery";
 import { useSlackIntegration, SLACK_LOGO_URL } from "./use-slack-integration";
 

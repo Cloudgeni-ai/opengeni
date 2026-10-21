@@ -52,21 +52,47 @@ export async function getExternalLinkTurnSnapshot(
   scope: Scope,
   turnId: string,
 ): Promise<ExternalLinkWorkSnapshot | null> {
-  return withWorkspaceRls(db, scope.workspaceId, async (tx) => {
-    const [row] = await rawRows<{ canonical_snapshot: unknown }>(
-      tx,
-      sql`select canonical_snapshot
+  return withWorkspaceRls(db, scope.workspaceId, (tx) =>
+    getExternalLinkTurnSnapshotInTransaction(tx, scope, turnId),
+  );
+}
+
+async function getExternalLinkTurnSnapshotInTransaction(
+  tx: Database,
+  scope: Scope,
+  turnId: string,
+): Promise<ExternalLinkWorkSnapshot | null> {
+  const [row] = await rawRows<{ canonical_snapshot: unknown }>(
+    tx,
+    sql`select canonical_snapshot
       from external_link_turn_authorities where account_id = ${scope.accountId}::uuid
         and workspace_id = ${scope.workspaceId}::uuid and turn_id = ${turnId}::uuid`,
-    );
-    return row ? ExternalLinkWorkSnapshot.parse(row.canonical_snapshot) : null;
-  });
+  );
+  return row ? ExternalLinkWorkSnapshot.parse(row.canonical_snapshot) : null;
 }
 
 /** null is an ordinary native/external turn; a revoked linked turn is false,
  * never null. Callers must not fall back to unlinked authority after denial. */
 export async function getExternalLinkTurnAuthorization(db: Database, scope: Scope, turnId: string) {
   const snapshot = await getExternalLinkTurnSnapshot(db, scope, turnId);
+  return authorizeExternalLinkTurnSnapshot(db, snapshot);
+}
+
+/** Caller already owns this exact tenant's RLS transaction. Only the snapshot
+ * read reuses that scope; identity, membership and link revocation stay live. */
+export async function getExternalLinkTurnAuthorizationInTransaction(
+  tx: Database,
+  scope: Scope,
+  turnId: string,
+) {
+  const snapshot = await getExternalLinkTurnSnapshotInTransaction(tx, scope, turnId);
+  return authorizeExternalLinkTurnSnapshot(tx, snapshot);
+}
+
+async function authorizeExternalLinkTurnSnapshot(
+  db: Database,
+  snapshot: ExternalLinkWorkSnapshot | null,
+) {
   if (!snapshot) return null;
   return {
     authorized: await externalLinkWorkSnapshotIsLive(db, snapshot),

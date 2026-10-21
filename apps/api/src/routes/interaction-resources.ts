@@ -40,6 +40,8 @@ import {
   listInteractionInterventions,
   listNetworkRoutes,
   listSiteAuthConnections,
+  listVisibleSessionInvalidationIds,
+  sessionListChangesFor,
   resolveInteractionIntervention,
   updateNetworkRoute,
   updateSiteAuthConnection,
@@ -49,9 +51,12 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
+  hasVerifiedOwningUserAuthorization,
   requireFreshAccessGrant,
   requirePermission,
   requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
   type ApiRouteDeps,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -67,8 +72,18 @@ import { observeInterventionMutation } from "../interaction-metrics";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/live-events/stream", async (context) => {
-    const { workspaceId, grant } = await preamble(context, deps, "sessions:read");
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    // Host ACLs can change outside our database. Without an invalidation
+    // contract from that host, retain polling rather than promise completeness.
+    const source = deps.sessionAuthorization ? undefined : sessionListChangesFor(deps.db);
     return await sseWorkspaceLiveStream(
       deps.db,
       deps.bus,
@@ -81,6 +96,32 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
         ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
+        sessionLists: source
+          ? {
+              source,
+              subjectId: grant.subjectId,
+              authorizeIds: async (ids) => {
+                const freshGrant = await requireFreshAccessGrant(
+                  context,
+                  deps,
+                  workspaceId,
+                  "sessions:read",
+                );
+                requirePermission(freshGrant, "workspace:read");
+                const authorizationScope = await requireSessionAuthorizationListScope(
+                  deps,
+                  freshGrant,
+                  "http",
+                );
+                return await listVisibleSessionInvalidationIds(deps.db, workspaceId, ids, {
+                  subjectId: freshGrant.subjectId,
+                  ...(authorizationScope ? { authorizationScope } : {}),
+                  personalWorkspaceOwnerException:
+                    hasVerifiedOwningUserAuthorization(authorization),
+                });
+              },
+            }
+          : undefined,
         reauthorize: async () => {
           const freshGrant = await requireFreshAccessGrant(
             context,

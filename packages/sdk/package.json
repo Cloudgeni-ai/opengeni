@@ -38,6 +38,10 @@
       "types": "./src/this-computer.ts",
       "default": "./src/this-computer.ts"
     },
+    "./desktop-bridge": {
+      "types": "./src/desktop-bridge.ts",
+      "default": "./src/desktop-bridge.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -205,7 +209,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/generate-site-browser-runtime.ts && bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

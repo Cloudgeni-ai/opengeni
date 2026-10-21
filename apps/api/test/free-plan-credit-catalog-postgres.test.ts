@@ -10,8 +10,11 @@ import {
 } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { createApp } from "../src/app";
-import { freeCreditGap, freeCreditGapReason } from "../../web/src/lib/free-credit-gap";
-import type { PickerModelRow } from "../../web/src/lib/model-policy";
+import {
+  freeCreditGap,
+  freeCreditGapReason,
+} from "../../../packages/react/src/app/lib/free-credit-gap";
+import type { PickerModelRow } from "../../../packages/react/src/app/lib/model-policy";
 
 test("only Free monthly credit funds the catalog hint and uncovered-model gap", async () => {
   const shared = await acquireSharedTestDatabase("free-plan-credit-catalog");

@@ -16,7 +16,7 @@ fn capacity(free_mib: u64) -> Capacity {
     Capacity {
         memory_mib: 64 * 1024,
         free_memory_mib: free_mib,
-        free_cpu_millis: None,
+        free_cpu_millis: 64_000,
         free_disk_mib: 100_000,
         ready: Vec::new(),
         sandboxes: 0,
@@ -176,6 +176,44 @@ fn reservations_spread_a_burst_evenly() {
     let (least, most) = (counts.iter().min().unwrap(), counts.iter().max().unwrap());
     // Two choices keep the spread within a few sandboxes of the mean (100).
     assert!(*least >= 90 && *most <= 110, "spread {least}..{most}");
+}
+
+#[test]
+fn what_was_sent_since_a_report_steers_but_never_refuses() {
+    // One host with room for two by its report: creates and removes in
+    // quick succession leave reservations its next report may not clear.
+    let mut one = fleet(1, 2_000);
+    let mut rng = Rng::new(3);
+    let wanted = demand(1_000);
+    for _ in 0..5 {
+        let placed = one.place(&wanted, &[], &mut rng).unwrap();
+        assert_eq!(placed.host, HostId(0));
+        one.reserve(placed, &wanted);
+    }
+    assert_eq!(one.get(HostId(0)).unwrap().2.free_memory_mib, 0);
+    // The host is still asked; once it refuses, nothing is left.
+    assert_eq!(one.place(&wanted, &[HostId(0)], &mut rng), None);
+    // Its report never fit more than it has.
+    assert_eq!(one.place(&demand(3_000), &[], &mut rng), None);
+
+    // With a host that fits after what was sent, that one is chosen.
+    let mut two = fleet(2, 2_000);
+    for _ in 0..2 {
+        two.reserve(
+            super::Placement {
+                host: HostId(0),
+                ready: false,
+                same_class: false,
+            },
+            &wanted,
+        );
+    }
+    for _ in 0..100 {
+        assert_eq!(two.place(&wanted, &[], &mut rng).unwrap().host, HostId(1));
+    }
+    // A report resets what was counted.
+    two.update(HostId(0), capacity(2_000));
+    assert_eq!(two.get(HostId(0)).unwrap().2.free_memory_mib, 2_000);
 }
 
 #[test]

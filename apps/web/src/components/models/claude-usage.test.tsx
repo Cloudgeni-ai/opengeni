@@ -20,7 +20,7 @@ import {
   invalidateSharedQueries,
   peekSharedQuery,
   retainSharedQueries,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 let root: Root, container: HTMLDivElement;
 beforeAll(() => {

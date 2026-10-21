@@ -229,7 +229,10 @@ describe("sandbox enrollments", () => {
         connectionInstanceId: third,
         leaseMs: LEASE_MS,
       }),
-    ).toEqual({ renewed: true });
+    ).toMatchObject({
+      renewed: true,
+      enrollment: { id: box.id, connectionInstanceId: third },
+    });
   });
 
   test("a machine never opens a sandbox link", async () => {

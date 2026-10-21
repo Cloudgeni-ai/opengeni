@@ -5,9 +5,9 @@ import { createRoot } from "react-dom/client";
 import {
   DetailBody,
   type ConnectAction,
-} from "../src/components/capabilities/capability-detail-sheet";
-import { SessionCapabilityFrame } from "../src/components/capabilities/session-capability-frame";
-import { Button } from "../src/components/ui/button";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
+import { SessionCapabilityFrame } from "@opengeni/react";
+import { Button } from "@opengeni/react/ui/button";
 import "../src/styles.css";
 
 const scenarios = [

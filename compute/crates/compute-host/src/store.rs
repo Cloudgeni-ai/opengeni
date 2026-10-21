@@ -147,6 +147,9 @@ pub struct Claimed {
     pub receipt: Receipt,
     /// Whether it holds a memory image.
     pub memory: bool,
+    /// The length of the disk it holds, which the new owner books and
+    /// grows the sandbox's disk from.
+    pub disk_bytes: u64,
 }
 
 /// Where a fetch puts what it brings back.
@@ -265,13 +268,6 @@ pub trait Store: Send + Sync + 'static {
         id: Id,
         own: OwnerEpoch,
     ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send;
-
-    /// The length of the disk in the stored copy, `None` if nothing is
-    /// stored.
-    fn disk_len(&self, id: Id) -> impl Future<Output = Result<Option<u64>, EngineError>> + Send {
-        let _ = id;
-        std::future::ready(unconfigured("disk_len"))
-    }
 
     /// The chunk store that remote memory images page in from, if this store
     /// keeps memory as chunks, and the host's transfer lanes, which the
@@ -680,21 +676,13 @@ impl Store for Directory {
                 line.split_once(' ')
                     .is_some_and(|(name, _)| name == "memory")
             });
+            let disk_bytes = fs::metadata(stored.join("disk"))?.len();
             Ok(Owned::Done(Some(Claimed {
                 save: 0,
                 receipt: Receipt(blake3::hash(listed.as_bytes()).to_hex().to_string()),
                 memory,
+                disk_bytes,
             })))
-        })
-        .await
-    }
-
-    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
-        let disk = self.dir(id).join("disk");
-        blocking("disk_len", move || match fs::metadata(&disk) {
-            Ok(metadata) => Ok(Some(metadata.len())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
         })
         .await
     }

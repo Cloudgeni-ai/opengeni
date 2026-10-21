@@ -1,4 +1,7 @@
-import { SubscriptionAccountRow } from "./subscription-account-ui";
+import {
+  AccountGroupHeading,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
@@ -18,8 +21,8 @@ import type {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
-import { useOrganizationCodexUsage } from "./use-organization-codex-overview";
+import { isValidElement, useMemo, type ReactNode } from "react";
+import { useOrganizationCodexUsage } from "@/components/models/use-organization-codex-overview";
 
 import {
   PROVIDER_CONNECTION_CONFIGS,
@@ -52,7 +55,7 @@ import {
   payerShortLabel,
   resetsLabel,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
@@ -67,20 +70,20 @@ import {
   superGrokAccountName,
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
-import { billingClassForModel } from "@/lib/model-policy";
-import { accountKey, type GatewayId } from "@/lib/models-route";
-import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
+import { accountKey, type GatewayId } from "@opengeni/react/app/lib/models-route";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models, the list: every account that pays for
@@ -417,7 +420,7 @@ export function OrganizationModelsList({
                 scope="workspace"
                 scopeId={workspace.id}
                 account={account}
-                canManage={workspace.canManage}
+                canManage={workspace.canManage && account.scope !== "organization"}
               />
             ),
           }}
@@ -443,7 +446,45 @@ export function OrganizationModelsList({
   /* What the organization shares, as the workspaces of a workspace admin use it. */
   const sharedRows = administrator ? [] : sharedAccountRows(ready, labels, ownCodexIds);
 
-  const orgRows = administrator ? (
+  const orgGrokRows = administrator ? (
+    <>
+      {orgGrok.unavailable ? null : (
+        <OrganizationSuperGrokRows
+          grok={orgGrok}
+          labels={labels}
+          onOpen={(id) => onOpenAccount(accountKey("supergrok", id, true))}
+        />
+      )}
+    </>
+  ) : null;
+  const orgKeyRows =
+    administrator && GATEWAYS.some((id) => providerListed(orgGateways[id])) ? (
+      <>
+        {GATEWAYS.filter((id) => providerListed(orgGateways[id])).map((id) => (
+          <OrganizationKeyRow
+            key={`org:${id}`}
+            state={orgGateways[id]}
+            labels={labels}
+            onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
+          />
+        ))}
+      </>
+    ) : null;
+  /* Workspace-owned and shared rows, split by how they pay: keys are pay as you go. */
+  const payAsYouGo = (row: ReactNode) =>
+    isValidElement(row) &&
+    String(row.key).includes(":gateway:") &&
+    !String(row.key).endsWith("claude_subscription");
+  const subscriptionRows = [...sharedRows, ...ownRows].filter((row) => !payAsYouGo(row));
+  const keyRows = [...sharedRows, ...ownRows].filter(payAsYouGo);
+  const orgSubscriptionsListed =
+    administrator &&
+    (orgCodex.loading ||
+      orgCodex.accounts.length > 0 ||
+      Boolean(orgCodex.pending || orgCodex.loadError) ||
+      (claudeEnabled && (orgClaude.loading || orgClaude.accounts.length > 0)) ||
+      (!orgGrok.unavailable && orgGrok.accounts.length > 0));
+  const orgPooledRows = administrator ? (
     <>
       {organizationId ? (
         <ConnectedSubscriptionUsagePool
@@ -482,21 +523,6 @@ export function OrganizationModelsList({
           }}
         />
       ) : null}
-      {orgGrok.unavailable ? null : (
-        <OrganizationSuperGrokRows
-          grok={orgGrok}
-          labels={labels}
-          onOpen={(id) => onOpenAccount(accountKey("supergrok", id, true))}
-        />
-      )}
-      {GATEWAYS.filter((id) => providerListed(orgGateways[id])).map((id) => (
-        <OrganizationKeyRow
-          key={`org:${id}`}
-          state={orgGateways[id]}
-          labels={labels}
-          onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
-        />
-      ))}
     </>
   ) : null;
 
@@ -604,15 +630,23 @@ export function OrganizationModelsList({
           />
         ) : (
           <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
+            {subscriptionRows.length > 0 || orgSubscriptionsListed ? (
+              <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+            ) : null}
+            {orgPooledRows}
+            {orgGrokRows}
+            {subscriptionRows}
+            {credits.visible || keyRows.length > 0 || orgKeyRows ? (
+              <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+            ) : null}
             <OpenGeniCreditsRow
               credits={credits}
               workspaceId={anchorWorkspaceId}
               workspaceName={creditsReturnLabel}
               scope={labels.everyone}
             />
-            {orgRows}
-            {sharedRows}
-            {ownRows}
+            {orgKeyRows}
+            {keyRows}
             {loadingWorkspaces ? <ListRowSkeleton count={1} /> : null}
           </RowList>
         )}
@@ -978,7 +1012,7 @@ function OrganizationCodexRow({
       meta={[
         organizationReachLabel(labels, access.data),
         planLabel(account.plan, "ChatGPT"),
-        resetsLabel(account.resetCreditAvailableCount),
+        resetsLabel(live.resetCredits?.availableCount ?? account.resetCreditAvailableCount),
       ]}
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (

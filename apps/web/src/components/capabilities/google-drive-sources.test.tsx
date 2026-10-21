@@ -4,7 +4,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { Sheet } from "@/components/ui/sheet";
+import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   GOOGLE_DRIVE_ACCESS_DISCLOSURE,
   GOOGLE_DRIVE_APP_DESCRIPTION,
@@ -17,7 +17,7 @@ import type {
   ApiIntegrationInstallationSummary,
   ConnectionMetadata,
   IntegrationDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import { IntegrationSheetBody, integrationDisclosureElementId } from "./integration-sheet";
 import {
@@ -29,7 +29,7 @@ import {
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => {
     const client = mutableContext.current.client as Record<string, unknown>;
     client.connectTransport ??= () =>

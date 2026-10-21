@@ -1,4 +1,4 @@
-import { workspaceDefaultMachine } from "@/lib/workspace-default-machine";
+import { workspaceDefaultMachine } from "@opengeni/react/app/lib/workspace-default-machine";
 import { Link } from "@tanstack/react-router";
 /**
  * New schedule, Edit schedule and Duplicate: one full page with a back link
@@ -11,27 +11,30 @@ import { LaptopIcon, LockIcon, MessageSquareIcon, ServerIcon, UsersIcon } from "
 import { toast } from "sonner";
 import { MACHINES_COMPOSER_POLL_MS } from "@opengeni/react/machines";
 
-import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
-import { selectedConnectionAccounts } from "@/components/capabilities/session-connection-accounts";
-import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
-import { Button } from "@/components/ui/button";
-import { CadencePicker } from "@/components/ui/cadence-picker";
-import { Disclosure } from "@/components/ui/disclosure";
+import { ConnectionAccountPicker } from "@opengeni/react/app/components/capabilities/connection-account-picker";
+import { selectedConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
+import { useConnectionAccounts } from "@opengeni/react/app/components/capabilities/use-connection-accounts";
+import { AgentLearningDraftEditor } from "@opengeni/react/app/components/knowledge/agent-learning-settings";
+import { Button } from "@opengeni/react/ui/button";
+import { CadencePicker } from "@opengeni/react/ui/cadence-picker";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { useVaults } from "@opengeni/react";
 import {
   ScheduleSecretsField,
   scheduleSecretsSummary,
 } from "@/components/secrets/schedule-secrets-field";
-import { secretsCapabilityOff, secretsOffIn } from "@/components/secrets/vault-model";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack, TextInput, useField } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { HelpLink } from "@/components/ui/inline-help";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { useAppContext } from "@/context";
+import {
+  secretsCapabilityOff,
+  secretsOffIn,
+} from "@opengeni/react/app/components/secrets/vault-model";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { HelpLink } from "@opengeni/react/ui/inline-help";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl, type SegmentedControlProps } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorAdvice,
   apiErrorDetails,
@@ -39,20 +42,20 @@ import {
   isApiError,
   isPermissionDenied,
   userErrorText,
-} from "@/lib/api-error";
-import { isMachineComputeSelectable } from "@/lib/machine-selectability";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/api-error";
+import { isMachineComputeSelectable } from "@opengeni/react/app/lib/machine-selectability";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import {
   formStateFromScheduledTask,
   recurringSessionTaskFormState,
   scheduledLearningDestinationKey,
 } from "@/lib/scheduled-tasks";
-import { sessionDisplayTitle } from "@/lib/session-rename";
-import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { cn } from "@/lib/utils";
-import type { ScheduledTask, Session } from "@/types";
+import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
+import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { ScheduledTask, Session } from "@opengeni/react/app/types";
 
 import { useCanCreateScheduleWithAgent, useCreateWithOpenGeni } from "./create-with-opengeni";
 

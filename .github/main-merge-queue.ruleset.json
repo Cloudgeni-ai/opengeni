@@ -1,0 +1,29 @@
+{
+  "name": "Main merge queue",
+  "target": "branch",
+  "enforcement": "disabled",
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "bypass_actors": [],
+  "rules": [
+    {
+      "type": "merge_queue",
+      "parameters": {
+        "check_response_timeout_minutes": 45,
+        "grouping_strategy": "ALLGREEN",
+        "max_entries_to_build": 8,
+        "max_entries_to_merge": 1,
+        "merge_method": "MERGE",
+        "min_entries_to_merge": 1,
+        "min_entries_to_merge_wait_minutes": 5
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [{ "context": "Queue ready", "integration_id": 15368 }]
+      }
+    }
+  ]
+}

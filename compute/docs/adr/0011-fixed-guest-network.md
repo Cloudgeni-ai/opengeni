@@ -1,8 +1,7 @@
 # 11. The same guest network everywhere, firewalled per sandbox
 
 Status: Accepted, 2026-10-16; amended 2026-10-20 (listed destinations and
-the sandboxes' name server replace the `trusted` switch; queries to
-unreachable name servers are answered by the sandbox's own)
+the sandboxes' name server replace the `trusted` switch)
 
 ## Context
 
@@ -34,28 +33,12 @@ Sandboxes run untrusted code next to each other and next to the host.
   resolved when the agent starts, so what guests are told and what the
   firewalls open always agree; a name that moves takes effect at the next
   agent start, which leaves sandboxes running (ADR 9).
-- A query to port 53 of an address the guest may not reach is sent to its
-  own name server, which answers in that address's place. A guest booted
-  under an older host that named a private name server (an overlay's, a
-  cloud's), or an image that names one, keeps resolving after it is
-  restored behind these rules, and learns no more than any other guest.
-  Queries to name servers it may reach, public ones or a listed
-  destination, go where they were sent.
-- Rules decide a connection by its first packet; the kernel lets the rest
-  follow it for as long as packets keep coming. So whenever the agent
-  installs rules, as when an upgraded one starts under running sandboxes
-  (ADR 9), it forgets every connection the kernel tracks that they refuse:
-  in a namespace, its guest's to a refused destination that its own name
-  server does not answer; on the host, any from a namespace to a refused
-  destination. The next packet is then a new connection, refused or
-  redirected by the rules in place. Each is forgotten by its reply
-  direction and the id the kernel listed it with, so a connection made in
-  place of one that ended meanwhile, redirected, stays: the kernel may
-  give the two one id, never one reply direction. A failure to list or forget them is
-  logged, not fatal: the host's rules drop guest packets to refused
-  destinations whatever is tracked.
 - The rules are enforced twice: inside the namespace, which the VMM joins
-  without the privilege to change it, and again on the host.
+  without the privilege to change it, and again on the host. The host's
+  rules drop every guest packet to a refused destination whatever the
+  kernel tracks, so a narrower list takes effect at the next agent start
+  for connections already open too: the guest can no longer send on them,
+  and only their far end can still send to it until they idle.
 - After a restore, when the guest runs a notice handler on the configured
   port, the agent tries to tell it the current time and that connections it
   opened before are gone, before anything else uses it. A failed notice is
@@ -67,13 +50,6 @@ Sandboxes run untrusted code next to each other and next to the host.
   repaired after restore. Open connections do not survive. Its name server
   is the same address everywhere, so a guest restored from a template, after
   a move or on a host with other upstream name servers still resolves.
-- A guest booted under an older host keeps the name servers it was told
-  until it next boots: public ones it asks directly, private ones are
-  answered by its own name server, so it resolves either way, even from a
-  socket it kept asking from before the upgrade.
-- An agent upgrade leaves a guest's connections the new rules allow and
-  ends the ones they refuse, so what an older version let through stops
-  at once rather than once idle.
 - Guest ports relay bytes and add no identity: every sandbox's forwarded
   connections reach their upstream from the host's address. The upstream
   authenticates each one by a credential only that sandbox holds, never by

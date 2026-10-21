@@ -60,7 +60,9 @@ describe("production session conditional loading", () => {
       (key) => manifest[key]?.name === "session-conditional-panels",
     )!;
     panelAsset = manifest[panelKey]!.file;
-    attachmentAsset = manifest["src/components/session/message-resource-attachments.tsx"]!.file;
+    attachmentAsset =
+      manifest["../../packages/react/src/app/components/session/message-resource-attachments.tsx"]!
+        .file;
     const filesKey = "../../packages/react/src/components/sandbox-files.tsx";
     workspaceFilesAsset = manifest[filesKey]!.file;
     const eager = new Set<string>();
@@ -70,7 +72,7 @@ describe("production session conditional loading", () => {
       for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
     };
     for (const [key, entry] of Object.entries(manifest))
-      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+      if (entry.isEntry || key === "src/routes/session-route.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
     // Shared conversation state must not pull the embedded view's optional
     // question/command implementations into the direct session's static graph.

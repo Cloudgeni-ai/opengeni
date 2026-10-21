@@ -353,6 +353,20 @@ export function toolReviewDetails(
       truncated: !hidden && text.length > 4000,
     };
   };
+  // Selected messages read as subject and sender rather than bare provider ids.
+  const labels =
+    (path === "/messageIds" || path === "/messageId") && context?.selectionLabels?.length
+      ? new Map(context.selectionLabels.map((label) => [label.id, label]))
+      : undefined;
+  const labelled = (entry: unknown): Pick<DetailItem, "value" | "detail"> | undefined => {
+    const label = typeof entry === "string" ? labels?.get(entry) : undefined;
+    return label && typeof entry === "string"
+      ? {
+          value: label.title,
+          detail: label.subtitle ? `${label.subtitle} · ${entry}` : entry,
+        }
+      : undefined;
+  };
   let total: number;
   let items: DetailItem[];
   if (Array.isArray(value)) {
@@ -360,7 +374,11 @@ export function toolReviewDetails(
     items = value.slice(offset, offset + limit).map((entry, index) => ({
       label: `${offset + index + 1}`,
       ...preview(entry, "", `${path}/${offset + index}`),
+      ...labelled(entry),
     }));
+  } else if (offset === 0 && labelled(value)) {
+    total = 1;
+    items = [{ label: "Message", ...labelled(value)! }];
   } else if (value && typeof value === "object") {
     const entries = Object.entries(value);
     total = entries.length;

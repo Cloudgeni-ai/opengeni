@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import type {
   PrReviewAppRegistration,
   PrReviewManagedGitHubSetup,
@@ -10,17 +10,20 @@ import { OpenGeniPrReviewClient } from "@opengeni/sdk/pr-review";
 import { BotIcon, CheckCircle2Icon, CopyIcon, Loader2Icon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { findPickerRow, groupPickerRowsByBillingClass } from "@/lib/model-policy";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Select } from "@opengeni/react/ui/select";
+import { Textarea } from "@opengeni/react/ui/textarea";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { findPickerRow, groupPickerRowsByBillingClass } from "@opengeni/react/app/lib/model-policy";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 
 export function PrReviewSetupCard(props: {
   client: OpenGeniBrowserClient;

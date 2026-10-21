@@ -1,10 +1,10 @@
 import { useState } from "react";
 
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { DetailFact, DetailFacts } from "@/components/ui/detail-sheet";
-import { Disclosure, type DisclosureVariant } from "@/components/ui/disclosure";
-import { Field, FieldStack, TextArea } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { DetailFact, DetailFacts } from "@opengeni/react/ui/detail-sheet";
+import { Disclosure, type DisclosureVariant } from "@opengeni/react/ui/disclosure";
+import { Field, FieldStack, TextArea } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { learningModes, sandboxEnvironments, scheduleById } from "../fixtures";
 import {
   Alternative,

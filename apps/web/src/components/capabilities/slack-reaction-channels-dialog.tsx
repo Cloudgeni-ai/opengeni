@@ -3,12 +3,12 @@ import type { SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { openGeniSlackBotConnectionOptions } from "@/lib/slack-bot";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
-import { Button } from "@/components/ui/button";
-import { CheckboxField } from "@/components/ui/field";
+import { Button } from "@opengeni/react/ui/button";
+import { CheckboxField } from "@opengeni/react/ui/field";
 import {
   Dialog,
   DialogContent,
@@ -16,9 +16,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Select } from "@/components/ui/select";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/dialog";
+import { Select } from "@opengeni/react/ui/select";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 /**
  * Where the reaction shortcut works: anywhere the bot is a member, or only in

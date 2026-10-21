@@ -7,7 +7,7 @@ import {
   clientRequestAction,
   clientRequestFailureReason,
   createClientSignalReporter,
-} from "./client-signals";
+} from "@opengeni/react/app/lib/client-signals";
 
 const W = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 const S = "0b4f8f3e-3c55-4a8b-9a3e-2f43d93a9c11";

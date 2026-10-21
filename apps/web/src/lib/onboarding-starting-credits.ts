@@ -7,7 +7,7 @@ import type {
   WorkspaceModelCatalogResponse,
 } from "@opengeni/sdk";
 
-import { confirmIncludedModel } from "./model-access-onboarding";
+import { confirmIncludedModel } from "@opengeni/react/app/lib/model-access-onboarding";
 
 // Onboarding-only helpers, kept apart from `model-access-onboarding.ts` because
 // the session route imports that module and these must stay out of its graph.

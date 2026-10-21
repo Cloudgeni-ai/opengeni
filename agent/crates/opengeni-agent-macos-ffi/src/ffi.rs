@@ -371,6 +371,18 @@ pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError
     ax::launch_application(application_id)
 }
 
+pub(super) fn window_presence(
+    query: &crate::MacWindowQuery,
+) -> Result<crate::MacWindowPresence, MacFfiError> {
+    ax::window_presence(query)
+}
+
+pub(super) fn restore_window_behind(
+    query: &crate::MacWindowQuery,
+) -> Result<crate::MacWindowPresence, MacFfiError> {
+    ax::restore_window_behind(query)
+}
+
 pub(super) fn run_background_application(
     application_bundle: &str,
     arguments: &[String],

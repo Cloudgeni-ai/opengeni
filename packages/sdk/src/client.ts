@@ -4,6 +4,7 @@ import {
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
@@ -193,6 +194,9 @@ import {
   type BrowserDownloadListResponse,
   type BrowserDownloadSaveRequest,
   type BrowserDownloadSaveResponse,
+  type BrowserRecordingSaveRequest,
+  type BrowserRecordingSaveResponse,
+  type BrowserRecordingSummary,
   type BrowserIdentity,
   type BrowserIdentityListOptions,
   type BrowserIdentityListResponse,
@@ -2904,6 +2908,8 @@ export class OpenGeniClient {
         ...(listOptions?.excludeClasses?.length
           ? { excludeClasses: listOptions.excludeClasses.join(",") }
           : {}),
+        ...(listOptions?.presentedToolCalls === "include" ? { presentedToolCalls: "include" } : {}),
+        ...(listOptions?.toolOutputs === "preview" ? { toolOutputs: "preview" } : {}),
         ...(options.latest ? { latest: options.latest } : {}),
       }),
       {
@@ -2964,6 +2970,7 @@ export class OpenGeniClient {
       nextAfter: integerHeader("X-OpenGeni-Next-After"),
       nextBefore: integerHeader("X-OpenGeni-Next-Before"),
       forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
+      conversationFilter: integerHeader(SESSION_EVENT_CONVERSATION_FILTER_HEADER),
     };
   }
 
@@ -4588,6 +4595,56 @@ export class OpenGeniClient {
     return await this.requestJson<BrowserDownloadSaveResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Starts recording one tab of a browser session as a video. The recording
+   * follows the agent to other tabs it acts on, opens or selects. */
+  async startBrowserRecording(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRecordingSummary> {
+    return await this.requestJson<BrowserRecordingSummary>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings`,
+      { targetId },
+      {},
+      options,
+    );
+  }
+
+  async getBrowserRecording(
+    workspaceId: string,
+    browserSessionId: string,
+    recordingId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRecordingSummary> {
+    return await this.requestJson<BrowserRecordingSummary>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Stops a recording and saves it as an MP4 plus an action log in the
+   * browser's source session workspace; the MP4 is also a retained artifact. */
+  async saveBrowserRecording(
+    workspaceId: string,
+    browserSessionId: string,
+    recordingId: string,
+    request: BrowserRecordingSaveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRecordingSaveResponse> {
+    return await this.requestJson<BrowserRecordingSaveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}/save`,
       request,
       {},
       options,

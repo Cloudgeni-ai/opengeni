@@ -8,11 +8,11 @@ import {
   renderHook,
 } from "../../../../packages/react/test/render-hook";
 
-import { managedSelfContextIdentity } from "./managed-self-context";
+import { managedSelfContextIdentity } from "@opengeni/react/app/lib/managed-self-context";
 import {
   useFixedRigScope,
   usePersonalResourceAttachment,
-} from "./use-personal-resource-attachment";
+} from "@opengeni/react/app/lib/use-personal-resource-attachment";
 
 registerDom();
 afterEach(() => document.body.replaceChildren());

@@ -9,10 +9,10 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { humanizeName, skillBody, skillSummary } from "@/components/capabilities/skill-copy";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { Notice } from "@/components/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /* ----------------------------------------------------------------------------
    A skill from skills.sh or GitHub before it is installed: the author's own

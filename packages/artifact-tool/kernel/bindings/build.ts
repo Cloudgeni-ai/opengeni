@@ -28,7 +28,7 @@ await ensureArtifactKernelRustToolchain(rustToolchain, {
 await run([
   "bun",
   "x",
-  "tsc",
+  "tsrs",
   "--noEmit",
   "--ignoreConfig",
   "--strict",

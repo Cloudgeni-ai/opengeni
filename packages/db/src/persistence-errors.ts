@@ -444,7 +444,11 @@ export async function runIdempotentPersistenceTransaction<T>(
     try {
       return await transaction(attempt);
     } catch (error) {
-      const sqlState = nestedPostgresSqlState(error);
+      // An uncertain transport/commit outcome is not a confirmed rollback,
+      // even when an older error in its cause chain carries a retryable state.
+      const sqlState = isRetryableDatabaseTransportFailure(error)
+        ? null
+        : nestedPostgresSqlState(error);
       const retryable = isRetryablePersistenceSqlState(sqlState);
       if (retryable && attempt < maxAttempts) {
         await options.onRetry?.({

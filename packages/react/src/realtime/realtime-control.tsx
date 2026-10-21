@@ -6,6 +6,7 @@ import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } f
 import {
   projectSessionRealtimeLifecycle,
   type SessionRealtimeControllerSnapshot,
+  type RealtimeVoiceSettings,
   type SessionRealtimeModel,
 } from "@opengeni/sdk/realtime";
 import {
@@ -109,29 +110,38 @@ type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META = (
   t: OpenGeniText,
-): Record<RealtimeModelProvider, { billingClass: BillingClass; label: string; hint: string }> => ({
+): Record<
+  RealtimeModelProvider,
+  // `key` is unique per provider; several providers can share a billing class.
+  { key: string; billingClass: BillingClass; label: string; hint: string }
+> => ({
   // The wire value keeps its historical spelling; the product name is Opengeni.
   OpenGeni: {
+    key: "opengeni",
     billingClass: "opengeni_credits",
     label: t("realtime.realtimeControl.opengeni"),
     hint: t("realtime.realtimeControl.usesOpengeniCredits"),
   },
   "Connected Codex": {
+    key: "codex",
     billingClass: "codex_subscription",
     label: t("realtime.realtimeControl.connectedCodex"),
     hint: t("realtime.realtimeControl.chatgptCodexPlan"),
   },
   "Connected SuperGrok": {
+    key: "supergrok",
     billingClass: "supergrok_subscription",
     label: t("realtime.realtimeControl.connectedSupergrok"),
     hint: t("realtime.realtimeControl.supergrokXaiPlan"),
   },
   "Your Gateway": {
+    key: "gateway",
     billingClass: "byok",
     label: t("realtime.realtimeControl.yourGateway"),
     hint: t("realtime.realtimeControl.billedToYourAiGateway"),
   },
   "Your ElevenLabs": {
+    key: "elevenlabs",
     billingClass: "byok",
     label: t("realtime.realtimeControl.yourElevenlabs"),
     hint: t("realtime.realtimeControl.billedToYourElevenlabs"),
@@ -165,6 +175,13 @@ export function SessionRealtimeControl(props: {
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
   /** Explicitly expose low-level controller diagnostics; disabled by default. */
   showDiagnostics?: boolean | undefined;
+  /**
+   * Voice settings for this session's voice (voice, language, turn eagerness),
+   * over the workspace's saved settings for the selected model. A language the
+   * person picks in the voice menu takes precedence. Settings the selected
+   * model does not offer are ignored.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -183,6 +200,7 @@ export function SessionRealtimeControl(props: {
     modelAvailable: selectedModel.available,
     modelUnavailableReason: selectedModel.unavailableReason,
     language: selection.languageFor(selectedModel.id),
+    voiceSettings: selection.voiceSettingsFor(selectedModel.id, props.voiceSettings),
   });
   const autostartModelRef = useRef(props.realtimeAutostartModel ?? null);
   const autostartStartedRef = useRef(false);
@@ -879,6 +897,17 @@ export function RealtimeModelPickerMenu(props: {
   const appLanguageName = appLanguage
     ? languageDisplayName(baseLanguage(appLanguage), t.locale)
     : null;
+  // Without a pick of their own, the person talks in the workspace's language
+  // for this provider's voice, else their app language.
+  const workspaceLanguage = props.provider
+    ? props.models.find(
+        (model) => model.provider === props.provider && model.workspaceVoiceSettings?.language,
+      )?.workspaceVoiceSettings?.language
+    : undefined;
+  const workspaceLanguageName = workspaceLanguage
+    ? languageDisplayName(baseLanguage(workspaceLanguage), t.locale)
+    : null;
+  const automaticLanguageName = workspaceLanguageName ?? appLanguageName;
   const body =
     languagePageOpen && props.provider ? (
       <div data-testid="realtime-language-picker">
@@ -894,11 +923,15 @@ export function RealtimeModelPickerMenu(props: {
           <PickerNavRow
             label={t("realtime.realtimeControl.voiceLanguageAutomatic")}
             hint={
-              appLanguageName
-                ? t("realtime.realtimeControl.voiceLanguageAppLanguage", {
-                    language: appLanguageName,
+              workspaceLanguageName
+                ? t("realtime.realtimeControl.voiceLanguageWorkspaceLanguage", {
+                    language: workspaceLanguageName,
                   })
-                : undefined
+                : appLanguageName
+                  ? t("realtime.realtimeControl.voiceLanguageAppLanguage", {
+                      language: appLanguageName,
+                    })
+                  : undefined
             }
             disabled={props.disabled}
             active={languagePreference === null}
@@ -980,9 +1013,9 @@ export function RealtimeModelPickerMenu(props: {
               hint={
                 languagePreference !== null
                   ? languageDisplayName(languagePreference, t.locale)
-                  : appLanguageName
+                  : automaticLanguageName
                     ? t("realtime.realtimeControl.voiceLanguageAutomaticValue", {
-                        language: appLanguageName,
+                        language: automaticLanguageName,
                       })
                     : t("realtime.realtimeControl.voiceLanguageAutomatic")
               }
@@ -1005,7 +1038,7 @@ export function RealtimeModelPickerMenu(props: {
               hint={meta.hint}
               icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
               active={props.selectedModel.provider === provider}
-              testId={`realtime-model-provider-${meta.billingClass}`}
+              testId={`realtime-model-provider-${meta.key}`}
               onClick={() => changeProvider(provider, 1)}
             />
           );

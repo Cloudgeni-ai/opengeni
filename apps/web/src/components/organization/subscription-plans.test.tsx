@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
-import { isSeatLimitError, subscriptionAction } from "@/lib/subscription-plans";
+import { isSeatLimitError, subscriptionAction } from "@opengeni/react/app/lib/subscription-plans";
 
 GlobalRegistrator.register();
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

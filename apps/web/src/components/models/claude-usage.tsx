@@ -1,20 +1,20 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useId, useRef } from "react";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
 import {
   UsageMeterGroup,
   UsageReadout,
   usageResets,
   type UsageWindowReading,
-} from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/usage-meter";
 import {
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
   type SharedQueryKey,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 export type ClaudeUsageState = {
   value: ClaudeSubscriptionUsage | null;

@@ -4,14 +4,14 @@ import {
   ScheduleAccounts,
   scheduleAccountsDescription,
 } from "../src/components/schedules/schedule-accounts";
-import { DetailPageBody } from "../src/components/ui/detail-page";
+import { DetailPageBody } from "@opengeni/react/ui/detail-page";
 import {
   DetailFact,
   DetailFacts,
   DetailPage,
   DetailSection,
-} from "../src/components/ui/detail-sheet";
-import type { ScheduledTaskAccountPlan } from "../src/types";
+} from "@opengeni/react/ui/detail-sheet";
+import type { ScheduledTaskAccountPlan } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const pinned: ScheduledTaskAccountPlan = {

@@ -131,6 +131,7 @@ function upstreamServer() {
         headers: {
           "X-OpenGeni-Has-More": "true",
           "X-OpenGeni-Next-Before": "1",
+          "X-OpenGeni-Conversation-Filter": "2",
           // Upstream's own revision header must stay behind the proxy.
           "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION,
         },
@@ -1254,6 +1255,8 @@ describe("createSessionProxyHandler", () => {
     expect(page.events.map((event) => event.sequence)).toEqual([1]);
     expect(page.hasMore).toBe(true);
     expect(page.nextBefore).toBe(1);
+    // The conversation-filter announcement reaches the browser.
+    expect(page.conversationFilter).toBe(2);
     const query = upstream.requests[0]!.url.searchParams;
     expect(query.get("before")).toBe("5");
     expect(query.get("payloadMode")).toBe("full");

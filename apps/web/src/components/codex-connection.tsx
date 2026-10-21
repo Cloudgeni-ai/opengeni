@@ -1,4 +1,4 @@
-import { trackModelConnection } from "@/lib/analytics-observer";
+import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
 
 // Codex (ChatGPT) subscriptions for Settings > Models: the data and every
 // mutation (useCodexSubscriptions), the usage-limit reset list, the device-code
@@ -21,25 +21,27 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   codexAccountsQueryKey,
   codexLiveUsageQueryKey,
+  recordCodexLiveUsage,
+  type CodexLiveUsageSnapshot,
+} from "@opengeni/react/app/lib/codex-usage-query";
+import {
   invalidateSharedQueries,
   MODEL_SETTINGS_STALE_TIME_MS,
-  recordCodexLiveUsage,
   sharedQueryWriter,
   useSharedQuery,
   useSharedQueryValue,
-  type CodexLiveUsageSnapshot,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { formatAbsoluteTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import type { UsageWindowReading } from "@/components/ui/usage-meter";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import type { UsageWindowReading } from "@opengeni/react/ui/usage-meter";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   ApiError,
   prepareCodexResetRedemption,

@@ -25,6 +25,8 @@ import {
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
+  subscriptionConnectionEffectiveLastError,
+  subscriptionConnectionEffectiveStatus,
 } from "../subscription-core-repository";
 import {
   organizationAdministeredConnection,
@@ -94,7 +96,11 @@ export function subscriptionCoreWakeReason(
   return `core_${subscriptionCoreProviderId(provider)}_${event}`;
 }
 
-/** One subscription connection as the administration projections read it. */
+/**
+ * One subscription connection as the administration projections read it.
+ * `status` and `last_error` are effective: a quarantine that ended reads
+ * `active` with no error (`subscriptionConnectionEffectiveStatus`).
+ */
 export type SubscriptionCoreConnectionRow = {
   id: string;
   label: string | null;
@@ -129,7 +135,9 @@ export type SubscriptionCoreConnectionRow = {
 
 const CONNECTION_COLUMNS = sql`connection.id::text as id, connection.label,
   connection.account_email, connection.plan_type, connection.provider_account_id,
-  connection.status, connection.last_error, connection.version, connection.allocator_enabled,
+  ${subscriptionConnectionEffectiveStatus("connection")} as status,
+  ${subscriptionConnectionEffectiveLastError("connection")} as last_error,
+  connection.version, connection.allocator_enabled,
   connection.extra_credits_enabled, connection.extra_credits_version, connection.extra_credits_updated_at,
   connection.allocator_version, connection.allowed_model_ids,
   connection.connected_by_subject_id, connection.expires_at, connection.last_refresh_at,

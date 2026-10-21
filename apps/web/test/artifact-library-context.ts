@@ -3,8 +3,11 @@ import type {
   ArtifactCatalogListOptions,
   RetainedArtifactReference,
 } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
-import { filterArtifactCatalog, defaultArtifactFilters } from "../src/lib/artifact-catalog";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import {
+  filterArtifactCatalog,
+  defaultArtifactFilters,
+} from "@opengeni/react/app/lib/artifact-catalog";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const sessionId = "33333333-3333-4333-8333-333333333333";

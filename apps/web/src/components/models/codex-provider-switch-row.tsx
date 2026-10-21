@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { useAppContext } from "@/context";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 /**
  * Whether NEW Codex chats here are portable (`codexCompactionDefault`).

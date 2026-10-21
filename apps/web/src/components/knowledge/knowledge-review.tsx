@@ -20,32 +20,32 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { toast } from "sonner";
 
 import { notifyKnowledgeReviewUpdated } from "@/components/rail/use-knowledge-review-indicator";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DiffView } from "@/components/ui/diff-view";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, TextArea, TextInput } from "@/components/ui/field";
-import { InAppHelpLink } from "@/components/in-app-help-link";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { inAppClick } from "@/lib/in-app-click";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { ToolbarSummary } from "@/components/ui/toolbar";
-import { useAppContext } from "@/context";
-import { apiErrorFacts } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DiffView } from "@opengeni/react/ui/diff-view";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { inAppClick } from "@opengeni/react/ui/in-app-click";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { ToolbarSummary } from "@opengeni/react/ui/toolbar";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
   canManageWorkspaceSettings,
   hasAccountPermission,
   hasWorkspacePermission,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 
 import { errorText } from "./knowledge-data";
 import { Markdown } from "./knowledge-markdown";

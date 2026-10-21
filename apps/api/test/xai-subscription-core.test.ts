@@ -19,6 +19,7 @@ const SESSION = "33333333-3333-4333-8333-333333333333";
 const SHARED = "55555555-5555-4555-8555-555555555555";
 
 let route: "legacy" | "core" | "maintenance";
+let workspaceSettings: Record<string, unknown>;
 let calls: string[];
 let wakeFails = false;
 let candidates: string[];
@@ -55,6 +56,7 @@ const token = (version: number) => ({
 mock.module("@opengeni/db", () => ({
   ...realDb,
   getWorkspace: async () => ({ id: WORKSPACE, accountId: ACCOUNT }),
+  getWorkspaceSettings: async () => workspaceSettings,
   getActiveSessionHistoryItems: async () => [],
   getSessionRealtimeContinuityEntries: async () => [],
   readSubscriptionCoreProviderRouteForWorkspace: async (
@@ -152,6 +154,7 @@ const { readXaiCoreStatus, workspaceXaiOperationAvailable } =
 
 beforeEach(() => {
   route = "core";
+  workspaceSettings = {};
   calls = [];
   candidates = [SHARED];
   probe = { kind: "read" };
@@ -333,6 +336,13 @@ describe("SuperGrok realtime by route", () => {
     );
     expect(calls).toContain("candidates:session:user:owner");
     expect(calls).toContain(`lease:realtime:session:${SHARED}`);
+  });
+
+  test("core: the workspace's voice for SuperGrok replaces the default", async () => {
+    upstream = async () => Response.json({ value: "secret", expires_at: 1 });
+    workspaceSettings = { realtimeVoice: { [SUPERGROK_REALTIME_MODEL_ID]: { voice: "ara" } } };
+    const connection = (await create()) as { sessionUpdate: { session: { voice: string } } };
+    expect(connection.sessionUpdate.session.voice).toBe("ara");
   });
 
   test("core with SuperGrok subscriptions disabled for the deployment reads no credential", async () => {

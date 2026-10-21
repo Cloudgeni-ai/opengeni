@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { RowSelect } from "@/components/settings/row-select";
-import { SettingRow } from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { RowSelect } from "@opengeni/react/app/components/settings/row-select";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
 
 const NONE = "none";
 

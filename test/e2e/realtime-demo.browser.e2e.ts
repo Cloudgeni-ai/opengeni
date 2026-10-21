@@ -78,7 +78,7 @@ describe("public realtime React demo browser acceptance", () => {
 
     await openPicker(existing);
     await page.getByTestId("model-picker-back").click();
-    await page.getByTestId("realtime-model-provider-opengeni_credits").click();
+    await page.getByTestId("realtime-model-provider-opengeni").click();
     await page
       .getByTestId("realtime-model-choice-opengeni-gateway/openai/gpt-realtime-2.1")
       .waitFor();
@@ -155,7 +155,7 @@ describe("public realtime React demo browser acceptance", () => {
 
     await openPicker(next);
     await page.getByTestId("model-picker-back").click();
-    await page.getByTestId("realtime-model-provider-byok").click();
+    await page.getByTestId("realtime-model-provider-gateway").click();
     await page
       .getByTestId("realtime-model-choice-workspace-gateway/openai/gpt-realtime-mini")
       .click();

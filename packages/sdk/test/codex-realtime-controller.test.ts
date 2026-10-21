@@ -2786,11 +2786,15 @@ test("Azure rotation persists final speech before the replacement reads startup 
   }
 });
 
-test("each provider connection carries the host's current conversation language", async () => {
+test("each provider connection carries the host's current conversation language and voice settings", async () => {
   const browser = browserFixture();
   const timers = timerFixture();
   let language = "nb-NO";
   const languages: Array<string | undefined> = [];
+  let voiceSettings: { voice?: string; turnEagerness?: "low" | "medium" | "high" } = {
+    voice: "library-voice-id",
+  };
+  const voices: unknown[] = [];
   let current = mode({ model: "workspace-elevenlabs/eleven_realtime_v1_max" });
   const controller = createCodexRealtimeController({
     workspaceId: WORKSPACE_ID,
@@ -2799,8 +2803,10 @@ test("each provider connection carries the host's current conversation language"
     storage: storageFixture(),
     getUserMedia: async () => browser.media,
     getLanguage: () => language,
+    getVoiceSettings: () => voiceSettings,
     startTransport: async (input) => {
       languages.push(input.language);
+      voices.push(input.voiceSettings);
       throw new Error("transport unavailable in this test");
     },
     reconnectBackoffMs: [10],
@@ -2830,9 +2836,11 @@ test("each provider connection carries the host's current conversation language"
     await controller.start().catch(() => undefined);
     await eventually(() => languages.length === 1, "transport not started");
     language = "sv";
+    voiceSettings = { turnEagerness: "low" };
     timers.runTimeout(10);
     await eventually(() => languages.length === 2, "transport not retried");
     expect(languages).toEqual(["nb-NO", "sv"]);
+    expect(voices).toEqual([{ voice: "library-voice-id" }, { turnEagerness: "low" }]);
   } finally {
     controller.close();
   }

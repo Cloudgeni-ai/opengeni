@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ScheduledTask, Session } from "@/types";
+import type { ScheduledTask, Session } from "@opengeni/react/app/types";
 import type { ReactNode } from "react";
 
 GlobalRegistrator.register();
@@ -8,7 +8,7 @@ GlobalRegistrator.register();
   true;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const selectMenu = await import("@/components/ui/select-menu");
+const selectMenu = await import("@opengeni/react/ui/select-menu");
 
 const workspaceId = "workspace-example";
 let task: ScheduledTask;
@@ -70,7 +70,7 @@ const context = {
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#chat">{children}</a>,
 }));
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("./schedule-parts", () => ({
   useScheduleAccess: () => ({
     canManage: true,
@@ -84,17 +84,17 @@ mock.module("./create-with-opengeni", () => ({
   useCanCreateScheduleWithAgent: () => false,
   useCreateWithOpenGeni: () => ({ dialog: null }),
 }));
-mock.module("@/lib/use-workspace-machines", () => ({
+mock.module("@opengeni/react/app/lib/use-workspace-machines", () => ({
   useWorkspaceMachines: () => ({ machines, loading: false }),
 }));
-mock.module("@/lib/use-workspace-model-catalog", () => ({
+mock.module("@opengeni/react/app/lib/use-workspace-model-catalog", () => ({
   useWorkspaceModelCatalog: () => ({
     defaultSelection: null,
     rows: [],
     loading: false,
   }),
 }));
-mock.module("@/components/knowledge/agent-learning-settings", () => ({
+mock.module("@opengeni/react/app/components/knowledge/agent-learning-settings", () => ({
   AgentLearningDraftEditor: () => null,
 }));
 mock.module("./schedule-agent-capabilities", () => ({
@@ -129,7 +129,7 @@ mock.module("./schedule-composer", () => ({
     </>
   ),
 }));
-mock.module("@/components/ui/form-dialog", () => ({
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   FormPage: ({
     children,
     onSubmit,
@@ -150,7 +150,7 @@ mock.module("@/components/ui/form-dialog", () => ({
     </>
   ),
 }));
-mock.module("@/components/ui/select-menu", () => ({
+mock.module("@opengeni/react/ui/select-menu", () => ({
   ...selectMenu,
   SelectMenu: ({
     value,

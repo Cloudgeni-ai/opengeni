@@ -20,36 +20,39 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirmPanel, showUndoToast } from "@/components/ui/destructive-confirm";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormFrame } from "@/components/ui/form-dialog";
-import { Disclosure } from "@/components/ui/disclosure";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  DestructiveConfirmPanel,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormFrame } from "@opengeni/react/ui/form-dialog";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import {
   EmptyState,
   EmptyStateLink,
   EmptyStateTemplate,
   EmptyStateTemplates,
-} from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
+} from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import {
   ListRow,
   ListRowSkeleton,
   RowList,
   useRowListVariant,
   type RowListColumn,
-} from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   KIT_NOW,

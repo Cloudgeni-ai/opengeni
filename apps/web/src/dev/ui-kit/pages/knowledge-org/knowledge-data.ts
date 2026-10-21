@@ -1,4 +1,4 @@
-import type { Revision } from "@/components/ui/revision-history";
+import type { Revision } from "@opengeni/react/ui/revision-history";
 
 import {
   knowledgeEntries,

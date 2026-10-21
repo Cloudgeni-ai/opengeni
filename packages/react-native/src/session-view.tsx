@@ -637,6 +637,7 @@ function TimelineRow({
   renderTool?: NativeToolRenderer | undefined;
   theme: OpenGeniNativeTheme;
 }) {
+  if (item.kind === "turn-steps") return <TurnStepsAction item={item} theme={theme} />;
   if (item.kind === "tool-call" && renderTool) {
     const rendered = renderTool(item, { compact: compactActivity, labels, theme });
     if (rendered !== null && rendered !== undefined) return <>{rendered}</>;
@@ -885,6 +886,7 @@ function timelineTitle(
       return labels.fleetDecision;
     case "turn-end":
       return labels.turn;
+    case "turn-steps":
     case "notice":
     case "machine-input-batch":
     case "auth-needed":
@@ -1149,6 +1151,8 @@ function timelineSummary(
       return nativeFleetDecisionSummary(item, labels);
     case "turn-end":
       return item.failureText ?? nativeTimelineStatusLabel(item.outcome, labels);
+    case "turn-steps":
+      return "";
   }
 }
 
@@ -1931,6 +1935,41 @@ function DefaultComposerActions(context: NativeComposerActionContext) {
         />
       </View>
     </View>
+  );
+}
+
+/** A turn's unloaded steps: loaded (and kept) when the reader asks. */
+function TurnStepsAction({
+  item,
+  theme,
+}: {
+  item: Extract<TimelineItem, { kind: "turn-steps" }>;
+  theme: OpenGeniNativeTheme;
+}) {
+  const t = useOpenGeniText();
+  const release = useRef<(() => void) | null>(null);
+  useEffect(() => () => release.current?.(), []);
+  if (item.state === "complete") return null;
+  const label =
+    item.state === "loading"
+      ? t("timeline.turnSteps.loadingSteps")
+      : item.state === "error"
+        ? `${t("timeline.turnSteps.couldNotLoadSteps")} ${t("timeline.turnSteps.retry")}`
+        : item.state === "partial"
+          ? t("timeline.turnSteps.showEarlierSteps")
+          : t("timeline.turnSteps.showSteps");
+  return (
+    <ActionButton
+      compact
+      disabled={item.state === "loading"}
+      label={label}
+      onPress={() => {
+        release.current ??= item.retain();
+        item.load();
+      }}
+      theme={theme}
+      variant="quiet"
+    />
   );
 }
 

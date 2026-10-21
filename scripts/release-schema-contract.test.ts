@@ -37,6 +37,21 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("model fact reconciliation adds rolling state and concurrent paging indexes", async () => {
+    const contract = await buildCompleteSchemaContract();
+    for (const path of [
+      "0890_model_fact_reconciliation_progress.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0892_model_fact_event_pages.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0894_model_fact_reconciliation_arrivals.sql",
+    ]) {
+      expect(contract.migrations.find((migration) => migration.path === path)).toMatchObject({
+        path,
+        deploymentMode: "rolling",
+      });
+    }
+  });
   test("registers the shared subscription-core M2 rolling migration in the release contract", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2325,6 +2340,26 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0894_model_fact_reconciliation_arrivals.sql",
+      "0893_model_fact_ledger_source.sql",
+      "0892_model_fact_event_pages.sql",
+      "0891_model_fact_ledger_pages.sql",
+      "0890_model_fact_reconciliation_progress.sql",
+      "0889_session_events_tool_name.sql",
+      "0888_session_list_invalidation.sql",
+      "0887_session_events_attempt_reference_index.sql",
+      "0886_remove_duplicate_session_identity_indexes.sql",
+      "0885_checkpoint_gc_reference_sets.sql",
+      "0884_subscription_core_personal_quarantine_expiry.sql",
+      "0883_retired_instance_interactions.sql",
+      "0882_continuable_core_capacity_waits.sql",
+      "0881_knowledge_scope_expression.sql",
+      "0880_quiescence_repair_skips_parked_waits.sql",
+      "0879_unsettled_admissions_session_index.sql",
+      "0878_keyed_knowledge_visibility.sql",
+      "0877_single_semantic_event_projection.sql",
+      "0876_connection_validation_shared_locks.sql",
+      "0875_realtime_history_reference_index.sql",
       "0874_elevenlabs_realtime_models.sql",
       "0873_mcp_binding_delegation_revocation.sql",
       "0872_agent_update_blockers.sql",

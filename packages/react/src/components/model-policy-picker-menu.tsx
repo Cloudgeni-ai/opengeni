@@ -2,6 +2,7 @@ import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { ArrowRightIcon, CheckIcon, SearchIcon, ZapIcon } from "lucide-react";
 import { useRef, useState, type RefObject, type CSSProperties } from "react";
 import { Popover, RadioGroup } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { cn } from "../lib/cn";
 import {
   MENU_CHECK_CLASS,
@@ -24,6 +25,8 @@ import {
 } from "./model-policy-picker";
 import { ModelMark } from "./model-mark";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const PopoverContainedPortal = containedPortal(Popover.Portal);
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
@@ -397,7 +400,7 @@ export function ModelPolicyPickerPopover(
   return (
     <Popover.Root open onOpenChange={(open) => props.onOpenChange?.(open)}>
       <Popover.Anchor virtualRef={props.anchor} />
-      <Popover.Portal>
+      <PopoverContainedPortal>
         <Popover.Content
           id={props.contentId}
           aria-label={messages.label}
@@ -423,7 +426,7 @@ export function ModelPolicyPickerPopover(
         >
           <ModelPolicyPickerMenu {...props} />
         </Popover.Content>
-      </Popover.Portal>
+      </PopoverContainedPortal>
     </Popover.Root>
   );
 }

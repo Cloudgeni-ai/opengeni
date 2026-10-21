@@ -2,6 +2,7 @@ import type { TimelineAnnotationSource } from "@opengeni/sdk";
 import { XIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { usePortalContainer } from "../ui/portal-container";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   AnnotationAccentRow,
@@ -59,6 +60,7 @@ export function TimelineAnnotationsDialog({
   const listRef = useRef<HTMLDivElement | null>(null);
   const noteRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const focusedAnnotationIdRef = useRef<string | null>(null);
+  const portalContainer = usePortalContainer();
   const portalStyle = usePortalTokenStyle(triggerRef.current);
   const revealNote = (id: string) => {
     const row = listRef.current?.querySelector<HTMLElement>(
@@ -271,7 +273,7 @@ export function TimelineAnnotationsDialog({
         })}
       </div>
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 

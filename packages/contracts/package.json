@@ -166,6 +166,10 @@
       "types": "./src/session-final-reply.ts",
       "default": "./src/session-final-reply.ts"
     },
+    "./session-history": {
+      "types": "./src/session-history.ts",
+      "default": "./src/session-history.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -272,7 +276,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

@@ -1,8 +1,8 @@
 import { ShieldCheckIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
+import { cn } from "@opengeni/react/app/lib/utils";
 import {
   scheduledTaskAccessFailuresText,
   scheduledTaskAwaitingHumanText,
@@ -10,7 +10,7 @@ import {
   scheduledTaskPolicyDriftLines,
   scheduledTaskUnavailableAccountsText,
 } from "@/lib/scheduled-tasks";
-import type { ScheduledTask, ScheduledTaskAccessAttention } from "@/types";
+import type { ScheduledTask, ScheduledTaskAccessAttention } from "@opengeni/react/app/types";
 
 /** Everything the attention list says about one schedule, in one line of text. */
 export function scheduledTaskAttentionText(

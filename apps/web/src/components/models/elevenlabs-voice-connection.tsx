@@ -4,19 +4,19 @@ import { UnplugIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { Field } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { Field } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { SecretInput } from "@/components/ui/secret-field";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import {
   invalidateModelSettingsQueries,
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    The workspace's ElevenLabs key, used by Eleven Realtime voice models. The

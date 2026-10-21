@@ -37,6 +37,8 @@
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
+// The shared session UI renders through this app's router and API helpers.
+import "./app-host";
 import {
   Navigate,
   RouterProvider,
@@ -47,23 +49,39 @@ import {
   useParams,
   useSearch,
 } from "@tanstack/react-router";
-import { ProblemPanel } from "@/components/common";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
-import { RootRouteComponent, useAppContext } from "@/context";
-import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
-import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { RootRouteComponent } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  parseComposerLaunchSearch,
+  type ComposerLaunchSearch,
+} from "@opengeni/react/app/lib/composer-launch";
+import {
+  parseSessionSearchRoute,
+  type SessionSearchRoute,
+} from "@opengeni/react/app/lib/session-search-route";
+import {
+  artifactReturnSearch,
+  parseCheckoutOutcome,
+  type CheckoutOutcome,
+} from "@opengeni/react/app/lib/routes";
 import { parseCheckoutSessionId } from "@/lib/checkout-session-id";
-import { parseReturnTo, returnToOf, returnToSearch, type ReturnToSearch } from "@/lib/return-to";
+import {
+  parseReturnTo,
+  returnToOf,
+  returnToSearch,
+  type ReturnToSearch,
+} from "@opengeni/react/app/lib/return-to";
 import {
   parseModelsAccount,
   parseModelsView,
   workspaceModelsRedirect,
   type ModelsView,
-} from "@/lib/models-route";
+} from "@opengeni/react/app/lib/models-route";
 import {
   documentsRedirectSearch,
   parseKnowledgeSearch,
@@ -84,12 +102,12 @@ import { parseSecretsIndexSearch, type SecretsIndexSearch } from "@/lib/secrets-
 import {
   workspaceSettingsSectionFromSearch,
   type WorkspaceSettingsSection,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 import {
   parseOrganizationSection,
   type LegacyOrganizationAdminSection,
   type OrganizationAdminSection as OrganizationSettingsSection,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import {
   parseOrganizationRecordId,
   parseOrganizationView,
@@ -101,15 +119,19 @@ import {
   resolveLandingWorkspaceId,
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
-} from "@/lib/workspace-navigation-preference";
-import { installDesktopShell, warmDesktopPages } from "@/lib/desktop";
+} from "@opengeni/react/app/lib/workspace-navigation-preference";
+import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
 type OrganizationAdminSection = OrganizationSettingsSection | LegacyOrganizationAdminSection;
 
-export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
+export {
+  workspaceAgentPath,
+  workspaceSessionPath,
+  workspaceSessionsPath,
+} from "@opengeni/react/app/lib/routes";
 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
@@ -186,7 +208,7 @@ const LazyScheduleFormRoute = lazyRouteComponent(
   () => import("@/routes/schedules"),
   "ScheduleFormRoute",
 );
-const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
   () => import("@/routes/playground"),
   "PlaygroundRoute",
@@ -196,7 +218,7 @@ const LazySessionDeepLinkRoute = lazyRouteComponent(
   "SessionDeepLinkRoute",
 );
 const LazySessionsIndexRoute = lazyRouteComponent(
-  () => import("@/routes/sessions-index"),
+  () => import("@opengeni/react/app/routes/sessions-index"),
   "SessionsIndexRoute",
 );
 const LazyWorkspaceSettingsRoute = lazyRouteComponent(
@@ -207,9 +229,12 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
-const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyArtifactsRoute = lazyRouteComponent(
+  () => import("@opengeni/react/app/routes/artifacts"),
+  "ArtifactsRoute",
+);
 const LazyRetainedArtifactRoute = lazyRouteComponent(
-  () => import("@/routes/retained-artifact"),
+  () => import("@opengeni/react/app/routes/retained-artifact"),
   "RetainedArtifactRoute",
 );
 const LazyIdentityLinkRoute = lazyRouteComponent(

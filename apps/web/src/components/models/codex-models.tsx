@@ -1,11 +1,15 @@
 import type { CodexAccount } from "@opengeni/sdk";
-import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
-import { EnableAccountRow, SubscriptionAccountRow } from "./subscription-account-ui";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
+import { useOrganizationCodexOverview } from "./use-organization-codex-overview";
+import {
+  EnableAccountRow,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   CodexDeviceCodePanel,
   CodexRedemptionDialog,
@@ -32,36 +36,36 @@ import {
   resetsLabel,
   type ModelsScopeLabels,
   useModelsListLabel,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { copyText } from "@/components/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { FieldStack } from "@/components/ui/field";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { formatAbsoluteTime, RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { copyText } from "@opengeni/react/ui/copy-field";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { FieldStack } from "@opengeni/react/ui/field";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { formatAbsoluteTime, RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import {
   SettingDangerRow,
   SettingNavRow,
   SettingRow,
   SettingRowGroup,
-} from "@/components/ui/setting-row";
-import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup, UsageReadout, usageResets } from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/setting-row";
+import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageMeterGroup, UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Codex on Settings > Models: the provider group (header with the pool-wide
@@ -512,6 +516,13 @@ function SharedCodexSetAsideRow({
   menu: ReactNode;
   onKeptForPeople?: KeptForPeopleReporter | undefined;
 }) {
+  const overview = useOrganizationCodexOverview(
+    organization.codex.client,
+    organization.codex.organizationId,
+    account,
+  );
+  const resetCount =
+    overview.data?.resetCredits?.availableCount ?? account.resetCreditAvailableCount;
   const access = useConnectionAccess({
     client: organization.codex.client,
     organizationId: organization.codex.organizationId,
@@ -561,14 +572,14 @@ function SharedCodexSetAsideRow({
             ? [
                 <ModelSettingsPlaceholder key="reach" />,
                 planLabel(account.plan, "ChatGPT"),
-                resetsLabel(account.resetCreditAvailableCount),
+                resetsLabel(resetCount),
               ]
             : [
                 organizationReachLabel(places.scope, access.data),
                 // Before the plan, so it stays readable on a phone.
                 reason,
                 planLabel(account.plan, "ChatGPT"),
-                resetsLabel(account.resetCreditAvailableCount),
+                resetsLabel(resetCount),
               ]
       }
       cells={forPeople || pending ? undefined : { usage: NOT_IN_USE }}

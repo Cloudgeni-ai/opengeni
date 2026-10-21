@@ -13,7 +13,7 @@ mock.module("sonner", () => ({
   ),
 }));
 
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     title,

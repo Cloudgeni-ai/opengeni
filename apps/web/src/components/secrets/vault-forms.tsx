@@ -7,10 +7,10 @@ import {
 } from "@opengeni/react";
 import { useState, type ReactNode } from "react";
 
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 
 import {
   AvailabilityEditor,
@@ -18,7 +18,7 @@ import {
   personalAvailabilityFrom,
   type AvailabilityWorkspace,
 } from "./availability-editor";
-import { vaultErrorText } from "./vault-model";
+import { vaultErrorText } from "@opengeni/react/app/components/secrets/vault-model";
 
 /* ----------------------------------------------------------------------------
    New vault (S5) and the vault's own small forms: Rename (one-field dialog)

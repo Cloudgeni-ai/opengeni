@@ -9,9 +9,9 @@ import { OpenGeniMemorySlackClient } from "@opengeni/sdk/memory-slack";
 import { Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -19,17 +19,20 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Field } from "@/components/ui/field";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { StatusBadge, type StatusBadgeProps } from "@/components/ui/status-badge";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/dialog";
+import { Field } from "@opengeni/react/ui/field";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import {
+  SegmentedControl,
+  type SegmentedControlOption,
+} from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { StatusBadge, type StatusBadgeProps } from "@opengeni/react/ui/status-badge";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { openGeniSlackBotConnectionOptions } from "@/lib/slack-bot";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 const IMPORTANCES: MemorySlackImportance[] = ["major", "normal", "minor"];
 

@@ -98,6 +98,11 @@ const agentInteractionMethods = [
   "adoptBrowserSessionWorkingCopy",
   "getBrowserSessionWorkingCopyAdoption",
   "revertBrowserSessionWorkingCopyAdoption",
+  // Recording a browser flow is an agent action (browser_record); the console
+  // plays the saved video as an ordinary artifact.
+  "startBrowserRecording",
+  "getBrowserRecording",
+  "saveBrowserRecording",
 ];
 
 // Server-side integrations replace the Skills a session carries, and hosts that

@@ -34,6 +34,7 @@ import {
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { presentTurnFailureText } from "./compaction-copy";
+import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -53,7 +54,9 @@ import type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
   ToolCallItem,
+  ToolOutputPreview,
   ToolCallTruncation,
   UserMessageItem,
   WorkerItem,
@@ -160,10 +163,27 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+export type BuildTimelineOptions = {
+  partialStart?: boolean;
+  /**
+   * Turns whose steps are not all loaded, keyed by turn id. Each becomes a
+   * `turn-steps` item placed at the turn's start (its `turn.started`, or its
+   * first event), so the readable grouping gives the turn an expandable work
+   * row even when none of its steps are in the browser.
+   */
+  turnSteps?: ReadonlyMap<string, Pick<TurnStepsItem, "state" | "load" | "retain">>;
+  /**
+   * Exact reads of tool outputs a step page delivered as previews, by output
+   * event. A previewed tool row carries its read's state and loader in
+   * `outputPreview`; without a reader it is still marked as a preview.
+   */
+  toolOutputs?: ToolOutputReader | undefined;
+};
+
 export function buildTimeline(
   t: OpenGeniText,
   events: SessionEvent[],
-  options: { partialStart?: boolean } = {},
+  options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
   const allowanceNotices = new Set<string>();
@@ -432,7 +452,15 @@ export function buildTimeline(
     }
   };
 
+  const turnStepsByAnchor = turnStepsAnchors(ordered, options.turnSteps);
+  let pendingTurnSteps: TurnStepsItem | null = null;
   for (const event of ordered) {
+    // A turn's steps marker follows its anchor event, before anything later.
+    if (pendingTurnSteps) {
+      items.push(pendingTurnSteps);
+      pendingTurnSteps = null;
+    }
+    pendingTurnSteps = turnStepsByAnchor.get(event.id) ?? null;
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
     resolveCapacityWaits(event, payload);
@@ -951,6 +979,22 @@ export function buildTimeline(
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
         const truncation = toolCallTruncation(payload);
+        const previewFact = toolOutputPreviewFact(payload);
+        const previewRead = previewFact
+          ? options.toolOutputs?.(event.id, event.sequence, event.turnId ?? null)
+          : undefined;
+        // An exact read that landed replaced this event; a forged fact on an
+        // exact output must not ask again.
+        const outputPreview: ToolOutputPreview | null =
+          previewFact && previewRead?.state !== "loaded"
+            ? {
+                shape: previewFact.shape,
+                originalBytes: previewFact.originalBytes,
+                previewBytes: previewFact.previewBytes,
+                state: previewRead?.state ?? "preview",
+                ...(previewRead ? { load: previewRead.load } : {}),
+              }
+            : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
@@ -958,12 +1002,14 @@ export function buildTimeline(
             ? payload.preview
             : payload.output;
         target.truncation = truncation;
+        target.outputPreview = outputPreview;
         const sourceText = timelineAnnotationToolOutputText(
           Object.prototype.hasOwnProperty.call(payload, "output")
             ? payload.output
             : payload.preview,
         );
-        if (sourceText !== null) {
+        // Annotations anchor in the exact text, which a preview is not.
+        if (sourceText !== null && !outputPreview) {
           target.annotationSource = {
             kind: "tool_output",
             eventId: event.id,
@@ -1882,6 +1928,7 @@ export function buildTimeline(
         break;
     }
   }
+  if (pendingTurnSteps) items.push(pendingTurnSteps);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2213,6 +2260,37 @@ type WorkActivityItem = Exclude<ActivityItem, AgentMessageItem>;
  * decide its grouping, and it narrows `item` to a work item with no cast.
  * Assistant prose stays outside activity clusters.
  */
+/** Each marked turn's anchor: its `turn.started`, else its first event. */
+function turnStepsAnchors(
+  ordered: readonly SessionEvent[],
+  turnSteps: BuildTimelineOptions["turnSteps"],
+): Map<string, TurnStepsItem> {
+  const anchors = new Map<string, TurnStepsItem>();
+  if (!turnSteps || turnSteps.size === 0) return anchors;
+  const chosen = new Map<string, SessionEvent>();
+  for (const event of ordered) {
+    const turnId = event.turnId;
+    if (!turnId || !turnSteps.has(turnId)) continue;
+    const current = chosen.get(turnId);
+    if (!current || (event.type === "turn.started" && current.type !== "turn.started")) {
+      chosen.set(turnId, event);
+    }
+  }
+  for (const [turnId, anchor] of chosen) {
+    const marker = turnSteps.get(turnId)!;
+    anchors.set(anchor.id, {
+      kind: "turn-steps",
+      id: `turn-steps-${turnId}`,
+      turnId,
+      occurredAt: anchor.occurredAt,
+      state: marker.state,
+      load: marker.load,
+      retain: marker.retain,
+    });
+  }
+  return anchors;
+}
+
 function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   switch (item.kind) {
     case "reasoning":
@@ -2383,7 +2461,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
       return group;
     };
-    if (isActivityItem(item)) {
+    if (item.kind === "turn-steps") {
+      // Not a step: it gives the turn its work row (a turn whose steps are all
+      // unloaded has nothing else) and is rendered by that row.
+      workForTurn().work!.steps = item;
+    } else if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
       const previous = group.work!.details.at(-1);

@@ -1,10 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { BracesIcon } from "lucide-react";
 
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RelativeTime, type RelativeTimeProps } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RelativeTime, type RelativeTimeProps } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import { KIT_NOW, KIT_TIME_ZONE, schedules, variableSets } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";

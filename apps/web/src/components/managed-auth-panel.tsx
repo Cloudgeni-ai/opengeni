@@ -2,10 +2,10 @@ import { CheckIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AuthApiError, requestPasswordReset, sendVerificationEmail } from "@/api";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   ManagedAuthDivider,
   ManagedSocialAuthButtons,
@@ -16,8 +16,8 @@ import {
   validateManagedAuthInput,
   type ManagedAuthField,
   type ManagedAuthFormErrors,
-  type ManagedAuthMode,
 } from "@/lib/managed-auth-form";
+import type { ManagedAuthMode } from "@opengeni/react/app/lib/managed-auth-transition";
 import {
   clearVerificationLinkErrorFromLocation,
   managedAuthModeFromSearch,

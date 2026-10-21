@@ -1,11 +1,11 @@
 import { BookOpenIcon, Loader2Icon, PanelsTopLeftIcon, SearchIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import { request as apiRequest } from "@/api";
 import { saveAtlassianSources } from "@/components/capabilities/atlassian-sources";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -13,9 +13,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Select } from "@opengeni/react/ui/select";
 import type {
   AtlassianBrowseItem,
   AtlassianBrowseResponse,
@@ -23,7 +23,7 @@ import type {
   AtlassianSyncCadence,
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 /**
  * The Jira and Confluence source picker. Opened from the integration sheet's

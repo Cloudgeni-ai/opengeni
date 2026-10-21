@@ -70,7 +70,8 @@ const VERIFY_CHECKS: usize = 64;
 /// zstd level 1: measured nearly as small as higher levels at a fraction of
 /// the time, which matters because sleeping waits for it.
 const ZSTD_LEVEL: i32 = 1;
-/// Version 2 added the learned wake profile; version 3 its working-set pack.
+/// The stored copy's format. A host reads only this version and refuses
+/// any other.
 const HEAD_VERSION: u32 = 3;
 
 /// One chunk-sized piece of a stored file: where it is, and the chunk
@@ -85,11 +86,9 @@ struct Head {
     memory: Option<MemoryHead>,
     /// The order the guest touched memory after its last wake, stored as
     /// one chunk.
-    #[serde(default)]
     profile: Option<ChunkRef>,
     /// The memory pages at the start of that order, packed for one fetch:
     /// the index chunk of a [`working_set`] pack.
-    #[serde(default)]
     pack: Option<ChunkRef>,
 }
 
@@ -105,7 +104,7 @@ struct MemoryHead {
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
     let head: Head = serde_json::from_slice(bytes)
         .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, operation, error))?;
-    if !(1..=HEAD_VERSION).contains(&head.version) {
+    if head.version != HEAD_VERSION {
         return Err(EngineError::new(
             ErrorKind::Fatal,
             operation,
@@ -227,12 +226,6 @@ impl Chunked {
         }
     }
 
-    /// Refuses a store this release cannot read every copy in; see
-    /// [`ChunkStore::refuse_unstamped_pointers`].
-    pub async fn refuse_unreadable(&self) -> Result<(), StorageError> {
-        self.chunks.refuse_unstamped_pointers().await
-    }
-
     /// Deletes the chunks and manifests no sandbox's stored copy names any
     /// more, or with `delete` false only reports them (see
     /// [`compute_storage::sweep`]).
@@ -251,7 +244,7 @@ impl Chunked {
     /// working-set pack does not, since a wake without it is just slower.
     async fn names(&self, pointer: &[u8]) -> Result<Vec<String>, StorageError> {
         let head: Head = serde_json::from_slice(pointer)?;
-        if !(1..=HEAD_VERSION).contains(&head.version) {
+        if head.version != HEAD_VERSION {
             return Err(StorageError::Invalid("a stored copy of an unknown version"));
         }
         let mut manifests = vec![head.disk];
@@ -804,24 +797,17 @@ impl Store for Chunked {
             Err(error) => return Err(storage_error(OP, error)),
         };
         let head = parse_head(OP, &bytes)?;
-        Ok(Owned::Done(Some(Claimed {
-            save: stamp.save,
-            receipt: receipt_of(&bytes),
-            memory: head.memory.is_some(),
-        })))
-    }
-
-    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
-        const OP: &str = "disk_len";
-        let Some(head) = self.head(OP, id).await? else {
-            return Ok(None);
-        };
-        let manifest = self
+        let disk = self
             .chunks
             .get_manifest(&head.disk)
             .await
             .map_err(|error| storage_error(OP, error))?;
-        Ok(Some(manifest.disk_len))
+        Ok(Owned::Done(Some(Claimed {
+            save: stamp.save,
+            receipt: receipt_of(&bytes),
+            memory: head.memory.is_some(),
+            disk_bytes: disk.disk_len,
+        })))
     }
 
     async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {

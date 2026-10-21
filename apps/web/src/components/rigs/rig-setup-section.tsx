@@ -9,9 +9,9 @@ import {
   cleanRigChecks,
   type RigDefinitionDraft,
 } from "@/components/rigs/rig-definition-fields";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import type { ProposeRigChangeRequest, RigVersion } from "@/types";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import type { ProposeRigChangeRequest, RigVersion } from "@opengeni/react/app/types";
 
 export function RigSetupEditPage({
   rigName,

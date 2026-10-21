@@ -2476,6 +2476,41 @@
     },
     {
       "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings",
+      "sdk": [
+        "OpenGeniClient.startBrowserRecording"
+      ],
+      "request": [],
+      "response": [
+        "BrowserRecordingSummary"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId",
+      "sdk": [
+        "OpenGeniClient.getBrowserRecording"
+      ],
+      "request": [],
+      "response": [
+        "BrowserRecordingSummary"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
+      "sdk": [
+        "OpenGeniClient.saveBrowserRecording"
+      ],
+      "request": [
+        "BrowserRecordingSaveRequest"
+      ],
+      "response": [
+        "BrowserRecordingSaveResponse"
+      ]
+    },
+    {
+      "method": "POST",
       "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume",
       "sdk": [
         "OpenGeniClient.resumeBrowserSession"
@@ -11937,6 +11972,55 @@
         "$": "enum=[\"\\\"denied\\\"\",\"\\\"granted\\\"\",\"\\\"prompt\\\"\"]"
       }
     },
+    "BrowserRecordingSaveRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.destinationPath": "string?",
+        "$.operationId": "string!"
+      }
+    },
+    "BrowserRecordingSaveResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionLogPath": "string!",
+        "$.recording": "ref(BrowserRecordingSummary)!",
+        "$.video": "object!",
+        "$.video.artifactId": "string!",
+        "$.video.durationMs": "integer!",
+        "$.video.frameCount": "integer!",
+        "$.video.height": "integer!",
+        "$.video.path": "string!",
+        "$.video.sizeBytes": "integer!",
+        "$.video.width": "integer!"
+      }
+    },
+    "BrowserRecordingSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actionCount": "integer!",
+        "$.bundle": "object! null",
+        "$.bundle.sha256": "string!",
+        "$.bundle.sizeBytes": "integer!",
+        "$.durationMs": "integer!",
+        "$.frameBytes": "integer!",
+        "$.frameCount": "integer!",
+        "$.recordingId": "string!",
+        "$.startedAt": "string!",
+        "$.state": "enum!=[\"\\\"recording\\\"\",\"\\\"stopped\\\"\"]",
+        "$.stopReason": "enum! null=[\"\\\"duration_limit\\\"\",\"\\\"requested\\\"\",\"\\\"session_ended\\\"\",\"\\\"size_limit\\\"\"]",
+        "$.stoppedAt": "string! null",
+        "$.streamError": "string! null"
+      }
+    },
     "BrowserRevision": {
       "io": [
         "output"
@@ -13817,6 +13901,7 @@
         "$.focused": "boolean!",
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",
+        "$.offScreen": "const?=[\"true\"]",
         "$.processId": "integer! null",
         "$.targetGeneration": "string!",
         "$.title": "string!"
@@ -15993,7 +16078,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
+        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
       }
     },
     "ForkSessionRequest": {
@@ -16240,7 +16325,8 @@
         "$.operationId": "string!",
         "$.ownerKey": "string!",
         "$.realtimeId": "string!",
-        "$.rotate": "boolean!"
+        "$.rotate": "boolean!",
+        "$.voiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
     "GatewayRealtimeConnectResponse": {
@@ -22615,6 +22701,27 @@
         "$.secret": "string?"
       }
     },
+    "RealtimeTurnEagerness": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"high\\\"\",\"\\\"low\\\"\",\"\\\"medium\\\"\"]"
+      }
+    },
+    "RealtimeVoiceSettings": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.language": "string?",
+        "$.turnEagerness": "ref(RealtimeTurnEagerness)?",
+        "$.voice": "string?"
+      }
+    },
     "RealtimeWebsocketProtocol": {
       "io": [
         "output"
@@ -24645,6 +24752,7 @@
         "$.groups[].queued": "integer!",
         "$.groups[].total": "integer!",
         "$.groups[].unread": "integer!",
+        "$.groups[].waiting": "integer?",
         "$.needsYouCount": "integer!"
       }
     },
@@ -25053,7 +25161,8 @@
         "$.operationId": "string!",
         "$.ownerKey": "string!",
         "$.realtimeId": "string!",
-        "$.rotate": "boolean!"
+        "$.rotate": "boolean!",
+        "$.voiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
     "SessionRealtimeWebsocketResponse": {
@@ -27322,6 +27431,7 @@
         "$.id": "string!",
         "$.items": "array!",
         "$.items[]": "object",
+        "$.items[].detail": "string?",
         "$.items[].label": "string!",
         "$.items[].path": "string?",
         "$.items[].truncated": "boolean?",
@@ -28413,6 +28523,8 @@
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
         "$.modelCompactionThresholds": "unknown?",
+        "$.realtimeVoice": "object?",
+        "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)? null",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
@@ -30281,6 +30393,7 @@
       "shape": {
         "$": "object",
         "$.available": "boolean!",
+        "$.customVoice": "boolean?",
         "$.description": "string!",
         "$.id": "ref(SessionRealtimeModel)!",
         "$.label": "string!",
@@ -30288,8 +30401,16 @@
         "$.languages[]": "string",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
+        "$.turnEagerness": "array?",
+        "$.turnEagerness[]": "ref(RealtimeTurnEagerness)",
         "$.unavailableCode": "string? null",
-        "$.unavailableReason": "string! null"
+        "$.unavailableReason": "string! null",
+        "$.voiceDefaults": "ref(RealtimeVoiceSettings)?",
+        "$.voices": "array?",
+        "$.voices[]": "object",
+        "$.voices[].id": "string!",
+        "$.voices[].label": "string!",
+        "$.workspaceVoiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },
     "WorkspaceRealtimeModelCatalogResponse": {
@@ -30868,6 +30989,9 @@
       "BrowserOpenTargetRequest": "type",
       "BrowserPermission": "type",
       "BrowserPermissionSetting": "type",
+      "BrowserRecordingSaveRequest": "type",
+      "BrowserRecordingSaveResponse": "type",
+      "BrowserRecordingSummary": "type",
       "BrowserRevision": "type",
       "BrowserRevisionComponent": "type",
       "BrowserRevisionComponentKind": "type",
@@ -31427,9 +31551,11 @@
       "isOpenGeniSiteBridgeCancelMessage": "value",
       "isOpenGeniSiteBridgeConnectMessage": "value",
       "isOpenGeniSiteBridgeRequestMessage": "value",
+      "isPresentedSessionToolName": "value",
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
+      "isSessionModelResponsePhase": "value",
       "isSessionRealtimeModel": "value",
       "isSiteCatalogStaleError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
@@ -31837,6 +31963,8 @@
       "ReadEditableArtifactMaterializationOptions": "type",
       "ReadEditableArtifactResourceOptions": "type",
       "RealtimeControllerTransportStarter": "type",
+      "RealtimeTurnEagerness": "type",
+      "RealtimeVoiceSettings": "type",
       "RealtimeWebsocketProtocol": "type",
       "ReasoningEffort": "type",
       "RecordingAvailablePayload": "type",
@@ -31951,6 +32079,13 @@
       "ServiceTurnInitiator": "type",
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
+      "SESSION_EVENT_BOOKKEEPING_STEP_TYPES": "value",
+      "SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES": "value",
+      "SESSION_EVENT_CONTENT_STEP_TYPES": "value",
+      "SESSION_EVENT_CONVERSATION_FILTER_HEADER": "value",
+      "SESSION_EVENT_CONVERSATION_FILTER_VERSION": "value",
+      "SESSION_EVENT_PRESENTED_TOOL_LEAVES": "value",
+      "SESSION_EVENT_STEP_TYPES": "value",
       "SESSION_EVENT_TYPES": "value",
       "SESSION_REALTIME_MODELS": "value",
       "SESSION_SCOPE_HEADER": "value",
@@ -31984,6 +32119,7 @@
       "sessionEventsToSseStream": "value",
       "sessionEventStreamCoveredThrough": "value",
       "SessionEventStreamTransport": "type",
+      "SessionEventToolOutputPreview": "type",
       "SessionEventType": "type",
       "SessionGoal": "type",
       "SessionGoalCreatedBy": "type",
@@ -32522,6 +32658,7 @@
       "WorkspaceRevisionDegradedPayload": "type",
       "WorkspaceSandboxImages": "type",
       "WorkspaceSessionDefaults": "type",
+      "WorkspaceSessionListEvent": "type",
       "WorkspaceSettings": "type",
       "WorkspaceSlackReactionSummonSettings": "type",
       "WorkspaceStateAttemptGovernance": "type",
@@ -33114,6 +33251,9 @@
       "BrowserOpenTargetRequest": "type",
       "BrowserPermission": "type",
       "BrowserPermissionSetting": "type",
+      "BrowserRecordingSaveRequest": "type",
+      "BrowserRecordingSaveResponse": "type",
+      "BrowserRecordingSummary": "type",
       "BrowserRevision": "type",
       "BrowserRevisionComponent": "type",
       "BrowserRevisionComponentKind": "type",
@@ -33428,6 +33568,8 @@
       "parseCodexRealtimeV3Event": "value",
       "projectSessionRealtimeLifecycle": "value",
       "RealtimeControllerTransportStarter": "type",
+      "RealtimeTurnEagerness": "type",
+      "RealtimeVoiceSettings": "type",
       "RealtimeWebsocketProtocol": "type",
       "RenewSessionRealtimeRequest": "type",
       "SESSION_REALTIME_MODELS": "value",
@@ -34278,6 +34420,7 @@
       "ToolActionReviewDetails": "value",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
+      "ToolOutputPreview": "type",
       "ToolRegistry": "type",
       "ToolRegistryEntry": "type",
       "ToolRenderer": "type",
@@ -34296,6 +34439,8 @@
       "tryParseJson": "value",
       "TurnEndItem": "type",
       "TurnOutcome": "type",
+      "TurnStepsItem": "type",
+      "TurnStepsState": "type",
       "TurnSummary": "value",
       "TurnSummaryContext": "type",
       "TurnSummaryFacet": "type",
@@ -34542,6 +34687,9 @@
       "useBrowserAccountTransitionBlocker": "value",
       "useOptionalBrowserAccounts": "value",
       "useOptionalBrowserAccountTransitionBlocker": "value"
+    },
+    "@opengeni/react/app.css": {
+      "default": "value"
     },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
@@ -35336,8 +35484,11 @@
       "TimelineItem": "type",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
+      "ToolOutputPreview": "type",
       "TurnEndItem": "type",
       "TurnOutcome": "type",
+      "TurnStepsItem": "type",
+      "TurnStepsState": "type",
       "useComposer": "value",
       "UseComposerOptions": "type",
       "useFileAttachments": "value",
@@ -35382,6 +35533,17 @@
       "sessionAgentsSignal": "value",
       "SessionAgentsSignal": "type",
       "sessionGoalStateLabel": "value"
+    },
+    "@opengeni/react/session-app": {
+      "EditableArtifactSurfaceProps": "type",
+      "PdfPreviewProps": "type",
+      "SESSION_UI_PRESETS": "value",
+      "SessionApp": "value",
+      "SessionAppProps": "type",
+      "SessionAppSurfaces": "type",
+      "SessionShellSlots": "type",
+      "SessionUiFeatures": "type",
+      "SessionUiPreset": "type"
     },
     "@opengeni/react/session-attention-model": {
       "readAcknowledgementFrontier": "value",
@@ -35687,6 +35849,7 @@
       "plainToolRow": "value",
       "presentedToolKind": "value",
       "PresentedToolKind": "type",
+      "presentsToolOutputPreview": "value",
       "QUESTION_NAV_HIDDEN_PX": "value",
       "QUESTION_NAV_MARGIN_PX": "value",
       "QuestionNavPrompt": "type",
@@ -35758,6 +35921,7 @@
       "TurnSummaryFacet": "type",
       "TurnSummaryFacetConfiguration": "type",
       "TurnSummaryFacetResult": "type",
+      "turnSummaryFallbackLabel": "value",
       "TurnSummaryOptions": "type",
       "TurnSummaryStatus": "type",
       "unwrapMcpOutput": "value",
@@ -35770,6 +35934,623 @@
     },
     "@opengeni/react/tokens.css": {
       "default": "value"
+    },
+    "@opengeni/react/ui/access-list": {
+      "AccessList": "value",
+      "AccessListProps": "type",
+      "AccessListVariant": "type",
+      "AccessMember": "type",
+      "AccessMemberStatus": "type",
+      "AccessScope": "type",
+      "groupAccessMembers": "value",
+      "removeBlockedReason": "value"
+    },
+    "@opengeni/react/ui/analytics-actions": {
+      "ANALYTICS_ACTIONS": "value",
+      "analyticsAction": "value",
+      "AnalyticsAction": "type",
+      "isAnalyticsAction": "value"
+    },
+    "@opengeni/react/ui/api-error": {
+      "apiErrorAdvice": "value",
+      "apiErrorDetails": "value",
+      "apiErrorFacts": "value",
+      "ApiErrorFacts": "type",
+      "apiErrorTechnicalFacts": "value",
+      "isApiError": "value",
+      "isPermissionDenied": "value",
+      "userErrorText": "value",
+      "userErrorTextWithoutReference": "value",
+      "userFacingError": "value"
+    },
+    "@opengeni/react/ui/avatar": {
+      "Avatar": "value",
+      "AvatarBadge": "value",
+      "AvatarFallback": "value",
+      "AvatarGroup": "value",
+      "AvatarGroupCount": "value",
+      "AvatarImage": "value"
+    },
+    "@opengeni/react/ui/badge": {
+      "Badge": "value",
+      "badgeVariants": "value"
+    },
+    "@opengeni/react/ui/button": {
+      "Button": "value",
+      "buttonVariants": "value"
+    },
+    "@opengeni/react/ui/cadence-picker": {
+      "ApiWeekday": "type",
+      "CadenceDescribeOptions": "type",
+      "CadenceDescription": "type",
+      "CadenceField": "type",
+      "CadenceFrequency": "type",
+      "cadenceFromScheduleSpec": "value",
+      "CadenceIssue": "type",
+      "CadenceParseResult": "type",
+      "cadencePhrase": "value",
+      "CadencePicker": "value",
+      "CadencePickerProps": "type",
+      "CadencePickerVariant": "type",
+      "CadencePreview": "value",
+      "CadenceRule": "type",
+      "CadenceScheduleSpec": "type",
+      "CadenceTimeZoneOption": "type",
+      "CadenceValue": "type",
+      "DEFAULT_CADENCE_TIME": "value",
+      "describeCadence": "value",
+      "describeNextRuns": "value",
+      "formatLocalDate": "value",
+      "formatRunTime": "value",
+      "IntervalUnit": "type",
+      "LocalDate": "type",
+      "NextRunOptions": "type",
+      "nextRuns": "value",
+      "normalizeCadenceRule": "value",
+      "normalizeTime": "value",
+      "parseCadence": "value",
+      "parseLocalDate": "value",
+      "parseTime": "value",
+      "RunFormatOptions": "type",
+      "stepTime": "value",
+      "switchFrequency": "value",
+      "TimeField": "value",
+      "timeZoneLabels": "value",
+      "TimeZonePicker": "value",
+      "TimeZoneSearch": "value",
+      "toScheduleSpec": "value",
+      "validateCadence": "value",
+      "Weekday": "type",
+      "WEEKDAYS": "value",
+      "zonedParts": "value",
+      "zonedTimeToUtc": "value"
+    },
+    "@opengeni/react/ui/card": {
+      "Card": "value",
+      "CardAction": "value",
+      "CardContent": "value",
+      "CardDescription": "value",
+      "CardFooter": "value",
+      "CardHeader": "value",
+      "CardTitle": "value"
+    },
+    "@opengeni/react/ui/choice-cards": {
+      "ChoiceCard": "value",
+      "ChoiceCardProps": "type",
+      "ChoiceCards": "value",
+      "ChoiceCardsProps": "type",
+      "ChoiceCardsSkeleton": "value",
+      "ChoiceCardsVariant": "type",
+      "SELECTABLE_SURFACE_CLASS": "value",
+      "selectableSurface": "value",
+      "SELECTED_SURFACE_CLASS": "value",
+      "SelectedCheck": "value"
+    },
+    "@opengeni/react/ui/collapsible": {
+      "Collapsible": "value",
+      "CollapsibleContent": "value",
+      "CollapsibleTrigger": "value"
+    },
+    "@opengeni/react/ui/composer-menu": {
+      "COMPOSER_MENU_PANEL_CLASS": "value",
+      "ComposerMenuHeader": "value",
+      "ComposerMenuRowsSkeleton": "value",
+      "ComposerMenuSwitch": "value",
+      "ComposerMenuSwitchIndicator": "value",
+      "lazyComposerPanel": "value",
+      "MenuBackButton": "value",
+      "preloadComposerMenuPanels": "value",
+      "registerComposerMenuPreload": "value"
+    },
+    "@opengeni/react/ui/composer-menu-action": {
+      "ConnectorAction": "value"
+    },
+    "@opengeni/react/ui/confirm-dialog": {
+      "ConfirmDialog": "value",
+      "destructiveActionFocusTarget": "value"
+    },
+    "@opengeni/react/ui/content-layout": {
+      "ContentPage": "value",
+      "ContentSurface": "value",
+      "ContentSurfaceHeader": "value",
+      "DataScroller": "value",
+      "FormField": "value",
+      "FormGrid": "value"
+    },
+    "@opengeni/react/ui/context-menu": {
+      "ContextMenu": "value",
+      "ContextMenuContent": "value",
+      "ContextMenuItem": "value",
+      "ContextMenuLabel": "value",
+      "ContextMenuSeparator": "value",
+      "ContextMenuTrigger": "value"
+    },
+    "@opengeni/react/ui/copy-field": {
+      "CopyField": "value",
+      "CopyState": "type",
+      "copyText": "value",
+      "truncateMiddle": "value",
+      "useCopyToClipboard": "value"
+    },
+    "@opengeni/react/ui/detail-page": {
+      "BackLink": "value",
+      "DetailAside": "value",
+      "DetailAsideItem": "value",
+      "DetailBackLink": "type",
+      "DetailMeta": "value",
+      "DetailPage": "value",
+      "DetailPageBody": "value",
+      "DetailPageHeader": "value",
+      "DetailPageHeaderProps": "type"
+    },
+    "@opengeni/react/ui/detail-sheet": {
+      "BackLink": "value",
+      "DetailBackLink": "type",
+      "DetailBody": "value",
+      "DetailFact": "value",
+      "DetailFacts": "value",
+      "DetailFooter": "value",
+      "DetailFooterConfirm": "value",
+      "DetailFooterConfirmProps": "type",
+      "DetailHeader": "value",
+      "DetailHeaderProps": "type",
+      "DetailInline": "value",
+      "DetailPage": "value",
+      "DetailPresentation": "type",
+      "DetailSection": "value",
+      "DetailSectionProps": "type",
+      "DetailSheet": "value",
+      "DetailSheetContent": "value",
+      "DetailSheetContentProps": "type",
+      "DetailSheetPreview": "value",
+      "DetailSheetTrigger": "value",
+      "DetailSkeleton": "value",
+      "useDetailPresentation": "value"
+    },
+    "@opengeni/react/ui/dialog": {
+      "Dialog": "value",
+      "DialogClose": "value",
+      "DialogContent": "value",
+      "DialogDescription": "value",
+      "DialogFooter": "value",
+      "DialogHeader": "value",
+      "DialogOverlay": "value",
+      "DialogPortal": "value",
+      "DialogTitle": "value",
+      "DialogTrigger": "value"
+    },
+    "@opengeni/react/ui/diff-view": {
+      "buildDiffRows": "value",
+      "DiffFormat": "type",
+      "DiffLine": "type",
+      "DiffLineKind": "type",
+      "diffLines": "value",
+      "DiffRow": "type",
+      "DiffSegment": "type",
+      "diffStats": "value",
+      "DiffView": "value",
+      "DiffViewProps": "type",
+      "DiffViewVariant": "type",
+      "diffWords": "value",
+      "FailedLoad": "type",
+      "failedLoadParts": "value"
+    },
+    "@opengeni/react/ui/disabled-reason": {
+      "DisabledReason": "value",
+      "DisabledReasonProps": "type",
+      "ReasonTooltip": "value",
+      "ReasonTooltipProps": "type"
+    },
+    "@opengeni/react/ui/disclosure": {
+      "Disclosure": "value",
+      "DisclosureProps": "type",
+      "DisclosureVariant": "type"
+    },
+    "@opengeni/react/ui/dropdown-menu": {
+      "DropdownMenu": "value",
+      "DropdownMenuCheck": "value",
+      "DropdownMenuCheckboxItem": "value",
+      "DropdownMenuContent": "value",
+      "DropdownMenuGroup": "value",
+      "DropdownMenuItem": "value",
+      "DropdownMenuLabel": "value",
+      "DropdownMenuMeta": "value",
+      "DropdownMenuNote": "value",
+      "DropdownMenuPortal": "value",
+      "DropdownMenuRadioGroup": "value",
+      "DropdownMenuRadioItem": "value",
+      "DropdownMenuSeparator": "value",
+      "DropdownMenuShortcut": "value",
+      "DropdownMenuSub": "value",
+      "DropdownMenuSubContent": "value",
+      "DropdownMenuSubTrigger": "value",
+      "DropdownMenuTrigger": "value"
+    },
+    "@opengeni/react/ui/email-chips-input": {
+      "EmailChip": "type",
+      "EmailChipsInput": "value"
+    },
+    "@opengeni/react/ui/empty-state": {
+      "EmptyState": "value",
+      "EmptyStateLink": "value",
+      "EmptyStateTemplate": "value",
+      "EmptyStateTemplates": "value",
+      "EmptyStateVariant": "type"
+    },
+    "@opengeni/react/ui/error-message": {
+      "ErrorDetail": "type",
+      "ErrorMessage": "value",
+      "ErrorMessageProps": "type",
+      "TechnicalDetails": "value"
+    },
+    "@opengeni/react/ui/field": {
+      "Checkbox": "value",
+      "CheckboxField": "value",
+      "Field": "value",
+      "FieldStack": "value",
+      "TextArea": "value",
+      "TextInput": "value",
+      "useField": "value",
+      "useFieldControlProps": "value"
+    },
+    "@opengeni/react/ui/flush-form-page": {
+      "FLUSH_DETAIL_PAGE_CLASS": "value",
+      "FLUSH_FORM_PAGE_CLASS": "value",
+      "FlushFormPage": "value"
+    },
+    "@opengeni/react/ui/form-dialog": {
+      "firstFormField": "value",
+      "FormDialog": "value",
+      "FormDialogChromeProvider": "value",
+      "FormDialogSize": "type",
+      "FormFrame": "value",
+      "FormFrameProps": "type",
+      "FormInline": "value",
+      "FormOverlayProps": "type",
+      "FormPage": "value",
+      "FormVariant": "type",
+      "useFormOverlay": "value"
+    },
+    "@opengeni/react/ui/form-disclosure": {
+      "FormDisclosure": "value"
+    },
+    "@opengeni/react/ui/hover-card": {
+      "HoverCard": "value",
+      "HoverCardContent": "value",
+      "HoverCardTrigger": "value"
+    },
+    "@opengeni/react/ui/in-app-click": {
+      "inAppClick": "value"
+    },
+    "@opengeni/react/ui/inline-help": {
+      "HelpLink": "value",
+      "HelpTip": "value",
+      "InlineHelp": "value"
+    },
+    "@opengeni/react/ui/input": {
+      "Input": "value"
+    },
+    "@opengeni/react/ui/label": {
+      "Label": "value"
+    },
+    "@opengeni/react/ui/line-tabs": {
+      "LineTabCount": "value",
+      "LineTabs": "value",
+      "LineTabsContent": "value",
+      "LineTabsCountTone": "type",
+      "LineTabsLink": "value",
+      "LineTabsLinkProps": "type",
+      "LineTabsList": "value",
+      "LineTabsListProps": "type",
+      "LineTabsNav": "value",
+      "LineTabsNavProps": "type",
+      "LineTabsTrigger": "value",
+      "LineTabsTriggerProps": "type",
+      "LineTabsVariant": "type",
+      "lineTabVariants": "value"
+    },
+    "@opengeni/react/ui/list-row": {
+      "ListRow": "value",
+      "ListRowProps": "type",
+      "ListRowSkeleton": "value",
+      "RowIndicator": "value",
+      "RowIndicatorKind": "type",
+      "RowIndicatorProps": "type",
+      "RowList": "value",
+      "RowListColumn": "type",
+      "RowListProps": "type",
+      "RowListSort": "type",
+      "RowListVariant": "type",
+      "useRowListVariant": "value"
+    },
+    "@opengeni/react/ui/load-failure": {
+      "LoadFailure": "value"
+    },
+    "@opengeni/react/ui/logo-tile": {
+      "logoMonogram": "value",
+      "LogoTile": "value",
+      "LogoTileProps": "type",
+      "LogoTileSize": "type",
+      "LogoTileSizeProvider": "value",
+      "LogoTileTone": "type",
+      "useLogoTileSize": "value"
+    },
+    "@opengeni/react/ui/menu-styles": {
+      "MENU_BACK_BUTTON_CLASS": "value",
+      "MENU_BACK_HEADER_CLASS": "value",
+      "MENU_BUTTON_CLASS": "value",
+      "MENU_BUTTON_STATE_CLASS": "value",
+      "MENU_CHECK_CLASS": "value",
+      "MENU_CHECK_SLOT_CLASS": "value",
+      "MENU_CHEVRON_CLASS": "value",
+      "MENU_ITEM_BASE_CLASS": "value",
+      "MENU_ITEM_CLASS": "value",
+      "MENU_ITEM_STATE_CLASS": "value",
+      "MENU_LABEL_CLASS": "value",
+      "MENU_META_CLASS": "value",
+      "MENU_NOTE_CLASS": "value",
+      "MENU_SEPARATOR_CLASS": "value",
+      "MENU_SURFACE_CLASS": "value"
+    },
+    "@opengeni/react/ui/meta-chip": {
+      "MetaChip": "value",
+      "MetaChipVariant": "type"
+    },
+    "@opengeni/react/ui/notice": {
+      "Notice": "value",
+      "NoticeTone": "type"
+    },
+    "@opengeni/react/ui/page-actions": {
+      "MoreMenu": "value",
+      "RowButton": "value"
+    },
+    "@opengeni/react/ui/page-header": {
+      "PageHeader": "value",
+      "PageHeaderIconMode": "type",
+      "PageHeaderProps": "type",
+      "PageHeaderStyleProvider": "value",
+      "PageHeaderVariant": "type",
+      "usePageHeaderStyle": "value"
+    },
+    "@opengeni/react/ui/portal-container": {
+      "containedPortal": "value",
+      "PortalContainerProvider": "value",
+      "usePortalContainer": "value"
+    },
+    "@opengeni/react/ui/relative-time": {
+      "DateInput": "type",
+      "formatAbsoluteTime": "value",
+      "formatDate": "value",
+      "formatExactTime": "value",
+      "formatRelativeTime": "value",
+      "formatShortTime": "value",
+      "inSentence": "value",
+      "RelativeTime": "value",
+      "RelativeTimeDefaultsContext": "value",
+      "RelativeTimeFormat": "type",
+      "RelativeTimeProps": "type",
+      "TimeFormatOptions": "type",
+      "timeZoneLabel": "value",
+      "toDate": "value",
+      "useMinuteNow": "value"
+    },
+    "@opengeni/react/ui/revision-history": {
+      "previousContent": "value",
+      "Revision": "type",
+      "RevisionHistory": "value",
+      "RevisionHistoryLayout": "type",
+      "RevisionHistoryProps": "type"
+    },
+    "@opengeni/react/ui/role-select": {
+      "CUSTOM_ROLE_LABEL": "value",
+      "needsEscalationConfirm": "value",
+      "roleLabel": "value",
+      "RoleOption": "type",
+      "RoleSelect": "value",
+      "RoleSelectProps": "type",
+      "RoleSelectVariant": "type",
+      "RoleValue": "type"
+    },
+    "@opengeni/react/ui/scope-switcher-trigger": {
+      "ScopeSwitcherTrigger": "value",
+      "SETTINGS_SWITCHER_CLASS": "value"
+    },
+    "@opengeni/react/ui/scroll-area": {
+      "ScrollArea": "value",
+      "ScrollBar": "value"
+    },
+    "@opengeni/react/ui/section": {
+      "Section": "value",
+      "SECTION_TITLE_CLASS": "value",
+      "SectionProps": "type",
+      "SectionStack": "value",
+      "SectionStackProps": "type",
+      "SectionVariant": "type",
+      "SectionVariantProvider": "value",
+      "useSectionListFrame": "value"
+    },
+    "@opengeni/react/ui/section-variant": {
+      "SectionCardContext": "value",
+      "SectionFrameReset": "value",
+      "SectionVariant": "type",
+      "SectionVariantContext": "value",
+      "SectionVariantProvider": "value",
+      "useSectionListFrame": "value"
+    },
+    "@opengeni/react/ui/segmented-control": {
+      "SegmentedControl": "value",
+      "SegmentedControlOption": "type",
+      "SegmentedControlProps": "type",
+      "SegmentedControlSize": "type",
+      "SegmentedControlVariant": "type"
+    },
+    "@opengeni/react/ui/select": {
+      "Select": "value"
+    },
+    "@opengeni/react/ui/select-menu": {
+      "ComboboxPanelPreview": "value",
+      "ComboboxSelect": "value",
+      "filterSelectOptions": "value",
+      "InlineDisabledReason": "value",
+      "MenuSelect": "value",
+      "nativeOptionText": "value",
+      "NativeSelect": "value",
+      "nextEnabledIndex": "value",
+      "SelectError": "value",
+      "SelectMenu": "value",
+      "SelectMenuPanel": "value",
+      "SelectMenuPanelProps": "type",
+      "SelectMenuProps": "type",
+      "SelectMenuVariant": "type",
+      "SelectOption": "type",
+      "typeaheadIndex": "value"
+    },
+    "@opengeni/react/ui/separator": {
+      "Separator": "value"
+    },
+    "@opengeni/react/ui/setting-row": {
+      "DisabledReasonTooltip": "value",
+      "joinIds": "value",
+      "SettingDangerRow": "value",
+      "SettingNavRow": "value",
+      "SettingRow": "value",
+      "SettingRowControlWidth": "type",
+      "SettingRowField": "type",
+      "SettingRowGroup": "value",
+      "SettingRowLink": "value",
+      "SettingRowProps": "type",
+      "SettingRowSkeleton": "value",
+      "SettingRowVariant": "type",
+      "useSettingRowControl": "value",
+      "useSettingRowField": "value"
+    },
+    "@opengeni/react/ui/settings-nav": {
+      "NavGroup": "value",
+      "NavItem": "value",
+      "NavItemProps": "type",
+      "NavItemSize": "type",
+      "NavItemSkeleton": "value",
+      "SettingsNav": "value",
+      "SettingsNavProps": "type",
+      "SettingsNavVariant": "type"
+    },
+    "@opengeni/react/ui/sheet": {
+      "Sheet": "value",
+      "SheetClose": "value",
+      "SheetContent": "value",
+      "SheetDescription": "value",
+      "SheetFooter": "value",
+      "SheetHeader": "value",
+      "SheetTitle": "value",
+      "SheetTrigger": "value"
+    },
+    "@opengeni/react/ui/skeleton": {
+      "Skeleton": "value"
+    },
+    "@opengeni/react/ui/stat-tile": {
+      "sparklinePoints": "value",
+      "StatDelta": "type",
+      "StatGroup": "value",
+      "StatSentiment": "type",
+      "StatTile": "value",
+      "StatTileProps": "type",
+      "StatTrend": "type"
+    },
+    "@opengeni/react/ui/status-badge": {
+      "PRODUCT_STATUS_KEYS": "value",
+      "PRODUCT_STATUSES": "value",
+      "ProductStatus": "type",
+      "resolveStatus": "value",
+      "StatusBadge": "value",
+      "StatusBadgeProps": "type",
+      "StatusBadgeSkeleton": "value",
+      "StatusBadgeVariant": "type"
+    },
+    "@opengeni/react/ui/status-dot": {
+      "LIFECYCLE_TO_SEMANTIC": "value",
+      "SEMANTIC_TONE_META": "value",
+      "SEMANTIC_TONES": "value",
+      "SemanticTone": "type",
+      "STATUS_META": "value",
+      "StatusDot": "value",
+      "StatusTone": "type"
+    },
+    "@opengeni/react/ui/switch": {
+      "Switch": "value",
+      "SwitchProps": "type",
+      "SwitchSize": "type",
+      "SwitchVariant": "type"
+    },
+    "@opengeni/react/ui/tabs": {
+      "Tabs": "value",
+      "TabsContent": "value",
+      "TabsList": "value",
+      "tabsListVariants": "value",
+      "TabsTrigger": "value"
+    },
+    "@opengeni/react/ui/textarea": {
+      "Textarea": "value"
+    },
+    "@opengeni/react/ui/toolbar": {
+      "countActiveFilters": "value",
+      "toggleFilter": "value",
+      "Toolbar": "value",
+      "ToolbarFilterChips": "value",
+      "ToolbarFilterGroup": "type",
+      "ToolbarFilterMenu": "value",
+      "ToolbarFilterMenuProps": "type",
+      "ToolbarFilterOption": "type",
+      "ToolbarFilterValue": "type",
+      "ToolbarGroup": "value",
+      "ToolbarSearch": "value",
+      "ToolbarSearchProps": "type",
+      "ToolbarSearchSize": "type",
+      "ToolbarSummary": "value"
+    },
+    "@opengeni/react/ui/tooltip": {
+      "Tooltip": "value",
+      "TooltipContent": "value",
+      "TooltipProvider": "value",
+      "TooltipTrigger": "value"
+    },
+    "@opengeni/react/ui/usage-meter": {
+      "clampPercent": "value",
+      "resetPhrase": "value",
+      "USAGE_LOW_THRESHOLD": "value",
+      "usageAccessibleText": "value",
+      "usageLevel": "value",
+      "UsageLevel": "type",
+      "UsageMeter": "value",
+      "UsageMeterDensity": "type",
+      "UsageMeterGroup": "value",
+      "UsageMeterGroupProps": "type",
+      "UsageMeterProps": "type",
+      "UsageMeterVariant": "type",
+      "UsageReadout": "value",
+      "UsageReset": "type",
+      "usageResets": "value",
+      "usageValueText": "value",
+      "UsageWindowReading": "type"
     },
     "@opengeni/react/usage": {
       "allowanceLabels": "value",
@@ -35817,6 +36598,9 @@
       "useUsage": "value",
       "UseUsageOptions": "type",
       "UseUsageResult": "type"
+    },
+    "@opengeni/react/workbench": {
+      "enableWorkbench": "value"
     }
   },
   "sdkMembers": {
@@ -36335,6 +37119,7 @@
       "getBrowserActionReceipt",
       "getBrowserDownload",
       "getBrowserIdentity",
+      "getBrowserRecording",
       "getBrowserSession",
       "getBrowserSessionWorkingCopyAdoption",
       "getBrowserTargetState",
@@ -36695,6 +37480,7 @@
       "saveAgentLearningSettings",
       "saveAtlassianSources",
       "saveBrowserDownload",
+      "saveBrowserRecording",
       "saveComposerDraft",
       "saveGoogleDriveFacetSource",
       "saveKnowledgeEntry",
@@ -36729,6 +37515,7 @@
       "signOutNativeApp",
       "startApiIntegrationOAuth",
       "startBrowserAuthRun",
+      "startBrowserRecording",
       "startConnectionOAuth",
       "startFikenOAuth",
       "startOpenGeniSlackBotInstall",
@@ -37050,6 +37837,7 @@
       "getBrowserActionReceipt",
       "getBrowserDownload",
       "getBrowserIdentity",
+      "getBrowserRecording",
       "getBrowserSession",
       "getBrowserSessionWorkingCopyAdoption",
       "getBrowserTargetState",
@@ -37403,6 +38191,7 @@
       "saveAgentLearningSettings",
       "saveAtlassianSources",
       "saveBrowserDownload",
+      "saveBrowserRecording",
       "saveComposerDraft",
       "saveGoogleDriveFacetSource",
       "saveKnowledgeEntry",
@@ -37437,6 +38226,7 @@
       "signOutNativeApp",
       "startApiIntegrationOAuth",
       "startBrowserAuthRun",
+      "startBrowserRecording",
       "startConnectionOAuth",
       "startFikenOAuth",
       "startOpenGeniSlackBotInstall",
@@ -37773,6 +38563,7 @@
       "getBrowserActionReceipt",
       "getBrowserDownload",
       "getBrowserIdentity",
+      "getBrowserRecording",
       "getBrowserSession",
       "getBrowserSessionWorkingCopyAdoption",
       "getBrowserTargetState",
@@ -38150,6 +38941,7 @@
       "saveAgentLearningSettings",
       "saveAtlassianSources",
       "saveBrowserDownload",
+      "saveBrowserRecording",
       "saveComposerDraft",
       "saveGoogleDriveFacetSource",
       "saveKnowledgeEntry",
@@ -38186,6 +38978,7 @@
       "signOutNativeApp",
       "startApiIntegrationOAuth",
       "startBrowserAuthRun",
+      "startBrowserRecording",
       "startConnectionOAuth",
       "startFikenOAuth",
       "startOpenGeniSlackBotInstall",
@@ -39433,6 +40226,9 @@
       "getBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentity\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSession\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -40568,6 +41364,9 @@
       "saveBrowserDownload": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "saveBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "saveComposerDraft": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SaveComposerDraftRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComposerDraft\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -40675,6 +41474,9 @@
       ],
       "startBrowserAuthRun": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StartAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "startBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "startConnectionOAuth": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -41875,6 +42677,9 @@
       "getBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentity\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSession\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -42959,6 +43764,9 @@
       "saveBrowserDownload": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "saveBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "saveComposerDraft": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SaveComposerDraftRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComposerDraft\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43060,6 +43868,9 @@
       ],
       "startBrowserAuthRun": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StartAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "startBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "startConnectionOAuth": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -44111,6 +44922,9 @@
       "getBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentity\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSession\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45138,6 +45952,9 @@
       "saveBrowserDownload": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "saveBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "saveComposerDraft": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SaveComposerDraftRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComposerDraft\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -45239,6 +46056,9 @@
       ],
       "startBrowserAuthRun": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StartAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "startBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "startConnectionOAuth": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -46501,6 +47321,9 @@
       "getBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentity\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSession\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47564,6 +48387,9 @@
       "saveBrowserDownload": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "saveBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "saveComposerDraft": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SaveComposerDraftRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComposerDraft\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47665,6 +48491,9 @@
       ],
       "startBrowserAuthRun": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StartAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "startBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "startConnectionOAuth": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -48709,6 +49538,9 @@
       "getBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentity\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getBrowserSession": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserSession\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49772,6 +50604,9 @@
       "saveBrowserDownload": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserDownloadSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "saveBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSaveResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "saveComposerDraft": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SaveComposerDraftRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ComposerDraft\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -49873,6 +50708,9 @@
       ],
       "startBrowserAuthRun": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"StartAuthRunRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AuthRunMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "startBrowserRecording": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserRecordingSummary\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "startConnectionOAuth": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OAuthStartResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

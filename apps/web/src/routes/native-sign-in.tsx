@@ -2,11 +2,11 @@ import { SmartphoneIcon } from "lucide-react";
 import { useState } from "react";
 
 import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FormPage } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { type NativeSignInSearch, useNativeSignInContext } from "@/lib/native-sign-in-context";
 
 /* ----------------------------------------------------------------------------

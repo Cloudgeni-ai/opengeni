@@ -15,12 +15,12 @@ import { useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { MockOpenGeniClient } from "../../../packages/react/demo/mock";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
-import { SessionHeader } from "../src/components/rail/session-header";
-import { UsageLimitMenuBody } from "../src/components/session/new-session-settings-menu";
-import { SessionUsageLimitSection } from "../src/components/session/session-usage-limit-section";
-import { Toaster } from "../src/components/ui/sonner";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
+import { UsageLimitMenuBody } from "@opengeni/react/app/components/session/new-session-settings-menu";
+import { SessionUsageLimitSection } from "@opengeni/react/app/components/session/session-usage-limit-section";
+import { Toaster } from "@opengeni/react/app/components/toaster";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   emptyAttachments,
   galleryFirstPartyTools,
@@ -28,7 +28,7 @@ import {
   galleryToolServers,
   idleComposer,
 } from "../src/dev/composer-chrome-fixtures";
-import { buildCreateSessionRequest } from "../src/lib/session-create";
+import { buildCreateSessionRequest } from "@opengeni/react/app/lib/session-create";
 import {
   NO_SESSION_USAGE_LIMIT,
   OPEN_SESSION_USAGE_LIMIT_EVENT,
@@ -38,8 +38,8 @@ import {
   usageLimitRefusalFromState,
   useSessionUsageLimit,
   type SessionUsageLimitDraft,
-} from "../src/lib/session-usage-limit";
-import type { Session, SessionEvent } from "../src/types";
+} from "@opengeni/react/app/lib/session-usage-limit";
+import type { Session, SessionEvent } from "@opengeni/react/app/types";
 import { ScenarioProvider } from "./session-usage-limit-context";
 import "../src/styles.css";
 

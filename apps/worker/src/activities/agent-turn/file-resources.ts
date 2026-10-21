@@ -183,25 +183,22 @@ export function requiresSignedFileResourceDownloads(
   if (activeSandboxBackend === "none") {
     return false;
   }
-  // A selfhosted machine (bring-your-own-compute) can NEVER mount ANY object store
-  // — it is a remote user machine reached only over NATS, so file resources are
-  // ALWAYS delivered by exec-curling a pre-signed URL onto it. Without this a
-  // machine-home turn (sandbox_backend "selfhosted") would silently drop file
-  // resources on an azure-blob / s3-compatible store (nativeBucketMount=false),
-  // a regression from the pre-honest-label path where the same turn ran home=modal
-  // and modal's descriptor forced signed downloads.
-  if (activeSandboxBackend === "selfhosted") {
+  // A backend that cannot mount object storage at all (a Connected Machine, the
+  // compute fabric) ALWAYS receives file resources as pre-signed downloads.
+  // Otherwise the manifest would carry a mount entry the box never applies and
+  // the file would silently be missing from its mount path.
+  const bucketMount = CAPABILITY_DESCRIPTORS[activeSandboxBackend].bucketMount;
+  if (bucketMount === "none") {
     return true;
   }
-  // A nativeBucketMount backend (modal) cannot mount Azure Blob entries, so it
+  // A native bucket-mount backend (modal) cannot mount Azure Blob entries, so it
   // needs pre-signed downloads for that store. Keying on the descriptor (not the
   // "modal" literal) keeps this correct as bucket-mount backends are added.
-  const nativeBucketMount = CAPABILITY_DESCRIPTORS[activeSandboxBackend].nativeBucketMount;
   return (
     (activeSandboxBackend === "docker" && settings.objectStorageBackend === "s3-compatible") ||
     settings.objectStorageBackend === "aws-s3" ||
     settings.objectStorageBackend === "gcs" ||
-    (nativeBucketMount && settings.objectStorageBackend === "azure-blob")
+    (bucketMount === "native" && settings.objectStorageBackend === "azure-blob")
   );
 }
 

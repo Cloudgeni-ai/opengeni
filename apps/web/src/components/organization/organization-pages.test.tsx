@@ -7,14 +7,14 @@ import { createRoot } from "react-dom/client";
 import * as RouterPackage from "@tanstack/react-router";
 import * as SonnerPackage from "sonner";
 
-import * as DestructiveModule from "@/components/ui/destructive-confirm";
-import * as DropdownModule from "@/components/ui/dropdown-menu";
-import type { OrganizationAdminIdentity } from "@/lib/organization-admin";
+import * as DestructiveModule from "@opengeni/react/app/components/ui/destructive-confirm";
+import * as DropdownModule from "@opengeni/react/ui/dropdown-menu";
+import type { OrganizationAdminIdentity } from "@opengeni/react/app/lib/organization-admin";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
 const toastError = mock((_message: string, _options?: unknown) => undefined);
@@ -33,7 +33,7 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
   useNavigate: () => navigate,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   ...DropdownModule,
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -45,7 +45,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
   ),
   DropdownMenuSeparator: () => <hr />,
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   ...DestructiveModule,
   showUndoToast: undoToast,
   DestructiveConfirm: ({

@@ -1,11 +1,11 @@
 import type { CodexAccount, CodexUsagePayload } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect } from "react";
-import { useOrganizationCodexUsage } from "./use-organization-codex-overview";
-import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
+import { useOrganizationCodexUsage } from "@/components/models/use-organization-codex-overview";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
 import { codexUsageReadings } from "@/components/codex-connection";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { UsageMeterGroup } from "@/components/ui/usage-meter";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
 
 export const CODEX_EXTRA_CREDITS_DESCRIPTION =
   "Allow extra credits after included usage runs out. Spread work uses other accounts' included usage first. Usage updates can lag, so a request may still use credits when this is off.";

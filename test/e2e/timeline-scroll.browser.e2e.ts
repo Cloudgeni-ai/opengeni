@@ -947,7 +947,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     // Expanding and collapsing a step changes row height, but it must neither
     // remove surrounding chat rows nor destroy the usable scroll range.
-    const step = page.getByRole("button", { name: /steps/ }).nth(4);
+    const step = page.locator('button[data-og-work-header="outer"]').nth(4);
     const anchor = page.locator('[data-conversation-message="user-201"]');
     // The clicked disclosure owns position; another row can move as it folds.
     await step.evaluate((node) => node.scrollIntoView({ block: "center" }));
@@ -1707,7 +1707,7 @@ describe("timeline scroll ownership browser regression", () => {
     );
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
 
-    const step = page.getByRole("button", { name: /steps/ }).first();
+    const step = page.locator('button[data-og-work-header="outer"]').first();
     await step.click();
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
@@ -1767,7 +1767,7 @@ describe("timeline scroll ownership browser regression", () => {
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
 
-    const step = page.getByRole("button", { name: /steps/ }).first();
+    const step = page.locator('button[data-og-work-header="outer"]').first();
     await step.click();
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
@@ -1812,7 +1812,7 @@ describe("timeline scroll ownership browser regression", () => {
           exact: true,
         },
       );
-      const disclosure = page.getByRole("button", { name: /steps?/ }).first();
+      const disclosure = page.locator('button[data-og-work-header="outer"]').first();
 
       await fallback.waitFor({ timeout: 5_000 });
       expect(await fallback.count()).toBe(1);

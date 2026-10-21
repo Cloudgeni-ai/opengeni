@@ -3,9 +3,9 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { AppContextValue } from "./context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import { WorkspaceShellRouteContent } from "./routes/workspace";
-import type { SlackUserLinkAccessRequest, Workspace } from "./types";
+import type { SlackUserLinkAccessRequest, Workspace } from "@opengeni/react/app/types";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";

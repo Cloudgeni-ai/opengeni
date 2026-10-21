@@ -112,6 +112,10 @@ const subscriptionCoreMigrations = [
   // migrations; the seed reads them. Replay both after them.
   "0871_subscription_usage_history.sql",
   "0872_subscription_usage_call_history_seed.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
   // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
   ...strictOwnerMaintenanceMigrationTail,
 ] as const;

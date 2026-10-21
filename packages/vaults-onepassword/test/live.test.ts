@@ -211,7 +211,7 @@ if (!(LIVE && token)) {
         () =>
           sdk.createClient({
             auth: token,
-            integrationName: "OpenGeni",
+            integrationName: "Opengeni",
             integrationVersion: "live-test",
           }),
       );

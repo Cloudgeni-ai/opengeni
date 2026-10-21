@@ -1,8 +1,8 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
-import { RelativeTime, formatShortTime, useMinuteNow } from "@/components/ui/relative-time";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { useSharedQuery } from "@/lib/shared-query";
+import { RelativeTime, formatShortTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
+import { useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 export const SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX = ["subscription-usage-pools"] as const;
 const PROVIDER_LABELS = { codex: "Codex", claude: "Claude", xai: "SuperGrok" };
@@ -61,6 +61,8 @@ export function SubscriptionUsagePoolView({
   const now = fixedNow ?? minuteNow;
   const window = pool.windows.find((item) => item.id === "weekly");
   if (!window || window.accounts.length === 0) return null;
+  // Accounts with no current reading are left out of the total, and the card says so.
+  const unreported = window.accounts.filter((account) => account.remainingPercent === null);
   const blocked =
     pool.windows
       .find((item) => item.id === "five_hour")
@@ -72,7 +74,7 @@ export function SubscriptionUsagePoolView({
       ) ?? [];
   return (
     <section
-      className="flex min-w-0 flex-col gap-4 py-5"
+      className="flex min-w-0 flex-col gap-4 px-3 py-5"
       aria-label={`${PROVIDER_LABELS[pool.provider]} pooled limits`}
     >
       <h3 className="m-0 text-sm font-semibold text-fg">
@@ -81,7 +83,7 @@ export function SubscriptionUsagePoolView({
       <div className="space-y-1">
         <p className="m-0 text-sm leading-5 text-fg">
           {window.remainingPercent === null
-            ? "Some account limits aren't available yet."
+            ? "No account has reported its limit yet."
             : poolForecastSentence(window.forecast, now)}
         </p>
         <p className="m-0 text-xs leading-4 text-fg-muted">{forecastBasis(window.forecast)}</p>
@@ -99,9 +101,12 @@ export function SubscriptionUsagePoolView({
         </p>
       ) : null}
       <p className="m-0 text-xs leading-4 text-fg-subtle">
+        {window.remainingPercent !== null && unreported.length > 0
+          ? `Leaves out ${unreported.map((account) => account.label).join(", ")}, which ${unreported.length === 1 ? "hasn't" : "haven't"} reported ${unreported.length === 1 ? "its" : "their"} limit yet. `
+          : null}
         {pool.observedAt ? (
           <>
-            Read <RelativeTime date={pool.observedAt} now={now} />.
+            Read <RelativeTime date={pool.observedAt} now={now} inSentence />.
           </>
         ) : (
           "Not read yet."

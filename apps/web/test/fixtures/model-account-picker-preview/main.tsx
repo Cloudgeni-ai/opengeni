@@ -7,8 +7,8 @@ import type {
 } from "@opengeni/sdk";
 import { createRoot } from "react-dom/client";
 import { fakeClient, WORKSPACE_ID } from "../../../../../packages/react/test/fake-client";
-import { CodexAccountIndicator } from "../../../src/components/session/codex-account-indicator";
-import { ModelAccountIndicator } from "../../../src/components/session/model-account-indicator";
+import { CodexAccountIndicator } from "@opengeni/react/app/components/session/codex-account-indicator";
+import { ModelAccountIndicator } from "@opengeni/react/app/components/session/model-account-indicator";
 import "../../../src/styles.css";
 import { ServingPreview } from "./serving-preview";
 

@@ -171,6 +171,32 @@ pub fn boot_identity(sandbox: &str) {
     if let Err(error) = sys::set_host_name(identity::host_name(sandbox)) {
         log(&format!("host name: {error}"));
     }
+    name_self(identity::host_name(sandbox));
+}
+
+/// Makes the guest's own host name `name` resolve locally (see
+/// [`identity::hosts_naming`]). The file need not survive a crash: every
+/// boot and new identity writes it again. A symlinked hosts file belongs
+/// to whatever manages it and is left alone.
+fn name_self(name: &str) {
+    let path = Path::new(identity::HOSTS_FILE);
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return;
+    }
+    let hosts = fs::read_to_string(path).ok();
+    let named = identity::hosts_naming(hosts.as_deref(), name);
+    if hosts.as_deref() == Some(named.as_str()) {
+        return;
+    }
+    let next = path.with_extension("opengeni-next");
+    let result = fs::write(&next, &named).and_then(|()| {
+        fs::set_permissions(&next, Permissions::from_mode(0o644))?;
+        fs::rename(&next, path)
+    });
+    if let Err(error) = result {
+        let _ = fs::remove_file(&next);
+        log(&format!("hosts file: {error}"));
+    }
 }
 
 /// The sandbox the guest currently is.
@@ -195,6 +221,7 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
     let machine_id = identity::derived_machine_id(seed_hex, sandbox);
     replace(MACHINE_ID_FILE, &format!("{machine_id}\n"), 0o444)?;
     sys::set_host_name(identity::host_name(sandbox))?;
+    name_self(identity::host_name(sandbox));
     replace(OWNER_FILE, &format!("{sandbox}\n"), 0o644)?;
     replace(SANDBOX_FILE, &format!("{sandbox}\n"), 0o644)
 }

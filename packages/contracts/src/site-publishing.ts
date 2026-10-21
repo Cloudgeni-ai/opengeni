@@ -233,7 +233,7 @@ export function parseSiteHostname(host: string, sitesDomain: string): string | n
 /**
  * Who may open a published Site.
  * - members: signed-in members of the Site's workspace.
- * - invited: members plus people invited by email (they sign in to OpenGeni).
+ * - invited: members plus people invited by email (they sign in to Opengeni).
  * - public: anyone; anonymous visitors use a guest principal. On deployments
  *   configured login-only (staging), public means any signed-in Opengeni user.
  */

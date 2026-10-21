@@ -1,4 +1,8 @@
-import { ComputerNativeCommand } from "@opengeni/contracts";
+import {
+  ComputerNativeCommand,
+  interactionDriverDiagnostic,
+  type InteractionDriverDiagnostic,
+} from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
@@ -9,6 +13,10 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
@@ -167,7 +175,15 @@ export type BrowserControlServerOptions = {
   allowedOrigins?: readonly string[];
   browserExecutablePath?: string;
   closeSupervisorOnStop?: boolean;
-  onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
+  onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+};
+
+export type ControllerFailureContext = {
+  method: string;
+  pathname: string;
+  /** `driver_failed`: a driver failure with a code-written message;
+   * `unexpected`: any other error, whose message can be any text. */
+  kind: "unexpected" | "driver_failed";
 };
 
 export class BrowserControlServer {
@@ -181,7 +197,7 @@ export class BrowserControlServer {
   private readonly browserExecutablePath: string | undefined;
   private readonly closeSupervisorOnStop: boolean;
   private readonly onUnexpectedError:
-    | ((error: unknown, context: { method: string; pathname: string }) => void)
+    | ((error: unknown, context: ControllerFailureContext) => void)
     | undefined;
   private readonly authorities = new Map<string, SessionAuthority>();
   private readonly computerAuthorities = new Map<string, ComputerSessionAuthority>();
@@ -344,17 +360,30 @@ export class BrowserControlServer {
       const response = await this.route(request, server);
       return response ? this.withCors(response, normalizedOrigin) : undefined;
     } catch (error) {
-      if (!(error instanceof ProtocolError) && !(error instanceof InteractionControllerError)) {
+      // Unexpected errors and every driver failure are reported for local
+      // diagnosis; the reporter redacts them like the response's diagnostic.
+      let driverFailed = false;
+      const response = protocolResponse(error, () => {
+        driverFailed = true;
+      });
+      const unexpected =
+        !(error instanceof ProtocolError) && !(error instanceof InteractionControllerError);
+      if (unexpected || driverFailed) {
+        const known =
+          error instanceof ProtocolError ||
+          error instanceof InteractionControllerError ||
+          error instanceof InteractionDefiniteDriverError;
         try {
           this.onUnexpectedError?.(error, {
             method: request.method,
             pathname: new URL(request.url).pathname,
+            kind: driverFailed && known ? "driver_failed" : "unexpected",
           });
         } catch {
           // Diagnostics must never alter the controller response contract.
         }
       }
-      return this.withCors(protocolResponse(error), normalizedOrigin);
+      return this.withCors(response, normalizedOrigin);
     } finally {
       this.activeRequests -= 1;
       if (this.activeRequests === 0) {
@@ -671,6 +700,54 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.passkeySync(sync.data));
+    }
+    if (segments.length === 4 && segments[3] === "recordings") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const start = BrowserRecordingStartRequest.safeParse(await readJson(request));
+      if (!start.success) {
+        throw new ProtocolError("invalid_action", "recording start request is invalid", 400);
+      }
+      return success(
+        BrowserRecordingSummary.parse(
+          await this.supervisor.startRecording(reference, start.data.targetId),
+        ),
+      );
+    }
+    if (segments.length === 5 && segments[3] === "recordings") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      return success(
+        BrowserRecordingSummary.parse(this.supervisor.recordingStatus(reference, recordingId)),
+      );
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "stop") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      return success(
+        BrowserRecordingSummary.parse(await this.supervisor.stopRecording(reference, recordingId)),
+      );
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "exports") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      const exported = BrowserRecordingExportRequest.safeParse(await readJson(request));
+      if (!exported.success || exported.data.recordingId !== recordingId) {
+        throw new ProtocolError("invalid_action", "recording export authority is invalid", 400);
+      }
+      const receipt = await this.supervisor.exportRecording(
+        reference,
+        recordingId,
+        exported.data.upload,
+      );
+      return success(BrowserRecordingExportReceipt.parse({ recordingId, ...receipt }));
     }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {
@@ -2148,9 +2225,31 @@ async function browserReadResponse(
   }
 }
 
-function protocolResponse(error: unknown): Response {
+/** The protocol failure for a thrown value. A driver failure also carries an
+ * operator diagnostic beside the error (never inside it, so callers and models
+ * see the same error) and is reported to `onDriverFailure` for local logs. */
+function protocolResponse(
+  error: unknown,
+  onDriverFailure?: (diagnostic: InteractionDriverDiagnostic) => void,
+): Response {
+  const fail = (
+    code: InteractionError["code"],
+    message: string,
+    retryable: boolean,
+    status: number,
+    details?: Record<string, string>,
+  ): Response => {
+    if (code !== "driver_failed") return failureResponse(code, message, retryable, status, details);
+    const diagnostic = interactionDriverDiagnostic(error);
+    try {
+      onDriverFailure?.(diagnostic);
+    } catch {
+      // Diagnostics must never alter the controller response contract.
+    }
+    return failureResponse(code, message, retryable, status, details, diagnostic);
+  };
   if (error instanceof BrowserWorkingRuntimeUnavailableError) {
-    return failure(
+    return fail(
       "resource_unavailable",
       error.message,
       false,
@@ -2159,7 +2258,7 @@ function protocolResponse(error: unknown): Response {
     );
   }
   if (error instanceof WorkingCopyAdoptionError) {
-    return failure(
+    return fail(
       error.reason === "unsupported_platform"
         ? "unsupported"
         : error.reason === "operation_conflict"
@@ -2172,9 +2271,9 @@ function protocolResponse(error: unknown): Response {
     );
   }
   if (error instanceof ProtocolError)
-    return failure(error.code, error.message, error.retryable, error.status);
+    return fail(error.code, error.message, error.retryable, error.status);
   if (error instanceof InteractionControllerError) {
-    return failure(
+    return fail(
       error.code === "journal_full" ? "resource_unavailable" : error.code,
       error.message,
       error.retryable,
@@ -2182,9 +2281,9 @@ function protocolResponse(error: unknown): Response {
     );
   }
   if (error instanceof InteractionDefiniteDriverError) {
-    return failure(error.code, error.message, false, interactionStatus(error.code));
+    return fail(error.code, error.message, false, interactionStatus(error.code));
   }
-  return failure("driver_failed", "interaction controller request failed", false, 500);
+  return fail("driver_failed", "interaction controller request failed", false, 500);
 }
 
 function success(data: unknown, status = 200): Response {
@@ -2216,6 +2315,17 @@ function failure(
   status: number,
   details?: Record<string, string>,
 ): Response {
+  return failureResponse(code, message, retryable, status, details);
+}
+
+function failureResponse(
+  code: InteractionError["code"],
+  message: string,
+  retryable: boolean,
+  status: number,
+  details?: Record<string, string>,
+  diagnostic?: InteractionDriverDiagnostic,
+): Response {
   const headers: Record<string, string> = { "cache-control": "no-store" };
   if (status === 401) headers["www-authenticate"] = "Bearer";
   headers["content-type"] = "application/json; charset=utf-8";
@@ -2224,6 +2334,7 @@ function failure(
       protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
       ok: false,
       error: { code, message, retryable, ...(details ? { details } : {}) },
+      ...(diagnostic ? { diagnostic } : {}),
     }),
     { status, headers },
   );
@@ -2253,6 +2364,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
     (segments[3] === "downloads" && segments[5] === "exports") ||
+    (segments[3] === "recordings" && request.method === "POST") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {
     return true;

@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import type { SkillRecord } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import { SkillsPanelContent } from "../src/routes/skills-panel";
 import "../src/styles.css";
 

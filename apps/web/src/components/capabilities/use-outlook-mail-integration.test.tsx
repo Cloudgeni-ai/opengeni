@@ -8,17 +8,17 @@ import type {
   AccessContext,
   ApiIntegrationInstallationSummary,
   IntegrationDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 
 // The adapter reads everything through the app context; swap it per case.
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => mutableContext.current,
 }));
-mock.module("./native-connect-setup", () => ({
+mock.module("@opengeni/react/app/components/capabilities/native-connect-setup", () => ({
   NativeConnectSetup: ({ request }: { request: { ownership: string } }) => (
     <div data-connect-ownership={request.ownership} />
   ),
@@ -26,7 +26,7 @@ mock.module("./native-connect-setup", () => ({
 
 // Radix portals do not mount under happy-dom; render dialog frames inline so
 // the reaction-channel dialog's real body can be exercised.
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
     open ? <div data-dialog>{children}</div> : null,
   DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,

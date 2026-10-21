@@ -1,8 +1,8 @@
 import { ServerIcon } from "lucide-react";
 import type { ReactElement } from "react";
 
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
-import { cn } from "@/lib/utils";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { PROVIDERS, type VaultProviderId } from "./vault-providers";
 

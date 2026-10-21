@@ -4,15 +4,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
 import { WorkspaceMenuItemContent } from "../src/components/rail/workspace-switcher";
 import { ResourceScopePicker } from "../src/components/resource-scope-picker";
-import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
+import { SessionTenancyControl } from "@opengeni/react/app/components/session/session-tenancy-control";
 import { SessionVisibilityPicker } from "../src/components/session-visibility-picker";
 import {
   managedSelfContextIdentity,
   type ManagedSelfContext,
-} from "../src/lib/managed-self-context";
-import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
+} from "@opengeni/react/app/lib/managed-self-context";
+import { SessionTenancyOperationController } from "@opengeni/react/app/lib/session-tenancy-operation-controller";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import type { Session, Workspace } from "../src/types";
+import type { Session, Workspace } from "@opengeni/react/app/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const personalWorkspaceId = "22222222-2222-4222-8222-222222222222";

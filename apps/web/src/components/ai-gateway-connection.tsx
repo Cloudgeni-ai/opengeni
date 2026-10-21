@@ -1,15 +1,15 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import { ClaudeSignInPage } from "@/components/models/claude-signin";
 import { CLAUDE_MODEL_CHOICES, claudeModelLabel } from "@/components/models/claude-setup";
-import { Disclosure } from "@/components/ui/disclosure";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   ClaudeUsage,
   ClaudeUsageReadout,
   useClaudeUsage,
   type ClaudeUsageState,
 } from "@/components/models/claude-usage";
-import { trackModelConnection } from "@/lib/analytics-observer";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
@@ -27,48 +27,48 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   ConnectionAccessFormPage,
   ConnectionAccessRows,
   useConnectionAccess,
   type ConnectionAccessTarget,
 } from "@/components/connection-access-settings";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import {
   ModelsFormPage,
   NOT_IN_USE,
   ProviderTile,
   useModelsListLabel,
-} from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+} from "@opengeni/react/app/components/models/models-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { ListRow, ListRowSkeleton } from "@/components/ui/list-row";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { ListRow, ListRowSkeleton } from "@opengeni/react/ui/list-row";
 import { SecretInput } from "@/components/ui/secret-field";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import type { AnalyticsAction } from "@/lib/analytics-actions";
-import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@/lib/api-error";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import type { AnalyticsAction } from "@opengeni/react/ui/analytics-actions";
+import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   invalidateSharedQueries,
   peekSharedQuery,
   sharedQueryWriter,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter, Opper) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list

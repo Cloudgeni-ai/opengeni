@@ -8,7 +8,7 @@ GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 const { ConnectProviderPage } = await import("./connect-provider");
-const { TooltipProvider } = await import("@/components/ui/tooltip");
+const { TooltipProvider } = await import("@opengeni/react/ui/tooltip");
 type Actions = Parameters<typeof ConnectProviderPage>[0]["actions"];
 
 afterAll(() => {

@@ -9,13 +9,13 @@ import {
 } from "@tanstack/react-router";
 import { KnowledgePage } from "../src/components/knowledge/knowledge-page";
 import { WorkspaceShortcutLinks } from "../src/components/rail/primary-nav";
-import { RailProvider } from "../src/components/rail/rail-context";
-import { PersonalResourceAttachmentSurface } from "../src/components/personal-resource-attachment-surface";
+import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
+import { PersonalResourceAttachmentSurface } from "@opengeni/react/app/components/personal-resource-attachment-surface";
 import {
   useFixedRigScope,
   usePersonalResourceAttachment,
-} from "../src/lib/use-personal-resource-attachment";
-import { hasWorkspacePermission } from "../src/lib/permissions";
+} from "@opengeni/react/app/lib/use-personal-resource-attachment";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { parseKnowledgeSearch } from "../src/lib/knowledge-route";
 import { useAppContext, workspaceId, rigId } from "./workbench-permissions-preview-context";
 import "../src/styles.css";

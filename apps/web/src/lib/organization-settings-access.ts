@@ -5,10 +5,14 @@
 import {
   ORGANIZATION_ADMIN_SECTIONS,
   type OrganizationAdminSection,
-} from "@/lib/organization-admin";
-import { hasAccountPermission } from "@/lib/permissions";
-import { administersOrganization } from "@/lib/workspaces";
-import type { AccessContext, ClientConfig, OrganizationMembershipRole } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
+import type {
+  AccessContext,
+  ClientConfig,
+  OrganizationMembershipRole,
+} from "@opengeni/react/app/types";
 
 export type OrganizationSettingsAccess = {
   actorRole: OrganizationMembershipRole | null;

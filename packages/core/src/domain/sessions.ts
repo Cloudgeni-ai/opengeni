@@ -1667,10 +1667,11 @@ async function finishStartSession(
     }),
   );
   // Initialization committed the initial turn, events and wake outbox together.
-  // Live fanout is not workflow authority: signal from the durable revision
-  // without waiting for NATS, but retain and fully join both notifications.
+  // Notifications and the response read depend on that commit, not on one
+  // another. Read authoritative state while the immediate delivery attempts run;
+  // retain and fully join all work before returning (including on failure).
   const wakeRevision = started.workflowWakeRevision;
-  const [fanout, wake] = await Promise.allSettled([
+  const [fanout, wake, response] = await Promise.allSettled([
     measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
       publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
     ),
@@ -1685,22 +1686,26 @@ async function finishStartSession(
             wakeRevision,
           }),
         ),
+    (async () => {
+      const persisted = await measureSessionStartPhase(
+        input.startupObservability,
+        "session_reload",
+        () => requireSession(input.db, session.workspaceId, session.id),
+      );
+      const initialTurnId =
+        started.turn?.id ??
+        (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
+        null;
+      return { ...persisted, initialTurnId };
+    })(),
   ]);
   // Keep the prior serial error priority without detaching attempt work. Normal
   // transport failure remains best-effort inside publishDurableSessionEvents.
   if (fanout.status === "rejected") throw fanout.reason;
   if (wake.status === "rejected") throw wake.reason;
-  const persisted = await measureSessionStartPhase(
-    input.startupObservability,
-    "session_reload",
-    () => requireSession(input.db, session.workspaceId, session.id),
-  );
-  const initialTurnId =
-    started.turn?.id ??
-    (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
-    null;
+  if (response.status === "rejected") throw response.reason;
   return {
-    session: { ...persisted, initialTurnId },
+    session: response.value,
     changed: started.changed,
   };
 }
@@ -3559,10 +3564,16 @@ async function createSessionForRequestInFileScope(
   const firstPartyMcpTools = applySessionAgentConfigWriteThrough({
     config: agentConfig,
     firstPartyMcpTools: creatorFirstPartyMcpTools,
-    // Slack computes its own baseline selection; only a caller's own explicit
-    // list is checked strictly against the capabilities.
+    // Only an agent's own explicit list is checked strictly against the
+    // capabilities: it reads the live tool catalog, so a conflict is its
+    // mistake. An API or SDK client was built against a capability map that
+    // grows (a tool can move under a capability it turns off), so its list is
+    // narrowed to the capabilities like the default selection, never refused.
+    // Slack computes its own baseline selection.
     explicitFirstPartyMcpTools:
-      agentConfigCreator === "slack" ? undefined : payload.firstPartyMcpTools,
+      agentConfigCreator === "slack" || grant.principalKind !== "agent_attempt"
+        ? undefined
+        : payload.firstPartyMcpTools,
     tools: [],
     toolPolicy,
     productServerIds: [],

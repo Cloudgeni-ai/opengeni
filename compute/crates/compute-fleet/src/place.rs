@@ -6,6 +6,13 @@
 //! a little stale by design: a host that cannot fit what it is sent
 //! refuses it, and the sandbox goes to the next candidate.
 //!
+//! What a replica sent a host since its last report is counted against it
+//! until the next one, so a burst spreads over the hosts. That count only
+//! steers: removes are not taken off it, and a host's report can repeat
+//! the one before it, so it can run ahead of the host. When it leaves no
+//! host, a host whose own report fits is asked anyway, and the host's
+//! answer decides.
+//!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,
 //! then the one with more free memory. Drawing two keeps load even without
@@ -50,8 +57,8 @@ pub struct Capacity {
     /// what it keeps spare.
     pub free_memory_mib: u64,
     /// Processor time in millicores it can still promise to sandboxes
-    /// that wake; `None` when it does not say, so it is not checked.
-    pub free_cpu_millis: Option<u64>,
+    /// that wake.
+    pub free_cpu_millis: u64,
     /// Disk in MiB it can still promise.
     pub free_disk_mib: u64,
     /// Ready clones it holds, by shape.
@@ -130,7 +137,22 @@ struct Slot {
     id: HostId,
     info: HostInfo,
     state: HostState,
+    /// As the host last reported it.
+    reported: Capacity,
+    /// That, less what was sent to the host since.
     capacity: Capacity,
+}
+
+impl Slot {
+    fn new(id: HostId, info: HostInfo, state: HostState, capacity: Capacity) -> Self {
+        Self {
+            id,
+            info,
+            state,
+            reported: capacity.clone(),
+            capacity,
+        }
+    }
 }
 
 /// A set of slot numbers with constant-time insert, remove and random
@@ -205,12 +227,7 @@ impl Fleet {
     pub fn upsert(&mut self, id: HostId, info: HostInfo, state: HostState, capacity: Capacity) {
         if let Some(&slot) = self.by_id.get(&id) {
             self.unindex(slot);
-            self.slots[slot as usize] = Some(Slot {
-                id,
-                info,
-                state,
-                capacity,
-            });
+            self.slots[slot as usize] = Some(Slot::new(id, info, state, capacity));
             self.index(slot);
             return;
         }
@@ -218,12 +235,7 @@ impl Fleet {
             self.slots.push(None);
             u32::try_from(self.slots.len() - 1).expect("fewer than four billion hosts")
         });
-        self.slots[slot as usize] = Some(Slot {
-            id,
-            info,
-            state,
-            capacity,
-        });
+        self.slots[slot as usize] = Some(Slot::new(id, info, state, capacity));
         self.by_id.insert(id, slot);
         self.index(slot);
     }
@@ -233,6 +245,7 @@ impl Fleet {
         if let Some(&slot) = self.by_id.get(&id) {
             self.unindex(slot);
             if let Some(entry) = self.slots[slot as usize].as_mut() {
+                entry.reported = capacity.clone();
                 entry.capacity = capacity;
             }
             self.index(slot);
@@ -259,7 +272,8 @@ impl Fleet {
         }
     }
 
-    /// A host's state and capacity, if it is in the view.
+    /// A host's state and capacity less what was sent to it since it last
+    /// reported, if it is in the view.
     #[must_use]
     pub fn get(&self, id: HostId) -> Option<(HostInfo, HostState, &Capacity)> {
         let slot = self.by_id.get(&id)?;
@@ -288,9 +302,7 @@ impl Fleet {
             capacity.free_memory_mib = capacity
                 .free_memory_mib
                 .saturating_sub(demand.memory_on(entry.info));
-            if let Some(free) = capacity.free_cpu_millis.as_mut() {
-                *free = free.saturating_sub(demand.cpu_millis);
-            }
+            capacity.free_cpu_millis = capacity.free_cpu_millis.saturating_sub(demand.cpu_millis);
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
             if placement.ready
@@ -304,29 +316,38 @@ impl Fleet {
     }
 
     /// Chooses a live host for `demand`, other than those in `exclude`
-    /// (hosts that already refused it). `None` when no host fits.
+    /// (hosts that already refused it). `None` when no host's own report
+    /// fits it.
     pub fn place(&self, demand: &Demand, exclude: &[HostId], rng: &mut Rng) -> Option<Placement> {
-        let fits = |slot: u32| {
+        let fits = |slot: u32, reported: bool| {
             self.slots[slot as usize].as_ref().is_some_and(|entry| {
+                let capacity = if reported {
+                    &entry.reported
+                } else {
+                    &entry.capacity
+                };
                 entry.state == HostState::Live
                     && !exclude.contains(&entry.id)
-                    && entry.capacity.free_memory_mib >= demand.memory_on(entry.info)
-                    && entry
-                        .capacity
-                        .free_cpu_millis
-                        .is_none_or(|free| free >= demand.cpu_millis)
-                    && entry.capacity.free_disk_mib >= demand.disk_mib
+                    && capacity.free_memory_mib >= demand.memory_on(entry.info)
+                    && capacity.free_cpu_millis >= demand.cpu_millis
+                    && capacity.free_disk_mib >= demand.disk_mib
             })
         };
-        let pools = [
+        let class = demand.class().and_then(|class| self.by_class.get(&class));
+        let chosen = [
             demand.shape().and_then(|shape| self.ready.get(&shape)),
-            demand.class().and_then(|class| self.by_class.get(&class)),
+            class,
             Some(&self.live),
-        ];
-        let chosen = pools
-            .into_iter()
-            .flatten()
-            .find_map(|pool| self.best_of_two(pool, &fits, demand, rng))?;
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, false), demand, rng))
+        .or_else(|| {
+            [class, Some(&self.live)]
+                .into_iter()
+                .flatten()
+                .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, true), demand, rng))
+        })?;
         let entry = self.slots[chosen as usize].as_ref()?;
         Some(Placement {
             host: entry.id,

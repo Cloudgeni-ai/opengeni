@@ -959,9 +959,7 @@ function timelineEventAt(
 }
 
 function turnSummaryTriggers(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll("button")).filter((button) =>
-    /\d+ steps?/.test(button.textContent ?? ""),
-  );
+  return Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-og-work-header]"));
 }
 
 function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
@@ -2299,8 +2297,8 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(r.container.textContent).not.toContain("Narration: one fixture needs a quick patch.");
 
     const trigger = turnSummaryTrigger(r.container);
-    expect(trigger?.textContent).toContain("2 steps");
-    expect(trigger?.textContent).toContain("2 commands");
+    // Duration only: steps and commands are not counted.
+    expect(trigger?.textContent).toBe("6s");
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -3831,9 +3829,9 @@ describe("StartupPhaseRow", () => {
       );
       await flush();
       expect(r.container.textContent).toContain("Ready.");
-      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
-        (candidate) => candidate.textContent?.includes("Preparation"),
-      );
+      // The startup-only turn folds behind its duration.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("6s");
       expect(summary?.getAttribute("aria-expanded")).toBe("false");
       await act(async () => summary?.click());
       await flush();
@@ -3915,9 +3913,9 @@ describe("StartupPhaseRow", () => {
       );
       await flush();
       expect(r.container.textContent).toContain("Continued.");
-      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
-        (candidate) => candidate.textContent?.includes("Preparation"),
-      );
+      // The startup-only turn folds behind its compaction facet.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("compacted");
       if (summary?.getAttribute("aria-expanded") === "false") {
         await act(async () => summary.click());
         await flush();

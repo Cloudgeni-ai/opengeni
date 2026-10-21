@@ -2,7 +2,11 @@ import { constants, readFileSync } from "node:fs";
 import { access, lstat, open } from "node:fs/promises";
 import { totalmem } from "node:os";
 import { resolve } from "node:path";
-import { BROWSER_CONTROL_PORT } from "@opengeni/contracts";
+import {
+  BROWSER_CONTROL_PORT,
+  interactionDriverDiagnostic,
+  redactInteractionDriverMessage,
+} from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
 import { resolvePinnedAgentBrowserBinary } from "./binary";
 import { resolvePinnedHeadlessShell } from "./headless-shell";
@@ -13,7 +17,7 @@ import {
 } from "./computer-environment";
 import { ComputerSupervisor } from "./computer-supervisor";
 import { createCuaComputerDriver } from "./cua/factory";
-import { BrowserControlServer } from "./server";
+import { BrowserControlServer, type ControllerFailureContext } from "./server";
 import { BrowserSupervisor } from "./supervisor";
 import { retainControllerDiagnostic } from "./controller-diagnostics";
 
@@ -116,30 +120,31 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   await server.stop();
 }
 
+/** One line per failed request: the error class, the stack's code locations
+ * and, for a known driver failure, its message's code-written head. Window
+ * titles, page text, paths and a driver's free-text reason are redacted, and
+ * an unexpected error's message is left out, since it can be any text. */
 function reportUnexpectedControllerError(
   error: unknown,
-  context: { method: string; pathname: string },
+  context: ControllerFailureContext,
   rootDirectory: string,
   adminToken: string,
 ): void {
-  const value =
-    error instanceof Error
-      ? {
-          name: boundedDiagnostic(error.name, 256),
-          message: boundedDiagnostic(error.message, 4_096),
-          stack: boundedDiagnostic(error.stack ?? "", 16_384),
-        }
-      : {
-          name: "UnknownError",
-          message: boundedDiagnostic(nonErrorDiagnostic(error), 4_096),
-          stack: "",
-        };
+  const diagnostic = interactionDriverDiagnostic(error);
   const line = `${JSON.stringify({
     service: "opengeni-browserd",
-    event: "unexpected_request_error",
+    event: context.kind === "driver_failed" ? "driver_request_failed" : "unexpected_request_error",
     method: context.method,
     pathname: context.pathname,
-    error: value,
+    error: {
+      name: diagnostic.errorClass,
+      ...(diagnostic.frame ? { frame: diagnostic.frame } : {}),
+      message:
+        context.kind === "driver_failed" && error instanceof Error
+          ? redactInteractionDriverMessage(error.message)
+          : "[redacted]",
+      stack: error instanceof Error ? boundedDiagnostic(stackFrames(error), 16_384) : "",
+    },
   })}\n`.replaceAll(adminToken, "[redacted]");
   process.stderr.write(line);
   try {
@@ -149,13 +154,19 @@ function reportUnexpectedControllerError(
   }
 }
 
-function nonErrorDiagnostic(value: unknown): string {
+/** The stack's frame lines only; its header repeats the unredacted message. */
+function stackFrames(error: Error): string {
+  let stack: unknown;
   try {
-    const serialized = JSON.stringify(value);
-    return serialized === undefined ? String(value) : serialized;
+    stack = error.stack;
   } catch {
-    return String(value);
+    return "";
   }
+  if (typeof stack !== "string") return "";
+  return stack
+    .split("\n")
+    .filter((line) => /^\s+at\s/u.test(line))
+    .join("\n");
 }
 
 function boundedDiagnostic(value: string, maxBytes: number): string {

@@ -106,53 +106,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             recovering.push(record);
         }
-        let recovering = self.learn_disk_lengths(recovering).await;
         self.recover_recorded(recovering).await;
-    }
-
-    /// Records the disk length of every sandbox whose record predates
-    /// keeping it, before anything of it is admitted: from its local disk,
-    /// or from the store's copy of one that is only there. One whose length
-    /// cannot be learned is blocked, since today's base image may be
-    /// shorter than its disk.
-    async fn learn_disk_lengths(&mut self, recovering: Vec<Record>) -> Vec<Record> {
-        let mut known = Vec::with_capacity(recovering.len());
-        for record in recovering {
-            if record.allocation.disk_bytes.is_some() {
-                known.push(record);
-                continue;
-            }
-            let id = record.id;
-            let length = match record.disk {
-                Disk::Local => tokio::fs::metadata(Paths::of(&self.root, &record).disk)
-                    .await
-                    .map(|metadata| metadata.len())
-                    .map_err(|error| error.to_string()),
-                Disk::Remote => match self.store.disk_len(id).await {
-                    Ok(Some(length)) => Ok(length),
-                    Ok(None) => Err("the store holds no copy".to_owned()),
-                    Err(error) => Err(error.to_string()),
-                },
-            };
-            let learned = match length {
-                Ok(length) => self
-                    .records
-                    .commit(id, record.fence(), Change::new().disk_bytes(length))
-                    .await
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error),
-            };
-            match learned {
-                Ok(record) => known.push(record),
-                Err(error) => {
-                    tracing::error!(%id, %error, "disk length unknown; blocking the sandbox and leaving it alone");
-                    self.block(id, format!("disk length unknown: {error}"));
-                    let size = self.retained_size(&record).await;
-                    self.unmanaged(id, size, record.config.vcpus);
-                }
-            }
-        }
-        known
     }
 
     /// Tidies the sandboxes whose records are missing, and blocks those

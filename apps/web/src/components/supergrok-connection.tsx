@@ -4,17 +4,20 @@ import {
   subscriptionPoolQueryPrefix,
 } from "./models/use-subscription-account-pool";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { trackModelConnection } from "@/lib/analytics-observer";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 
 import type { SuperGrokAccount, SuperGrokAccountScope } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
-import { invalidateSharedQueries, MODEL_SETTINGS_STALE_TIME_MS } from "@/lib/shared-query";
+import {
+  invalidateSharedQueries,
+  MODEL_SETTINGS_STALE_TIME_MS,
+} from "@opengeni/react/app/lib/shared-query";
 
 // SuperGrok (xAI) subscriptions for Settings > Models at workspace and
 // organization scope: the data and every mutation. Rows, the account page and

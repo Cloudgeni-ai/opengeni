@@ -13,14 +13,14 @@ import {
   localConnectedSlackPreview,
   slackBotDocumentDestinationAuthority,
 } from "@/components/capabilities/use-slack-integration";
-import type { AccessContext, GitHubAppInfo } from "@/types";
+import type { AccessContext, GitHubAppInfo } from "@opengeni/react/app/types";
 import {
   catalogStatusForChip,
   connectionAccessChip,
   connectionAccessModel,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
-import { capabilityStateChip } from "@/lib/capabilities";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { capabilityStateChip } from "@opengeni/react/app/lib/capabilities";
 import {
   canManageApiIntegrations,
   fetchOAuthReturnRows,

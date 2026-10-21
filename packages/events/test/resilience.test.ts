@@ -424,6 +424,44 @@ function scriptedConnection(state: { draining?: boolean } = {}) {
   return { subscriptions, connect };
 }
 
+test("agent-event queue groups survive resubscription while ordinary subscribers stay broadcast", async () => {
+  const subscriptions: Array<ReturnType<typeof scriptedSubscription>> = [];
+  const options: Array<unknown> = [];
+  const bus = await createNatsEventBus(SENTINEL_URL, undefined, {
+    connect: (async () => ({
+      ...(fakeNatsConnection() as Record<string, unknown>),
+      subscribe: (subject: string, option: unknown) => {
+        options.push(option);
+        const subscription = scriptedSubscription(subject);
+        subscriptions.push(subscription);
+        return subscription.iterable;
+      },
+    })) as never,
+    resubscribeDelayMs: () => 0,
+  });
+  const received: number[] = [];
+  const stopQueue = bus.subscribeAgentEvents(
+    "agent.*.*.connection.*.events",
+    () => {
+      received.push(1);
+    },
+    { queue: "state-ingestion" },
+  );
+  const stopBroadcast = bus.subscribeAgentEvents("agent.*.*.connection.*.events", () => {});
+  try {
+    expect(options).toEqual([{ queue: "state-ingestion" }, undefined]);
+    subscriptions[0]!.fail(permissionsViolation());
+    await waitFor(() => subscriptions.length === 3);
+    expect(options[2]).toEqual({ queue: "state-ingestion" });
+    subscriptions[2]!.push(new Uint8Array());
+    await waitFor(() => received.length === 1);
+  } finally {
+    stopQueue();
+    stopBroadcast();
+    await bus.close();
+  }
+});
+
 describe("a subscription that ends while still held is surfaced, never silent", () => {
   test("session and workspace-control consumers are told once and counted", async () => {
     await withUnhandledRejectionProbe(async (rejections) => {

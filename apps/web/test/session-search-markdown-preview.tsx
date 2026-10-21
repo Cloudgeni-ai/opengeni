@@ -4,9 +4,9 @@ import { SearchIcon } from "lucide-react";
 import {
   SearchPreviewView,
   SearchResultsView,
-} from "../src/components/session/search-results-view";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../src/components/ui/dialog";
-import { Input } from "../src/components/ui/input";
+} from "@opengeni/react/app/components/session/search-results-view";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
 import "../src/styles.css";
 
 // This fixture is sample data and preview-only wiring, not a change to production search.

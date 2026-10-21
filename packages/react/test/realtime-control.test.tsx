@@ -15,6 +15,7 @@ import {
   realtimeConversationLanguage,
   type RealtimeModelOption,
   type SessionRealtimeControllerFactory,
+  useRealtimeLanguagePreference,
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "../src/realtime/realtime-control";
@@ -684,6 +685,15 @@ describe("ordinary session Codex realtime control", () => {
         unavailableReason: null,
         recommended: false,
       },
+      {
+        id: "workspace-elevenlabs/eleven_realtime_v1_max",
+        label: "Eleven Realtime v1 max",
+        provider: "Your ElevenLabs",
+        description: "Reasons before replying",
+        available: true,
+        unavailableReason: null,
+        recommended: false,
+      },
     ];
 
     function Harness() {
@@ -710,12 +720,21 @@ describe("ordinary session Codex realtime control", () => {
     ).not.toBeNull();
     expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).not.toBeNull();
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
+    // Each provider has its own row id, even when two share a billing class.
+    expect(
+      [...container.querySelectorAll<HTMLElement>('[data-testid^="realtime-model-provider-"]')].map(
+        (row) => row.dataset.testid,
+      ),
+    ).toEqual([
+      "realtime-model-provider-opengeni",
+      "realtime-model-provider-codex",
+      "realtime-model-provider-gateway",
+      "realtime-model-provider-elevenlabs",
+    ]);
 
     await act(async () =>
       container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="realtime-model-provider-opengeni_credits"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="realtime-model-provider-opengeni"]')
         ?.click(),
     );
     expect(container.textContent).toContain("GPT Realtime 2.1");
@@ -800,6 +819,99 @@ describe("ordinary session Codex realtime control", () => {
         ?.click(),
     );
     expect(localStorage.getItem("opengeni:realtime-language")).toBeNull();
+
+    // Without a pick of their own, people talk in the workspace's language.
+    const elevenWithWorkspaceLanguage = { ...eleven, workspaceVoiceSettings: { language: "no" } };
+    await act(async () =>
+      root.render(
+        <OpenGeniMessagesProvider locale="en-US">
+          <RealtimeModelPickerMenu
+            models={[elevenWithWorkspaceLanguage, gateway]}
+            selectedModel={elevenWithWorkspaceLanguage}
+            provider="Your ElevenLabs"
+            direction={1}
+            disabled={false}
+            onProviderChange={() => undefined}
+            onSelect={() => undefined}
+          />
+        </OpenGeniMessagesProvider>,
+      ),
+    );
+    expect(languageRow()?.textContent).toContain("Automatic · Norwegian");
+    await act(async () => languageRow()?.click());
+    expect(
+      container.querySelector('[data-testid="realtime-language-choice-automatic"]')?.textContent,
+    ).toContain("Set for this workspace, Norwegian");
+  });
+
+  test("sends the host's voice settings with the language the person picked on top", async () => {
+    localStorage.removeItem("opengeni:realtime-language");
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => ({
+        models: [
+          {
+            id: "workspace-elevenlabs/eleven_realtime_v1_max",
+            label: "Eleven Realtime v1 max",
+            provider: "Your ElevenLabs",
+            description: "Reasons before replying; best at handing off work",
+            available: true,
+            unavailableReason: null,
+            recommended: true,
+            languages: ["en", "no", "sv"],
+            customVoice: true,
+          },
+          {
+            id: "workspace-gateway/openai/gpt-realtime-mini",
+            label: "GPT Realtime Mini",
+            provider: "Your Gateway",
+            description: "Faster, lighter live voice",
+            available: true,
+            unavailableReason: null,
+            recommended: false,
+          },
+        ],
+      }),
+    } as unknown as OpenGeniClient;
+    const hostSettings = { voice: "library-voice-id", language: "no" };
+    let selection: ReturnType<typeof useRealtimeModelSelection> | null = null;
+    let setLanguage: ((language: string | null) => void) | null = null;
+    function Harness() {
+      setLanguage = useRealtimeLanguagePreference().setLanguage;
+      selection = useRealtimeModelSelection({
+        client,
+        workspaceId: "11111111-1111-4111-8111-111111111112",
+        codexConnected: false,
+      });
+      return <output>{selection.models.length}</output>;
+    }
+    await act(async () =>
+      root.render(
+        <OpenGeniMessagesProvider locale="nb-NO">
+          <Harness />
+        </OpenGeniMessagesProvider>,
+      ),
+    );
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (container.textContent === "2") break;
+    }
+    const eleven = "workspace-elevenlabs/eleven_realtime_v1_max" as const;
+    const gateway = "workspace-gateway/openai/gpt-realtime-mini" as const;
+    // The person's own language is the fallback under the host's and workspace's.
+    expect(selection!.languageFor(eleven)).toBe("nb-NO");
+    expect(selection!.languageFor(gateway)).toBeUndefined();
+    expect(selection!.voiceSettingsFor(eleven, hostSettings)).toEqual(hostSettings);
+
+    // The language the person picks in the voice menu wins over the host's.
+    await act(async () => setLanguage!("sv"));
+    expect(selection!.voiceSettingsFor(eleven, hostSettings)).toEqual({
+      voice: "library-voice-id",
+      language: "sv",
+    });
+    expect(selection!.languageFor(eleven)).toBe("nb-NO");
+    // A model that detects the language itself keeps the host's settings as they are.
+    expect(selection!.voiceSettingsFor(gateway, hostSettings)).toEqual(hostSettings);
+    await act(async () => setLanguage!(null));
   });
 
   test("loads and selects a connected SuperGrok realtime model", async () => {

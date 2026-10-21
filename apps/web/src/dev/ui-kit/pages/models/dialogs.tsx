@@ -2,21 +2,21 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRightIcon, CircleCheckIcon, LoaderCircleIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DestructiveConfirm,
   showUndoToast,
   type ConfirmDependency,
-} from "@/components/ui/destructive-confirm";
-import { Checkbox, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
-import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
+} from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Checkbox, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { FormDialog, FormPage, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
 import { SecretInput } from "@/components/ui/secret-field";
 
 import { KIT_NOW, currentWorkspace, you } from "../../fixtures";

@@ -3536,6 +3536,26 @@ mod live_tests {
 
     use super::*;
 
+    /// Create an executable script fixture without this test process ever
+    /// holding it open for writing. Tests in this binary run concurrently and
+    /// spawn processes: a fork on another thread while this process has the
+    /// script open for writing hands that child the descriptor until it execs,
+    /// and executing the script in that window fails with ETXTBSY ("Text file
+    /// busy"). A short-lived `sh` writes the file instead, so the only
+    /// writable descriptor belongs to a process that has exited before the
+    /// test runs the script.
+    fn write_executable_script(path: &std::path::Path, script: &str) {
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"")
+            .arg("sh")
+            .arg(path)
+            .arg(script)
+            .status()
+            .expect("start fixture writer");
+        assert!(status.success(), "write executable fixture: {status}");
+    }
+
     #[tokio::test]
     #[ignore = "requires DISPLAY on an X11 server and a session bus without AT-SPI (e.g. DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent)"]
     async fn drives_the_screen_without_an_accessibility_bus() {
@@ -3660,9 +3680,7 @@ mod live_tests {
     async fn application_launch_returns_after_a_long_running_launcher_starts() {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
-        fs::write(&executable, "#!/bin/sh\nsleep 2\n").expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        write_executable_script(&executable, "#!/bin/sh\nsleep 2\n");
         let launcher = LinuxApplicationLauncher { executable };
 
         tokio::time::timeout(
@@ -3679,16 +3697,13 @@ mod live_tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
         let environment = directory.path().join("environment");
-        fs::write(
+        write_executable_script(
             &executable,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s %s %s' \"$ACCESSIBILITY_ENABLED\" \"$GNOME_ACCESSIBILITY\" \"$QT_LINUX_ACCESSIBILITY_ALWAYS_ON\" > '{}'\n",
                 environment.display()
             ),
-        )
-        .expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        );
         let launcher = LinuxApplicationLauncher { executable };
 
         launcher
@@ -3728,9 +3743,7 @@ mod live_tests {
     async fn application_launch_reports_immediate_launcher_failure() {
         let directory = tempfile::tempdir().expect("tempdir");
         let executable = directory.path().join("gtk-launch");
-        fs::write(&executable, "#!/bin/sh\nexit 9\n").expect("write launcher");
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
-            .expect("make launcher executable");
+        write_executable_script(&executable, "#!/bin/sh\nexit 9\n");
         let launcher = LinuxApplicationLauncher { executable };
 
         let error = launcher

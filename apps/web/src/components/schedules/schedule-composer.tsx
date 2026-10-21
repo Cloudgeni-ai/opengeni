@@ -14,25 +14,28 @@ import {
   XIcon,
 } from "lucide-react";
 
-import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { modelPayerHint } from "@/lib/model-payer";
-import { ModelPicker, type PickerModelRow } from "@/components/pickers";
+import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
+import { modelPayerHint } from "@opengeni/react/app/lib/model-payer";
+import { ModelPicker, type PickerModelRow } from "@opengeni/react/app/components/pickers";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useFieldControlProps } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import { gitHubRepositoryResource, isRepositoryResourceForGitHubRepo } from "@/lib/session-tools";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import { cn } from "@/lib/utils";
-import type { ResourceRef } from "@/types";
+} from "@opengeni/react/ui/dropdown-menu";
+import { useFieldControlProps } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  gitHubRepositoryResource,
+  isRepositoryResourceForGitHubRepo,
+} from "@opengeni/react/app/lib/session-tools";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { ResourceRef } from "@opengeni/react/app/types";
 import type { DefaultModelSelection } from "@opengeni/sdk";
 
 import type { ScheduleDraft } from "./schedule-model";

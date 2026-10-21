@@ -15,7 +15,7 @@ import {
   type CadenceFrequency,
   type CadenceScheduleSpec,
   type CadenceValue,
-} from "@/components/ui/cadence-picker";
+} from "@opengeni/react/ui/cadence-picker";
 import {
   agentConfigFromFormState,
   newScheduledTaskFormState,
@@ -32,8 +32,13 @@ import type {
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import { mergeResourceRefs } from "@opengeni/contracts";
-import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
-import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec, Session } from "@/types";
+import { connectionAccountChoices } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
+import type {
+  ScheduledTask,
+  ScheduledTaskRun,
+  ScheduledTaskScheduleSpec,
+  Session,
+} from "@opengeni/react/app/types";
 
 /** Agent learning overrides sent with an edit (not in the SDK's update type yet). */
 export interface ScheduleLearningUpdate {

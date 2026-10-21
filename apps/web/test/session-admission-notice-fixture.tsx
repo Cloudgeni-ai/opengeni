@@ -1,12 +1,12 @@
 import { createRoot } from "react-dom/client";
 import type { Session } from "@opengeni/sdk";
-import { SessionAdmissionNotice } from "../src/components/session/session-admission-notice";
-import { SessionMachineAccessNotice } from "../src/components/session/session-machine-access-notice";
+import { SessionAdmissionNotice } from "@opengeni/react/app/components/session/session-admission-notice";
+import { SessionMachineAccessNotice } from "@opengeni/react/app/components/session/session-machine-access-notice";
 import { useState } from "react";
 import {
   SessionMachinePickerAction,
   type SessionRunsOn,
-} from "../src/components/session/sandbox-switcher";
+} from "@opengeni/react/app/components/session/sandbox-switcher";
 import "../src/styles.css";
 
 const reasons = [

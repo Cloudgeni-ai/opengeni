@@ -1,9 +1,9 @@
 import type { CodexAccount, ModelConnectionAccessResponse } from "@opengeni/sdk";
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { useOrganizationCodexOverview } from "./use-organization-codex-overview";
-import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
-import { invalidateSharedQueries } from "@/lib/shared-query";
+import { useOrganizationCodexOverview } from "@/components/models/use-organization-codex-overview";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
+import { invalidateSharedQueries } from "@opengeni/react/app/lib/shared-query";
 
 import {
   CodexDeviceCodePanel,
@@ -27,24 +27,24 @@ import {
   organizationReachLabel,
   type ModelsScopeLabels,
   useModelsListLabel,
-} from "@/components/models/models-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+} from "@opengeni/react/app/components/models/models-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FieldStack } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FieldStack } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, OrganizationCodexUsage } from "./codex-account-usage";
-import { EnableAccountRow } from "./subscription-account-ui";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { EnableAccountRow } from "@/components/models/subscription-account-ui";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    The organization's Codex accounts on the one Models page: each account's

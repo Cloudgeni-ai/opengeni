@@ -3,7 +3,7 @@
  * provider is done (`/desktop-return?url=…`): it hands the person back to the
  * app, which already shows the finished connection.
  */
-import { openInAppUrl } from "@/lib/open-in-app";
+import { openInAppUrl } from "@opengeni/react/app/lib/open-in-app";
 
 /**
  * The console page the flow meant to return to, or null when the link is

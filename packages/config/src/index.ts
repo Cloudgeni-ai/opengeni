@@ -365,6 +365,9 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // LISTEN needs a session-pinned connection. Direct deployments reuse the
+  // ordinary URL; transaction poolers supply this separate direct endpoint.
+  databaseNotificationUrl: z.string().optional(),
   // API application pool only. Managed auth owns its separate pool; readiness
   // reuses the application handle. Keep the historical default for existing
   // deployments and let operators budget this per process with replica counts.
@@ -4984,6 +4987,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    databaseNotificationUrl: optional("OPENGENI_DATABASE_NOTIFICATION_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),

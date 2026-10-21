@@ -79,10 +79,8 @@ pub struct HostInfo {
     /// Memory it gives sandboxes, in MiB.
     pub memory_mib: u64,
     /// Processor time it guarantees sandboxes at once, in millicores, as
-    /// it started; `None` from a host that does not guarantee it. What it
-    /// guarantees now is [`Capacity::cpu_millis`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_millis: Option<u64>,
+    /// it started. What it guarantees now is [`Capacity::cpu_millis`].
+    pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
 }
@@ -109,14 +107,9 @@ pub struct Capacity {
     /// Processor time it guarantees sandboxes at once now, in
     /// millicores: less than [`HostInfo::cpu_millis`] while what else runs
     /// on the host takes more of its processors than it keeps back.
-    /// `None` from a host that does not guarantee it, and from an older
-    /// host, whose [`HostInfo::cpu_millis`] then stands.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_millis: Option<u64>,
-    /// Processor time a wake can still reserve, in millicores; `None`
-    /// from a host that does not guarantee it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_free_millis: Option<u64>,
+    pub cpu_millis: u64,
+    /// Processor time a wake can still reserve, in millicores.
+    pub cpu_free_millis: u64,
     /// Disk free for sandboxes, in MiB.
     pub disk_free_mib: u64,
     /// Its ready clones, per shape.
@@ -453,16 +446,23 @@ mod tests {
             "a renewal says what the host can take on"
         );
         let register: Register = serde_json::from_str(
-            r#"{"attempt":7,"info":{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"t","memory_mib":1,"disk_mib":1},"capacity":{"memory_free_mib":1,"disk_free_mib":1,"awake":0,"sandboxes":0},"held":[]}"#,
+            r#"{"attempt":7,"info":{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"t","memory_mib":1,"disk_mib":1,"cpu_millis":1000},"capacity":{"memory_free_mib":1,"disk_free_mib":1,"cpu_millis":1000,"cpu_free_millis":1000,"awake":0,"sandboxes":0},"held":[]}"#,
         )
         .unwrap();
         assert_eq!((register.host, register.attempt), (None, 7));
+        assert!(
+            serde_json::from_str::<Register>(
+                r#"{"attempt":7,"info":{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"t","memory_mib":1,"disk_mib":1},"capacity":{"memory_free_mib":1,"disk_free_mib":1,"awake":0,"sandboxes":0},"held":[]}"#,
+            )
+            .is_err(),
+            "a registration says what processor time the host has"
+        );
     }
 
     #[test]
     fn ready_clones_of_two_images_of_one_shape_stay_apart() {
         let capacity: Capacity = serde_json::from_str(
-            r#"{"memory_free_mib":1,"disk_free_mib":1,"ready":[{"image":"python","vcpus":2,"memory_mib":1024,"count":3},{"image":"node","vcpus":2,"memory_mib":1024,"count":1}],"awake":0,"sandboxes":0}"#,
+            r#"{"memory_free_mib":1,"disk_free_mib":1,"cpu_millis":1000,"cpu_free_millis":1000,"ready":[{"image":"python","vcpus":2,"memory_mib":1024,"count":3},{"image":"node","vcpus":2,"memory_mib":1024,"count":1}],"awake":0,"sandboxes":0}"#,
         )
         .unwrap();
         let images: Vec<(&str, u32)> = capacity

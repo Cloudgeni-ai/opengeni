@@ -118,7 +118,7 @@ const client = {
     return {};
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({ client }) }));
 const { ReviewTab } = await import("./knowledge-review");
 
 beforeAll(() => {
