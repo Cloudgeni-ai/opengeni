@@ -796,8 +796,9 @@ same local-test and independent-review evidence. No agent may activate the prepa
 ruleset without the rollout owner's explicit go.
 The native draft's one-PR landing limit is temporary exact-Version-SHA
 compatibility, not CI-sharing batching. Activation is blocked by the measured
-capacity gate; true batching and descendant full-green release admission are a
-separate follow-up awaiting the owner's provider/design choice.
+capacity gate. The owner selected an in-house batcher; true batching and descendant
+full-green release admission are a separate implementation and shadow-rollout
+follow-up, not authorization to enable the native draft or install a vendor.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
 explicit in the PR and evidence comment, independently confirmed by the reviewer,
