@@ -20,6 +20,7 @@ export interface PullInput {
   queueReady: boolean;
   events: ReadyEvent[];
   comments: Comment[];
+  controlPlane?: boolean;
 }
 export type Admission = { ready: Pull; reason: null } | { ready: null; reason: string };
 // Human prose is an attestation, never executable instructions. No formal approval required.
@@ -58,13 +59,21 @@ export function admit(input: PullInput): Admission {
       /\b(?:not|never|no)\s+(?:yet\s+)?(?:passed|green|reviewed|tested)|\b(?:pending|awaiting)\s+(?:independent\s+)?review|\b(?:tests?|suites?)\s+(?:failed|failing)/i.test(
         text,
       );
-    if (vm && tests && review && reviewer && !negative)
+    if (
+      vm &&
+      tests &&
+      review &&
+      reviewer &&
+      !negative &&
+      (!input.controlPlane || /control[ -]plane/i.test(text))
+    )
       return {
         reason: null,
         ready: {
           number: input.number,
           headSha: input.headSha,
           headRef: input.headRef,
+          ...(input.controlPlane ? { controlPlane: true } : {}),
           binding: {
             eventId: event.id,
             at: event.at,
@@ -80,6 +89,8 @@ export function admit(input: PullInput): Admission {
       };
   }
   return no(
-    "missing exact-head VM test and independent-review evidence comment from a repository collaborator",
+    input.controlPlane
+      ? "missing explicit control-plane review in exact-head VM/independent-review evidence"
+      : "missing exact-head VM test and independent-review evidence comment from a repository collaborator",
   );
 }

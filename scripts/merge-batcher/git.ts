@@ -117,7 +117,7 @@ export class GitStore {
       tip = await this.commit(
         tree,
         [tip, pull.headSha],
-        `Batch ${batchId}: PR #${pull.number}\n\n${TRAILER}${canonical({ batchId, index, spec })}`,
+        `Batch ${batchId}: PR #${pull.number} from ${pull.headRef}\n\n${TRAILER}${canonical({ batchId, index, spec })}`,
         spec.createdAt,
       );
       pulls.push({ ...pull, mergeSha: tip });
@@ -218,6 +218,7 @@ export class AtomicGitWriter {
     readonly baseRef: string,
   ) {}
   async transaction(updates: RefUpdate[]): Promise<void> {
+    if (this.stateRef === this.baseRef) throw new Error("State fence must never be main");
     const fence = updates.find((u) => u.ref === this.stateRef);
     if (!fence || fence.next === fence.expected)
       throw new Error("A changing durable fence is required");
@@ -233,7 +234,8 @@ export class AtomicGitWriter {
         throw new Error("State history must advance");
     }
     // Git skips an already-up-to-date ref before checking its lease. Explicitly
-    // reject replayed snapshots; the wire CAS still closes races after this read.
+    // reject replayed snapshots. The lease wire CAS fences coordinated writers;
+    // main keeps ordinary FF semantics, not a force-authorizing expected-old lease.
     const current = await this.git.remoteRefs(this.remote);
     if (updates.some((u) => (current.get(u.ref) ?? null) !== u.expected))
       throw new Error("Stale remote ref snapshot");
@@ -241,7 +243,7 @@ export class AtomicGitWriter {
       "push",
       "--atomic",
       "--porcelain",
-      ...updates.map((u) => `--force-with-lease=${u.ref}:${u.expected ?? ""}`),
+      `--force-with-lease=${this.stateRef}:${fence.expected ?? ""}`,
       this.remote,
       ...updates.map((u) => `${u.next}:${u.ref}`),
     ]);

@@ -2,6 +2,8 @@ import { createSign } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence";
 import { type Config, type Manifest, type Outcome, type Pull, type Run } from "./model";
+import { verifyResult, type VerifiedResult } from "./result";
+import type { MainOutcome } from "./shadow-ci";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
 export class ProviderError extends Error {
@@ -38,7 +40,15 @@ export class GitHubAuth {
     const permissions =
       this.env.BATCHER_MODE === "active"
         ? { contents: "write", actions: "write", pull_requests: "write", issues: "write" }
-        : { contents: "read", actions: "read", pull_requests: "read", issues: "read" };
+        : this.env.BATCHER_MODE === "shadow-ci"
+          ? {
+              contents: "write",
+              workflows: "write",
+              actions: "read",
+              pull_requests: "read",
+              issues: "read",
+            }
+          : { contents: "read", actions: "read", pull_requests: "read", issues: "read" };
     const response = await this.transport(
       `https://api.github.com/app/installations/${installation}/access_tokens`,
       {
@@ -201,7 +211,18 @@ export class GitHubReader {
           authorAssociation: x.author_association,
         }),
       );
+      const files = await this.pages(`pulls/${number}/files`);
+      const controlPlane = files.some((file) =>
+        [file.filename, file.previous_filename].some(
+          (path) =>
+            typeof path === "string" &&
+            (path === ".github/workflows/batch-ci.yml" ||
+              path.startsWith("scripts/ci/batch-") ||
+              path.startsWith("scripts/merge-batcher/")),
+        ),
+      );
       const input: PullInput = {
+        controlPlane,
         number,
         headSha: pull.head?.sha ?? "",
         headRef: pull.head?.ref ?? "",
@@ -253,16 +274,19 @@ export class GitHubReader {
             : details.status === "in_progress"
               ? "in_progress"
               : "queued";
-        let outcome: Outcome = details.conclusion === "cancelled" ? "cancelled" : "unknown";
+        let outcome: Outcome = details.conclusion === "cancelled" ? "cancelled" : "infrastructure";
         let trusted = false;
-        if (status === "completed") {
+        let retryable = false;
+        if (status === "completed" && details.conclusion !== "cancelled") {
           const attested = await this.resultArtifact(manifest, Number(run.id), attempt);
           if (
             attested &&
-            (attested !== "success" || details.conclusion === "success") &&
-            (attested !== "code_failure" || details.conclusion === "failure")
+            details.conclusion !== "cancelled" &&
+            (attested.outcome !== "success" || details.conclusion === "success") &&
+            (attested.outcome !== "code_failure" || details.conclusion === "failure")
           ) {
-            outcome = attested;
+            outcome = attested.outcome;
+            retryable = attested.retryable;
             trusted = true;
           }
         }
@@ -275,22 +299,46 @@ export class GitHubReader {
           status,
           outcome,
           trusted,
+          retryable,
+          startedAt: details.run_started_at ?? null,
           completedAt: status === "completed" ? details.updated_at : null,
         });
       }
     }
     return result;
   }
+  async mainOutcomes(headSha: string): Promise<MainOutcome[]> {
+    const runs = await this.pages(
+      `actions/workflows/ci.yml/runs?branch=${encodeURIComponent(this.config.baseBranch)}&head_sha=${headSha}&event=push`,
+      "workflow_runs",
+    );
+    return runs
+      .filter(
+        (run) =>
+          run.head_sha === headSha &&
+          run.head_branch === this.config.baseBranch &&
+          run.path === ".github/workflows/ci.yml" &&
+          run.event === "push",
+      )
+      .map((run) => ({
+        headSha,
+        runId: Number(run.id),
+        runAttempt: Number(run.run_attempt),
+        conclusion: run.conclusion ?? null,
+        startedAt: run.run_started_at ?? null,
+        completedAt: run.status === "completed" ? run.updated_at : null,
+      }));
+  }
   async resultArtifact(
     manifest: Manifest,
     runId: number,
     attempt: number,
-  ): Promise<Outcome | null> {
+  ): Promise<VerifiedResult | null> {
     const artifacts = await this.pages(`actions/runs/${runId}/artifacts`, "artifacts");
-    const matches: Outcome[] = [];
+    const matches: VerifiedResult[] = [];
     for (const a of artifacts) {
       if (
-        a.name !== "batch-result" ||
+        a.name !== `batch-result-${attempt}` ||
         a.expired ||
         a.size_in_bytes > 1_000_000 ||
         a.workflow_run?.id !== runId ||
@@ -319,16 +367,8 @@ export class GitHubReader {
       }
       try {
         const body = readResultZip(new Uint8Array(await download.arrayBuffer()));
-        const data = JSON.parse(body) as Json;
-        if (
-          data.schemaVersion === 1 &&
-          data.batchId === manifest.batchId &&
-          data.headSha === manifest.tipSha &&
-          data.runId === runId &&
-          data.runAttempt === attempt &&
-          ["success", "code_failure", "infrastructure", "cancelled"].includes(data.outcome)
-        )
-          matches.push(data.outcome);
+        const verified = verifyResult(JSON.parse(body), manifest, runId, attempt);
+        if (verified) matches.push(verified);
       } catch {
         /* Malformed artifacts are unknown, never code-red. */
       }
@@ -396,11 +436,11 @@ export interface Capabilities {
   reason: string;
 }
 export const githubCapabilities: Capabilities = {
-  atomicRefs: false,
+  atomicRefs: true,
   atomicReadyFence: false,
   fencedSideEffects: false,
   reason:
-    "GitHub adapter has no verified atomic multi-ref receive-pack support or transaction binding PR head/readiness/comments to a main ref update; REST rerun/comment cannot be fenced atomically with a Git lease. Active mode is unavailable until a provider implements these contracts.",
+    "GitHub advertises atomic receive-pack, but cannot atomically bind PR head/readiness/comments to a main ref update; REST rerun/comment cannot be fenced atomically with a Git lease. Active mode remains unavailable under the strict no-stale-head landing contract. Shadow-ci is a separate queue-only mode.",
 };
 export function requireActiveCapabilities(caps: Capabilities): void {
   if (!caps.atomicRefs || !caps.atomicReadyFence || !caps.fencedSideEffects)

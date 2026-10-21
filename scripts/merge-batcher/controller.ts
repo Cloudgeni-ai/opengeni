@@ -111,6 +111,7 @@ export class Controller {
     readonly executor?: Executor,
   ) {}
   async step(): Promise<StepResult> {
+    if (this.config.mode === "shadow-ci") throw new Error("Use the restricted ShadowCiController");
     if (this.config.mode === "active") {
       requireActiveCapabilities(this.executor?.capabilities ?? githubCapabilities);
       if (!this.executor) throw new Error("Active mode requires a fenced provider adapter");

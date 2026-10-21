@@ -33,6 +33,8 @@ import {
   type Run,
 } from "./model";
 import { fifo, plan } from "./planner";
+import { classifyExit, verifyResult } from "./result";
+import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 
 const NOW = "2026-10-21T11:00:00.000Z";
 const SHA = "a".repeat(40);
@@ -83,7 +85,34 @@ function run(c: Candidate, outcome: Run["outcome"], attempt = 1, trusted = true)
     status: "completed",
     outcome,
     trusted,
+    retryable: outcome === "code_failure",
     completedAt: NOW,
+  };
+}
+function receiptResult(c: Candidate, attempt = 1) {
+  const identity = {
+    schemaVersion: 1,
+    batchId: c.manifest.batchId,
+    headSha: c.manifest.tipSha,
+    runId: "100",
+    runAttempt: attempt,
+  };
+  return {
+    ...identity,
+    outcome: "success",
+    retryable: false,
+    reason: "fixture",
+    expectedJobs: ["plan", "source"],
+    jobs: { plan: "success", source: "success", units: "skipped" },
+    tasks: ["plan", "source"].map((job) => ({
+      ...identity,
+      job,
+      exitCode: 0,
+      outcome: "success",
+      retryable: false,
+      startedAt: NOW,
+      finishedAt: NOW,
+    })),
   };
 }
 function observation(ready = [pull(1)], candidates: Candidate[] = []): Observation {
@@ -696,6 +725,62 @@ describe("controller isolation and fencing", () => {
 });
 
 describe("wire adapters and CLI", () => {
+  test.each([0, 1, 70, 75, 124, 126, 127, 130, 137, 143, -1])(
+    "task exit classification %s is independently reverified",
+    (code) => {
+      const c = candidate(),
+        data = receiptResult(c),
+        classification = classifyExit(code);
+      Object.assign(data.tasks[1]!, classification, { exitCode: code });
+      Object.assign(data, classification);
+      if (classification.outcome !== "success")
+        data.jobs.source = classification.outcome === "cancelled" ? "cancelled" : "failure";
+      expect(verifyResult(data, c.manifest, 100, 1)?.outcome).toBe(classification.outcome);
+      expect(verifyResult(data, c.manifest, 100, 1)?.retryable).toBe(classification.retryable);
+    },
+  );
+  test.each(["head", "batch", "attempt", "run", "exit", "duplicate", "missing-plan"])(
+    "malformed task cannot create partial green: %s",
+    (kind) => {
+      const c = candidate(),
+        data = receiptResult(c);
+      if (kind === "head") data.tasks[0]!.headSha = SHA;
+      if (kind === "batch") data.tasks[0]!.batchId = digest("other");
+      if (kind === "attempt") data.tasks[0]!.runAttempt = 2;
+      if (kind === "run") data.tasks[0]!.runId = "2";
+      if (kind === "exit") data.tasks[0]!.exitCode = 1;
+      if (kind === "duplicate") data.tasks.push(data.tasks[0]!);
+      if (kind === "missing-plan") data.tasks.shift();
+      expect(verifyResult(data, c.manifest, 100, 1)).toBeNull();
+    },
+  );
+  test("verified red survives missing siblings, but task/provider cancellation wins", () => {
+    const c = candidate(),
+      data = receiptResult(c);
+    Object.assign(data.tasks[1]!, { exitCode: 1, outcome: "code_failure", retryable: true });
+    data.tasks.shift();
+    Object.assign(data, { outcome: "code_failure", retryable: true });
+    expect(verifyResult(data, c.manifest, 100, 1)?.outcome).toBe("code_failure");
+    data.jobs.plan = "cancelled";
+    Object.assign(data, { outcome: "cancelled", retryable: false });
+    expect(verifyResult(data, c.manifest, 100, 1)?.outcome).toBe("cancelled");
+  });
+  test("process-leak code-red is never retried away", () => {
+    const c = candidate();
+    c.runs = [{ ...run(c, "code_failure"), retryable: false }];
+    const action = plan(observation([pull(1)], [c]), cfg);
+    expect(action.kind).toBe("record");
+    if (action.kind === "record")
+      expect(action.ledger.ejected[0]!.reason).toContain("non-retryable");
+  });
+  test("numeric runId and untrusted task outcome are refused", () => {
+    const c = candidate(),
+      data = receiptResult(c);
+    expect(verifyResult({ ...data, runId: 100 }, c.manifest, 100, 1)).toBeNull();
+    data.tasks[1]!.outcome = "code_failure";
+    data.outcome = "code_failure";
+    expect(verifyResult(data, c.manifest, 100, 1)).toBeNull();
+  });
   test("raw mutation adapter refuses shadow; active permission denial is explicit", async () => {
     let calls = 0;
     const transport = (async () => {
@@ -752,20 +837,14 @@ describe("wire adapters and CLI", () => {
     "duplicate",
     "malformed",
     "expired",
+    "generic",
   ])("exact result artifact binding: %s", async (kind) => {
     const c = candidate();
-    const data = {
-      schemaVersion: 1,
-      batchId: c.manifest.batchId,
-      headSha: c.manifest.tipSha,
-      outcome: "success",
-      runId: 100,
-      runAttempt: 2,
-    };
+    const data = receiptResult(c, 2);
     if (kind === "head") data.headSha = SHA;
     if (kind === "batch") data.batchId = digest("wrong");
     if (kind === "attempt") data.runAttempt = 1;
-    if (kind === "run") data.runId = 99;
+    if (kind === "run") data.runId = "99";
     if (kind === "schema") data.schemaVersion = 2;
     const archive = kind === "malformed" ? new Uint8Array([1, 2]) : zipResult(data);
     const methods: string[] = [];
@@ -774,7 +853,7 @@ describe("wire adapters and CLI", () => {
       if (String(url).endsWith("/zip")) return new Response(archive);
       const artifact = {
         id: 500,
-        name: "batch-result",
+        name: kind === "generic" ? "batch-result" : "batch-result-2",
         expired: kind === "expired",
         size_in_bytes: archive.length,
         workflow_run: { id: 100, head_sha: c.manifest.tipSha },
@@ -782,8 +861,8 @@ describe("wire adapters and CLI", () => {
       return Response.json({ artifacts: kind === "duplicate" ? [artifact, artifact] : [artifact] });
     }) as unknown as typeof fetch;
     const reader = new GitHubReader(cfg, new GitHubAuth({ GH_TOKEN: "never-log" }), transport);
-    expect(await reader.resultArtifact(c.manifest, 100, 2)).toBe(
-      kind === "success" ? "success" : null,
+    expect(await reader.resultArtifact(c.manifest, 100, 2)).toEqual(
+      kind === "success" ? { outcome: "success", retryable: false, reason: "fixture" } : null,
     );
     expect(methods.every((m) => m === "GET")).toBe(true);
   });
@@ -793,16 +872,7 @@ describe("wire adapters and CLI", () => {
     const transport = (async (url: string | URL, init: RequestInit) => {
       if (String(url).startsWith("https://storage.example/")) {
         leaked = new Headers(init.headers).has("Authorization");
-        return new Response(
-          zipResult({
-            schemaVersion: 1,
-            batchId: c.manifest.batchId,
-            headSha: c.manifest.tipSha,
-            outcome: "success",
-            runId: 100,
-            runAttempt: 1,
-          }),
-        );
+        return new Response(zipResult(receiptResult(c)));
       }
       if (String(url).endsWith("/zip"))
         return new Response(null, {
@@ -813,7 +883,7 @@ describe("wire adapters and CLI", () => {
         artifacts: [
           {
             id: 500,
-            name: "batch-result",
+            name: "batch-result-1",
             expired: false,
             size_in_bytes: 100,
             workflow_run: { id: 100, head_sha: c.manifest.tipSha },
@@ -827,7 +897,7 @@ describe("wire adapters and CLI", () => {
         new GitHubAuth({ GH_TOKEN: "private" }),
         transport,
       ).resultArtifact(c.manifest, 100, 1),
-    ).toBe("success");
+    ).toEqual({ outcome: "success", retryable: false, reason: "fixture" });
     expect(leaked).toBe(false);
   });
   test("workflow identity and run conclusion, not check name, bind success", async () => {
@@ -852,13 +922,16 @@ describe("wire adapters and CLI", () => {
       })) as unknown as typeof fetch;
     class ReaderWithArtifact extends GitHubReader {
       override async resultArtifact() {
-        return "success" as const;
+        return { outcome: "success" as const, retryable: false, reason: "fixture" };
       }
     }
     const reader = new ReaderWithArtifact(cfg, new GitHubAuth({}), transport);
     expect((await reader.runs(c.manifest, c.branch))[0]!.trusted).toBe(false);
     conclusion = "success";
     expect((await reader.runs(c.manifest, c.branch))[0]!.trusted).toBe(true);
+    conclusion = "cancelled";
+    expect((await reader.runs(c.manifest, c.branch))[0]!.outcome).toBe("cancelled");
+    expect((await reader.runs(c.manifest, c.branch))[0]!.trusted).toBe(false);
     path = ".github/workflows/attacker.yml";
     expect(await reader.runs(c.manifest, c.branch)).toEqual([]);
   });
@@ -923,5 +996,181 @@ describe("wire adapters and CLI", () => {
   });
   test("canonical JSON is stable across object insertion order", () => {
     expect(canonical({ z: 1, a: 2 })).toBe(canonical({ a: 2, z: 1 }));
+  });
+});
+
+describe("integration boundaries and queue-only shadow CI", () => {
+  test("Version commit carries the literal main-CI isolation marker", async () => {
+    const f = await fixture();
+    const p = { ...pull(1, f.first), headRef: "changeset-release/main" };
+    const m = await f.git.build(spec([p], f.base));
+    expect(await f.git.exec(["show", "-s", "--format=%s", m.tipSha])).toContain(
+      "changeset-release/main",
+    );
+    expect(await f.git.inspect(m.tipSha)).toEqual(m);
+  });
+  test("control-plane changes are singleton barriers and require explicit review prose", () => {
+    const p = { ...pull(2), controlPlane: true };
+    expect(bindingKey(p)).not.toBe(bindingKey(pull(2)));
+    expect(fifo([pull(1), p, pull(3)], 16).map((x) => x.number)).toEqual([1]);
+    expect(fifo([p, pull(3)], 16)).toEqual([p]);
+    const input: PullInput = {
+      number: 2,
+      headSha: p.headSha,
+      headRef: p.headRef,
+      controlPlane: true,
+      draft: false,
+      autoMerge: false,
+      queueReady: true,
+      events: [{ id: "ready", at: NOW, source: "queue-ready", enabled: true }],
+      comments: [
+        {
+          id: "evidence",
+          updatedAt: NOW,
+          authorAssociation: "MEMBER",
+          body: `Head ${p.headSha}. VM tests passed. Independent review passed, reviewer session 12345678-1234-1234-1234-123456789abc.`,
+        },
+      ],
+    };
+    expect(admit(input).reason).toContain("control-plane");
+    input.comments[0]!.body += " Control-plane changes explicitly reviewed.";
+    expect(admit(input).ready?.controlPlane).toBe(true);
+  });
+  test("atomic push grants force semantics only to state, never main", async () => {
+    const f = await fixture();
+    let command: string[] = [];
+    class RecordingGit extends GitStore {
+      override async exec(args: string[], input?: string, env?: Record<string, string>) {
+        if (args[0] === "push") command = args;
+        return super.exec(args, input, env);
+      }
+    }
+    const git = new RecordingGit(f.git.dir),
+      m = await git.build(spec([pull(1, f.first)], f.base));
+    const next = await git.stateCommit({ ...emptyLedger(), epoch: 1 }, null, NOW);
+    await new AtomicGitWriter(git, f.origin.dir, cfg.stateRef, "refs/heads/main").transaction([
+      { ref: cfg.stateRef, expected: null, next },
+      { ref: "refs/heads/main", expected: f.base, next: m.tipSha },
+    ]);
+    expect(command.filter((x) => x.startsWith("--force-with-lease"))).toEqual([
+      `--force-with-lease=${cfg.stateRef}:`,
+    ]);
+    expect(command.some((x) => x.startsWith("+") || x === "--force")).toBe(false);
+  });
+  test("shadow-ci needs separately authorized non-CI state ref and cannot use main or queue", () => {
+    expect(() => config({ BATCHER_MODE: "shadow-ci" })).toThrow("explicitly authorized");
+    for (const ref of ["refs/heads/main", "refs/heads/queue/lease"])
+      expect(() =>
+        config({ BATCHER_MODE: "shadow-ci", BATCHER_SHADOW_CI_STATE_REF: ref }),
+      ).toThrow();
+    expect(
+      config({
+        BATCHER_MODE: "shadow-ci",
+        BATCHER_SHADOW_CI_STATE_REF: "refs/heads/batcher-shadow-ci-state",
+      }).mode,
+    ).toBe("shadow-ci");
+  });
+  test("two shadow-ci controllers atomically publish at most one candidate, never main/PR effects", async () => {
+    const f = await fixture();
+    const settings = config({
+      BATCHER_MODE: "shadow-ci",
+      BATCHER_SHADOW_CI_STATE_REF: "refs/heads/batcher-shadow-ci-state",
+      BATCHER_OUTPUT_DIR: join(f.root, "stage"),
+    });
+    const snapshot = { ...observation([pull(1, f.first)]), baseSha: f.base };
+    const publisher = new QueueOnlyPublisher(
+      settings,
+      new AtomicGitWriter(f.git, f.origin.dir, settings.stateRef, "refs/heads/main"),
+    );
+    const results = await Promise.allSettled(
+      ["A", "B"].map((owner) =>
+        new ShadowCiController(
+          settings,
+          { observe: async () => snapshot },
+          f.git,
+          publisher,
+          owner,
+        ).step(),
+      ),
+    );
+    expect(results.filter((x) => x.status === "fulfilled")).toHaveLength(1);
+    const refs = await f.git.remoteRefs(f.origin.dir);
+    expect(refs.get("refs/heads/main")).toBe(f.base);
+    const queues = [...refs].filter(([ref]) => ref.startsWith("refs/heads/queue/"));
+    expect(queues).toHaveLength(1);
+    const m = await f.git.inspect(queues[0]![1]);
+    const pending: Candidate = {
+      manifest: m,
+      branch: queues[0]![0].slice(11),
+      runs: [],
+      containedInBase: false,
+    };
+    let writes = 0;
+    const second = new ShadowCiController(
+      settings,
+      { observe: async () => ({ ...snapshot, candidates: [pending], ready: [pull(2, f.second)] }) },
+      f.git,
+      {
+        publish: async () => {
+          writes++;
+        },
+      },
+      "C",
+    );
+    expect((await second.step()).reason).toContain("occupied");
+    expect(writes).toBe(0);
+    const mutations = new GitHubMutations(
+      new GitHubReader(settings, new GitHubAuth({}), (async () => {
+        throw new Error("unexpected HTTP");
+      }) as unknown as typeof fetch),
+    );
+    await expect(mutations.announce(1, "forbidden")).rejects.toThrow("Shadow mode");
+  });
+  test("completed shadow candidate is compared with exact main baseline and never rerun/landed", async () => {
+    const f = await fixture();
+    const p = pull(1, f.first);
+    const s = { ...spec([p], f.base), createdAt: p.binding.at };
+    const m = await f.git.build(s);
+    const c: Candidate = {
+      manifest: m,
+      branch: `queue/${m.batchId}`,
+      runs: [],
+      containedInBase: false,
+    };
+    c.runs = [{ ...run(c, "success"), startedAt: NOW, completedAt: "2026-10-21T11:00:20Z" }];
+    const settings = config({
+      BATCHER_MODE: "shadow-ci",
+      BATCHER_SHADOW_CI_STATE_REF: "refs/heads/batcher-shadow-ci-state",
+      BATCHER_OUTPUT_DIR: join(f.root, "stage"),
+    });
+    let writes = 0;
+    const controller = new ShadowCiController(
+      settings,
+      { observe: async () => ({ ...observation([p], [c]), baseSha: f.base }) },
+      f.git,
+      {
+        publish: async () => {
+          writes++;
+        },
+      },
+      "A",
+      {
+        mainOutcomes: async (headSha) => [
+          {
+            headSha,
+            runId: 11,
+            runAttempt: 1,
+            conclusion: "success",
+            startedAt: NOW,
+            completedAt: "2026-10-21T11:00:30Z",
+          },
+        ],
+      },
+    );
+    expect((await controller.step()).reason).toContain("already observed");
+    expect(writes).toBe(0);
+    const stage = JSON.parse(await readFile(join(f.root, "stage/stage.json"), "utf8"));
+    expect(stage.comparisons[0].candidateSeconds).toBe(20);
+    expect(stage.comparisons[0].mainRuns[0].headSha).toBe(f.base);
   });
 });

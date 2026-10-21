@@ -37,8 +37,11 @@ export function fifo(pulls: Pull[], cap: number): Pull[] {
       compareText(a.binding.eventId, b.binding.eventId) ||
       a.number - b.number,
   );
-  if (ordered[0]?.headRef === "changeset-release/main") return ordered.slice(0, 1);
-  const barrier = ordered.findIndex((p) => p.headRef === "changeset-release/main");
+  if (ordered[0]?.headRef === "changeset-release/main" || ordered[0]?.controlPlane)
+    return ordered.slice(0, 1);
+  const barrier = ordered.findIndex(
+    (p) => p.headRef === "changeset-release/main" || p.controlPlane,
+  );
   return ordered.slice(0, Math.min(cap, barrier < 0 ? ordered.length : barrier));
 }
 export function descendants(id: string, candidates: Candidate[]): string[] {
@@ -131,7 +134,7 @@ export function plan(o: Observation, c: Config): Action {
           )
           .map((r) => `${r.id}/${r.attempt}`),
       ]).size;
-      if (run.trusted && run.outcome === "code_failure" && codeReds >= 2) {
+      if (run.trusted && run.outcome === "code_failure" && (codeReds >= 2 || !run.retryable)) {
         ledger.invalidated = [
           ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
         ];
@@ -139,7 +142,9 @@ export function plan(o: Observation, c: Config): Action {
         if (pulls.length === 1)
           ledger.ejected.push({
             pull: pulls[0]!,
-            reason: "two exact-candidate code failures (including one whole-candidate retry)",
+            reason: !run.retryable
+              ? "non-retryable exact-candidate code failure (process leak)"
+              : "two exact-candidate code failures (including one whole-candidate retry)",
             batchId: root.manifest.batchId,
             announced: false,
           });
@@ -205,7 +210,11 @@ export function plan(o: Observation, c: Config): Action {
     return { kind: "wait", reason: "bisection recovery is sequential; no speculative regrouping" };
   if (live.length >= c.speculationDepth)
     return { kind: "wait", reason: "speculation depth reached" };
-  if (live.some((x) => x.manifest.pulls.some((p) => p.headRef === "changeset-release/main")))
+  if (
+    live.some((x) =>
+      x.manifest.pulls.some((p) => p.headRef === "changeset-release/main" || p.controlPlane),
+    )
+  )
     return { kind: "wait", reason: "Version barrier in flight" };
   const assigned = new Set(live.flatMap((x) => x.manifest.pulls.map((p) => p.number)));
   const alreadyLanded = (p: Pull) =>
@@ -224,7 +233,7 @@ export function plan(o: Observation, c: Config): Action {
   );
   const pulls = fifo(queued, c.maxBatchSize);
   if (!pulls.length) return { kind: "wait", reason: "no eligible ready heads" };
-  if (live.length && pulls[0]!.headRef === "changeset-release/main")
+  if (live.length && (pulls[0]!.headRef === "changeset-release/main" || pulls[0]!.controlPlane))
     return { kind: "wait", reason: "Version waits for preceding batches" };
   const tail = live.find((x) => !live.some((y) => y.manifest.predecessor === x.manifest.batchId));
   return makeBuild(

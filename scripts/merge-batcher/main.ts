@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { Controller, LiveReader, type StepResult } from "./controller";
-import { GitStore } from "./git";
+import { AtomicGitWriter, GitStore } from "./git";
+import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { GitHubAuth, GitHubReader, githubCapabilities, requireActiveCapabilities } from "./github";
 import { assertSha, config, type Config } from "./model";
 
@@ -34,8 +35,27 @@ export async function main(
   const auth = new GitHubAuth({ ...env, BATCHER_MODE: settings.mode });
   const git = new GitStore(settings.gitDir, await auth.gitEnv());
   await git.init();
-  const reader = new LiveReader(new GitHubReader(settings, auth), git, settings);
-  const controller = new Controller(settings, reader, git, randomUUID());
+  const github = new GitHubReader(settings, auth);
+  const reader = new LiveReader(github, git, settings);
+  const controller =
+    settings.mode === "shadow-ci"
+      ? new ShadowCiController(
+          settings,
+          reader,
+          git,
+          new QueueOnlyPublisher(
+            settings,
+            new AtomicGitWriter(
+              git,
+              `https://github.com/${settings.repository}.git`,
+              settings.stateRef,
+              `refs/heads/${settings.baseBranch}`,
+            ),
+          ),
+          randomUUID(),
+          github,
+        )
+      : new Controller(settings, reader, git, randomUUID());
   await runService(settings, controller, values.once ?? false);
 }
 

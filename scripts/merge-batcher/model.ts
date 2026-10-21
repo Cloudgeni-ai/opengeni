@@ -33,6 +33,7 @@ export interface Pull {
   headSha: string;
   headRef: string;
   binding: ReadyBinding;
+  controlPlane?: boolean;
 }
 export interface BatchSpec {
   schemaVersion: 1;
@@ -58,6 +59,8 @@ export interface Run {
   outcome: Outcome;
   completedAt: string | null;
   trusted: boolean;
+  retryable: boolean;
+  startedAt?: string | null;
 }
 export interface Candidate {
   manifest: Manifest;
@@ -115,7 +118,7 @@ export interface Config {
   branchPrefix: string;
   stateRef: string;
   workflow: string;
-  mode: "shadow" | "active";
+  mode: "shadow" | "shadow-ci" | "active";
   maxBatchSize: number;
   maxInflight: number;
   speculationDepth: number;
@@ -132,7 +135,8 @@ export function config(env: Record<string, string | undefined>): Config {
     return n;
   };
   const mode = env.BATCHER_MODE ?? "shadow";
-  if (mode !== "shadow" && mode !== "active") throw new Error("Invalid BATCHER_MODE");
+  if (mode !== "shadow" && mode !== "shadow-ci" && mode !== "active")
+    throw new Error("Invalid BATCHER_MODE");
   const repository = env.BATCHER_REPOSITORY ?? "Cloudgeni-ai/opengeni";
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid repository");
   const baseBranch = env.BATCHER_BASE_BRANCH ?? "main";
@@ -143,12 +147,24 @@ export function config(env: Record<string, string | undefined>): Config {
   }
   if (!branchPrefix.endsWith("/") || baseBranch.startsWith(branchPrefix))
     throw new Error("Queue namespace must be separate from base");
+  const stateRef =
+    mode === "shadow-ci" ? env.BATCHER_SHADOW_CI_STATE_REF : "refs/heads/batcher-state";
+  if (
+    !stateRef ||
+    (mode === "shadow-ci" && stateRef !== "refs/heads/batcher-shadow-ci-state") ||
+    !/^refs\/heads\/[\w/-]+$/.test(stateRef) ||
+    stateRef === `refs/heads/${baseBranch}` ||
+    stateRef.startsWith(`refs/heads/${branchPrefix}`)
+  )
+    throw new Error(
+      "Shadow-ci requires explicitly authorized BATCHER_SHADOW_CI_STATE_REF outside main and queue (otherwise its lease would trigger CI)",
+    );
   return {
     repository,
     baseBranch,
     branchPrefix,
     mode,
-    stateRef: "refs/heads/batcher-state",
+    stateRef,
     workflow: ".github/workflows/batch-ci.yml",
     maxBatchSize: integer("BATCHER_MAX_BATCH_SIZE", 16, 256),
     maxInflight: integer("BATCHER_MAX_INFLIGHT", 1, 16),
@@ -161,7 +177,12 @@ export function config(env: Record<string, string | undefined>): Config {
   };
 }
 export const bindingKey = (pull: Pull): string =>
-  digest({ number: pull.number, headSha: pull.headSha, binding: pull.binding });
+  digest({
+    number: pull.number,
+    headSha: pull.headSha,
+    binding: pull.binding,
+    controlPlane: pull.controlPlane ?? false,
+  });
 export const ejectionKey = (pull: Pull): string =>
   digest({
     number: pull.number,
@@ -205,7 +226,10 @@ export function validateSpec(value: unknown): BatchSpec {
       throw new Error("Invalid batch member");
     seen.add(p.number);
   }
-  if (spec.pulls.length > 1 && spec.pulls.some((p) => p.headRef === "changeset-release/main"))
+  if (
+    spec.pulls.length > 1 &&
+    spec.pulls.some((p) => p.headRef === "changeset-release/main" || p.controlPlane)
+  )
     throw new Error("Version must be singleton");
   return spec;
 }

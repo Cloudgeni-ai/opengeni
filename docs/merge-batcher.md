@@ -3,7 +3,9 @@
 This is the OPE-834 in-house batcher core. It uses Bun 1.4.3, built-in APIs and
 Git (2.38 or newer for `merge-tree --write-tree`). No database, checkout, native
 `merge_group`, vendor queue, cloud SDK or cloud-specific state service is used.
-The default and currently supported GitHub operating mode is **read-only shadow**.
+The default mode is **read-only shadow**. Opt-in `shadow-ci` publishes candidates
+without landing them, subject to the dedicated state-ref authorization below.
+No live writer was exercised by this implementation task.
 
 ## Activation boundary
 
@@ -23,15 +25,25 @@ The provider contract requires all of:
   outcomes and lease transfer. GitHub REST side effects are not transactions
   with a Git ref update.
 
-`githubCapabilities` declares these unsupported/unverified. Setting an
+Read-only research established that GitHub advertises atomic receive-pack.
+PR-metadata and REST-effect transaction guarantees remain unsupported;
+`githubCapabilities` distinguishes these boundaries. Setting an
 environment variable cannot override them. `AdmissionCoordinator` and
 `FencedGitExecutor` are the typed integration point for a provider that can
 actually supply the contract. Do not implement that contract as read-then-write
-or turn capability booleans on without establishing its semantics. GitHub
-atomic receive-pack availability must be established by the rollout owner;
+or turn capability booleans on without establishing its semantics;
 this implementation never falls back from `git push --atomic` to separate pushes.
 Repository rulesets, App permissions and bypass policy are separate activation
 dependencies, not evidence that these transaction guarantees exist.
+
+The achievable weaker GitHub invariant is “only the exact tested snapshot
+lands,” not “no PR head can change after the final HTTP read.” A future active
+adapter adopting that explicitly accepted invariant must reconcile afterward
+and never automatically close or claim to have tested a newer PR head. This
+executable retains the original strict active-mode refusal rather than silently
+relaxing that invariant. Keep non-FF/deletion guards in a separate ruleset the
+batcher cannot bypass; bypass of a combined PR-admission rule also bypasses its
+non-FF/deletion protections.
 
 The parent workflow integration and production deployment are separate work.
 No branch/ruleset/permission/cloud activation is performed by this code change.
@@ -43,6 +55,11 @@ No branch/ruleset/permission/cloud activation is performed by this code change.
 bun scripts/merge-batcher/main.ts shadow --once
 
 # Poll; still shadow unless explicitly configured otherwise.
+bun scripts/merge-batcher/main.ts run
+
+# Only after queue publication AND the dedicated state ref are authorized:
+BATCHER_MODE=shadow-ci \
+BATCHER_SHADOW_CI_STATE_REF=refs/heads/batcher-shadow-ci-state \
 bun scripts/merge-batcher/main.ts run
 
 # CI interface: stdout contains only the inspected JSON manifest.
@@ -73,7 +90,8 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_REPOSITORY` | `Cloudgeni-ai/opengeni` |
 | `BATCHER_BASE_BRANCH` | `main` |
 | `BATCHER_BRANCH_PREFIX` | `queue/` |
-| `BATCHER_MODE` | `shadow`; `active` requires a supported fenced adapter |
+| `BATCHER_MODE` | `shadow`, opt-in `shadow-ci`; `active` requires a supported fenced adapter |
+| `BATCHER_SHADOW_CI_STATE_REF` | No default; explicitly authorize `refs/heads/batcher-shadow-ci-state` |
 | `BATCHER_MAX_BATCH_SIZE` | `16` |
 | `BATCHER_MAX_INFLIGHT` | `1` hosted candidate CI |
 | `BATCHER_SPECULATION_DEPTH` | `2`, including current candidate |
@@ -93,6 +111,8 @@ existing-token live-shadow path uses no token-creation API. Credentials are
 passed to Git through environment-based configuration, never command arguments,
 remote URLs, files, stage output or logs. Provider response bodies and Git stderr
 are suppressed on errors to avoid credential leakage.
+Shadow-ci App authentication requests contents/workflows write and
+actions/pull_requests/issues read, not comment/label or Actions rerun writes.
 
 Public repository reads can work without credentials, but private repository
 access and GraphQL ready-event discovery require suitable read permissions.
@@ -135,6 +155,12 @@ workflow changes. The parent owns that workflow/ruleset enforcement.
 
 ## Immutable candidates and CI result contract
 
+Version commit subjects retain literal `changeset-release/main` for the existing
+non-coalescing main-CI lane. PRs touching `.github/workflows/batch-ci.yml`,
+`scripts/ci/batch-*` or `scripts/merge-batcher/**` are also singleton barriers.
+Their normal exact-head VM/independent-review comment must explicitly mention
+**control-plane** review; generic review alone does not admit these changes.
+
 Each member is one two-parent merge commit built with `git merge-tree --write-tree`
 and `git commit-tree`. Parent 1 is the preceding tested/base tip; parent 2 is the
 exact PR head. No checkout or merge-script execution occurs. The commit timestamp
@@ -161,8 +187,9 @@ returning at least:
 The parent supplies `.github/workflows/batch-ci.yml`, triggered by **push to
 `queue/**` only**, with aggregate `Batch ready`. The reader binds the workflow
 path, push event, exact branch, head SHA, run ID and attempt. It does not use
-`Batch ready` alone as proof. The workflow must upload an artifact named
-`batch-result` containing exactly one `batch-result.json` (or `result.json`):
+`Batch ready` alone as proof. The workflow uploads attempt-specific
+`batch-result-${runAttempt}` containing one `batch-result.json` (or `result.json`).
+Its aggregate identity fields are:
 
 ```json
 {
@@ -170,24 +197,37 @@ path, push event, exact branch, head SHA, run ID and attempt. It does not use
   "batchId": "<64hex>",
   "headSha": "<40sha>",
   "outcome": "success",
-  "runId": 123,
-  "runAttempt": 1
+  "runId": "123",
+  "runAttempt": 1,
+  "retryable": false,
+  "reason": "All selected checks passed",
+  "expectedJobs": ["plan", "source"],
+  "jobs": { "plan": "success", "source": "success", "units": "skipped" },
+  "tasks": ["<complete plan receipt>", "<complete source receipt>"]
 }
 ```
 
 `outcome` is `success`, `code_failure`, `infrastructure` or `cancelled`.
-`runId`/`runAttempt` must be JSON numbers (convert GitHub expression strings).
+The `tasks` placeholders must be replaced by objects, not strings. Every receipt
+has schemaVersion, batchId, headSha, **string** runId, numeric runAttempt, job,
+exitCode, outcome, retryable, startedAt and finishedAt. Expected jobs are `plan`,
+`source`, then contiguous `unit-0` through `unit-N` (at most 16 shards).
+Generic `batch-result` artifacts and numeric runId payloads are not this contract.
+Every task identity, duplicate/missing job, timestamp and process-exit
+classification is independently reverified. A verified red may coexist with
+missing/infrastructure siblings, but partial evidence never becomes green.
+Cancellation wins over code failure.
 Success additionally needs the matching workflow run conclusion `success`;
 code failure needs `failure`. Missing/expired/ambiguous/malformed artifacts,
 wrong attempts/branches/workflows and other conclusions are unknown, never
 evidence against a PR. Archive reading is bounded and never extracts paths.
 
-GitHub reruns may replace an artifact of the same name. Before requesting its
+Retries rerun the **entire workflow**, never only failed jobs. Before requesting its
 whole-candidate retry, the controller durably records the trusted exact run/attempt
 code-failure receipt in Git-backed state. That receipt survives artifact replacement
 and process restart. For historical runs not observed before their artifacts
-expired, the controller does not invent failure evidence. The parent may extend
-the adapter to attempt-qualified artifact names while retaining the binding fields.
+expired, the controller does not invent failure evidence. Attempt-specific names
+retain history without weakening the identity bindings.
 Unknown result evidence can exhaust its bounded retry budget and require
 operator investigation rather than endlessly rerunning or ejecting a PR.
 
@@ -200,7 +240,9 @@ rebuilt after cache loss. Configured additional in-flight capacity is explicit.
 Invalidated descendants still occupy CI slots while running: no cancellation
 operation exists in the adapter.
 
-A trusted code-red result gets one whole-candidate retry. Two trusted code-red
+A retryable trusted code-red result gets one whole-candidate retry. Exit 70 is
+non-retryable process-leak evidence and goes directly to bisection/ejection.
+Two trusted retryable code-red
 attempts split the ordered candidate at `ceil(length / 2)`; halves are tested
 sequentially against the actual landed base. Repeated singleton failure ejects
 that exact head with an exact-head reason comment. Changed heads and new ready
@@ -215,16 +257,27 @@ exponentially from 60 seconds to at most 3,600 seconds, with an eight-attempt
 budget. Retry intent is durable before effect submission. An uncertain effect
 does not get blindly replayed after restart; its observable intent waits for
 provider reconciliation. No running job is cancelled.
+Exit 75 (setup), 124/126/127, negative exits and OOM/signal exits are
+infrastructure; 130/143 are cancellation. Missing plan/batch identity or missing
+or unverifiable result receipts are infrastructure, never code-red evidence.
 
 Before landing, the controller inspects the exact tested commit, verifies
 fast-forward ancestry separately, re-observes heads/readiness/evidence/run state,
 then asks the provider to atomically fence those bindings and the durable lease
-with main's exact old SHA. Main moves to the **already-tested tip**, never a
-freshly rebuilt commit after testing. The Git adapter uses exact
-`--force-with-lease=<ref>:<expected>` as the CAS mechanism, never `--force` or
-`+main`; independent ancestry validation forbids non-fast-forward main updates.
+with main's ref update. Main moves to the **already-tested tip**, never a
+freshly rebuilt commit after testing. Git uses
+`--force-with-lease=<state-ref>:<expected>` **only on the changing state ref**.
+Main uses ordinary FF-only semantics plus a separate local ancestry assertion:
+no main-specific force-with-lease, `--force` or `+main`. A main-specific lease
+would authorize non-FF on an unprotected server and is deliberately absent.
+The explicit pre-push read catches observed base races, but ordinary FF push
+does not independently assert original-base equality: an advance to another
+ancestor of the tested tip may still be accepted. Receive-pack checks its
+advertised old main value atomically with the changing lease.
 It also checks snapshots explicitly because Git omits already-up-to-date refs
 before wire-level lease checks. The lease ref must change in every transaction.
+Expiry is a client takeover policy; stale owners are fenced by a changed remote
+lease generation, not wall-clock expiry alone.
 
 Durable state is an ordinary Git commit tree containing `state.json`, reachable
 from `refs/heads/batcher-state`. It stores owner/epoch/expiry, landed/invalidated
@@ -238,6 +291,33 @@ State retention/compaction is an operator-owned future extension; no automatic
 remote ref deletion is performed by this implementation.
 
 ## Shadow evidence and operations
+
+### Shadow with real CI, never landing
+
+`shadow-ci` uses a separate controller and a `QueueOnlyPublisher` that can express
+only a create-only candidate plus a changing dedicated state ref. It cannot
+express main updates, PR comments/ejections/labels/readiness, deletion or REST
+reruns. It admits at most one controller-generated hosted candidate, regardless
+of a larger configured max-inflight; published-but-not-started and stale running
+candidates still occupy that slot. Concurrent controllers atomically compete
+on the state ref. Uncoordinated external publishers/manual reruns are outside
+this rate-limit guarantee: protect the writer namespace.
+
+**Queue publication authority alone does not authorize the control ref.** The
+rollout owner must also authorize `refs/heads/batcher-shadow-ci-state`, then
+set `BATCHER_SHADOW_CI_STATE_REF` to that exact value. Without that explicit
+opt-in, the mode fails before authentication/writes. Keeping lease commits
+outside `queue/**` avoids spurious second CI runs. Neither read-only shadow nor
+this implementation task creates that control ref.
+
+The same exact candidate is not automatically republished/rerun after completion.
+New eligible snapshots can publish after a fresh head/evidence/base check and
+atomic state update. `stage.json` compares candidate verdicts/timings with
+main-CI runs on the exact original base SHA. These are baseline comparisons,
+not equivalent-tree claims: shadow candidates contain unlanded PR heads.
+Missing results remain observable infrastructure, never ejection/comment effects.
+
+### Strictly read-only shadow
 
 `shadow --once` performs only reads plus local Git object construction. It never
 instantiates the write executor, and even an accidentally supplied executor is
