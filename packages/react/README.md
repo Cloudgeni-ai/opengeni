@@ -1083,8 +1083,10 @@ state remains application-owned; durable draft and session state remain in
   window.
 - History is conversation-first: windowed reads exclude a turn's steps
   (`SESSION_EVENT_STEP_TYPES`: tool calls, tool outputs, reasoning and command
-  output deltas) but keep presented tool results such as images and published
-  files. Each turn with unloaded steps gets a `turn-steps` timeline item, which
+  output deltas, and the model request and usage rows of each model call) but
+  keep presented tool results such as images and published files, and the
+  model request rows up to a turn's first model response (its startup phases).
+  Each turn with unloaded steps gets a `turn-steps` timeline item, which
   readable work rows render when opened. Opening a turn reads its newest
   `SESSION_TURN_STEP_PAGE_SIZE` steps, and "Show earlier steps" pages back.
   Live steps go to per-turn stores outside the conversation window, so a long
@@ -1101,6 +1103,16 @@ state remains application-owned; durable draft and session state remain in
   reads its newest page again. That signal comes from this package's
   `useSessionEvents`; a terminal fed with `events` from elsewhere reads its
   history only when opened.
+- The package and the Opengeni server can be upgraded in either order. A
+  server that applies the conversation filter says so in the
+  `X-OpenGeni-Conversation-Filter` response header
+  (`SESSION_EVENT_CONVERSATION_FILTER_VERSION`). Without it, history reads keep
+  tool calls and model bookkeeping and drop non-presented calls in the browser,
+  so an older server that ignores `presentedToolCalls` loses no image,
+  published file or Skill card. The header is read through `listEventPage`:
+  a client without it (for example a host proxy exposing only `listEvents`)
+  always uses that fallback. `createEmbeddedSessionClient` keeps
+  `listEventPage` when the base client has it.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
   The live working set is at most 16 MiB or 20,000 events. One event larger than

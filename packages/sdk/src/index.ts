@@ -203,9 +203,15 @@ export {
 } from "@opengeni/contracts/session-final-reply";
 export type { EmptyFinalReplyCompletion } from "@opengeni/contracts/session-final-reply";
 export {
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
+  SESSION_EVENT_CONTENT_STEP_TYPES,
+  SESSION_EVENT_CONVERSATION_FILTER_HEADER,
+  SESSION_EVENT_CONVERSATION_FILTER_VERSION,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_STEP_TYPES,
   isPresentedSessionToolName,
+  isSessionModelResponsePhase,
 } from "@opengeni/contracts/session-history";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
 export type {

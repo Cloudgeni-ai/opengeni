@@ -21,7 +21,7 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 import { timelineQuestionPlacement } from "../src/timeline/projection";
 import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
 import {
-  SESSION_EVENT_STEP_TYPES,
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_TYPES,
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -39,8 +39,10 @@ registerDom();
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const SESSION_HISTORY_PAGE_SIZE = 1000;
 // Windowed history reads the conversation; a turn's steps load when opened.
+// These fakes have no listEventPage, so they cannot see the server announce
+// its conversation filter: tool calls are read and dropped by the reader.
 const CONVERSATION_READ = {
-  excludeTypes: [...SESSION_EVENT_STEP_TYPES],
+  excludeTypes: [...SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES],
   presentedToolCalls: "include",
 } as const;
 

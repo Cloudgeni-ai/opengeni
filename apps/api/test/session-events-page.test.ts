@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { sessionEventPayloadTruncation, signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
+  SESSION_EVENT_STEP_TYPES,
+  sessionEventPayloadTruncation,
+  signDelegatedAccessToken,
+} from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -112,6 +117,164 @@ async function fixture(): Promise<{
     authorization,
   };
 }
+
+describe("conversation-first event reads", () => {
+  test("announce the conversation filter and keep the bookkeeping each page's turns draw", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const [tools, plain, failed] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    const rows: Array<[number, string, Record<string, unknown>, string | null]> = [
+      [1, "user.message", { text: "question" }, null],
+      [2, "turn.started", {}, tools],
+      [3, "agent.model.request", { phase: "started" }, tools],
+      [4, "agent.model.request", { phase: "headers" }, tools],
+      [5, "agent.model.request", { phase: "first_byte" }, tools],
+      [6, "agent.model.request", { phase: "completed" }, tools],
+      [7, "agent.model.usage", { inputTokens: 10 }, tools],
+      [8, "agent.toolCall.created", { id: "c1", name: "exec_command", arguments: {} }, tools],
+      [9, "agent.toolCall.output", { id: "c1", output: "ok" }, tools],
+      [10, "agent.model.request", { phase: "started" }, tools],
+      [11, "agent.model.request", { phase: "first_byte" }, tools],
+      [12, "agent.model.request", { phase: "completed" }, tools],
+      [13, "agent.model.usage", { inputTokens: 10 }, tools],
+      [14, "agent.message.completed", { text: "answer" }, tools],
+      [15, "turn.completed", {}, tools],
+      [16, "user.message", { text: "thanks" }, null],
+      [17, "turn.started", {}, plain],
+      [18, "agent.model.request", { phase: "started" }, plain],
+      [19, "agent.model.request", { phase: "first_byte" }, plain],
+      [20, "agent.model.request", { phase: "completed" }, plain],
+      [21, "agent.model.usage", { inputTokens: 10 }, plain],
+      [22, "agent.message.completed", { text: "welcome" }, plain],
+      [23, "turn.completed", {}, plain],
+      [24, "user.message", { text: "again" }, null],
+      [25, "turn.started", {}, failed],
+      [26, "agent.model.request", { phase: "started" }, failed],
+      [27, "agent.model.request", { phase: "timed_out" }, failed],
+      [28, "turn.failed", {}, failed],
+    ];
+    for (const [sequence, type, payload, turnId] of rows) {
+      await admin`
+        insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${session!.accountId}, ${workspaceId}, ${sessionId}, ${turnId}, ${sequence}, ${type},
+          ${admin.json(payload as never)})`;
+    }
+    const read = async (query: string) => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?compact=1&payloadMode=full&${query}`,
+        { headers: { authorization } },
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Array<{ sequence: number }>;
+      return {
+        sequences: body.map((event) => event.sequence),
+        announced: response.headers.get("X-OpenGeni-Conversation-Filter"),
+        hasMore: response.headers.get("X-OpenGeni-Has-More"),
+      };
+    };
+    const conversation = `excludeTypes=${SESSION_EVENT_STEP_TYPES.join(",")}&presentedToolCalls=include`;
+
+    expect(await read(`${conversation}&before=1000&limit=100`)).toEqual({
+      sequences: [1, 2, 3, 4, 5, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
+      announced: "2",
+      hasMore: "false",
+    });
+    // Paging back: each page adds only rows within what it covers.
+    const newest = await read(`${conversation}&before=1000&limit=4`);
+    expect(newest).toEqual({
+      sequences: [23, 24, 25, 26, 27, 28],
+      announced: "2",
+      hasMore: "true",
+    });
+    const middle = await read(`${conversation}&before=23&limit=4`);
+    expect(middle.sequences).toEqual([15, 16, 17, 18, 19, 20, 21, 22]);
+    const oldest = await read(`${conversation}&before=15&limit=4`);
+    expect(oldest).toEqual({ sequences: [1, 2, 3, 4, 5, 14], announced: "2", hasMore: "false" });
+    // Forward pages stop at their last row too.
+    const forward = await read(`${conversation}&after=0&direction=after&limit=3`);
+    expect(forward.sequences).toEqual([1, 2, 3, 4, 5, 14]);
+    // Any page size, either direction: the pages add up to the unpaged read,
+    // also when a page ends at a turn's start and the next holds none of its
+    // rows' anchors.
+    const unpaged = [1, 2, 3, 4, 5, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28];
+    for (let limit = 1; limit <= 6; limit += 1) {
+      const forwardPages: number[] = [];
+      for (let after = 0, pages = 0; pages < 40; pages += 1) {
+        const page = await read(`${conversation}&after=${after}&direction=after&limit=${limit}`);
+        forwardPages.push(...page.sequences);
+        if (page.hasMore !== "true" || page.sequences.length === 0) break;
+        after = page.sequences.at(-1)!;
+      }
+      expect({ limit, sequences: forwardPages }).toEqual({ limit, sequences: unpaged });
+      const backwardPages: number[] = [];
+      for (let before = 1000, pages = 0; pages < 40; pages += 1) {
+        const page = await read(`${conversation}&before=${before}&limit=${limit}`);
+        backwardPages.unshift(...page.sequences);
+        if (page.hasMore !== "true" || page.sequences.length === 0) break;
+        before = page.sequences[0]!;
+      }
+      expect({ limit, sequences: backwardPages }).toEqual({ limit, sequences: unpaged });
+    }
+
+    // An older reader's fallback keeps tool calls and bookkeeping; the
+    // announcement tells it the server applies presentedToolCalls.
+    const compat = await read(
+      `excludeTypes=${SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES.join(",")}&presentedToolCalls=include&before=1000&limit=100`,
+    );
+    expect(compat.announced).toBe("2");
+    expect(compat.sequences).toEqual(
+      rows.map(([sequence]) => sequence).filter((sequence) => sequence !== 9),
+    );
+    // Other readers see no announcement and no added rows.
+    const plainRead = await read(
+      `excludeTypes=${SESSION_EVENT_STEP_TYPES.join(",")}&before=1000&limit=100`,
+    );
+    expect(plainRead.announced).toBeNull();
+    expect(plainRead.sequences).toEqual([1, 2, 14, 15, 16, 17, 22, 23, 24, 25, 28]);
+  });
+
+  test("a read past a running turn's start keeps its startup rows with no other row in range", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const turn = crypto.randomUUID();
+    const rows: Array<[number, string, Record<string, unknown>, string | null]> = [
+      [1, "user.message", { text: "question" }, null],
+      [2, "turn.started", {}, turn],
+      [3, "agent.model.request", { phase: "started" }, turn],
+      [4, "agent.model.request", { phase: "first_byte" }, turn],
+      [5, "agent.toolCall.created", { id: "c1", name: "exec_command", arguments: {} }, turn],
+      [6, "agent.model.request", { phase: "started" }, turn],
+      [7, "agent.model.usage", { inputTokens: 10 }, turn],
+    ];
+    for (const [sequence, type, payload, turnId] of rows) {
+      await admin`
+        insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${session!.accountId}, ${workspaceId}, ${sessionId}, ${turnId}, ${sequence}, ${type},
+          ${admin.json(payload as never)})`;
+    }
+    const conversation = `excludeTypes=${SESSION_EVENT_STEP_TYPES.join(",")}&presentedToolCalls=include`;
+    const read = async (query: string) => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?compact=1&payloadMode=full&${conversation}&${query}`,
+        { headers: { authorization } },
+      );
+      expect(response.status).toBe(200);
+      return ((await response.json()) as Array<{ sequence: number }>).map(
+        (event) => event.sequence,
+      );
+    };
+    expect(await read("before=1000&limit=100")).toEqual([1, 2, 3, 4]);
+    // Catching up from the turn start (or later) finds only bookkeeping rows.
+    expect(await read("after=2&direction=after&limit=100")).toEqual([3, 4]);
+    expect(await read("after=3&direction=after&limit=100")).toEqual([4]);
+    expect(await read("after=4&direction=after&limit=100")).toEqual([]);
+    expect(await read("after=2&before=4&limit=100")).toEqual([3]);
+  });
+});
 
 describe("session event byte-bounded HTTP pages", () => {
   test("no-cursor monitoring returns a semantic tail instead of the oldest 40 deltas", async () => {
