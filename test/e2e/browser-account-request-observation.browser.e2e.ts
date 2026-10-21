@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { chromium, type Browser, type Page, type Request } from "playwright";
 import {
+  cancelledWithReplacedDocument,
   DocumentRequestLedger,
   isBrowserCancellation,
   observeChromiumNeutralSessionSetRequestAuthority,
@@ -63,6 +64,81 @@ test("the document ledger attributes requests to the document that issued them",
   // Unknown requests are never claimed.
   expect(ledger.replaced({})).toBe(false);
   expect(ledger.replacing({})).toBe(false);
+});
+
+test("a cancellation reported before its replacing navigation is attributed after one round trip", async () => {
+  const ledger = new DocumentRequestLedger();
+  const document = {};
+  ledger.request(document, "http://127.0.0.1/a");
+  ledger.response(document);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/a")).toBe(true);
+  let roundTrips = 0;
+
+  // Evidence present at failure needs no round trip.
+  const replacedRead = {};
+  ledger.request(replacedRead, null);
+  const firstReload = {};
+  ledger.request(firstReload, "http://127.0.0.1/a");
+  expect(
+    await cancelledWithReplacedDocument(ledger, replacedRead, true, async () => {
+      roundTrips += 1;
+    }),
+  ).toBe(true);
+  ledger.response(firstReload);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/a")).toBe(true);
+  expect(roundTrips).toBe(0);
+
+  // The engine reports the read's cancellation first; the round trip delivers
+  // the reload's document request that took it down.
+  const read = {};
+  ledger.request(read, null);
+  expect(ledger.replaced(read) || ledger.replacing(read)).toBe(false);
+  const reload = {};
+  expect(
+    await cancelledWithReplacedDocument(ledger, read, false, async () => {
+      roundTrips += 1;
+      ledger.request(reload, "http://127.0.0.1/a");
+    }),
+  ).toBe(true);
+  expect(roundTrips).toBe(1);
+  ledger.response(reload);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/a")).toBe(true);
+
+  // The same holds when the round trip already delivers the commit.
+  const committedRead = {};
+  ledger.request(committedRead, null);
+  const navigation = {};
+  expect(
+    await cancelledWithReplacedDocument(ledger, committedRead, false, async () => {
+      ledger.request(navigation, "http://127.0.0.1/b");
+      ledger.response(navigation);
+      expect(ledger.mainFrameNavigated("http://127.0.0.1/b")).toBe(true);
+    }),
+  ).toBe(true);
+
+  // A cancellation no navigation explains stays unexplained, including when
+  // the round trip fails or delivers a navigation that never replaces it.
+  const aborted = {};
+  ledger.request(aborted, null);
+  expect(await cancelledWithReplacedDocument(ledger, aborted, false, async () => {})).toBe(false);
+  expect(
+    await cancelledWithReplacedDocument(ledger, aborted, false, async () => {
+      throw new Error("execution context was destroyed");
+    }),
+  ).toBe(false);
+  const failedNavigation = {};
+  expect(
+    await cancelledWithReplacedDocument(ledger, aborted, false, async () => {
+      ledger.request(failedNavigation, "http://127.0.0.1/c");
+      ledger.failed(failedNavigation);
+    }),
+  ).toBe(false);
+  // An unknown request is never claimed, even while a navigation is pending.
+  expect(
+    await cancelledWithReplacedDocument(ledger, {}, false, async () => {
+      ledger.request({}, "http://127.0.0.1/e");
+    }),
+  ).toBe(false);
 });
 
 test.each([
