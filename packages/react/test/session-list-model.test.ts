@@ -5,6 +5,7 @@ import {
   applySessionPinToLists,
   groupSessionsByProject,
   groupSessionsForRail,
+  homeSessionSections,
   recentSessionModelPresentation,
   recentSessionStatus,
   recentSessionsForHome,
@@ -109,6 +110,31 @@ describe("session-list-model", () => {
         (row) => row.id,
       ),
     ).toEqual(["mine"]);
+  });
+
+  test("phone home sections: every pin, then recent work that pins never crowd out", () => {
+    const pins = Array.from({ length: 7 }, (_, index) =>
+      session(`pin-${index}`, { pinned: true, updatedAt: "2026-10-03T11:40:00Z" }),
+    );
+    const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
+    const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
+    const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
+    const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
+    const agent = session("agent", { status: "running", parentSessionId: "a" });
+    const sections = homeSessionSections(
+      englishText,
+      [older, ...pins, recent, agent, running],
+      [...pins, pinnedAgent],
+      15,
+      now,
+    );
+    expect(sections.pinned.map((row) => row.id)).toEqual(pins.map((pin) => pin.id));
+    expect(sections.recent.map((row) => row.id)).toEqual(["r", "a", "b"]);
+    expect(
+      homeSessionSections(englishText, [older, recent, running], [], 2, now).recent.map(
+        (row) => row.id,
+      ),
+    ).toEqual(["r", "a"]);
   });
 
   test("status dot: background commands read as running", () => {
