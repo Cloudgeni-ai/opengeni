@@ -16,6 +16,24 @@ async fn main() {
         }
         return;
     }
+    // `window presence|restore`: one-shot window commands, JSON on stdin.
+    let mut arguments = std::env::args().skip(1);
+    if arguments.next().as_deref() == Some("window") {
+        let command = arguments.next().unwrap_or_default();
+        let mut input = String::new();
+        let answer = tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input)
+            .await
+            .map_err(|error| format!("could not read the window {command} request: {error}"))
+            .and_then(|_| opengeni_computer_native::run_window_command(&command, &input));
+        match answer {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("opengeni-computer-native: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Err(error) = opengeni_computer_native::run_native_rpc().await {
         eprintln!("opengeni-computer-native: {error}");
         std::process::exit(1);
