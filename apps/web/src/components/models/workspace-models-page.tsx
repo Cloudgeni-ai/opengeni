@@ -1233,34 +1233,8 @@ export function WorkspaceModelsPageBody({
                   workspaceName={workspaceName}
                   scope={labels.everyone}
                 />
-                <ConnectedSubscriptionUsagePool
-                  client={client}
-                  scope="workspace"
-                  id={workspaceId}
-                  provider="codex"
-                />
-                <CodexAccountRows
-                  codex={codex}
-                  places={codexPlaces}
-                  organization={codexPool}
-                  onKeptForPeople={reportKeptForPeople}
-                />
-                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
-                {claudeEnabled ? (
-                  <ConnectedSubscriptionUsagePool
-                    client={client}
-                    scope="workspace"
-                    id={workspaceId}
-                    provider="claude"
-                  />
-                ) : null}
-                {claudeEnabled ? (
-                  <ClaudeAccountRows
-                    claude={claude}
-                    places={claudePlaces}
-                    organization={claudePool}
-                  />
-                ) : null}
+                {/* Keys and unpooled accounts first: each pooled provider below
+                    starts with its own card and runs to the end of the list. */}
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}
@@ -1290,6 +1264,34 @@ export function WorkspaceModelsPageBody({
                     onOpen={() => nav.openAccount(accountKey("gateway", id))}
                   />
                 ))}
+                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
+                />
+                <CodexAccountRows
+                  codex={codex}
+                  places={codexPlaces}
+                  organization={codexPool}
+                  onKeptForPeople={reportKeptForPeople}
+                />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
+                {claudeEnabled ? (
+                  <ClaudeAccountRows
+                    claude={claude}
+                    places={claudePlaces}
+                    organization={claudePool}
+                  />
+                ) : null}
               </RowList>
             }
             providerSections={

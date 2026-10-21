@@ -445,6 +445,27 @@ export function OrganizationModelsList({
 
   const orgRows = administrator ? (
     <>
+      {/* Keys and unpooled accounts first: each pooled provider below
+          starts with its own card and runs to the end of the list. */}
+      {orgGrok.unavailable ? null : (
+        <OrganizationSuperGrokRows
+          grok={orgGrok}
+          labels={labels}
+          onOpen={(id) => onOpenAccount(accountKey("supergrok", id, true))}
+        />
+      )}
+      {GATEWAYS.filter((id) => providerListed(orgGateways[id])).map((id) => (
+        <OrganizationKeyRow
+          key={`org:${id}`}
+          state={orgGateways[id]}
+          labels={labels}
+          onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
+        />
+      ))}
+    </>
+  ) : null;
+  const orgPooledRows = administrator ? (
+    <>
       {organizationId ? (
         <ConnectedSubscriptionUsagePool
           client={client}
@@ -482,21 +503,6 @@ export function OrganizationModelsList({
           }}
         />
       ) : null}
-      {orgGrok.unavailable ? null : (
-        <OrganizationSuperGrokRows
-          grok={orgGrok}
-          labels={labels}
-          onOpen={(id) => onOpenAccount(accountKey("supergrok", id, true))}
-        />
-      )}
-      {GATEWAYS.filter((id) => providerListed(orgGateways[id])).map((id) => (
-        <OrganizationKeyRow
-          key={`org:${id}`}
-          state={orgGateways[id]}
-          labels={labels}
-          onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
-        />
-      ))}
     </>
   ) : null;
 
@@ -613,6 +619,7 @@ export function OrganizationModelsList({
             {orgRows}
             {sharedRows}
             {ownRows}
+            {orgPooledRows}
             {loadingWorkspaces ? <ListRowSkeleton count={1} /> : null}
           </RowList>
         )}
