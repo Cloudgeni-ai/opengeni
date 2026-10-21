@@ -2910,10 +2910,22 @@ persistent checkpoint/lock volume; the independent operator image is published
 separately from runtime images. See [database backups](backups.md) for retention,
 validation, isolated restoration and coverage limits.
 
+The standalone merge batcher (`scripts/merge-batcher/`) is an operational
+controller, not part of the API or Temporal workers. It reconstructs state from
+Git objects and GitHub, builds one merge commit per admitted PR without checking
+out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
+run-attempt receipts distinguish assertion failures from infrastructure and
+cancellation. Landing requires the tested tip and unchanged base/head evidence;
+post-merge full CI remains independent. Shadow mode performs no remote writes.
+Its portable container and deployment/rollback boundary are documented in
+[merge batcher](merge-batcher.md); the historical measurements and inactive
+native/vendor configurations remain in [merge queue](merge-queue.md).
+
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
 | Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
+| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---

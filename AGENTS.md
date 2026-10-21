@@ -782,22 +782,30 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 ## Reviewed merges to main
 
-Follow [`docs/merge-queue.md`](docs/merge-queue.md). Run the full relevant suites
+Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
+and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
+Run the full relevant suites
 on the VM (not only the fast queue checks), with bounded workers and isolated
 services. Obtain an independent agent review of the exact candidate head. Post
 one PR evidence comment containing that head SHA, commands/results, reviewer
 session and any limitations. Recheck the evidence after substantive head changes.
 
-Once the main queue is enabled, enqueue with `gh pr merge <PR> --auto` and observe
-the actual merge-group result and landed SHA; never use `--admin` or a direct
-merge API. Do not rebase merely because main advanced: the queue tests the combined
-tree. Before activation, use the repository's normal squash merge only after the
-same local-test and independent-review evidence. No agent may activate the prepared
-ruleset without the rollout owner's explicit go.
-The native draft's one-PR landing limit is temporary exact-Version-SHA
-compatibility, not CI-sharing batching. Activation is blocked by the measured
-capacity gate; true batching and descendant full-green release admission are a
-separate follow-up awaiting the owner's provider/design choice.
+Bendik selected the in-house batcher on October 21, 2026. GitHub native queue
+enforcement and vendor installation stay off. The batcher starts in read-only
+shadow mode; only the rollout owner's explicit go permits activation.
+Before activation, use the repository's normal squash merge after the same
+local-test and independent-review evidence. Once active, submit the documented
+ready signal (configured ready label or auto-merge) and observe the **Batch ready**
+result and exact landed SHA. Never use `--admin`, a direct merge API or a direct
+main push. Do not rebase merely because main advanced: the batcher tests the
+combined tree. Any head change invalidates earlier evidence and requires a new
+candidate. Version PRs always occupy their own batch.
+
+Queue-green is not release-green. Releases require full main CI on the exact
+released tip, with verified Version ancestry and matching image provenance.
+Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
+the controller owns the single unchanged-input flaky retry. Do not stack manual
+or in-job retries on it, or silently resubmit an ejected unchanged head.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
 explicit in the PR and evidence comment, independently confirmed by the reviewer,

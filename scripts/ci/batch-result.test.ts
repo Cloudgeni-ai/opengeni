@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   aggregateBatchResult,
   batchIdentity,
@@ -103,4 +106,87 @@ test("environment identity requires exact SHA and concrete run attempt", () => {
       GITHUB_RUN_ATTEMPT: "2",
     }),
   ).toThrow("identity");
+});
+
+test("CLI preserves child failure and records its exact identity without retrying", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "batch-receipt-test-"));
+  try {
+    const output = join(directory, "receipt-source.json");
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "scripts/ci/batch-result.ts",
+        "run",
+        "--job",
+        "source",
+        "--output",
+        output,
+        "--",
+        process.execPath,
+        "-e",
+        "process.exit(70)",
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          BATCH_ID: identity.batchId,
+          GITHUB_SHA: identity.headSha,
+          GITHUB_RUN_ID: identity.runId,
+          GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
+        },
+      },
+    );
+    expect(await child.exited).toBe(70);
+    expect(JSON.parse(readFileSync(output, "utf8"))).toMatchObject({
+      ...identity,
+      schemaVersion: 1,
+      job: "source",
+      exitCode: 70,
+      outcome: "code_failure",
+      retryable: false,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI emits infrastructure evidence when the command cannot start", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "batch-receipt-missing-"));
+  try {
+    const output = join(directory, "receipt-source.json");
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "scripts/ci/batch-result.ts",
+        "run",
+        "--job",
+        "source",
+        "--output",
+        output,
+        "--",
+        join(directory, "missing-command"),
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          BATCH_ID: identity.batchId,
+          GITHUB_SHA: identity.headSha,
+          GITHUB_RUN_ID: identity.runId,
+          GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
+        },
+      },
+    );
+    expect(await child.exited).not.toBe(0);
+    expect(JSON.parse(readFileSync(output, "utf8"))).toMatchObject({
+      ...identity,
+      outcome: "infrastructure",
+      retryable: false,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
