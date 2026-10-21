@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import legacyRoutines from "./runtime-posture-legacy-routines.json";
 import type { Database, RlsStrategy } from "./database";
 import {
   classifyRoleRelationships,
@@ -2685,6 +2686,76 @@ export const RUNTIME_DML_TABLES = Object.freeze(
   Object.keys(RUNTIME_TABLE_PRIVILEGES).sort((a, b) => a.localeCompare(b)),
 );
 
+// Membership in ANY binary-owned contract means known, even if a caller uses
+// a narrower protectedTables/tablePrivileges override. In particular, adding
+// FORCE RLS to a known non-RLS or no-direct-DML table must not grant it an escape
+// from its exact ACL contract.
+const DECLARED_TARGET_TABLES = new Set<string>([
+  ...FORCE_RLS_TABLES,
+  ...NON_RLS_RUNTIME_TABLES,
+  ...RUNTIME_DML_TABLES,
+  ...PROTECTED_NO_DIRECT_DML_TABLES,
+  ...Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES).flat(),
+  "schema_migrations",
+]);
+
+// Before OPE-834 private routines had an implicit catalog-wide EXECUTE
+// requirement, while unnamed target routines were not inspected at all. Freeze
+// that existing inventory instead of reclassifying old capabilities as unknown
+// (or silently dropping their missing-EXECUTE violations). This is a signature
+// inventory, NOT a new grant list; all named checks below remain authoritative.
+// New private capabilities must be explicitly registered here as known and get
+// their own authority checks. Do not refresh this inventory from a live catalog.
+const DECLARED_PRIVATE_ROUTINES = new Set<string>([
+  ...legacyRoutines.private,
+  ...OWNER_INTERNAL_PRIVATE_ROUTINES,
+  ...RETIRED_PRIVATE_ROUTINES,
+]);
+const DECLARED_TARGET_ROUTINES = new Set<string>([
+  ...legacyRoutines.target,
+  ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+  ...RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+  ...RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  SITE_CANCELLATION_PREDICATE,
+]);
+
+function securelyShapedUnknownTable(
+  table: Pick<
+    RuntimePrivateTablePosture,
+    "owner" | "rlsEnabled" | "rlsForced" | "rlsActive" | "policyCount"
+  >,
+  runtimeRole: string,
+): boolean {
+  return (
+    table.owner !== runtimeRole &&
+    table.rlsEnabled === true &&
+    table.rlsForced === true &&
+    table.rlsActive === true &&
+    (table.policyCount ?? 0) >= 1
+  );
+}
+
+function unknownRoutineViolations(
+  routine: RuntimeRoutinePosture,
+  schema: string,
+  runtimeRole: string,
+): string[] {
+  const violations: string[] = [];
+  if (routine.owner === runtimeRole) {
+    violations.push(`runtime role owns unknown routine ${schema}.${routine.name}`);
+  }
+  // SECURITY INVOKER cannot elevate the runtime's identity. An uncallable
+  // definer is inert for this role. A callable unknown definer is NOT proven
+  // safe by FORCE RLS, a trusted owner or a fixed search_path: its body could
+  // disable owner RLS or expose a capability. Require a prior explicit binary
+  // contract for it. Treat missing PUBLIC metadata as unknown, not revoked.
+  if (routine.securityDefiner && (routine.execute || routine.publicExecute !== false)) {
+    violations.push(`unknown routine ${schema}.${routine.name} exposes SECURITY DEFINER execution`);
+  }
+  return violations;
+}
+
 export type RuntimeDatabasePostureOptions = {
   rlsStrategy: RlsStrategy;
   expectedRole?: string;
@@ -2737,6 +2808,8 @@ export type RuntimeTablePosture = {
   truncate: boolean;
   references: boolean;
   trigger: boolean;
+  /** Effective column ACLs, kept separate so they cannot satisfy table grants. */
+  columnPrivileges?: string[];
 };
 
 export type RuntimeRoutinePosture = {
@@ -2871,10 +2944,6 @@ export async function inspectRuntimeDatabasePosture(
   options: RuntimeDatabasePostureOptions,
 ): Promise<RuntimeDatabasePosture> {
   const targetSchema = options.targetSchema?.trim() || "public";
-  const targetSchemaCapabilityRoutines =
-    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
-  const targetSchemaForbiddenRoutines =
-    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   return await db.transaction(
     async (tx) => {
@@ -3096,6 +3165,7 @@ export async function inspectRuntimeDatabasePosture(
         can_truncate: boolean;
         can_references: boolean;
         can_trigger: boolean;
+        column_privileges: string[];
       }>(
         await tx.execute(sql`
           select
@@ -3121,7 +3191,9 @@ export async function inspectRuntimeDatabasePosture(
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
+            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+            ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
+              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = ${targetSchema}
@@ -3144,6 +3216,7 @@ export async function inspectRuntimeDatabasePosture(
         truncate: row.can_truncate,
         references: row.can_references,
         trigger: row.can_trigger,
+        columnPrivileges: row.column_privileges,
       }));
 
       const privateTables = resultRows<{
@@ -3173,80 +3246,26 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
-                has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
+              has_any_column_privilege(current_user, c.oid, 'SELECT')) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
-                has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
+              has_any_column_privilege(current_user, c.oid, 'INSERT')) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','usage_maintenance_due','usage_allowance_membership_changes','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...MAINTENANCE_PRIVATE_TABLES, ...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
-                has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
+              has_any_column_privilege(current_user, c.oid, 'UPDATE')) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             (has_table_privilege(current_user, c.oid, 'REFERENCES') or
               has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
             has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
-            CASE WHEN c.relname = ${ARTIFACT_PINS_TABLE} THEN ARRAY(
+            ARRAY(
               SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
               WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
                 AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
               ORDER BY acl.privilege_type
-            ) ELSE ARRAY[]::text[] END AS extra_privileges
+            ) AS extra_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'opengeni_private'
             and c.relkind in ('r', 'p')
-            and c.relname in (
-              ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
-              ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
-              ${VARIABLE_SET_CAPABILITY_TABLE},
-              ${SITE_CANCELLATION_CAPABILITY_TABLE},
-              ${VAULT_CAPABILITY_TABLE},
-              ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
-              ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
-              ${SCOPED_COMPUTE_CAPABILITY_TABLE},
-              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
-              ${SANDBOX_FILE_PUBLICATIONS_TABLE},
-              ${ARTIFACT_PINS_TABLE},
-              ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
-              ${ORGANIZATION_SLACK_BOT_ACCESS_TABLE},
-              ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
-              ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
-              'organization_usage_read_capabilities',
-              'usage_allowance_capabilities',
-              'usage_maintenance_due',
-              'usage_allowance_membership_changes',
-              'workspace_usage_allowances',
-              'workspace_member_allowances',
-              'workspace_allowance_grants',
-              'workspace_allowance_counters',
-              'workspace_allowance_periods',
-              'workspace_allowance_notifications',
-              'usage_allowance_attribution_receipts',
-              'workspace_video_allowance_allocations',
-              'workspace_allowance_clear_receipts',
-              'session_usage_limit_roots',
-              'session_usage_limit_receipts',
-              'session_usage_limit_config_receipts',
-              'session_usage_limit_capabilities',
-              'session_file_attachments',
-              'session_file_read_capabilities',
-              'session_import_batches',
-              'modal_inventory_read_capabilities',
-              'modal_native_origin_read_capabilities',
-              ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
-              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
-              'credit_promotion_policy_revisions',
-              'subscription_plan_catalog_revisions',
-              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE},
-              ${sql.join(
-                MAINTENANCE_PRIVATE_TABLES.map((name) => sql`${name}`),
-                sql`, `,
-              )}
-            )
         `),
       ).map((row) => ({
         name: row.name,
@@ -3289,18 +3308,6 @@ export async function inspectRuntimeDatabasePosture(
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = ${targetSchema}
             and p.prokind in ('f', 'p')
-            and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
-              array[
-                ${sql.join(
-                  [
-                    ...targetSchemaCapabilityRoutines,
-                    ...targetSchemaForbiddenRoutines,
-                    SITE_CANCELLATION_PREDICATE,
-                  ].map((name) => sql`${name}`),
-                  sql`, `,
-                )}
-              ]::text[]
-            )
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
       )
@@ -3404,6 +3411,48 @@ export const RUNTIME_ALLOWANCE_PRIVATE_TABLES = [
   "workspace_allowance_clear_receipts",
 ] as const;
 
+// This was the private-table inspection filter before forward compatibility.
+// Keep the exact named checks below for every member; only other private tables
+// are eligible for the generic additive rule.
+const DECLARED_PRIVATE_TABLES = new Set<string>([
+  // Provisioning explicitly grants this historical non-RLS rollout receipt
+  // SELECT; it is a known contract even though readiness did not inventory it.
+  "sandbox_recovery_rollout",
+  PERSONAL_RESOURCE_CAPABILITY_TABLE,
+  SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE,
+  VARIABLE_SET_CAPABILITY_TABLE,
+  SITE_CANCELLATION_CAPABILITY_TABLE,
+  VAULT_CAPABILITY_TABLE,
+  PERSONAL_DOCUMENT_CAPABILITY_TABLE,
+  DOCUMENT_MIGRATION_CAPABILITY_TABLE,
+  SCOPED_COMPUTE_CAPABILITY_TABLE,
+  CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
+  SANDBOX_FILE_PUBLICATIONS_TABLE,
+  ARTIFACT_PINS_TABLE,
+  SCHEDULED_SLACK_BOT_MESSAGES_TABLE,
+  ORGANIZATION_SLACK_BOT_ACCESS_TABLE,
+  ORGANIZATION_SIGNUP_USE_CASES_TABLE,
+  SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+  AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE,
+  VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
+  MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE,
+  "organization_usage_read_capabilities",
+  "usage_allowance_capabilities",
+  "usage_maintenance_due",
+  "usage_allowance_membership_changes",
+  "session_usage_limit_capabilities",
+  "session_file_attachments",
+  "session_file_read_capabilities",
+  "session_import_batches",
+  "modal_inventory_read_capabilities",
+  "modal_native_origin_read_capabilities",
+  "credit_promotion_policy_revisions",
+  "subscription_plan_catalog_revisions",
+  ...MAINTENANCE_PRIVATE_TABLES,
+  ...RUNTIME_ALLOWANCE_PRIVATE_TABLES,
+  ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+]);
+
 /** Pure deterministic evaluator used by startup/readiness and unit tests. */
 export function evaluateRuntimeDatabasePosture(
   posture: RuntimeDatabasePosture,
@@ -3469,6 +3518,24 @@ export function evaluateRuntimeDatabasePosture(
     options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
   const targetSchemaForbiddenRoutines =
     options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
+  const knownTables = new Set([
+    ...DECLARED_TARGET_TABLES,
+    ...protectedTables,
+    ...directRuntimeTables,
+    ...protectedNoDirectDmlTables,
+  ]);
+  const knownTargetRoutines = new Set([
+    ...DECLARED_TARGET_ROUTINES,
+    ...targetSchemaCapabilityRoutines,
+    ...targetSchemaForbiddenRoutines,
+  ]);
+  const toleratedUnknownTables = new Set(
+    posture.tables
+      .filter(
+        (table) => !knownTables.has(table.name) && securelyShapedUnknownTable(table, expectedRole),
+      )
+      .map((table) => table.name),
+  );
 
   if (identity.currentUser !== expectedRole || identity.sessionUser !== expectedRole) {
     violations.push(
@@ -3513,6 +3580,25 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  for (const table of posture.privateTables) {
+    if (DECLARED_PRIVATE_TABLES.has(table.name)) continue;
+    if (table.owner === expectedRole) {
+      violations.push(`runtime role owns private table ${table.name}`);
+    }
+    if (
+      (table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger ||
+        table.extraPrivileges?.length) &&
+      !securelyShapedUnknownTable(table, expectedRole)
+    ) {
+      violations.push(`unknown private table ${table.name} has unsafe runtime privileges`);
+    }
+  }
   if (
     !options.protectedTables &&
     !posture.privateRoutines.some(
@@ -3683,7 +3769,10 @@ export function evaluateRuntimeDatabasePosture(
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);
   }
-  const undeclaredRlsTables = difference(actualRlsTables, protectedTables);
+  const undeclaredRlsTables = difference(
+    actualRlsTables,
+    new Set([...protectedTables, ...toleratedUnknownTables]),
+  );
   if (undeclaredRlsTables.length > 0) {
     violations.push(
       `RLS tables are absent from the declared contract: ${undeclaredRlsTables.join(", ")}`,
@@ -3708,6 +3797,9 @@ export function evaluateRuntimeDatabasePosture(
     if (legacyTablesBeforeReceipt.has(table.name)) {
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
+    if (toleratedUnknownTables.has(table.name)) {
+      for (const [privilege] of privileges) toleratedPrivileges.add(privilege);
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
@@ -3720,7 +3812,11 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     const excessPrivileges = privileges
-      .filter(([privilege, granted]) => !toleratedPrivileges.has(privilege) && granted)
+      .filter(
+        ([privilege, granted]) =>
+          !toleratedPrivileges.has(privilege) &&
+          (granted || table.columnPrivileges?.includes(privilege)),
+      )
       .map(([privilege]) => privilege);
     if (excessPrivileges.length > 0) {
       violations.push(
@@ -3739,6 +3835,11 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const routine of posture.targetRoutines) {
+    if (!knownTargetRoutines.has(routine.name)) {
+      violations.push(...unknownRoutineViolations(routine, targetSchema, expectedRole));
+    }
+  }
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length !== 1) {
@@ -5903,6 +6004,9 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
+    if (!DECLARED_PRIVATE_ROUTINES.has(routine.name)) {
+      violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
+    }
     if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
       if (
         !routine.execute ||
@@ -6041,7 +6145,12 @@ export function evaluateRuntimeDatabasePosture(
     }
     // A retired routine still present is reported once, as retired (it is
     // never granted again, so its missing EXECUTE is not a second finding).
-    if (!routine.execute && !ownerInternalRoutine && !RETIRED_PRIVATE_ROUTINES.has(routine.name)) {
+    if (
+      DECLARED_PRIVATE_ROUTINES.has(routine.name) &&
+      !routine.execute &&
+      !ownerInternalRoutine &&
+      !RETIRED_PRIVATE_ROUTINES.has(routine.name)
+    ) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
