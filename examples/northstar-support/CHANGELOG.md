@@ -1,5 +1,47 @@
 # @opengeni/example-northstar-support
 
+## 0.0.187
+
+### Patch Changes
+
+- Updated dependencies [49f2177]
+- Updated dependencies [579239a]
+- Updated dependencies [03947ed]
+- Updated dependencies [6dd3785]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [fda625e]
+- Updated dependencies [2963eca]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [ee83178]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [c236847]
+- Updated dependencies [eeab39f]
+- Updated dependencies [7ed4d2b]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [6b08cbe]
+- Updated dependencies [b45d380]
+- Updated dependencies [724b529]
+- Updated dependencies [2058cd3]
+- Updated dependencies [c6a3493]
+- Updated dependencies [3915617]
+- Updated dependencies [908c0d3]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [a1265ca]
+- Updated dependencies [b95784c]
+- Updated dependencies [5f5fe8d]
+- Updated dependencies [83a467d]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/sdk@4.3.0
+  - @opengeni/react@4.3.0
+
 ## 0.0.186
 
 ### Patch Changes
