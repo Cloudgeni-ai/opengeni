@@ -1,21 +1,29 @@
 import type { TurnStepsItem } from "@opengeni/react/session";
 import { useOpenGeniText } from "@opengeni/react/messages";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /**
  * Loads an opened turn's steps (web TurnStepsLoader). The fold mounts its body
- * only while open, so steps are read when a reader opens the turn.
+ * only while open, so steps are read when a reader opens the turn. A row that
+ * opens by itself (`autoLoad={false}`) waits for the reader to ask.
  */
-export function TurnStepsLoader({ steps }: { steps: TurnStepsItem }) {
+export function TurnStepsLoader({
+  steps,
+  autoLoad = true,
+}: {
+  steps: TurnStepsItem;
+  autoLoad?: boolean | undefined;
+}) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const { state, load, retain } = steps;
-  useEffect(() => retain(), [retain]);
+  const [requested, setRequested] = useState(autoLoad);
+  useEffect(() => (requested ? retain() : undefined), [requested, retain]);
   useEffect(() => {
-    if (state === "idle") load();
-  }, [state, load]);
+    if (requested && state === "idle") load();
+  }, [requested, state, load]);
   if (state === "complete") return null;
   const text = {
     ...fontStyle(theme),
@@ -23,15 +31,20 @@ export function TurnStepsLoader({ steps }: { steps: TurnStepsItem }) {
     lineHeight: 18,
     color: theme.colors["fg-subtle"],
   };
-  if (state === "partial" || state === "error") {
+  if (state === "partial" || state === "error" || (state === "idle" && !requested)) {
     const label =
-      state === "partial"
-        ? t("timeline.turnSteps.showEarlierSteps")
-        : `${t("timeline.turnSteps.couldNotLoadSteps")} ${t("timeline.turnSteps.retry")}`;
+      state === "idle"
+        ? t("timeline.turnSteps.showSteps")
+        : state === "partial"
+          ? t("timeline.turnSteps.showEarlierSteps")
+          : `${t("timeline.turnSteps.couldNotLoadSteps")} ${t("timeline.turnSteps.retry")}`;
     return (
       <Pressable
         accessibilityRole="button"
-        onPress={load}
+        onPress={() => {
+          setRequested(true);
+          if (state !== "idle") load();
+        }}
         style={({ pressed }) => ({
           minHeight: 44,
           justifyContent: "center",

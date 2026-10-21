@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import {
   SESSION_EVENT_STEP_TYPES,
   type SessionEvent,
@@ -21,7 +21,7 @@ import {
   type TurnStepsItem,
 } from "../src/timeline";
 import { TurnStepsAction, TurnStepsLoader } from "../src/timeline/turn-steps";
-import { readableWorkHasDetails } from "../src/timeline/work-presentation";
+import { isPreparingWork, readableWorkHasDetails } from "../src/timeline/work-presentation";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 registerDom();
@@ -443,6 +443,192 @@ describe("conversation-first session history", () => {
     }
   });
 
+  test("returning from a hidden tab keeps an open working turn's steps and replays the gap", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    // A working turn with 100 calls already written when the chat opens.
+    const store = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
+    const live: SessionEvent[] = [];
+    const { client, streamCalls } = historyClient({
+      store: () => store,
+      live: () => live,
+      withPages: true,
+      head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    let unretain: (() => void) | undefined;
+    try {
+      await settle(60);
+      // Joining the working turn read its latest steps; the reader opens it.
+      expect(stepEvents(hook.result.current.events)).toHaveLength(200);
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+
+      jest.useFakeTimers();
+      visibility = "hidden";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(() => jest.advanceTimersByTime(2_000));
+      expect(hook.result.current.connectionState).toBe("idle");
+      // Three more calls while away: a short gap the stream replays.
+      for (let index = 0; index < 3; index += 1) {
+        const sequence = 203 + index * 2;
+        const id = `T1-late-${index}`;
+        const created = at(sequence, "agent.toolCall.created", { id, name: "exec_command" }, "T1");
+        const output = at(sequence + 1, "agent.toolCall.output", { id, output: "ok" }, "T1");
+        store.push(created, output);
+        live.push(created, output);
+      }
+      visibility = "visible";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(async () => {
+        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+        jest.advanceTimersByTime(20);
+        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+      });
+      jest.useRealTimers();
+      await settle(60);
+      expect(streamCalls.at(-1)).toBe(202);
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(206);
+      expect(steps.at(-1)!.sequence).toBe(208);
+      expect(stepMarkers(hook.result.current.timeline)[0]!.state).toBe("complete");
+    } finally {
+      jest.useRealTimers();
+      unretain?.();
+      await hook.unmount();
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      } else {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    }
+  });
+
+  test("a turn whose start is before the window still loads every step", async () => {
+    // T0's steps come first; T1 then has a conversation row per call, more
+    // than the first window reads, so the window starts in the middle of T1.
+    const store = longTurn({ start: 1, turnId: "T0", steps: 300 });
+    store.push(
+      at(700, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+      at(701, "turn.started", { turnId: "T1" }, "T1"),
+    );
+    let sequence = 702;
+    for (let index = 0; index < 2500; index += 1) {
+      const id = `T1-call-${index}`;
+      store.push(at(sequence, "agent.model.request", {}, "T1"));
+      store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+      store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+      sequence += 3;
+    }
+    store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+    store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+    const { client, reads } = historyClient({ store: () => store, withPages: true });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle();
+      expect(hook.result.current.events.some((event) => event.type === "turn.started")).toBe(false);
+      reads.length = 0;
+      for (let page = 0; page < 60; page += 1) {
+        const marker = stepMarkers(hook.result.current.timeline).find(
+          (item) => item.turnId === "T1",
+        )!;
+        if (marker.state === "complete") break;
+        await actRun(() => marker.load());
+        await settle(5);
+      }
+      const marker = stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1");
+      expect(marker?.state).toBe("complete");
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(5000);
+      expect(steps.every((event) => event.turnId === "T1")).toBe(true);
+      expect(steps[0]!.sequence).toBe(703);
+      // Each page continued below the last one, and reading stopped at T0.
+      const bounds = reads.map((read) => read.before!);
+      expect(bounds).toEqual([...bounds].sort((left, right) => right - left));
+      expect(new Set(bounds).size).toBe(bounds.length);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("presented results far behind parallel calls are found, beyond the first pass", async () => {
+    // Twelve publishes and eight other calls in parallel: every output lands
+    // after all twenty calls, the publishes' last.
+    const store: SessionEvent[] = [
+      at(1, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+      at(2, "turn.started", { turnId: "T1" }, "T1"),
+    ];
+    const calls: Array<{ id: string; name: string }> = [];
+    for (let index = 0; index < 20; index += 1) {
+      const name = index < 12 ? "sandbox_file_publish" : "exec_command";
+      calls.push({ id: `T1-${name === "exec_command" ? "call" : "publish"}-${index}`, name });
+    }
+    let sequence = 3;
+    for (const call of calls) {
+      store.push(at(sequence++, "agent.toolCall.created", { id: call.id, name: call.name }, "T1"));
+    }
+    for (const call of [...calls].reverse()) {
+      store.push(at(sequence++, "agent.toolCall.output", { id: call.id, output: "ok" }, "T1"));
+    }
+    for (let index = 0; index < 30; index += 1) {
+      const id = `T1-call-later-${index}`;
+      store.push(at(sequence++, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+      store.push(at(sequence++, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+    }
+    store.push(at(sequence, "turn.completed", { turnId: "T1" }, "T1"));
+    const { client } = historyClient({ store: () => store, withPages: true });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle(60);
+      const outputs = hook.result.current.events.filter(
+        (event) => event.type === "agent.toolCall.output",
+      );
+      expect(outputs.map((event) => (event.payload as { id: string }).id).sort()).toEqual(
+        calls
+          .filter((call) => call.name === "sandbox_file_publish")
+          .map((call) => call.id)
+          .sort(),
+      );
+      expect(stepEvents(hook.result.current.events)).toEqual([]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a turn started and stepping in one live batch is not offered earlier steps", async () => {
+    const store = [at(1, "user.message", { text: "go", routing: "accepted_for_execution" }, null)];
+    const live = [
+      at(2, "turn.started", { turnId: "T1" }, "T1"),
+      at(3, "agent.toolCall.created", { id: "c", name: "exec_command" }, "T1"),
+      at(4, "agent.toolCall.output", { id: "c", output: "ok" }, "T1"),
+    ];
+    const { client, reads } = historyClient({ store: () => store, live: () => live });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      await settle(60);
+      expect(stepEvents(hook.result.current.events)).toHaveLength(2);
+      expect(stepMarkers(hook.result.current.timeline)[0]?.state).toBe("complete");
+      expect(reads.filter((read) => read.includeTypes)).toEqual([]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("helpers classify steps, presented results and turn extents", () => {
     const presented = new Set(["pub"]);
     const created = (name: string) => at(5, "agent.toolCall.created", { id: "x", name }, "T");
@@ -560,6 +746,65 @@ describe("turn steps projection", () => {
     expect(loads).toBe(3);
     await actRun(() => root.unmount());
     expect(released).toBe(2);
+    container.remove();
+  });
+
+  test("a working turn with unloaded steps is work, not preparation", () => {
+    const phase = {
+      kind: "startup-phase",
+      id: "phase",
+      status: "complete",
+      occurredAt: new Date(0).toISOString(),
+    };
+    const group = (state: TurnStepsItem["state"] | null) =>
+      ({
+        kind: "activity",
+        id: "work",
+        items: [phase],
+        work: {
+          startedAt: new Date(0).toISOString(),
+          details: [],
+          ...(state ? { steps: { kind: "turn-steps", turnId: "T1", state, ...handle } } : {}),
+        },
+      }) as never;
+    const options = { startupDetails: false, startupDismissed: false };
+    expect(isPreparingWork(group(null), options)).toBe(true);
+    expect(isPreparingWork(group("complete"), options)).toBe(true);
+    for (const state of ["idle", "loading", "partial", "error"] as const) {
+      expect(isPreparingWork(group(state), options)).toBe(false);
+    }
+  });
+
+  test("a row that opens by itself waits for the reader before loading", async () => {
+    let loads = 0;
+    let retained = 0;
+    const steps = (state: TurnStepsItem["state"]): TurnStepsItem => ({
+      kind: "turn-steps",
+      id: "turn-steps-T1",
+      turnId: "T1",
+      occurredAt: new Date(0).toISOString(),
+      state,
+      load: () => {
+        loads += 1;
+      },
+      retain: () => {
+        retained += 1;
+        return () => {};
+      },
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(container);
+    await actRun(() => root.render(<TurnStepsLoader steps={steps("idle")} autoLoad={false} />));
+    expect(loads).toBe(0);
+    expect(retained).toBe(0);
+    const show = container.querySelector("button")!;
+    expect(show.textContent).toBe("Show steps");
+    await actRun(() => show.click());
+    expect(loads).toBe(1);
+    expect(retained).toBe(1);
+    await actRun(() => root.unmount());
     container.remove();
   });
 

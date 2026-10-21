@@ -19,8 +19,9 @@ export const SESSION_EVENT_STEP_TYPES = [
 /**
  * Tools whose result is primary output a reader sees without opening the
  * turn's steps: presented images and published files, Skill changes that may
- * need review, and learning writes whose refusal is told outside the folded
- * work row. Matched on the tool name's leaf (`x__leaf` or `leaf`).
+ * need review, learning writes whose refusal is told outside the folded work
+ * row, and worker spawns or messages that a turn's wait counts. Matched on the
+ * tool name's leaf (`x__leaf` or `leaf`).
  */
 export const SESSION_EVENT_PRESENTED_TOOL_LEAVES = [
   "generate_image",
@@ -32,6 +33,13 @@ export const SESSION_EVENT_PRESENTED_TOOL_LEAVES = [
   "skill_publish",
   "instruction_policy_save",
   "knowledge_save",
+  "knowledge_retain_file",
+  "knowledge_retain_message",
+  "knowledge_archive",
+  "task_note_promote_knowledge",
+  "remember_confirm",
+  "session_create",
+  "session_send_message",
 ] as const;
 
 /** Whether a tool name is one of {@link SESSION_EVENT_PRESENTED_TOOL_LEAVES}. */

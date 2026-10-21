@@ -6,6 +6,7 @@ import {
   rollingActivityItem,
   selectTurnSummaryFacets,
   toolDisplayName,
+  turnSummaryFallbackLabel,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
@@ -110,6 +111,8 @@ export interface TurnSummaryProps {
   foldKey?: string | undefined;
   contextCompactionCount?: number | undefined;
   status?: NativeTurnStatus | undefined;
+  /** The turn has steps that are not loaded yet (opening the row reads them). */
+  unloadedSteps?: boolean | undefined;
   /**
    * Reports the disclosure's open state: once on mount when it starts open,
    * then on every change, in the same update as the change itself.
@@ -130,6 +133,7 @@ export function TurnSummary({
   foldKey,
   contextCompactionCount,
   status,
+  unloadedSteps,
   onOpenStateChange,
   children,
 }: TurnSummaryProps) {
@@ -241,12 +245,15 @@ export function TurnSummary({
     );
   }
   const showLive = Boolean(liveHeader) && !open && !status;
-  const tail =
-    (showLive
-      ? ""
+  const tail = showLive
+    ? ""
+    : !hasStatusText && facetText.length === 0 && outcome !== "failed" && outcome !== "cancelled"
+      ? // Steps are not counted; an otherwise empty row still names what
+        // opening it reveals.
+        turnSummaryFallbackLabel(t, items, unloadedSteps)
       : facetText
           .map((value, index) => (index > 0 || hasStatusText ? ` · ${value}` : value))
-          .join("")) + "";
+          .join("");
 
   const renderHeader = (pinned: boolean) => (
     <Pressable

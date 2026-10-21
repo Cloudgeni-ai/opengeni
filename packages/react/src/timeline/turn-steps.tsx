@@ -1,19 +1,31 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useOpenGeniText } from "../messages/runtime";
 import type { TurnStepsItem } from "./types";
 
 /**
  * Loads an opened turn's steps. Mounted only inside an open work row, so a
  * turn's steps are read when a reader opens it, newest first, and kept while
- * it stays open.
+ * it stays open. A row that opens by itself (`autoLoad={false}`, for example
+ * a failed turn or one with an image) waits for the reader to ask.
  */
-export function TurnStepsLoader({ steps }: { steps: TurnStepsItem }) {
+export function TurnStepsLoader({
+  steps,
+  autoLoad = true,
+}: {
+  steps: TurnStepsItem;
+  autoLoad?: boolean | undefined;
+}) {
   const { state, load, retain } = steps;
-  useEffect(() => retain(), [retain]);
+  const [requested, setRequested] = useState(autoLoad);
+  useEffect(() => (requested ? retain() : undefined), [requested, retain]);
   useEffect(() => {
-    if (state === "idle") load();
-  }, [state, load]);
-  return <TurnStepsStatus steps={steps} />;
+    if (requested && state === "idle") load();
+  }, [requested, state, load]);
+  const ask = () => {
+    setRequested(true);
+    if (state !== "idle") load();
+  };
+  return <TurnStepsStatus steps={steps} onLoad={requested ? undefined : ask} />;
 }
 
 /**
@@ -30,7 +42,13 @@ export function TurnStepsAction({ steps }: { steps: TurnStepsItem }) {
   return <TurnStepsStatus steps={steps} onLoad={load} />;
 }
 
-function TurnStepsStatus({ steps, onLoad }: { steps: TurnStepsItem; onLoad?: () => void }) {
+function TurnStepsStatus({
+  steps,
+  onLoad,
+}: {
+  steps: TurnStepsItem;
+  onLoad?: (() => void) | undefined;
+}) {
   const t = useOpenGeniText();
   const { state } = steps;
   const load = onLoad ?? steps.load;

@@ -105,6 +105,24 @@ export type TurnSummaryStatus = Readonly<{
 }>;
 
 /** Elapsed wall time with seconds below an hour: "14s", "2m 14s", "1h 05m". */
+/**
+ * The label of a turn row with no status line and no facets. Steps are not
+ * counted, so the row still names what opening it reveals: "Preparation" when
+ * it holds only startup phases (and no unloaded steps), else "Steps".
+ */
+export function turnSummaryFallbackLabel(
+  t: OpenGeniText,
+  items: readonly ActivityItem[],
+  unloadedSteps = false,
+): string {
+  // Progress notes narrate steps; they are not steps themselves.
+  const preparationOnly =
+    !unloadedSteps &&
+    items.some((item) => item.kind === "startup-phase") &&
+    items.every((item) => item.kind === "startup-phase" || item.kind === "agent-message");
+  return preparationOnly ? t("timeline.turnSummary.preparation") : t("timeline.turnSummary.steps");
+}
+
 export function formatElapsed(t: OpenGeniText, durationMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
   if (totalSeconds < 60) {

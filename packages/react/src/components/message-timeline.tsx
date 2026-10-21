@@ -3585,6 +3585,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               failureText={group.failureText}
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
+              unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
               facets={turnSummary?.facets}
               contextCompactionCount={compactedLandmarkCount(group.work.details)}
               onOpenStateChange={
@@ -3594,7 +3595,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
               }
             >
               <TurnRailFrame compact>
-                {group.work.steps ? <TurnStepsLoader steps={group.work.steps} /> : null}
+                {group.work.steps ? (
+                  <TurnStepsLoader
+                    steps={group.work.steps}
+                    autoLoad={!readableWorkDefaultOpen(group)}
+                  />
+                ) : null}
                 {renderFoldedGroups(
                   group.work.details,
                   {

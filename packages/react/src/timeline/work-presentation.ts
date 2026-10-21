@@ -66,6 +66,8 @@ export type ReadableWorkOptions = {
  */
 export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptions): boolean {
   if (!group.work) return false;
+  // Steps not loaded yet are work the reader can open, not preparation.
+  if (group.work.steps && group.work.steps.state !== "complete") return false;
   const phases = group.items.filter((item) => item.kind === "startup-phase");
   return (
     !options.startupDetails &&
