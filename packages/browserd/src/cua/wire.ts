@@ -35,10 +35,15 @@ export const Windows = z.object({
         // macOS only: false for a minimized or hidden window, or one on
         // another Space or beyond every display.
         is_on_screen: z.boolean().nullish(),
+        // macOS only: the Spaces the window is on; null for a window the
+        // window server keeps ordered out (one no person ever sees).
+        space_ids: z.array(id).max(1_024).nullish(),
+        on_current_space: z.boolean().nullish(),
       }),
     )
     .max(4096),
 });
+export type ListedWindow = z.infer<typeof Windows>["windows"][number];
 export const Element = z.object({
   element_index: id,
   element_token: z.string().max(256).optional(),

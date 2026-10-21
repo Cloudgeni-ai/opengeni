@@ -18,6 +18,7 @@ import { cloudflareProvider } from "./cloudflare";
 import { computeProvider } from "./compute";
 import { daytonaProvider } from "./daytona";
 import { dockerProvider } from "./docker";
+import { dockerDrainCaptureIsPointInTime } from "./docker-workspace-drain";
 import { e2bProvider } from "./e2b";
 import { localProvider } from "./local";
 import { modalProvider } from "./modal";
@@ -186,6 +187,16 @@ export function providerWorkspaceCaptureIsPointInTime(backend: string, state: un
   if (backend !== "modal") return false;
   const persistence = providerWorkspacePersistence(state);
   return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
+}
+
+/** True when a drain's capture of this lease envelope is a point-in-time image,
+ * so it may run around a request whose owner crashed: a Modal native snapshot
+ * of the paused box, or a Docker host workspace read after the drain removed
+ * the exact container (`stopForCapture`). Warm captures keep using
+ * `providerWorkspaceCaptureIsPointInTime`, because they keep the box running. */
+export function providerDrainCaptureIsPointInTime(backend: string, envelope: unknown): boolean {
+  if (providerWorkspaceCaptureIsPointInTime(backend, envelope)) return true;
+  return backend === "docker" && dockerDrainCaptureIsPointInTime(envelope);
 }
 
 export function prepareProviderForTeardownAfterCapture(backend: string, session: unknown): void {

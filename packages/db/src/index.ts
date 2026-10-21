@@ -334,6 +334,8 @@ export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
+  sessionPendingWriterAttemptIdsSql,
+  sessionQuiescenceCandidateAttemptIdsSql,
 } from "./session-attempt-writers";
 import {
   childRecentTurnOutcomesSql,
@@ -20497,7 +20499,8 @@ export async function markScheduledTaskRunSkippedIfQueued(
   input: {
     workspaceId: string;
     runId: string;
-    sessionId: string;
+    /** Null when the run was skipped before it got a chat. */
+    sessionId: string | null;
     error: string;
   },
 ): Promise<void> {
@@ -20511,6 +20514,23 @@ export async function markScheduledTaskRunSkippedIfQueued(
       'skipped'::text,
       ${input.error}::text
     )`);
+  });
+}
+
+/**
+ * Whether a workspace Pause holds every new chat in the workspace. A chat
+ * created now could not run, so scheduled work checks this before creating one.
+ */
+export async function isWorkspaceAgentActivityPaused(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ state: schema.workspaceInferenceControls.workspaceState })
+      .from(schema.workspaceInferenceControls)
+      .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId));
+    return row?.state === "paused";
   });
 }
 
@@ -44570,8 +44590,10 @@ async function acquireLeaseOnce(
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
           // Capture may have failed after an earlier stop attempt recorded a
-          // cutoff. This provider was never stopped; a re-armed box must have
-          // a fresh charge horizon when its next drain reaches provider stop.
+          // cutoff. The box is wanted again: a provider that was never stopped
+          // keeps running, and a Docker container stopped for a capture is
+          // restored on its workspace by the arriving owner. Either way the
+          // re-armed box needs a fresh charge horizon for its next drain.
           if (warmBillingSnapshot(row)?.stopChargeAt) {
             await tx.execute(sql`
               update sandbox_leases
@@ -52327,14 +52349,18 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
   };
 })();
 
-/** Whether a lease's provider capture images the paused box at one instant
- * (Modal native filesystem/directory snapshots). Mirrors the runtime's
- * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
+/** Whether a lease's drain capture images the box at one instant: a Modal
+ * native filesystem/directory snapshot of the paused box, or a Docker host
+ * workspace read after the drain stopped the exact container (possible only
+ * when the envelope carries the durable ownership receipt that lets a retry
+ * re-attach to a stopped container's root). Mirrors the runtime's
+ * `providerDrainCaptureIsPointInTime` for the lease envelope: only such a
  * capture may run around a crashed worker's orphaned request, so
  * containment may treat the orphan as non-blocking only then; otherwise its
  * drain could never capture and the box would stay fenced until it died. */
-function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
-  if (backend !== "modal" || !resumeState || typeof resumeState !== "object") return false;
+function leaseDrainCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
+  if ((backend !== "modal" && backend !== "docker") || !resumeState) return false;
+  if (typeof resumeState !== "object") return false;
   const sessionState = (resumeState as { sessionState?: unknown }).sessionState;
   const session =
     sessionState && typeof sessionState === "object"
@@ -52344,6 +52370,10 @@ function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boole
     session.providerState && typeof session.providerState === "object"
       ? (session.providerState as Record<string, unknown>)
       : null;
+  if (backend === "docker") {
+    const receipt = providerState?.opengeniDockerWorkspaceOwnership;
+    return Boolean(receipt && typeof receipt === "object" && !Array.isArray(receipt));
+  }
   const persistence = providerState?.workspacePersistence ?? session.workspacePersistence;
   return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
 }
@@ -52427,7 +52457,7 @@ export async function enrollRetainedCommandContainment(
             ...input,
             leaseId: lease.id,
             windowMs: input.idleCommandContainmentMs,
-            writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+            writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resumeState)
               ? "containment"
               : "physical",
           }))));
@@ -52558,7 +52588,7 @@ export async function enrollRetainedCommandContainment(
     // can finish. Only a point-in-time drain captures around it (the cold
     // commit settles it once the box is terminated); for a tar-style capture
     // it stays a blocker, or the enrolled drain could never capture.
-    const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
+    const pointInTime = leaseDrainCaptureIsPointInTime(initial.backend, initial.resumeState);
     const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
     // A tolerated orphan is captured around only by a point-in-time drain.
@@ -52728,7 +52758,7 @@ export async function releaseIdleInteractionHolders(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleMs,
-        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+        writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resumeState)
           ? "containment"
           : "physical",
       }))
@@ -52784,7 +52814,7 @@ export async function releaseIdleInteractionHolders(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleMs,
-        writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resume_state)
+        writerMode: leaseDrainCaptureIsPointInTime(lease.backend, lease.resume_state)
           ? "containment"
           : "physical",
       }))
@@ -54613,6 +54643,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
         ${input.attemptId ? sql`and attempt.id = ${input.attemptId}` : sql``}
         and attempt.state = 'closed'
         and attempt.quiesced_at is null
+        and attempt.id in ${sessionQuiescenceCandidateAttemptIdsSql(input)}
         and (
           ${sessionAttemptPendingWritersSql(sql`attempt`, input.writerMode ?? "physical")}
           or exists (
@@ -73080,6 +73111,7 @@ export async function claimSessionWorkForAttempt(
               and attempt.session_id = ${sessionId}
               and attempt.state = 'closed'
               and attempt.quiesced_at is null
+              and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
               and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
           ) as pending
         `);
@@ -76125,6 +76157,12 @@ async function nextSessionAttemptAwaitingQuiescence(
         eq(schema.sessionTurnAttempts.sessionId, sessionId),
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
+        // Only rows that can satisfy the predicate below; without this every
+        // closed attempt in the session's history runs its subqueries.
+        sql`${schema.sessionTurnAttempts.id} in ${sessionQuiescenceCandidateAttemptIdsSql({
+          workspaceId,
+          sessionId,
+        })}`,
         sql`(
           ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`, writerMode)}
           or exists (
@@ -77798,7 +77836,12 @@ async function settleSessionWorkBeforeAttemptClaim(
             ) and not exists (
               select 1 from session_turn_attempts attempt
               where attempt.workspace_id = ${workspaceId} and attempt.session_id = ${session.id}
-                and (attempt.state <> 'closed' or ${sessionAttemptPendingWritersSql(sql`attempt`)})
+                and attempt.state in ('claimed', 'running')
+            ) and not exists (
+              select 1 from session_turn_attempts attempt
+              where attempt.workspace_id = ${workspaceId} and attempt.session_id = ${session.id}
+                and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId: session.id })}
+                and ${sessionAttemptPendingWritersSql(sql`attempt`)}
             ) and not exists (
               select 1 from session_turns sibling
               where sibling.workspace_id = ${workspaceId} and sibling.session_id = ${session.id}
@@ -84292,7 +84335,10 @@ export type AddSessionSystemUpdateInput = {
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
   | (RequireIdleSession extends true
-      ? { added: false; reason: "session_not_idle" } | { added: false; reason: "session_paused" }
+      ?
+          | { added: false; reason: "session_not_idle" }
+          | { added: false; reason: "session_paused" }
+          | { added: false; reason: "workspace_paused" }
       : never)
   | {
       added: boolean;
@@ -84335,7 +84381,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
-    rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
+    rejectionReason:
+      | "session_cancelled"
+      | "session_not_idle"
+      | "session_paused"
+      | "workspace_paused"
+      | null,
   ) => Promise<void>,
   options: {
     /**
@@ -84343,6 +84394,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
      * idle, or failed (its last turn ended and it accepts new turns).
      */
     requireIdleSession?: RequireIdleSession;
+    /**
+     * Refuse while a Pause holds the session, whatever its other work:
+     * `session_paused` for a Pause of this session or an ancestor,
+     * `workspace_paused` for a workspace Pause alone. Input queued behind a
+     * Pause could neither run nor settle until someone resumes.
+     */
+    refusePaused?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
       tx: Database,
@@ -84438,18 +84496,26 @@ export async function addSessionSystemUpdateWithSourceMutation<
             input.workspaceId,
             input.sessionId,
           ));
+        const sessionPaused = effectiveControl.blockers.some(
+          (blocker) => blocker.kind === "session",
+        );
         if (
-          options.requireIdleSession &&
-          ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
-            session.activeTurnId !== null ||
-            effectiveControl.state !== "active")
+          (options.refusePaused && effectiveControl.state !== "active") ||
+          (options.requireIdleSession &&
+            ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
+              session.activeTurnId !== null ||
+              effectiveControl.state !== "active"))
         ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {
             return replayed;
           }
           const reason =
-            effectiveControl.state !== "active" ? "session_paused" : "session_not_idle";
+            effectiveControl.state === "active"
+              ? "session_not_idle"
+              : sessionPaused
+                ? "session_paused"
+                : "workspace_paused";
           await mutateSource(tx as unknown as Database, null, null, reason);
           return { added: false, reason } as const;
         }

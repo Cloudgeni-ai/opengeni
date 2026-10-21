@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ToolCallError } from "@openai/agents-core";
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
-import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import { testSettings } from "@opengeni/testing";
 import { ModalClient } from "modal";
 import {
@@ -304,9 +303,10 @@ describe("Opengeni Modal 0.9 snapshot policy", () => {
     const resumed = fakeSession("snapshot_filesystem", {
       snapshotFilesystem: async () => ({ imageId: "im-resumed" }),
     });
-    const resume = spyOn(ModalSandboxClient.prototype, "resume").mockResolvedValue(
-      resumed as never,
-    );
+    const resume = spyOn(
+      OpenGeniModalSandboxClient.prototype,
+      "resumeOnSharedClient",
+    ).mockResolvedValue(resumed as never);
     const settings = testSettings({
       sandboxBackend: "modal",
       modalAppName: "opengeni-test",
