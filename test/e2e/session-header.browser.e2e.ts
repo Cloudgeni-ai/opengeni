@@ -266,9 +266,12 @@ describe("responsive production session header", () => {
         disposition: "timeout",
       });
       await publishDurableSessionEvents(bus, fixture.workspaceId, session.id, settled.events);
-      await header.getByText("Queued", { exact: true }).waitFor();
+      // The visible queued status badge reads "Starting" while the turn awaits a
+      // worker (#2979), and its startup feedback lives in the conversation (#3530).
+      await header.locator('[data-status="queued"]:visible', { hasText: /^Starting$/ }).waitFor();
       await waitStatus.waitFor({ state: "detached" });
-      await page.locator("[data-session-dispatch-wait]").waitFor();
+      await header.locator("[data-session-wait-badge]").waitFor({ state: "detached" });
+      await page.locator(".og-genie-loading").waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
       expect(await header.innerText()).not.toContain("Idle");
     } finally {
@@ -310,11 +313,16 @@ describe("responsive production session header", () => {
       try {
         const page = await context.newPage();
         await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
-        const status = page.locator("[data-session-dispatch-wait]");
+        // Startup feedback for a queued turn lives in the conversation (#3530):
+        // a failed dispatch says so at once, and its details carry the error.
+        const startup = page.locator(".og-genie-loading");
+        await startup.getByText("Unable to start yet. Your messages are saved.").first().waitFor();
+        await startup.getByRole("button", { name: /Behind the magic/ }).click();
+        const status = page.locator("[data-og-startup-dispatch-details]");
         await status.waitFor();
         expect(await status.innerText()).toContain("No agent turn is running");
-        await status.getByText("Start details", { exact: true }).click();
         expect(await status.innerText()).toContain("Control worker unavailable");
+        expect(await startup.locator(".animate-spin").count()).toBe(0);
         expect(await status.locator(".animate-spin").count()).toBe(0);
         expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
           true,
