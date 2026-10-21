@@ -1281,6 +1281,19 @@ describe("runtime database posture evaluator", () => {
       "runtime role has forbidden direct artifact pin authority",
     );
     table.extraPrivileges = [];
+    for (const privilege of ["SELECT", "INSERT", "UPDATE", "REFERENCES"]) {
+      table.columnPrivileges = [privilege];
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "runtime role has forbidden direct artifact pin authority",
+      );
+      expect([table.select, table.insert, table.update, table.references]).toEqual([
+        false,
+        false,
+        false,
+        false,
+      ]);
+    }
+    table.columnPrivileges = [];
     table.rlsForced = false;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "artifact pin relation lacks active FORCE-RLS workspace isolation",
@@ -3166,6 +3179,25 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "runtime role lacks EXECUTE on private routine current_account_id()",
     );
+  });
+
+  test("retired target signatures stay known and retain their retirement violation", () => {
+    const posture = safePosture();
+    const name = runtimePosture.SUBSCRIPTION_RETIRED_ROUTINES.find(
+      (r) => r.schema === "target",
+    )!.signature;
+    const retired = `routine public.${name}`;
+    posture.retiredSubscriptionObjects.push(retired);
+    posture.targetRoutines.push({
+      name,
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: true,
+    });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([
+      runtimePosture.retiredSubscriptionObjectViolation(retired),
+    ]);
   });
 
   test("rejects DML on a table outside the exact runtime allowlist", () => {

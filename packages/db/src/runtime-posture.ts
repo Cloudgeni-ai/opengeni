@@ -2717,6 +2717,9 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
+  ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
+    ({ signature }) => signature,
+  ),
   ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   ...RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
@@ -3505,11 +3508,49 @@ const DECLARED_PRIVATE_TABLES = new Set<string>([
   ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
 ]);
 
+// These exact existing contracts forbid every SELECT/INSERT/UPDATE column
+// grant. Historically the inspector folded those ACLs into their deny flags.
+// Preserve their named violations while keeping required table grants (catalog,
+// credit policy, Slack ledger) separate from column grants in the inspector.
+const COLUMN_DENIED_PRIVATE_TABLES = new Set<string>([
+  "modal_native_origin_read_capabilities",
+  "modal_inventory_read_capabilities",
+  "usage_allowance_capabilities",
+  "usage_maintenance_due",
+  "usage_allowance_membership_changes",
+  "session_import_batches",
+  ARTIFACT_PINS_TABLE,
+  SITE_CANCELLATION_CAPABILITY_TABLE,
+  ...MAINTENANCE_PRIVATE_TABLES,
+  ...RUNTIME_ALLOWANCE_PRIVATE_TABLES,
+  ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+  "session_usage_limit_capabilities",
+]);
+
 /** Pure deterministic evaluator used by startup/readiness and unit tests. */
 export function evaluateRuntimeDatabasePosture(
-  posture: RuntimeDatabasePosture,
+  catalogPosture: RuntimeDatabasePosture,
   options: RuntimeDatabasePostureOptions,
 ): string[] {
+  // Local deny-only projection; never mutate the catalog snapshot or substitute
+  // column grants for a table-level requirement. Unknown objects are untouched.
+  const posture = {
+    ...catalogPosture,
+    privateTables: catalogPosture.privateTables.map((table) => {
+      if (!DECLARED_PRIVATE_TABLES.has(table.name)) return table;
+      const denyColumns = COLUMN_DENIED_PRIVATE_TABLES.has(table.name);
+      return {
+        ...table,
+        select:
+          table.select || (denyColumns && table.columnPrivileges?.includes("SELECT")) || false,
+        insert:
+          table.insert || (denyColumns && table.columnPrivileges?.includes("INSERT")) || false,
+        update:
+          table.update || (denyColumns && table.columnPrivileges?.includes("UPDATE")) || false,
+        references: table.references || table.columnPrivileges?.includes("REFERENCES") || false,
+      };
+    }),
+  };
   const violations: string[] = [];
   const identity = posture.identity;
 
