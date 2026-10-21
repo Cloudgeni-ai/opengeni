@@ -586,41 +586,51 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    // Configuration is additive diagnostic metadata; retain the exact former
-    // authority inventory and separately pin the new Site policy configuration.
+    const expectedNamedRoutines = [
+      {
+        name: "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: true,
+        securityDefiner: true,
+      },
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+        name,
+        owner: "postgres",
+        execute: true,
+        publicExecute: (
+          RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+        ).includes(name),
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
+      })),
+      ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
+        name,
+        owner: "postgres",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
+      })),
+    ].sort((left, right) => left.name.localeCompare(right.name));
+    const namedRoutineSignatures = new Set(expectedNamedRoutines.map(({ name }) => name));
+    // Forward-compatible readiness inventories every routine, not only these
+    // named contracts. Keep their exact authority assertion; the full catalog
+    // was checked by assertRuntimeDatabasePosture above. Configuration and
+    // indirect-call metadata are additive, not changes to these grant fields.
     expect(
-      posture.targetRoutines.map(({ configuration: _configuration, ...routine }) => routine),
-    ).toEqual(
-      [
-        {
-          name: "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)",
-          owner: "postgres",
-          execute: true,
-          publicExecute: true,
-          securityDefiner: true,
-        },
-        ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+      posture.targetRoutines
+        .filter(({ name }) => namedRoutineSignatures.has(name))
+        .map(({ name, owner, execute, publicExecute, securityDefiner }) => ({
           name,
-          owner: "postgres",
-          execute: true,
-          publicExecute: (
-            RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
-          ).includes(name),
-          securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
-            name,
-          ),
+          owner,
+          execute,
+          publicExecute,
+          securityDefiner,
         })),
-        ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
-          name,
-          owner: "postgres",
-          execute: false,
-          publicExecute: false,
-          securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
-            name,
-          ),
-        })),
-      ].sort((left, right) => left.name.localeCompare(right.name)),
-    );
+    ).toEqual(expectedNamedRoutines);
     expect(
       posture.targetRoutines.find(
         (routine) =>
