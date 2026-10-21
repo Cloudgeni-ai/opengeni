@@ -2023,6 +2023,45 @@ a later GitHub `APPROVE` or structured PASS body on the exact head:
 - GitHub branch protection may still require a review to merge into `main`;
   that is a merge-time GitHub rule, not a second operator PASS check.
 
+**Tested-descendant candidate admission.** When the merge batcher lands a
+Version PR as a singleton true merge and `main` then fast-forwards to a later
+fully green tested tip, dispatch `release-candidate.yml` with `source_sha` set
+to that released tip and the optional `provenance_sha` set to the exact Version
+PR merge. An empty `provenance_sha` (or one equal to `source_sha`) keeps the
+exact-source lane above unchanged. The two SHAs stay separate: every Version
+proof above (merged associated PR from `changeset-release/main` by the GitHub
+Actions bot, reviewed base/head, `merge` or provider-verified moving-main merge
+topology, full reviewed delta, release-head retention and exact-head source
+admission) runs at `provenance_sha`, while every CI, image and artifact proof
+runs at `source_sha` only. `scripts/check-release-pr-automation.mjs` additionally
+requires, fail-closed:
+
+- `source_sha` retained by `main` at the initial and terminal reads, with
+  `provenance_sha` on its first-parent chain; the controller is either the
+  Version PR's reviewed base, `source_sha` itself, or a later `main` commit;
+- every intervening first-parent commit is a two-parent merge whose single
+  associated PR merged into `main` with `merge_commit_sha` equal to that merge
+  and head equal to its second parent; a competing `changeset-release/main` PR,
+  a direct commit, a squash or rebase, or a missing association is rejected;
+- every merge tree from `provenance_sha` to `source_sha` is recomputed from
+  protected `main` history fetched as Git objects only (`git merge-tree
+  --write-tree`) and must equal the recorded tree, so conflict resolutions and
+  hidden extra deltas are rejected;
+- every reviewed Version path keeps its reviewed content at `source_sha`, and no
+  pending `.changeset/*.md` exists there;
+- the required source CI jobs plus `Verify landed merge content` and
+  `Publish fully green main SHA` succeeded in one `push` run on `main` for
+  `source_sha`; the newest `Full CI` commit status was created by the GitHub
+  Actions bot and targets that run's current attempt; and that run attempt owns
+  exactly one unexpired, digest-bearing `full-green-main-<source_sha>` and
+  `canary-images-<source_sha>` artifact. Batch-ready or queue-ready signals are
+  not full green, and nothing is borrowed from the Version merge's own CI.
+
+The walk is bounded to 100 intervening merges and 2,000 compared commits. Any
+later change to a reviewed Version path fails closed; choose an earlier green
+tip. The admission job reports `release_source_sha`, `version_provenance_sha`
+and `release_admission_mode`; the candidate receipt schema is unchanged.
+
 Do not recreate admission from a live review list, a review comment, a commit
 message, or a local record. The ordinary operator still records identity fields
 (`reviewed_base_sha`, `reviewed_head_sha`, PR URL, digest, reviewer login) on
