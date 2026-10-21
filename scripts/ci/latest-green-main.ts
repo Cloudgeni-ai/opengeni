@@ -15,8 +15,11 @@ export function latestGreenMain(
     for (const run of runs) {
       const statuses = api(`repos/${repository}/commits/${run.head_sha}/statuses?per_page=100`);
       const status = statuses.find(
-        (s: { context: string; state: string; target_url: string }) =>
-          s.context === "Full CI" && s.state === "success" && s.target_url === run.html_url,
+        (s: { context: string; state: string; target_url: string; creator?: { login?: string } }) =>
+          s.context === "Full CI" &&
+          s.state === "success" &&
+          s.creator?.login === "github-actions[bot]" &&
+          s.target_url === `${run.html_url}/attempts/${run.run_attempt}`,
       );
       if (status)
         return {
@@ -24,7 +27,7 @@ export function latestGreenMain(
           sha: run.head_sha,
           runId: run.id,
           runAttempt: run.run_attempt,
-          url: run.html_url,
+          url: status.target_url,
         };
     }
     if (runs.length < 100) break;

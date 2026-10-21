@@ -1,9 +1,9 @@
 import { test, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verifyMergeContent } from "./verify-merge-content";
+import { fullGreenAuditBase, verifyMergeContent } from "./verify-merge-content";
 
 test("recomputes a merge and rejects a provider merge that silently drops earlier content", () => {
   const cwd = mkdtempSync(join(tmpdir(), "opengeni-queue-content-"));
@@ -27,6 +27,11 @@ test("recomputes a merge and rejects a provider merge that silently drops earlie
     git("add", ".");
     git("commit", "-m", "base");
     const base = git("rev-parse", "HEAD");
+    mkdirSync(join(cwd, "scripts/ci"), { recursive: true });
+    writeFileSync(join(cwd, "scripts/ci/verify-merge-content.ts"), "// audit introduction");
+    git("add", ".");
+    git("commit", "-m", "introduce audit");
+    const introduction = git("rev-parse", "HEAD");
     git("checkout", "-b", "pr");
     writeFileSync(join(cwd, "pr"), "pr");
     git("add", ".");
@@ -40,7 +45,26 @@ test("recomputes a merge and rejects a provider merge that silently drops earlie
     git("merge", "--no-ff", "pr", "-m", "queue");
     const head = git("rev-parse", "HEAD");
     expect(verifyMergeContent(before, head, cwd).verified).toEqual([head]);
-    expect(verifyMergeContent(base, head, cwd).singleParent).toEqual([before]);
+    expect(verifyMergeContent(base, head, cwd).singleParent).toEqual([introduction, before]);
+    expect(
+      fullGreenAuditBase(head, cwd, () => {
+        throw new Error("No successful full main CI receipt found");
+      }),
+    ).toBe(base);
+    expect(
+      fullGreenAuditBase(head, cwd, () => ({
+        schemaVersion: 1,
+        sha: before,
+        runId: 1,
+        runAttempt: 1,
+        url: "test",
+      })),
+    ).toBe(before);
+    expect(() =>
+      fullGreenAuditBase(head, cwd, () => {
+        throw new Error("provider unavailable");
+      }),
+    ).toThrow("provider unavailable");
     const corrupt = git(
       "commit-tree",
       `${pr}^{tree}`,

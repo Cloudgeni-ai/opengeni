@@ -46,6 +46,8 @@ test("main full CI cannot be cancelled by a new push and publishes only full exa
     "${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
   );
   expect(ci.concurrency.group).toContain("ci-main-push");
+  expect(ci.concurrency.group).toContain("github.event_name == 'push' && github.ref");
+  expect(ci.concurrency.group).toContain("changeset-release/main");
   expect(ci.concurrency.group).not.toContain("queue-");
   const plan = ci.jobs.plan.steps.find((step: any) => step.id === "plan").run;
   expect(plan).toContain(
@@ -63,6 +65,15 @@ test("main full CI cannot be cancelled by a new push and publishes only full exa
   expect(ci.jobs["full-green"].if).toContain("github.ref == 'refs/heads/main'");
   expect(ci.jobs["full-green"].permissions).toEqual({ contents: "read", statuses: "write" });
   expect(workflow("merge-content").concurrency).toBeUndefined();
+  expect(ci.jobs["merge-content"].steps.at(-1).run).toContain("--since-full-green");
+  expect(ci.jobs["full-green"].steps[0].run).toContain("/attempts/$GITHUB_RUN_ATTEMPT");
+});
+
+test("queue source retains committed runtime and outstanding release-plan contracts", () => {
+  const commands = queue.jobs.contracts.steps.map((step: any) => step.run ?? "").join("\n");
+  expect(commands).toContain("generate-site-browser-runtime.ts --check");
+  expect(commands).toContain("bunx changeset status");
+  expect(commands).toContain('git update-ref refs/heads/main "$GITHUB_SHA"');
 });
 
 test("bot-created PRs get queue entry evidence only after authenticated full CI", () => {
@@ -86,7 +97,7 @@ test("prepared ruleset is inert, main-only, uses MERGE and requires every succes
     check_response_timeout_minutes: 45,
     grouping_strategy: "ALLGREEN",
     max_entries_to_build: 8,
-    max_entries_to_merge: 8,
+    max_entries_to_merge: 1,
     merge_method: "MERGE",
     min_entries_to_merge: 1,
     min_entries_to_merge_wait_minutes: 5,

@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "078db3ea6a2114e8e848d6ac9e94ded89ddfc7d7a3d96db429c665e5001afd0c"
+      "sha256": "8e3fd5822d8ef74998c3a18a7a4293f2cf3c0b5b69a842e1c39e73f090e325c8"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-queue.yml",
-      "sha256": "1b159e97849885b918234dda0d1d81203f64df7e4f598e6fe8d62de4e3dfa15d"
+      "sha256": "4c04b476c96614e7aec7647a94b53205c0580eedd00b11b80013b24c4b5f7457"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -777,7 +777,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "full-green",
       "step": "Publish exact-SHA full CI evidence",
-      "sha256": "44c1cae34f66bc6a66df28d76ac8f3903393e903a34b87a0729c0df00e061a04"
+      "sha256": "15a3e340925b8e1cfca75586fd6d43f7d12c191e5d81eb59bdaee7ed999b1351"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -801,7 +801,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "merge-content",
       "step": "Recompute landed merge trees from their parents",
-      "sha256": "668d16491c21c1aedbb2be9cf2859715c17d7f4e47d43330f8de427eff0aca96"
+      "sha256": "c376ad8f0cda757c317e3d7658eace34e2cdddb8b7737b40f1d66c12514ccc0b"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1274,6 +1274,12 @@
     {
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "contracts",
+      "step": "Check committed Site browser runtime before builds",
+      "sha256": "fc4ba920e6a51460ee5b60430c35ebd5f1ee2c381818d52b7469bbc69250f1f4"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
       "step": "Check impacted static contracts",
       "sha256": "0038f7e1f78ea88c0d7b707a7d34301c2a345949f0975aa3111fe332181b73a6"
     },
@@ -1288,6 +1294,12 @@
       "job": "contracts",
       "step": "Install dependencies",
       "sha256": "d5b0a12f3e1afc3cd05865491a3bf95c58af7dcd39f56255a055748af1915f0d"
+    },
+    {
+      "workflow": ".github/workflows/merge-queue.yml",
+      "job": "contracts",
+      "step": "Validate the combined tree's outstanding changeset release plan",
+      "sha256": "3275ae311590a1a9e902f864ddbe40f4999aa3f9b2df72ef549c3f86e5bf4c1e"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",

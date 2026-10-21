@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { execFileSync } from "node:child_process";
+import { latestGreenMain } from "./latest-green-main";
 
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -43,8 +44,55 @@ export function verifyMergeContent(base: string, head: string, cwd = process.cwd
   return { schemaVersion: 1, base, head, verified, singleParent };
 }
 
+/** Cover every coalesced push since prior full-green evidence, not just the last
+ * webhook's before SHA. Bootstrap at this check's introduction on first-parent
+ * main history, never at a guessed current push boundary. */
+export function fullGreenAuditBase(head: string, cwd = process.cwd(), discover = latestGreenMain) {
+  let previous: string | undefined;
+  try {
+    previous = discover().sha;
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !error.message.startsWith("No successful full main CI receipt")
+    )
+      throw error;
+  }
+  if (previous && previous !== head) {
+    try {
+      git(["merge-base", "--is-ancestor", previous, head], cwd);
+      return previous;
+    } catch {
+      // A newer parallel Version run may already have published green. Audit
+      // this older exact run from bootstrap instead of trusting a descendant.
+    }
+  }
+  const introduced = git(
+    [
+      "log",
+      "--first-parent",
+      "--diff-filter=A",
+      "--format=%H",
+      head,
+      "--",
+      "scripts/ci/verify-merge-content.ts",
+    ],
+    cwd,
+  )
+    .split("\n")
+    .at(-1);
+  if (!introduced) throw new Error("Cannot find the merge-content audit bootstrap commit");
+  return git(["rev-parse", `${introduced}^1`], cwd);
+}
+
 if (import.meta.main) {
   const [base, head] = process.argv.slice(2);
   if (!base || !head) throw new Error("usage: verify-merge-content.ts <before-sha> <after-sha>");
-  console.log(JSON.stringify(verifyMergeContent(base, head), null, 2));
+  console.log(
+    JSON.stringify(
+      verifyMergeContent(base === "--since-full-green" ? fullGreenAuditBase(head) : base, head),
+      null,
+      2,
+    ),
+  );
 }

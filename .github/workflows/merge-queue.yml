@@ -85,6 +85,23 @@ jobs:
           key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Check committed Site browser runtime before builds
+        run: bun scripts/generate-site-browser-runtime.ts --check
+      - name: Validate the combined tree's outstanding changeset release plan
+        run: |
+          set -euo pipefail
+          # Match post-merge main's release-plan validation. Version PRs consume
+          # changesets, so do not pretend the combined tree is a new feature PR
+          # against its pre-version base. Exact Version reproduction remains
+          # mandatory in the authenticated automation-admission full CI lane.
+          git update-ref refs/heads/main "$GITHUB_SHA"
+          bunx changeset status --output "$RUNNER_TEMP/changeset-status.json"
+          count="$(jq -er '[.changesets[] | select(.releases | length > 0)] | length' "$RUNNER_TEMP/changeset-status.json")"
+          releases="$(jq -er '.releases | length' "$RUNNER_TEMP/changeset-status.json")"
+          if [ "$count" -gt 0 ] && [ "$releases" -eq 0 ]; then
+            echo '::error::Pending changesets cannot produce a Version PR'
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           name: queue-impact-plan

@@ -3828,7 +3828,7 @@ describe("workflow contracts", () => {
     );
     expect(ci.on.push.branches).toEqual(["main", "production"]);
     expect(ci.on.pull_request).not.toBeUndefined();
-    expect(ci.on.schedule).toEqual([{ cron: "17 * * * *" }]);
+    expect(ci.on.schedule).toEqual([{ cron: "0 3 * * 1" }]);
     expect(ci.on.workflow_dispatch.inputs).toEqual(
       expect.objectContaining({
         automation_pr_number: expect.objectContaining({ required: true }),

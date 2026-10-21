@@ -216,7 +216,7 @@ export function reportRedMain(api: Api, repository: string, run: Run) {
   const body =
     `${marker}\nFull CI is **${run.conclusion}** on main commit \`${run.head_sha}\`: ${run.html_url}.\n\n` +
     `Landing PR${pulls.length === 1 ? "" : "s"}: ${pulls.map((pull) => `#${pull.number}`).join(", ") || "not uniquely identified"}. ` +
-    "This identifies the landing commit, not a proven culprit: coalesced full CI may contain earlier untested merges. Inspect the failing leaf and last fully green SHA before attributing or reverting. No automatic revert was performed. Cancelled CI is never classified as a failure.";
+    "This identifies the landing commit, not a proven culprit: coalesced full CI may contain earlier untested merges. Inspect the failing leaf and last fully green SHA before attributing. Once confirmed, revert the culprit PR first through the queue, then fix it afterwards (AGENTS.md). No automatic revert was performed. Cancelled CI is never classified as a failure.";
   for (const pull of pulls) {
     const comments = paginated(api, `repos/${repository}/issues/${pull.number}/comments`);
     if (!comments.some((comment) => comment.body?.includes(marker)))

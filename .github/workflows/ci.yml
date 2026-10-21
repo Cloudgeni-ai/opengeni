@@ -11,9 +11,9 @@ on:
     branches:
       - production
   schedule:
-    # Retry latest main after failures even when no new push arrives. These runs
-    # share the non-cancelling main lane; only pending work is coalesced.
-    - cron: "17 * * * *"
+    # Scheduled service coverage has its own lane; it must never replace a
+    # pending push run, which alone can publish exact-SHA release receipts.
+    - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
       automation_pr_number:
@@ -56,7 +56,7 @@ concurrency:
   # run, so a manual re-run of an older main run would otherwise enter as the
   # pending run and cancel the newest push waiting behind the running build.
   # A re-run is an explicit request for that exact SHA and runs on its own.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && github.run_attempt == '1' && 'ci-main-push' || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && contains(github.event.head_commit.message, 'changeset-release/main') == false && github.run_attempt == '1' && 'ci-main-push' || format('ci-{0}-{1}', github.run_id, github.run_attempt) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
@@ -2599,6 +2599,10 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
     steps:
       - uses: actions/checkout@v6
         with:
@@ -2609,8 +2613,8 @@ jobs:
           bun-version-file: .bun-version
       - name: Recompute landed merge trees from their parents
         env:
-          BEFORE: ${{ github.event.before }}
-        run: bun scripts/ci/verify-merge-content.ts "$BEFORE" "$GITHUB_SHA"
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/verify-merge-content.ts --since-full-green "$GITHUB_SHA"
 
   full-green:
     name: Publish fully green main SHA
@@ -2627,7 +2631,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
           jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
             --arg attempt "$GITHUB_RUN_ATTEMPT" --arg url "$url" \
             '{schemaVersion:1,sha:$sha,runId:$run,runAttempt:$attempt,url:$url,mode:"full"}' > full-green-main.json

@@ -802,6 +802,12 @@ The documented `hotfix/*` → `production` incident lane stays separate; ordinar
 main changes never bypass the queue. See the incident and rollback steps in the
 queue runbook before any exceptional main action.
 
+If full post-merge main CI goes red, identify and reproduce the culprit against
+the last fully green SHA, then **revert the culprit PR first through the queue**
+and fix it afterwards. Do not leave main red while developing the forward fix.
+Coalesced runs can contain several PRs: the tip PR is not automatically the culprit.
+Cancelled runs are not failures. Automatic blind reverts are not authorized.
+
 ## Deployment Work Notes
 
 When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.

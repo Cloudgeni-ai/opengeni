@@ -41,10 +41,11 @@ Native queue has no configured flake-retry switch here.
 
 `ci.yml` uses a **full** plan on every admitted main push. Its existing
 `ci-main-push` concurrency group does not cancel the running build; GitHub keeps
-only the latest pending build. Hourly full-mode drift runs use that same lane.
+only the latest pending build. Weekly service/drift runs use a separate lane and
+cannot replace a pending push.
 Exact Version-PR merge and explicit rerun exceptions retain their existing lanes.
-New pushes cannot continually restart the expensive suite. The schedule retries
-coverage during quiet periods, but does not publish canary images; release
+New pushes cannot continually restart the expensive suite. Scheduled coverage
+does not publish canary images; release
 candidate discovery uses successful **push** runs. No CI design can promise a
 green result while tests are failing, runners are unavailable or environment
 approvals are held. The operational target is a completed full run every 120
@@ -61,7 +62,8 @@ bun scripts/ci/latest-green-main.ts
 This returns JSON, never a moving branch name. Release tooling must still verify
 main ancestry, the exact successful CI run, image receipts and its ordinary source
 admission. Queue green alone is **not** a release candidate. A missing full-green
-receipt is an error, not permission to substitute the latest main head.
+receipt is an error, not permission to substitute the latest main head. Discovery
+requires the GitHub Actions bot's status linked to the exact successful run attempt.
 
 Every push also runs `merge-content.yml`, independently of full-run coalescing.
 It recomputes each first-parent two-parent merge with `git merge-tree` and compares
@@ -69,6 +71,9 @@ the complete tree, detecting dropped prior changes. Single-parent legacy squash
 commits are reported as unverified rather than falsely attested. A mismatch is an
 incident: stop queue intake, investigate, and repair via a reviewed PR. This detects
 bad landed content; it cannot prevent a provider bug before landing.
+The full-green gate additionally audits every first-parent merge since the prior
+full-green SHA (or the check's introduction when no prior receipt exists), so
+coalescing a push cannot hide a content failure from release evidence.
 
 ## Measured sizing (October 21, 2026, 09:40 UTC)
 
@@ -88,7 +93,7 @@ Initial settings:
 | --- | --- |
 | Merge method | `MERGE` |
 | Build concurrency | 8 |
-| Merge limits | minimum 1, maximum 8 |
+| Merge limits | minimum 1, maximum 1 |
 | Minimum-group wait | 5 minutes (minimum 1 means no intentional batching delay) |
 | Only merge non-failing PRs | yes (`ALLGREEN`) |
 | Check timeout | 45 minutes |
@@ -97,7 +102,9 @@ Initial settings:
 | Queue bypass actors | none |
 
 **Do not multiply by batch size.** GitHub's merge limits combine successful merges,
-not `merge_group` builds. Approximate healthy capacity is `60 × concurrency / T`:
+not `merge_group` builds. Maximum landing size is one so each Version PR gets its
+own exact-SHA push CI; its merge message/branch marker also retains a dedicated
+full-CI lane. Approximate healthy capacity is `60 × concurrency / T`:
 32 PRs/hour at 15 minutes, **24/hour at 20 minutes**, 16/hour at 30 minutes.
 The measured 25/hour burst can briefly exceed the 20-minute envelope. A replay of
 the week's arrival timestamps with eight slots and fixed 20-minute checks yields
@@ -132,8 +139,10 @@ full-suite runs**. Hourly reconciliation catches event reports coalesced while t
 single reporter was busy. Cancelled, neutral, skipped and unfinished runs never
 become failures. The landing PR is an investigation suspect, **not a proven
 culprit**: coalesced full CI includes earlier changes too. Compare the last green
-SHA and failing leaf, then bisect/reproduce if needed. There is no automatic revert
-or external paging integration. A failed full run cannot prove causality alone.
+SHA and failing leaf, then bisect/reproduce if needed. Once confirmed, revert the
+culprit PR first through the queue and fix it afterwards; do not leave main red
+while developing a forward fix. There is no automatic blind revert or external
+paging integration. A failed full run cannot prove causality alone.
 
 ## Agent procedure
 
