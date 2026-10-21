@@ -1,6 +1,7 @@
 //! Waking and connecting: at the owner, or, for a sandbox nobody owns, at a
 //! host that first adopts its latest archive.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use compute_fleet::{HostId, Next, Op, Outcome, Prefer};
@@ -91,7 +92,7 @@ impl<S: Store> Service<S> {
         while Instant::now() < deadline {
             let row = self.get(team, id).await?;
             let Some(host) = row.ownership.owner else {
-                self.adopt(row, None, Vec::new()).await?;
+                self.adopt(row, None, HashSet::new()).await?;
                 continue;
             };
             let epoch = row.ownership.epoch;
@@ -128,7 +129,7 @@ impl<S: Store> Service<S> {
                 if let Some(adopted) = self.send_adopt(&row, &target).await?
                     && let (Next::PlaceElsewhere, Some(now)) = (adopted.next, adopted.row)
                 {
-                    self.adopt(now, None, vec![host]).await?;
+                    self.adopt(now, None, HashSet::from([host])).await?;
                 }
                 continue;
             }
@@ -167,7 +168,7 @@ impl<S: Store> Service<S> {
         &self,
         mut row: SandboxRow,
         on: Option<HostId>,
-        mut exclude: Vec<HostId>,
+        mut exclude: HashSet<HostId>,
     ) -> Result<(), Failure> {
         if !self.archived(row.id).await? {
             return Err(Failure::Unavailable(
@@ -197,7 +198,7 @@ impl<S: Store> Service<S> {
                 // Given up on since it was placed: elsewhere, unless it
                 // was asked for there.
                 Write::OwnerLost if on.is_none() => {
-                    exclude.push(target.host);
+                    exclude.insert(target.host);
                     match self.store.sandbox(row.id).await? {
                         Some(now) => row = now,
                         None => return Ok(()),
@@ -220,7 +221,7 @@ impl<S: Store> Service<S> {
                 // The host holds nothing of it: give it on from the row as
                 // it is now.
                 (Next::PlaceElsewhere, Some(now)) if on.is_none() => {
-                    exclude.push(target.host);
+                    exclude.insert(target.host);
                     row = now;
                 }
                 // The host asked for refused it for when it was sent, so it

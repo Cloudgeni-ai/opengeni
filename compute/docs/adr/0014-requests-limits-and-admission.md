@@ -33,6 +33,17 @@ pick a VM.
   creates therefore never takes more sandboxes than the host can wake; the
   rest are refused with `host_full` at once and placed elsewhere
   ([15](0015-placement-and-moves-between-hosts.md)).
+  - The deadline of that booking is in the sandbox's record and the record
+    drops it once the sandbox first runs, so an agent that restarts books
+    each first wake still due again before it admits anything else.
+  - An adoption is first checked as if its copy had the base image's disk,
+    since only claiming the copy shows its own; once claimed, it is checked
+    again with the copy's disk and refused with `host_full` if that does not
+    fit, leaving nothing on the host and the store's copy for another host.
+  - A claimed ready sandbox's VM already holds memory. Its first wake books
+    that memory up to the request, and only what the VM holds beyond the
+    request stays counted apart until the sandbox joins the core, so claims
+    that overlap never count one VM twice.
 - Admission in create, wake and connect is arithmetic on numbers held in
   memory (microseconds). Inside a request the only relief is instant: ending
   idle VMs that already have a valid saved copy (milliseconds, no I/O). If

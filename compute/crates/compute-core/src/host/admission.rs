@@ -161,8 +161,9 @@ pub enum CreateRoom {
     Fits,
     /// Only local disk is short, and by no more than what bookings that
     /// ended since the last reading stood for (see
-    /// [`Host::disk_awaits_reading`]): the next reading decides it.
-    AwaitsReading,
+    /// [`Host::disk_awaits_reading`]): the next reading decides it. Says
+    /// what of the disk is short, what it needs and what is free now.
+    AwaitsReading(Resource, u64, u64),
     /// The resource that is short, what it needs and what is free.
     Short(Resource, u64, u64),
 }
@@ -384,7 +385,7 @@ impl Host {
                 return CreateRoom::Short(Resource::Cpu, size.cpu, free);
             }
         }
-        let mut awaits_reading = false;
+        let mut awaits_reading = None;
         if let Some(mut room) = self.disk_room() {
             for slot in &queued {
                 // What a wake already queued cannot book does not change
@@ -405,7 +406,7 @@ impl Host {
                 if !room.may_take(disk, self.disk_spent) {
                     return CreateRoom::Short(short.resource, short.needed, short.free);
                 }
-                awaits_reading = true;
+                awaits_reading = Some(short);
             }
         }
         if let Some(capacity) = self.capacity() {
@@ -421,11 +422,9 @@ impl Host {
                 return CreateRoom::Short(Resource::Memory, size.request, free);
             }
         }
-        if awaits_reading {
-            CreateRoom::AwaitsReading
-        } else {
-            CreateRoom::Fits
-        }
+        awaits_reading.map_or(CreateRoom::Fits, |short| {
+            CreateRoom::AwaitsReading(short.resource, short.needed, short.free)
+        })
     }
 
     /// Takes in [`crate::Input::Creating`].

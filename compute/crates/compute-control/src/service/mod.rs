@@ -12,7 +12,7 @@ mod moves;
 mod reach;
 mod requests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -269,7 +269,7 @@ impl<S: Store> Service<S> {
     }
 
     /// Places `demand` on a host not in `exclude`.
-    fn place(&self, demand: &Demand, exclude: &[HostId]) -> Result<Target, Failure> {
+    fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Target, Failure> {
         let placement = self
             .view
             .place(demand, exclude)
@@ -380,7 +380,7 @@ impl<S: Store> Service<S> {
     ) -> Result<SandboxRow, Failure> {
         let (mut row, demand) = self.new_row(id, team, spec, metadata)?;
         let id = row.id;
-        let mut exclude = Vec::new();
+        let mut exclude = HashSet::new();
         let mut inserted = false;
         // The last refusal of a host that holds nothing of it.
         let mut refused = None;
@@ -412,7 +412,7 @@ impl<S: Store> Service<S> {
                 // Given up on since it was placed: place it elsewhere,
                 // from the row as stored.
                 Write::OwnerLost => {
-                    exclude.push(target.host);
+                    exclude.insert(target.host);
                     if inserted {
                         row = self.store.sandbox(id).await?.ok_or(Failure::NotFound)?;
                     } else {
@@ -449,7 +449,7 @@ impl<S: Store> Service<S> {
             match next {
                 _ if answered.outcome() == Outcome::Done => return Ok(row),
                 Next::PlaceElsewhere => {
-                    exclude.push(target.host);
+                    exclude.insert(target.host);
                     refused = Some(answered);
                 }
                 _ => {

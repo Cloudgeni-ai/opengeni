@@ -28,7 +28,7 @@
 //! run exercised.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::time::Duration;
 
 use compute_fleet::{
@@ -1675,7 +1675,7 @@ impl Sim {
             disk_mib: 1,
             prefer: Prefer::Any,
         };
-        let Some(placement) = self.fleet.place(&demand, &[], &mut self.rng) else {
+        let Some(placement) = self.fleet.place(&demand, &HashSet::new(), &mut self.rng) else {
             return;
         };
         self.fleet.reserve(placement, &demand);

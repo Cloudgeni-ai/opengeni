@@ -58,7 +58,7 @@ use crate::state::{Identity, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::{OwnerEpoch, Store};
 
-use super::requests::new_files;
+use super::requests::{first_wake_by_ms, new_files};
 use super::{Event, HostAgent, HostError, Reply};
 
 /// Most ready sandboxes filled at once on a host.
@@ -747,11 +747,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let engine = Arc::clone(&self.engine);
         let (host, fence) = (idle.record.id, idle.record.fence());
         self.ready.claiming.insert(host.0, false);
-        // No longer spare, but its VM holds what it did until the claimed
-        // sandbox joins the core, which books its first wake meanwhile, as
-        // checked before the claim.
+        // No longer spare: the claimed sandbox's first wake, checked before
+        // the claim, books the memory its VM holds, up to the request; the
+        // VM's memory beyond that stays counted under the name it was
+        // filled under until the sandbox joins the core.
         let bytes = self.ready.spares.remove(&host.0).unwrap_or(shape.bytes());
-        let first_wake = self.first_wake(id, &config, false);
+        let size = self.size(&config, None);
+        let by_ms = first_wake_by_ms();
+        let first_wake = self.first_wake(id, size, false, by_ms);
         self.inputs([
             Input::Spare {
                 sandbox: host.0,
@@ -762,7 +765,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             },
             Input::Unmanaged {
                 sandbox: host.0,
-                bytes,
+                bytes: bytes.saturating_sub(size.request),
                 cpu: 0,
             },
             first_wake,
@@ -796,7 +799,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let result = match fits {
                 Ok(Fit::Fits) => ClaimResult::Claimed(
                     records
-                        .claim(host, fence, id, config.clone(), owner)
+                        .claim(host, fence, id, config.clone(), owner, by_ms)
                         .await
                         .map(Box::new)
                         .map_err(HostError::from),
@@ -812,6 +815,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 claimed: Box::new(Claimed {
                     idle,
                     owner,
+                    bytes,
                     result,
                 }),
             });
@@ -832,12 +836,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Claimed {
             idle,
             owner,
+            bytes,
             result,
         } = claimed;
         let host = idle.record.id;
         let died = self.ready.claiming.remove(&host.0).unwrap_or(false);
         if !matches!(result, ClaimResult::Claimed(Ok(_))) {
-            // A create that starts over books its first wake again.
+            // Its VM holds all it did again until it goes, and a create
+            // that starts over books its first wake again.
+            self.input(Input::Unmanaged {
+                sandbox: host.0,
+                bytes,
+                cpu: 0,
+            });
             self.first_wake_unbooked(id);
         }
         let record = match result {
@@ -935,6 +946,8 @@ pub(super) struct Claimed<V> {
     idle: Idle<V>,
     /// The ownership the create is for.
     owner: OwnerEpoch,
+    /// What its VM held of host memory as it was claimed.
+    bytes: u64,
     result: ClaimResult,
 }
 

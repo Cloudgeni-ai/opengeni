@@ -9,7 +9,7 @@
 //! `FLEET_BUDGET_PRINT=1` prints the percentiles, as recorded in
 //! `docs/measurements.md` from a release build.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
 use compute_fleet::{
@@ -129,7 +129,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     while next < SANDBOXES {
         let wanted = demand(&mut rng);
         let placed = create.time(|| {
-            let placement = fleet.place(&wanted, &[], &mut rng)?;
+            let placement = fleet.place(&wanted, &HashSet::new(), &mut rng)?;
             fleet.reserve(placement, &wanted);
             Some(placement)
         });
@@ -167,7 +167,7 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     let mut found = 0;
     for _ in 0..20_000 {
         let wanted = demand(&mut rng);
-        let placement = full.time(|| fleet.place(&wanted, &[], &mut rng));
+        let placement = full.time(|| fleet.place(&wanted, &HashSet::new(), &mut rng));
         let host = placement.expect("some hosts have room").host;
         assert_eq!(host.0 % 50, 0, "placed on a full host");
         found += 1;
@@ -185,7 +185,10 @@ fn decisions_stay_well_under_a_millisecond_at_5000_hosts_and_500000_sandboxes() 
     let mut none = Timings::default();
     for _ in 0..2_000 {
         let wanted = demand(&mut rng);
-        assert!(none.time(|| fleet.place(&wanted, &[], &mut rng)).is_some());
+        assert!(
+            none.time(|| fleet.place(&wanted, &HashSet::new(), &mut rng))
+                .is_some()
+        );
     }
     none.check("create: no host has room by the view");
 

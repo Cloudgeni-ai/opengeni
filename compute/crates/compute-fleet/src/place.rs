@@ -24,7 +24,7 @@
 //! herding every request onto the single emptiest host, and costs the same
 //! at five thousand hosts as at five.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::ids::{ClassId, HostId, ShapeKey, ZoneId};
 use crate::rng::Rng;
@@ -319,7 +319,12 @@ impl Fleet {
     /// (hosts that already refused it): one that fits by the view if any
     /// does, or else one whose memory could hold it at all. `None` when no
     /// such host is left.
-    pub fn place(&self, demand: &Demand, exclude: &[HostId], rng: &mut Rng) -> Option<Placement> {
+    pub fn place(
+        &self,
+        demand: &Demand,
+        exclude: &HashSet<HostId>,
+        rng: &mut Rng,
+    ) -> Option<Placement> {
         let fits = |slot: u32, now: bool| {
             self.slots[slot as usize].as_ref().is_some_and(|entry| {
                 let capacity = &entry.capacity;

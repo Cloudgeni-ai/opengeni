@@ -162,6 +162,12 @@ pub(crate) struct Record {
     /// or was handed on: the host drops only what it has.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_off: bool,
+    /// Until when the host keeps the room of its first wake booked, in
+    /// milliseconds since the Unix epoch: set as it is created, claimed
+    /// or adopted here, so an agent that starts before then books that
+    /// wake again (see [`compute_core::Input::Creating`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_wake_by_ms: Option<u64>,
 }
 
 /// Whether a sandbox's guest knows which sandbox it is.
@@ -202,6 +208,7 @@ impl Record {
             owner_epoch: OwnerEpoch::FIRST.0,
             saves: 0,
             handed_off: false,
+            first_wake_by_ms: None,
         }
     }
 
@@ -270,6 +277,7 @@ pub(crate) struct Change {
     backed_up_ms: Option<u64>,
     next_save: bool,
     handed_off: bool,
+    woke: bool,
     owner: Option<OwnerEpoch>,
     /// The agent link the control service sent last, `None` inside for none;
     /// boxed, as most writes leave it.
@@ -333,6 +341,13 @@ impl Change {
         self
     }
 
+    /// Its VM runs: its first wake is done, so no agent books that wake's
+    /// room again.
+    pub fn woke(mut self) -> Self {
+        self.woke = true;
+        self
+    }
+
     /// This host holds the sandbox under owner epoch `owner` from now on.
     /// Its save numbers go on from where they were.
     pub fn owner(mut self, owner: OwnerEpoch) -> Self {
@@ -382,6 +397,9 @@ impl Change {
             record.saves += 1;
         }
         record.handed_off |= self.handed_off;
+        if self.woke {
+            record.first_wake_by_ms = None;
+        }
         if let Some(owner) = self.owner {
             record.owner_epoch = owner.0;
         }
@@ -898,6 +916,7 @@ impl Records {
         id: Id,
         config: SandboxConfig,
         owner: OwnerEpoch,
+        first_wake_by_ms: u64,
     ) -> Result<Record, StateError> {
         let entry = {
             let mut entries = locked(&self.entries);
@@ -939,6 +958,7 @@ impl Records {
                     owner_epoch: owner.0,
                     saves: 0,
                     handed_off: false,
+                    first_wake_by_ms: Some(first_wake_by_ms),
                     ..current
                 };
                 slot.write(Some(next.clone()))?;

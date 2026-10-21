@@ -20,7 +20,7 @@ impl ShortOf for CreateRoom {
     fn short_of(self) -> Option<Resource> {
         match self {
             CreateRoom::Short(resource, ..) => Some(resource),
-            CreateRoom::Fits | CreateRoom::AwaitsReading => None,
+            CreateRoom::Fits | CreateRoom::AwaitsReading(..) => None,
         }
     }
 }
@@ -402,7 +402,11 @@ fn a_create_that_may_fit_once_the_disk_is_read_awaits_the_reading() {
         key: SandboxId(1),
         disk: DiskSpace::default(),
     });
-    assert_eq!(room(&rig, 2), CreateRoom::AwaitsReading);
+    assert!(
+        matches!(room(&rig, 2), CreateRoom::AwaitsReading(Resource::Disk, ..)),
+        "{:?}",
+        room(&rig, 2)
+    );
     // A reading showing they took all of it leaves nothing to wait for.
     rig.send(Input::Disk {
         available: DiskSpace {

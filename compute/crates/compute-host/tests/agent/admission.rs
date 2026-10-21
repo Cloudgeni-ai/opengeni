@@ -190,6 +190,44 @@ async fn a_burst_of_creates_takes_only_what_the_host_can_wake() {
     assert_eq!((full.reserved, full.free, full.awake), (512 * MIB, 0, 2));
 }
 
+/// A created sandbox's first wake stays booked across a restart of the
+/// agent until the sandbox first runs, so what a new agent admits first
+/// cannot take its room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_wake_bookings_survive_a_restart() {
+    let lab = Lab::new(Delays::default(), policy()).await;
+    for n in 1..=2 {
+        lab.create(id(n), NEVER).await;
+    }
+    let booked = capacity(&lab).await;
+    assert_eq!((booked.reserved, booked.free), (512 * MIB, 0));
+
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), policy()).await;
+    let after = capacity(&lab).await;
+    assert_eq!(
+        (after.reserved, after.free, after.awake),
+        (512 * MIB, 0, 0),
+        "both first wakes are booked again"
+    );
+    let reply = try_create(&lab, id(3), SandboxConfig::new(1, 256, NEVER)).await;
+    assert!(host_full(&reply).is_some(), "{reply:?}");
+    for n in 1..=2 {
+        woke(&lab.wake(id(n)).await);
+    }
+    let full = capacity(&lab).await;
+    assert_eq!((full.reserved, full.free, full.awake), (512 * MIB, 0, 2));
+
+    // Once a sandbox ran, a restart books its room only while it is awake.
+    assert_eq!(lab.sleep_to(id(1), LevelName::Saved).await, Reply::Done);
+    lab.wait_level(id(1), LevelName::Saved).await;
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), policy()).await;
+    let after = capacity(&lab).await;
+    assert_eq!((after.reserved, after.awake), (256 * MIB, 1));
+    lab.assert_clean();
+}
+
 /// Waits until `n` is paused with its state saved: ending its VM process
 /// loses nothing.
 async fn wait_paused_and_saved(lab: &Lab, n: u128) {

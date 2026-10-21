@@ -32,6 +32,14 @@ use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, uni
 /// that room a create never used comes back soon.
 const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
 
+/// When the first wake of a sandbox created, claimed or adopted now stops
+/// being booked, in milliseconds since the Unix epoch; see
+/// [`HostAgent::first_wake`].
+pub(super) fn first_wake_by_ms() -> u64 {
+    let within = u64::try_from(FIRST_WAKE_WITHIN.as_millis()).unwrap_or(u64::MAX);
+    unix_ms_now().saturating_add(within)
+}
+
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
 fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
@@ -490,7 +498,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Some(refused) = self.needs_absent_store(&config.sleep) {
             return Err(refused);
         }
-        self.room_for(id, config, remote, DiskSpace::default())
+        self.room_for(id, self.size(config, None), remote, DiskSpace::default())
     }
 
     /// Refuses a new sandbox `id` of `config` this host could not wake at
@@ -503,14 +511,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn room_for(
         &self,
         id: Id,
-        config: &SandboxConfig,
+        size: Size,
         remote: bool,
         files: DiskSpace,
     ) -> Result<Room, HostError> {
-        let size = self.size(config, None);
         match self.core.create_room(self.now(), id.0, size, remote, files) {
             CreateRoom::Fits => Ok(Room::Now),
-            CreateRoom::AwaitsReading => Ok(Room::AfterReading),
+            CreateRoom::AwaitsReading(..) => Ok(Room::AfterReading),
             CreateRoom::Short(resource, needed, free) => Err(HostError::HostFull {
                 id,
                 resource,
@@ -520,16 +527,46 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// What books the first wake of new sandbox `id` of `config`, checked
-    /// with [`Self::room_for`], until it runs or for
-    /// [`FIRST_WAKE_WITHIN`]; see [`Input::Creating`].
-    pub(super) fn first_wake(&self, id: Id, config: &SandboxConfig, remote: bool) -> Input {
+    /// What books the first wake of new sandbox `id` of `size`, checked
+    /// with [`Self::room_for`], until it runs or until `by_ms` (from
+    /// [`first_wake_by_ms`]), which its record keeps so an agent that
+    /// starts before then books it again; see [`Input::Creating`].
+    pub(super) fn first_wake(&self, id: Id, size: Size, remote: bool, by_ms: u64) -> Input {
+        let left = Duration::from_millis(by_ms.saturating_sub(unix_ms_now()));
         Input::Creating {
             sandbox: id.0,
-            size: self.size(config, None),
+            size,
             remote,
-            until: self.now() + FIRST_WAKE_WITHIN,
+            until: self.now() + left,
         }
+    }
+
+    /// Books the first wake of adopted sandbox `record` as its copy's own
+    /// disk needs, `size`, if this host can wake it now: the adopt booked
+    /// it as the base image's disk would be, before the copy was claimed.
+    /// Otherwise the sandbox goes again, leaving the store's copy for
+    /// another host, and the adopt is refused as a wake that would wait
+    /// here for room is, even for disk only the next reading could show.
+    pub(super) fn adopted_room(&mut self, record: &Record, size: Size) -> Result<(), HostError> {
+        let id = record.id;
+        let room = self
+            .core
+            .create_room(self.now(), id.0, size, true, DiskSpace::default());
+        let (CreateRoom::AwaitsReading(resource, needed, free)
+        | CreateRoom::Short(resource, needed, free)) = room
+        else {
+            let by_ms = record.first_wake_by_ms.unwrap_or_else(first_wake_by_ms);
+            self.input(self.first_wake(id, size, true, by_ms));
+            return Ok(());
+        };
+        self.first_wake_unbooked(id);
+        self.remove_recorded_as(record, None, Vec::new(), None, true);
+        Err(HostError::HostFull {
+            id,
+            resource,
+            needed,
+            free,
+        })
     }
 
     /// Ends the booking of new sandbox `id`'s first wake: its create or
@@ -616,7 +653,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // fit together with its first wake.
         let template_disk = template.as_ref().map(|t| t.disk());
         let disk = self.first_files_disk(shape.image, template_disk.as_deref());
-        match self.room_for(id, &config, false, disk) {
+        match self.room_for(id, self.size(&config, None), false, disk) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
                 self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
@@ -644,12 +681,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
+        let by_ms = first_wake_by_ms();
         self.inputs([
             Input::Writes { key: id.0, disk },
-            self.first_wake(id, &config, false),
+            self.first_wake(id, self.size(&config, None), false, by_ms),
         ]);
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
+        record.first_wake_by_ms = Some(by_ms);
         self.prepare(record, template, reply);
     }
 

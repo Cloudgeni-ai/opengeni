@@ -865,7 +865,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         notes::phase("load");
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
-        let running = Change::new().image(false).archived(false);
+        let running = Change::new().image(false).archived(false).woke();
         if let Err(error) = self.commit(running).await {
             let outcome = self
                 .end_with_memory(vm, live_memory, state_failure(&error))
@@ -1205,7 +1205,11 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// that does not is ended and the boot retried, as nothing changed.
     async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
         let pending = self.record.identity == Identity::Pending;
-        let fresh = Change::new().image(false).archived(false).execution();
+        let fresh = Change::new()
+            .image(false)
+            .archived(false)
+            .execution()
+            .woke();
         let fresh = if pending {
             fresh
         } else {
