@@ -67,8 +67,10 @@ await run("the editor creates a file, and readFile reads it", async () => {
 });
 
 await run("resolveExposedPort reaches a server in the sandbox", async () => {
+  // Up to ten seconds for the server to listen: Python's http.server
+  // names its own address before it does.
   await session.execCommand({
-    cmd: "(python3 -m http.server 8000 >/tmp/http.log 2>&1 &) ; sleep 1",
+    cmd: `(python3 -u -m http.server 8000 >/tmp/http.log 2>&1 &) ; for _ in $(seq 100); do python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000), 1)' 2>/dev/null && break; sleep 0.1; done`,
   });
   const endpoint = await session.resolveExposedPort(8000);
   const host =
@@ -77,10 +79,10 @@ await run("resolveExposedPort reaches a server in the sandbox", async () => {
   const response = await fetch(new URL("/README.md", url.endsWith("/") ? url : `${url}/`));
   if (!response.ok) {
     // What the server printed, what listens, and how long naming its own
-    // address takes: Python's http.server does that before it listens.
+    // address takes.
     const report = await session
       .execCommand({
-        cmd: `cat /tmp/http.log; timeout 5 ss -ltn; s=$(date +%s%N); timeout 30 python3 -c 'import socket; print(socket.getfqdn("::"))'; echo getfqdn $? $(( ($(date +%s%N) - s) / 1000000 )) ms`,
+        cmd: `cat /tmp/http.log; cat /proc/net/tcp /proc/net/tcp6; s=$(date +%s%N); timeout 30 python3 -c 'import socket; print(socket.getfqdn("::"))'; echo getfqdn $? $(( ($(date +%s%N) - s) / 1000000 )) ms`,
       })
       .catch((error) => String(error));
     throw new Error(
