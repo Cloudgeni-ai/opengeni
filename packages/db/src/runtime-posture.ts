@@ -2703,7 +2703,7 @@ const DECLARED_TARGET_TABLES = new Set<string>([
   "session_history_items_repair_audit",
 ]);
 
-// Before OPE-834 private routines had an implicit catalog-wide EXECUTE
+// Before the runtime-posture admission change, private routines had an implicit catalog-wide EXECUTE
 // requirement, while unnamed target routines were not inspected at all. Freeze
 // that existing inventory instead of reclassifying old capabilities as unknown
 // (or silently dropping their missing-EXECUTE violations). This is a signature
