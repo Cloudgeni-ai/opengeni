@@ -742,6 +742,7 @@ function fullPlan(
       // Rolling (expand/contract) is the default: a new maintenance migration
       // drains the whole fleet for its release and must justify itself.
       "migration-deployment-mode",
+      "migration-online-safety",
       // A migration missing from the release-schema forward list is framed by
       // the governed checkpoint input, so the pinned aggregate only breaks after
       // merge, on protected main.
@@ -970,6 +971,7 @@ export function createImpactPlan(
       "migration-rls-backfills",
       "migration-lock-order",
       "migration-deployment-mode",
+      "migration-online-safety",
       "migration-schema-contract",
     );
   }
