@@ -799,7 +799,7 @@ describe("Gmail complete mailbox operations", () => {
 });
 
 describe("Gmail review snapshots", () => {
-  test("reads at most three distinct saved IDs, never a new search or a mutation", async () => {
+  test("reads each distinct saved ID once, never a new search or a mutation", async () => {
     const seen: string[] = [];
     const server = make(async (input, init) => {
       const url = new URL(input.toString());
@@ -821,9 +821,34 @@ describe("Gmail review snapshots", () => {
     const result = await server.reviewContext("batch_modify_messages", {
       messageIds: ["one", "one", "two", "three", "four"],
     });
-    expect(seen).toEqual(["one", "two", "three"]);
-    expect(result.samples?.map((sample) => sample.id)).toEqual(seen);
+    expect(seen).toEqual(["one", "two", "three", "four"]);
+    expect(result.samples?.map((sample) => sample.id)).toEqual(["one", "two", "three"]);
     expect(result.samples?.every((sample) => sample.provenance === "provider_metadata")).toBe(true);
+    expect(result.selectionLabels).toEqual(
+      seen.map((id) => ({
+        id,
+        title: `Example ${id}`,
+        subtitle: "sender@example.test",
+        provenance: "provider_metadata",
+      })),
+    );
+  });
+  test("labels beyond the card samples are best effort and stop at the first failure", async () => {
+    let requests = 0;
+    const server = make(async (input) => {
+      requests += 1;
+      const id = new URL(input.toString()).pathname.split("/").at(-1)!;
+      if (id === "m-10")
+        return Response.json({ error: { message: "Rate limited" } }, { status: 429 });
+      return Response.json({ id, payload: { headers: [{ name: "Subject", value: id }] } });
+    });
+    const messageIds = Array.from({ length: 200 }, (_, index) => `m-${index}`);
+    const result = await server.reviewContext("batch_modify_messages", { messageIds });
+    expect(result.samples?.map((sample) => sample.id)).toEqual(["m-0", "m-1", "m-2"]);
+    const labelled = result.selectionLabels?.map((label) => label.id) ?? [];
+    expect(labelled.slice(0, 10)).toEqual(messageIds.slice(0, 10));
+    expect(labelled).not.toContain("m-10");
+    expect(requests).toBeLessThan(40);
   });
   test("missing samples stay missing; wrong provider identities and access refusals fail closed", async () => {
     const missing = make(async () =>

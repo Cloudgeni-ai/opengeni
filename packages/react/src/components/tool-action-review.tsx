@@ -631,6 +631,11 @@ export function ToolActionReviewDetails({
                   ) : (
                     <SecretRefText text={item.value} />
                   )}
+                  {item.detail ? (
+                    <span className="mt-0.5 block text-og-xs text-og-fg-muted">
+                      <SecretRefText text={item.detail} linkable={false} />
+                    </span>
+                  ) : null}
                 </dd>
               </div>
             ))}
