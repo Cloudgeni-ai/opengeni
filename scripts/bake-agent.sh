@@ -124,6 +124,9 @@ for target in $TARGETS; do
     bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
       --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"$RUNTIME_BUILD_ID\"" \
       --outfile "$browserd"
+    # The compiled runtime carries Bun's own root list (see #5314).
+    bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "$browserd"
+    bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "$browserd"
     OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
     OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
     OPENGENI_BROWSERD_TARGET_MUSL=false \
