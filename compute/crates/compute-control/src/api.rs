@@ -333,6 +333,9 @@ pub struct HostView {
     pub epoch: u64,
     pub memory_mib: u64,
     pub memory_free_mib: u64,
+    /// Memory in MiB it frees at once for a wake by ending idle VM
+    /// processes whose state is saved; placement counts it as free.
+    pub memory_reclaimable_mib: u64,
     /// Processor time in millicores it guarantees sandboxes at once now.
     pub cpu_millis: u64,
     /// Processor time in millicores a wake can still reserve on it.
@@ -621,6 +624,7 @@ async fn hosts<S: Store>(
             epoch: known.target.epoch.0,
             memory_mib: known.info.memory_mib,
             memory_free_mib: known.capacity.memory_free_mib,
+            memory_reclaimable_mib: known.capacity.memory_reclaimable_mib,
             cpu_millis: known.capacity.cpu_millis,
             cpu_free_millis: known.capacity.cpu_free_millis,
             disk_free_mib: known.capacity.disk_free_mib,

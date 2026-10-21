@@ -287,6 +287,65 @@ fn a_booking_ends_with_a_failed_create_or_a_removal_and_lapses_unused() {
     assert_eq!(rig.capacity().occupied, GIB);
 }
 
+/// A paused sandbox whose state is saved, idle since it was added.
+fn paused_saved() -> State {
+    State::new(Level::Paused, Durability::Local, true)
+}
+
+#[test]
+fn free_and_reclaimable_memory_are_what_a_create_could_take_and_no_more() {
+    let mut rig = Rig::new(8 * GIB, 8000);
+    for id in 1..=2 {
+        rig.add(id, paused_saved(), Size::whole(2 * GIB));
+        rig.send(Input::Resident {
+            sandbox: SandboxId(id),
+            bytes: GIB,
+        });
+    }
+    // Idle past the busy grace: ending either VM loses nothing.
+    rig.at(5);
+    assert_eq!(rig.capacity().free(), 6 * GIB);
+    assert_eq!(rig.host.reclaimable_memory(rig.now), 2 * GIB);
+    assert_eq!(
+        rig.host
+            .create_room(rig.now, SandboxId(9), size(0), false, DiskSpace::default()),
+        CreateRoom::Fits
+    );
+    let more = Size::whole(8 * GIB + (1 << 20));
+    assert_eq!(
+        rig.host
+            .create_room(rig.now, SandboxId(9), more, false, DiskSpace::default())
+            .short_of(),
+        Some(Resource::Memory)
+    );
+    assert_eq!(rig.create(3, Size::whole(8 * GIB)), CreateRoom::Fits);
+
+    // Booked, that create takes the relief too: nothing is left to count,
+    // though the idle VMs still run.
+    assert_eq!(rig.capacity().free(), 0);
+    assert_eq!(rig.host.reclaimable_memory(rig.now), 0);
+    assert_eq!(rig.create(4, size(0)).short_of(), Some(Resource::Memory));
+}
+
+#[test]
+fn an_overdrawn_budget_takes_the_relief_before_reclaimable_memory_counts_it() {
+    // One idle saved VM fills the budget; two first wakes are booked on
+    // the strength of ending it, which leaves the budget overdrawn.
+    let mut rig = Rig::new(2 * GIB, 8000);
+    rig.add(1, paused_saved(), Size::whole(2 * GIB));
+    rig.send(Input::Resident {
+        sandbox: SandboxId(1),
+        bytes: 2 * GIB,
+    });
+    rig.at(5);
+    assert_eq!(rig.host.reclaimable_memory(rig.now), 2 * GIB);
+    assert_eq!(rig.create(2, size(0)), CreateRoom::Fits);
+    assert_eq!(rig.create(3, size(0)), CreateRoom::Fits);
+    assert_eq!(rig.capacity().free(), 0);
+    assert_eq!(rig.host.reclaimable_memory(rig.now), 0);
+    assert_eq!(rig.create(4, size(0)).short_of(), Some(Resource::Memory));
+}
+
 #[test]
 fn a_create_asked_again_does_not_count_its_own_booking() {
     let mut rig = Rig::new(GIB, 8000);

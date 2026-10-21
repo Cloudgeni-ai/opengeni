@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, LoanId, MemoryPolicy,
-    Notice, OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
-    StepLimits,
+    Action, Admission, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, LoanId,
+    MemoryPolicy, Notice, OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State,
+    Step, StepLimits,
 };
 
 const GIB: u64 = 1 << 30;
@@ -702,7 +702,14 @@ fn memory_pressure_saves_an_unprotected_sandbox_before_ending_its_process() {
 
 #[test]
 fn reclaimable_memory_counts_only_idle_paused_sandboxes_with_a_current_copy() {
-    let mut rig = Rig::new(HostPolicy::default());
+    let mut rig = Rig::new(HostPolicy {
+        admission: Some(Admission {
+            budget: 64 * GIB,
+            buffer: 0,
+            busy_grace: Duration::ZERO,
+        }),
+        ..HostPolicy::default()
+    });
     rig.add(1, paused(Durability::Local), recommended());
     rig.add(2, paused(Durability::Volatile), recommended());
     rig.add(3, State::RUNNING, recommended());
@@ -713,14 +720,17 @@ fn reclaimable_memory_counts_only_idle_paused_sandboxes_with_a_current_copy() {
             bytes: GIB << id,
         });
     }
-    assert_eq!(rig.host.reclaimable_memory(), (GIB << 1) + (GIB << 4));
+    assert_eq!(
+        rig.host.reclaimable_memory(rig.now),
+        (GIB << 1) + (GIB << 4)
+    );
     rig.send(Input::Hold {
         sandbox: SandboxId(4),
         hold: HoldId(1),
         until: None,
         priority: Priority::Interactive,
     });
-    assert_eq!(rig.host.reclaimable_memory(), GIB << 1);
+    assert_eq!(rig.host.reclaimable_memory(rig.now), GIB << 1);
 }
 
 #[test]

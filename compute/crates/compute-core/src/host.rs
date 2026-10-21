@@ -723,20 +723,6 @@ impl Host {
         self.sandboxes.get(&id).is_some_and(Sandbox::reserves)
     }
 
-    /// Bytes of host memory that ending VM processes could free at once,
-    /// without losing anything or keeping anyone waiting: idle, paused
-    /// sandboxes whose current state is already saved, and ready spare
-    /// VMs. Placement can count this memory as free.
-    #[must_use]
-    pub fn reclaimable_memory(&self) -> u64 {
-        self.sandboxes
-            .values()
-            .filter(|sandbox| sandbox.reclaimable())
-            .map(Sandbox::resident_bytes)
-            .sum::<u64>()
-            + self.spares.endable()
-    }
-
     /// Ids of all managed sandboxes, in no particular order.
     pub fn sandbox_ids(&self) -> impl Iterator<Item = SandboxId> + '_ {
         self.sandboxes.keys().copied()
