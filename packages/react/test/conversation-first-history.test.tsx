@@ -28,6 +28,8 @@ registerDom();
 
 const t = createOpenGeniText();
 const STEP_TYPES = new Set<string>(SESSION_EVENT_STEP_TYPES);
+// Tests that page through thousands of steps take seconds on a busy machine.
+const HEAVY_TEST_TIMEOUT_MS = 30_000;
 
 function at(sequence: number, type: SessionEvent["type"], payload: unknown, turnId: string | null) {
   return {
@@ -602,105 +604,59 @@ describe("conversation-first session history", () => {
     }
   });
 
-  test("a queued turn's row ahead of a running turn does not cut the running turn short", async () => {
-    // T2 was queued while T1 ran; its turn.queued row is the window's oldest.
-    const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
-    store.push(
-      at(100, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
-      at(101, "turn.started", { turnId: "T1" }, "T1"),
-    );
-    let sequence = 102;
-    const call = (index: number) => {
-      const id = `T1-call-${index}`;
-      store.push(at(sequence, "agent.model.request", {}, "T1"));
-      store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
-      store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
-      sequence += 3;
-    };
-    for (let index = 0; index < 2500; index += 1) call(index);
-    const queued = sequence;
-    store.push(at(sequence++, "turn.queued", { turnId: "T2" }, "T2"));
-    for (let index = 2500; index < 4497; index += 1) call(index);
-    store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
-    store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
-    const { client } = historyClient({ store: () => store, withPages: true });
-    const hook = await renderHook(
-      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    const marker = () =>
-      stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")!;
-    try {
-      await settle();
-      expect(hook.result.current.events[0]!.sequence).toBe(queued);
-      for (let page = 0; page < 60 && marker().state !== "complete"; page += 1) {
-        await actRun(() => marker().load());
-        await settle(5);
+  test(
+    "a queued turn's row ahead of a running turn does not cut the running turn short",
+    async () => {
+      // T2 was queued while T1 ran; its turn.queued row is the window's oldest.
+      const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
+      store.push(
+        at(100, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+        at(101, "turn.started", { turnId: "T1" }, "T1"),
+      );
+      let sequence = 102;
+      const call = (index: number) => {
+        const id = `T1-call-${index}`;
+        store.push(at(sequence, "agent.model.request", {}, "T1"));
+        store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+        store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+        sequence += 3;
+      };
+      for (let index = 0; index < 2500; index += 1) call(index);
+      const queued = sequence;
+      store.push(at(sequence++, "turn.queued", { turnId: "T2" }, "T2"));
+      for (let index = 2500; index < 4497; index += 1) call(index);
+      store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+      store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+      const { client } = historyClient({ store: () => store, withPages: true });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      const marker = () =>
+        stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")!;
+      try {
+        await settle();
+        expect(hook.result.current.events[0]!.sequence).toBe(queued);
+        for (let page = 0; page < 60 && marker().state !== "complete"; page += 1) {
+          await actRun(() => marker().load());
+          await settle(5);
+        }
+        expect(marker().state).toBe("complete");
+        const steps = stepEvents(hook.result.current.events);
+        expect(steps).toHaveLength(4497 * 2);
+        expect(steps[0]!.sequence).toBe(103);
+      } finally {
+        await hook.unmount();
       }
-      expect(marker().state).toBe("complete");
-      const steps = stepEvents(hook.result.current.events);
-      expect(steps).toHaveLength(4497 * 2);
-      expect(steps[0]!.sequence).toBe(103);
-    } finally {
-      await hook.unmount();
-    }
-  });
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
 
-  test("a turn whose start is before the window still loads every step", async () => {
-    // T0's steps come first; T1 then has a conversation row per call, more
-    // than the first window reads, so the window starts in the middle of T1.
-    const store = longTurn({ start: 1, turnId: "T0", steps: 300 });
-    store.push(
-      at(700, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
-      at(701, "turn.started", { turnId: "T1" }, "T1"),
-    );
-    let sequence = 702;
-    for (let index = 0; index < 2500; index += 1) {
-      const id = `T1-call-${index}`;
-      store.push(at(sequence, "agent.model.request", {}, "T1"));
-      store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
-      store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
-      sequence += 3;
-    }
-    store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
-    store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
-    const { client, reads } = historyClient({ store: () => store, withPages: true });
-    const hook = await renderHook(
-      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    try {
-      await settle();
-      expect(hook.result.current.events.some((event) => event.type === "turn.started")).toBe(false);
-      reads.length = 0;
-      for (let page = 0; page < 60; page += 1) {
-        const marker = stepMarkers(hook.result.current.timeline).find(
-          (item) => item.turnId === "T1",
-        )!;
-        if (marker.state === "complete") break;
-        await actRun(() => marker.load());
-        await settle(5);
-      }
-      const marker = stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1");
-      expect(marker?.state).toBe("complete");
-      const steps = stepEvents(hook.result.current.events);
-      expect(steps).toHaveLength(5000);
-      expect(steps.every((event) => event.turnId === "T1")).toBe(true);
-      expect(steps[0]!.sequence).toBe(703);
-      // Each page continued below the last one, and reading stopped at T0.
-      const bounds = reads.map((read) => read.before!);
-      expect(bounds).toEqual([...bounds].sort((left, right) => right - left));
-      expect(new Set(bounds).size).toBe(bounds.length);
-    } finally {
-      await hook.unmount();
-    }
-  });
-
-  for (const turnless of ["session.queue.changed", "terminal.pty.output.delta"] as const) {
-    test(`a turn starting before the window loads every step past turnless ${turnless} rows`, async () => {
-      // Each call of T1 has a turnless row (a queued prompt's queue change, or
-      // interactive terminal output) ahead of it, so the window's oldest
-      // event has no turn.
+  test(
+    "a turn whose start is before the window still loads every step",
+    async () => {
+      // T0's steps come first; T1 then has a conversation row per call, more
+      // than the first window reads, so the window starts in the middle of T1.
       const store = longTurn({ start: 1, turnId: "T0", steps: 300 });
       store.push(
         at(700, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
@@ -709,26 +665,24 @@ describe("conversation-first session history", () => {
       let sequence = 702;
       for (let index = 0; index < 2500; index += 1) {
         const id = `T1-call-${index}`;
-        store.push(at(sequence, turnless, { data: `row ${index}` }, null));
-        store.push(at(sequence + 1, "agent.model.request", {}, "T1"));
-        store.push(at(sequence + 2, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
-        store.push(at(sequence + 3, "agent.toolCall.output", { id, output: "ok" }, "T1"));
-        sequence += 4;
+        store.push(at(sequence, "agent.model.request", {}, "T1"));
+        store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+        store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+        sequence += 3;
       }
       store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
       store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
-      const { client } = historyClient({ store: () => store, withPages: true });
+      const { client, reads } = historyClient({ store: () => store, withPages: true });
       const hook = await renderHook(
         () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
         await settle();
-        const window = hook.result.current.events;
-        expect(window.some((event) => event.type === "turn.started")).toBe(false);
-        expect(window[0]!.turnId).toBeNull();
-        // Turnless rows are history too: PTY output shows after a reload.
-        expect(window.filter((event) => event.type === turnless).length).toBeGreaterThan(100);
+        expect(hook.result.current.events.some((event) => event.type === "turn.started")).toBe(
+          false,
+        );
+        reads.length = 0;
         for (let page = 0; page < 60; page += 1) {
           const marker = stepMarkers(hook.result.current.timeline).find(
             (item) => item.turnId === "T1",
@@ -737,81 +691,155 @@ describe("conversation-first session history", () => {
           await actRun(() => marker.load());
           await settle(5);
         }
-        expect(
-          stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")?.state,
-        ).toBe("complete");
-        const steps = stepEvents(hook.result.current.events).filter((event) => event.turnId);
+        const marker = stepMarkers(hook.result.current.timeline).find(
+          (item) => item.turnId === "T1",
+        );
+        expect(marker?.state).toBe("complete");
+        const steps = stepEvents(hook.result.current.events);
         expect(steps).toHaveLength(5000);
         expect(steps.every((event) => event.turnId === "T1")).toBe(true);
-        expect(steps[0]!.sequence).toBe(704);
+        expect(steps[0]!.sequence).toBe(703);
+        // Each page continued below the last one, and reading stopped at T0.
+        const bounds = reads.map((read) => read.before!);
+        expect(bounds).toEqual([...bounds].sort((left, right) => right - left));
+        expect(new Set(bounds).size).toBe(bounds.length);
       } finally {
         await hook.unmount();
       }
-    });
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
+
+  for (const turnless of ["session.queue.changed", "terminal.pty.output.delta"] as const) {
+    test(
+      `a turn starting before the window loads every step past turnless ${turnless} rows`,
+      async () => {
+        // Each call of T1 has a turnless row (a queued prompt's queue change, or
+        // interactive terminal output) ahead of it, so the window's oldest
+        // event has no turn.
+        const store = longTurn({ start: 1, turnId: "T0", steps: 300 });
+        store.push(
+          at(700, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+          at(701, "turn.started", { turnId: "T1" }, "T1"),
+        );
+        let sequence = 702;
+        for (let index = 0; index < 2500; index += 1) {
+          const id = `T1-call-${index}`;
+          store.push(at(sequence, turnless, { data: `row ${index}` }, null));
+          store.push(at(sequence + 1, "agent.model.request", {}, "T1"));
+          store.push(
+            at(sequence + 2, "agent.toolCall.created", { id, name: "exec_command" }, "T1"),
+          );
+          store.push(at(sequence + 3, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+          sequence += 4;
+        }
+        store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+        store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+        const { client } = historyClient({ store: () => store, withPages: true });
+        const hook = await renderHook(
+          () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+          undefined,
+        );
+        try {
+          await settle();
+          const window = hook.result.current.events;
+          expect(window.some((event) => event.type === "turn.started")).toBe(false);
+          expect(window[0]!.turnId).toBeNull();
+          // Turnless rows are history too: PTY output shows after a reload.
+          expect(window.filter((event) => event.type === turnless).length).toBeGreaterThan(100);
+          for (let page = 0; page < 60; page += 1) {
+            const marker = stepMarkers(hook.result.current.timeline).find(
+              (item) => item.turnId === "T1",
+            )!;
+            if (marker.state === "complete") break;
+            await actRun(() => marker.load());
+            await settle(5);
+          }
+          expect(
+            stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")?.state,
+          ).toBe("complete");
+          const steps = stepEvents(hook.result.current.events).filter((event) => event.turnId);
+          expect(steps).toHaveLength(5000);
+          expect(steps.every((event) => event.turnId === "T1")).toBe(true);
+          expect(steps[0]!.sequence).toBe(704);
+        } finally {
+          await hook.unmount();
+        }
+      },
+      HEAVY_TEST_TIMEOUT_MS,
+    );
   }
 
-  test("a turn read to a guessed lower bound offers earlier steps once its start loads", async () => {
-    // A late row of the previous turn sits inside T1 and is the window's
-    // oldest event (the first read and its boundary page hold 2,000 rows): the
-    // first reads stop at it, above T1's earliest steps.
-    const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
-    store.push(
-      at(100, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
-      at(101, "turn.started", { turnId: "T1" }, "T1"),
-    );
-    let sequence = 102;
-    const call = (index: number) => {
-      const id = `T1-call-${index}`;
-      store.push(at(sequence, "agent.model.request", {}, "T1"));
-      store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
-      store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
-      sequence += 3;
-    };
-    for (let index = 0; index < 2500; index += 1) call(index);
-    const late = sequence;
-    store.push(at(sequence++, "agent.model.usage", {}, "T0"));
-    for (let index = 2500; index < 4497; index += 1) call(index);
-    store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
-    store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
-    const { client } = historyClient({ store: () => store, withPages: true });
-    const hook = await renderHook(
-      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    const marker = () =>
-      stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")!;
-    const loadAll = async () => {
-      for (let page = 0; page < 60 && marker().state !== "complete"; page += 1) {
-        await actRun(() => marker().load());
-        await settle(5);
-      }
-    };
-    try {
-      await settle();
-      expect(hook.result.current.events[0]!.sequence).toBe(late);
-      await loadAll();
-      expect(marker().state).toBe("complete");
-      expect(stepEvents(hook.result.current.events)).toHaveLength(1997 * 2);
+  test(
+    "a turn read to a guessed lower bound offers earlier steps once its start loads",
+    async () => {
+      // A late row of the previous turn sits inside T1 and is the window's
+      // oldest event (the first read and its boundary page hold 2,000 rows): the
+      // first reads stop at it, above T1's earliest steps.
+      const store = longTurn({ start: 1, turnId: "T0", steps: 10 });
+      store.push(
+        at(100, "user.message", { text: "go", routing: "accepted_for_execution" }, null),
+        at(101, "turn.started", { turnId: "T1" }, "T1"),
+      );
+      let sequence = 102;
+      const call = (index: number) => {
+        const id = `T1-call-${index}`;
+        store.push(at(sequence, "agent.model.request", {}, "T1"));
+        store.push(at(sequence + 1, "agent.toolCall.created", { id, name: "exec_command" }, "T1"));
+        store.push(at(sequence + 2, "agent.toolCall.output", { id, output: "ok" }, "T1"));
+        sequence += 3;
+      };
+      for (let index = 0; index < 2500; index += 1) call(index);
+      const late = sequence;
+      store.push(at(sequence++, "agent.model.usage", {}, "T0"));
+      for (let index = 2500; index < 4497; index += 1) call(index);
+      store.push(at(sequence, "agent.message.completed", { text: "done" }, "T1"));
+      store.push(at(sequence + 1, "turn.completed", { turnId: "T1" }, "T1"));
+      const { client } = historyClient({ store: () => store, withPages: true });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      const marker = () =>
+        stepMarkers(hook.result.current.timeline).find((item) => item.turnId === "T1")!;
+      const loadAll = async () => {
+        for (let page = 0; page < 60 && marker().state !== "complete"; page += 1) {
+          await actRun(() => marker().load());
+          await settle(5);
+        }
+      };
+      try {
+        await settle();
+        expect(hook.result.current.events[0]!.sequence).toBe(late);
+        await loadAll();
+        expect(marker().state).toBe("complete");
+        expect(stepEvents(hook.result.current.events)).toHaveLength(1997 * 2);
 
-      for (let page = 0; page < 10; page += 1) {
-        if (hook.result.current.events.some((event) => event.type === "turn.started")) break;
-        await actRun(() => {
-          hook.result.current.loadOlder();
-        });
-        await settle(5);
+        for (let page = 0; page < 10; page += 1) {
+          if (hook.result.current.events.some((event) => event.type === "turn.started")) break;
+          await actRun(() => {
+            hook.result.current.loadOlder();
+          });
+          await settle(5);
+        }
+        expect(hook.result.current.events.some((event) => event.type === "turn.started")).toBe(
+          true,
+        );
+        // The turn's start is now known: the steps below the old bound are not.
+        expect(marker().state).toBe("partial");
+        await loadAll();
+        expect(marker().state).toBe("complete");
+        const steps = stepEvents(hook.result.current.events).filter(
+          (event) => event.turnId === "T1",
+        );
+        expect(steps).toHaveLength(4497 * 2);
+        expect(steps[0]!.sequence).toBe(103);
+      } finally {
+        await hook.unmount();
       }
-      expect(hook.result.current.events.some((event) => event.type === "turn.started")).toBe(true);
-      // The turn's start is now known: the steps below the old bound are not.
-      expect(marker().state).toBe("partial");
-      await loadAll();
-      expect(marker().state).toBe("complete");
-      const steps = stepEvents(hook.result.current.events).filter((event) => event.turnId === "T1");
-      expect(steps).toHaveLength(4497 * 2);
-      expect(steps[0]!.sequence).toBe(103);
-    } finally {
-      await hook.unmount();
-    }
-  });
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
 
   test("presented results are read at most eight at a time", async () => {
     const store: SessionEvent[] = [
