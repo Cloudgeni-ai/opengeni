@@ -5488,7 +5488,10 @@ export async function prepareAgentTools(
             // sanitize the response on the wire before validation. The namespace Set
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
-            ...mcpStreamableHttpClientOptions({ firstParty }),
+            ...mcpStreamableHttpClientOptions({
+              firstParty,
+              codexApps: isCodexAppsMcpServer(config),
+            }),
             ...remoteRequestInit,
             ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
             ...mcpSessionTimeoutOptions(config),
