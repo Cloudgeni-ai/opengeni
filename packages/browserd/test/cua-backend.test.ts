@@ -444,7 +444,11 @@ describe("CUA desktop boundary", () => {
             value: "Rejected",
           },
         }),
-      ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element offers no actions; act on a nearby control or its window instead",
+      });
       expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
     } finally {
       await backend.close();
@@ -605,6 +609,62 @@ describe("CUA desktop boundary", () => {
       await backend.dispatch(menu);
       expect({ invoked, menus }).toEqual({ invoked: 1, menus: 1 });
       expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("focuses a macOS control through CUA's element focus click", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    const focused: Record<string, unknown>[] = [];
+    fixture.callTool = async (name, argumentsJson) => {
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "click" && args.action === "focus") focused.push(args);
+      return await original(name, argumentsJson);
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const observed = await backend.observe(target.id);
+      expect(observed.roots[0]!.actions).toEqual(["invoke", "focus"]);
+      expect(observed.roots[1]!.actions).toEqual(["set_value", "focus"]);
+      const focus = command(observed);
+      focus.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "focus",
+      };
+      await backend.dispatch(focus);
+      expect(focused).toEqual([
+        expect.objectContaining({
+          element_token: observed.roots[0]!.ref,
+          action: "focus",
+          delivery_mode: "background",
+        }),
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("an element that cannot take the focus says what to do instead", async () => {
+    const fixture = new LinuxPermissionsFixture();
+    const backend = await CuaComputerBackend.open(fixture, "linux");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observed = await backend.observe(target.id);
+      const focus = command(observed);
+      focus.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "focus",
+      };
+      await expect(backend.dispatch(focus)).rejects.toMatchObject({
+        code: "unsupported",
+        message:
+          "Elements cannot be focused on their own here: invoke the element, or set its value",
+      });
     } finally {
       await backend.close();
     }

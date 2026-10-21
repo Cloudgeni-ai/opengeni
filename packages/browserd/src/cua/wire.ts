@@ -101,6 +101,8 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   unsupported: "unsupported",
   background_delivery_unsupported: "unsupported",
   background_unavailable: "unsupported",
+  // The element did not take the keyboard focus; nothing else changed.
+  focus_refused: "invalid_action",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
