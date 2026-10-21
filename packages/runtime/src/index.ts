@@ -11136,11 +11136,12 @@ function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: stri
 }
 
 function objectStorageFileMount(settings: Settings, prefix: string): any {
-  // Descriptor-driven: a nativeBucketMount backend (modal) mounts via the
+  // Descriptor-driven: a native bucket-mount backend (modal) mounts via the
   // provider's own bucket-mount strategy and cannot mount Azure Blob entries —
   // it needs pre-signed downloads instead. Reading the descriptor (not a
   // hard-coded backend name) keeps this honest as providers are added.
-  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
+  const nativeBucketMount =
+    CAPABILITY_DESCRIPTORS[settings.sandboxBackend].bucketMount === "native";
   if (settings.objectStorageBackend === "azure-blob") {
     if (nativeBucketMount) {
       throw new Error(
