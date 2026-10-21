@@ -1092,6 +1092,15 @@ state remains application-owned; durable draft and session state remain in
   `SESSION_TURN_LIVE_STEP_TAIL` steps, an opened turn keeps every step, and
   steps of turns nobody has open are limited to
   `SESSION_STEP_BROWSER_MAX_BYTES`. `replay: "full"` still reads everything.
+  Turnless step rows (PTY and background command output) are not part of the
+  conversation window either: the sandbox terminal reads its own newest
+  1,000 PTY and command-output rows by type the first time it is shown for a
+  session, and live output keeps streaming in. When `useSessionEvents` rejoins
+  the stream past unread terminal output (opening a chat, returning from a
+  hidden tab or from history) or a burst overflows its live tail, the terminal
+  reads its newest page again. That signal comes from this package's
+  `useSessionEvents`; a terminal fed with `events` from elsewhere reads its
+  history only when opened.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
   The live working set is at most 16 MiB or 20,000 events. One event larger than

@@ -18,6 +18,7 @@ import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
+import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -243,6 +244,20 @@ export function useSessionEvents(
   // from the contiguous conversation window (see `isConversationHistoryEvent`).
   const [stepStores, setStepStores] = useState<TurnStepStores>(EMPTY_STEP_STORES);
   const stepStoresRef = useRef<TurnStepStores>(EMPTY_STEP_STORES);
+  // Live step rows without a turn (PTY and background command output): a
+  // short tail outside the window. The sandbox dock reads their history itself.
+  const [turnlessSteps, setTurnlessSteps] = useState<TurnlessSteps>(EMPTY_TURNLESS_STEPS);
+  const turnlessStepsRef = useRef<TurnlessSteps>(EMPTY_TURNLESS_STEPS);
+  // How many live turnless rows the last committed render had seen, and
+  // whether a gap was already marked for rows appended since.
+  const renderedTurnlessRef = useRef({ appended: 0, marked: false });
+  useEffect(() => {
+    renderedTurnlessRef.current = { appended: turnlessSteps.appended, marked: false };
+  }, [turnlessSteps]);
+  // Through which sequence the live stream delivered every row. A stream that
+  // starts past it (the conversation side moved the cursor) skipped terminal
+  // output nobody read.
+  const liveThroughRef = useRef(0);
   // Retires step reads issued for a previous stream identity.
   const stepGenerationRef = useRef(0);
   // Each step read's id; a store answers only its newest read.
@@ -341,7 +356,23 @@ export function useSessionEvents(
 
   const appendLiveSteps = useCallback(
     (steps: readonly SessionEvent[]) => {
-      const windowEvents = eventWindowRef.current.events;
+      if (steps.some((event) => !event.turnId)) {
+        const incoming = steps.filter((event) => !event.turnId);
+        const turnless = appendTurnlessSteps(turnlessStepsRef.current, incoming);
+        // A burst larger than the tail dropped rows no render showed: the
+        // terminal re-reads them.
+        const rendered = renderedTurnlessRef.current;
+        if (!rendered.marked && turnless.appended - rendered.appended > turnless.events.length) {
+          rendered.marked = true;
+          if (sessionId) markTurnlessOutputGap(workspaceId, sessionId);
+        }
+        turnlessStepsRef.current = turnless;
+        setTurnlessSteps(turnless);
+      }
+      const windowEvents = withTurnlessSteps(
+        eventWindowRef.current.events,
+        turnlessStepsRef.current,
+      );
       const next = new Map(stepStoresRef.current);
       const now = Date.now();
       for (const [turnId, events] of groupByTurn(steps)) {
@@ -366,7 +397,7 @@ export function useSessionEvents(
       }
       commitStepStores(boundStepStores(next, retainedTurnsRef.current));
     },
-    [commitStepStores],
+    [commitStepStores, workspaceId, sessionId],
   );
 
   /**
@@ -428,7 +459,7 @@ export function useSessionEvents(
         }),
       );
       void readEventPage(client, workspaceId, sessionId, {
-        includeTypes: [...SESSION_EVENT_STEP_TYPES],
+        includeTypes: [...TURN_STEP_READ_TYPES],
         after: Math.max(0, lower),
         before: upper,
         direction: "before",
@@ -562,6 +593,7 @@ export function useSessionEvents(
       setInitialHistoryReady(false);
       lastSequenceRef.current = after;
       streamResumeSequenceRef.current = after;
+      liveThroughRef.current = after;
       oldestSequenceRef.current = null;
       newestSequenceRef.current = null;
       hasOlderRef.current = false;
@@ -578,6 +610,8 @@ export function useSessionEvents(
       stepGenerationRef.current += 1;
       stepStoresRef.current = EMPTY_STEP_STORES;
       setStepStores(EMPTY_STEP_STORES);
+      turnlessStepsRef.current = EMPTY_TURNLESS_STEPS;
+      setTurnlessSteps(EMPTY_TURNLESS_STEPS);
       turnStepHandlesRef.current = new Map();
       presentedCallIdsRef.current = new Set();
       presentedScanRef.current = null;
@@ -668,6 +702,7 @@ export function useSessionEvents(
           streamResumeSequenceRef.current,
           batchResumeSequence,
         );
+        liveThroughRef.current = Math.max(liveThroughRef.current, batchResumeSequence);
       }
       const status = observeSessionStatus(batch, sessionStatusRef);
       if (status !== undefined) {
@@ -857,15 +892,24 @@ export function useSessionEvents(
           setHasOlder(window.hasOlder || retained.truncated);
           setHasNewer(false);
           setInitialLoading(false);
-          // A working turn: catch up to the durable head and read its latest
-          // steps, rather than replaying every step since its last message.
-          if ((await rejoinLive(false)) === "reload" && attempt === 0) {
+          // Join at the durable head rather than replaying every row since the
+          // window's last conversation event: a working turn's steps (its
+          // latest are read), or terminal output written after the last turn,
+          // which only the sandbox dock reads.
+          if ((await rejoinLive(true)) === "reload" && attempt === 0) {
             initialWindowLoadedRef.current = false;
           }
         }
         if (fullReplay) {
           setInitialLoading(false);
         }
+        // The stream starts past what it last delivered: a window load,
+        // catch-up, page or jump moved the cursor with conversation reads, which
+        // carry no terminal output, so the sandbox terminal reads it again.
+        if (!fullReplay && streamResumeSequenceRef.current > liveThroughRef.current) {
+          markTurnlessOutputGap(workspaceId, sessionId);
+        }
+        liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
@@ -1516,16 +1560,26 @@ export function useSessionEvents(
   const liveSteps = identityMatches && !showRetained;
   const visibleStepStores = liveSteps ? stepStores : EMPTY_STEP_STORES;
   const visiblePresentedOutputs = liveSteps ? presentedOutputs : EMPTY_PRESENTED_OUTPUTS;
-  // The conversation plus loaded steps and presented results, by sequence.
+  const visibleTurnless = liveSteps ? turnlessSteps : EMPTY_TURNLESS_STEPS;
+  // The conversation plus loaded steps, presented results and the live
+  // turnless tail, by sequence.
   const loadedEvents = useMemo(
-    () => mergeLoadedEvents(visibleEvents, visibleStepStores, visiblePresentedOutputs),
-    [visibleEvents, visibleStepStores, visiblePresentedOutputs],
+    () =>
+      mergeLoadedEvents(
+        visibleEvents,
+        visibleStepStores,
+        visiblePresentedOutputs,
+        visibleTurnless.events,
+      ),
+    [visibleEvents, visibleStepStores, visiblePresentedOutputs, visibleTurnless],
   );
   // Turns whose steps are not all loaded get an expandable, loadable marker.
   const turnSteps = useMemo(() => {
     if (fullReplay) return undefined;
     const markers = new Map<string, Pick<TurnStepsItem, "state" | "load" | "retain">>();
-    for (const [turnId, bounds] of conversationTurnBounds(visibleEvents)) {
+    // Live turnless rows inside a turn are not its hidden steps.
+    const bounded = withTurnlessSteps(visibleEvents, visibleTurnless);
+    for (const [turnId, bounds] of conversationTurnBounds(bounded)) {
       const store = visibleStepStores.get(turnId);
       const state: TurnStepsItem["state"] | null = store
         ? store.loading
@@ -1544,7 +1598,7 @@ export function useSessionEvents(
       markers.set(turnId, { state, ...(liveSteps ? turnStepHandle(turnId) : RETAINED_VIEW_STEPS) });
     }
     return markers;
-  }, [fullReplay, visibleEvents, visibleStepStores, liveSteps, turnStepHandle]);
+  }, [fullReplay, visibleEvents, visibleTurnless, visibleStepStores, liveSteps, turnStepHandle]);
   const timeline = useMemo(() => {
     const witness =
       questionEvidence?.client === client &&
@@ -2201,6 +2255,15 @@ export const SESSION_TURN_STEP_PAGE_SIZE = 200;
 // A collapsed live turn only shows its latest step; keep a short tail.
 export const SESSION_TURN_LIVE_STEP_TAIL = 200;
 const SESSION_TURN_LIVE_STEP_TAIL_BYTES = 2 * 1024 * 1024;
+// Live turnless output kept for the sandbox terminal between its renders.
+// It reads its own history; a burst past this tail makes it re-read.
+const TURNLESS_STEP_TAIL = 1000;
+const TURNLESS_STEP_TAIL_BYTES = 4 * 1024 * 1024;
+// A turn's step reads skip PTY output: it never belongs to a turn's work rows,
+// and a turn with only terminal output in its span finds nothing in one read.
+const TURN_STEP_READ_TYPES: readonly SessionEventType[] = SESSION_EVENT_STEP_TYPES.filter(
+  (type) => type !== "terminal.pty.output.delta",
+);
 // Steps of turns nobody is viewing; least recently used turns are dropped
 // first and reload when reopened. Opened turns are never evicted.
 export const SESSION_STEP_BROWSER_MAX_BYTES = 16 * 1024 * 1024;
@@ -2245,6 +2308,84 @@ type TurnStepStores = ReadonlyMap<string, TurnStepStore>;
 
 const EMPTY_STEP_STORES: TurnStepStores = new Map();
 
+type TurnlessSteps = {
+  /** The newest live turnless steps, ascending. */
+  events: SessionEvent[];
+  bytes: number;
+  /** Inclusive sequence runs of every live turnless step seen, ascending. */
+  ranges: ReadonlyArray<readonly [number, number]>;
+  /** How many live turnless rows were ever appended. */
+  appended: number;
+};
+
+const EMPTY_TURNLESS_STEPS: TurnlessSteps = { events: [], bytes: 2, ranges: [], appended: 0 };
+// Runs of turnless sequences kept for turn extents; terminal output comes in
+// bursts, so a run usually spans many rows.
+const TURNLESS_STEP_MAX_RANGES = 4096;
+
+/** Add live turnless steps, keeping a bounded tail for the sandbox terminal. */
+function appendTurnlessSteps(
+  current: TurnlessSteps,
+  incoming: readonly SessionEvent[],
+): TurnlessSteps {
+  const ranges = current.ranges.map((range): [number, number] => [range[0], range[1]]);
+  for (const event of incoming) {
+    const sequence = event.sequence;
+    const last = ranges.at(-1);
+    if (last && sequence >= last[0] && sequence <= last[1]) continue;
+    if (last && sequence === last[1] + 1) last[1] = sequence;
+    else if (!last || sequence > last[1]) ranges.push([sequence, sequence]);
+    else if (!ranges.some(([first, end]) => sequence >= first && sequence <= end)) {
+      ranges.push([sequence, sequence]);
+      ranges.sort((left, right) => left[0] - right[0]);
+    }
+  }
+  if (ranges.length > TURNLESS_STEP_MAX_RANGES) {
+    ranges.splice(0, ranges.length - TURNLESS_STEP_MAX_RANGES);
+  }
+  const next = appendStepEvents(current, incoming);
+  const appended = current.appended + incoming.length;
+  if (next.events.length <= TURNLESS_STEP_TAIL && next.bytes <= TURNLESS_STEP_TAIL_BYTES) {
+    return { ...next, ranges, appended };
+  }
+  const kept = boundBrowserSessionEventWindow(next.events, {
+    maxCount: TURNLESS_STEP_TAIL,
+    maxBytes: TURNLESS_STEP_TAIL_BYTES,
+  });
+  return { events: kept.events, bytes: kept.bytes, ranges, appended };
+}
+
+/**
+ * The window with a placeholder over each run of live turnless steps inside
+ * its range, so the sequences they fill do not read as a turn's hidden steps.
+ * Only for turn extents: placeholders are never shown.
+ */
+function withTurnlessSteps(
+  window: readonly SessionEvent[],
+  turnless: TurnlessSteps,
+): readonly SessionEvent[] {
+  const first = window[0]?.sequence;
+  if (first === undefined || turnless.ranges.length === 0) return window;
+  const placeholders: SessionEvent[] = [];
+  for (const [start, end] of turnless.ranges) {
+    // Runs past the window's newest event still fill a live turn's span.
+    if (end < first) continue;
+    placeholders.push({
+      id: `turnless-steps-${start}`,
+      workspaceId: window[0]!.workspaceId,
+      sessionId: window[0]!.sessionId,
+      sequence: start,
+      coveredThrough: end,
+      type: "terminal.pty.output.delta",
+      payload: null,
+      occurredAt: window[0]!.occurredAt,
+      turnId: null,
+    });
+  }
+  if (placeholders.length === 0) return window;
+  return [...window, ...placeholders].sort((left, right) => left.sequence - right.sequence);
+}
+
 /** The exclusive lower bound of a turn's step reads in the current window. */
 function turnStepLowerBound(bounds: TurnBounds): number {
   return bounds.started !== null ? bounds.started - 1 : bounds.previous;
@@ -2260,12 +2401,15 @@ export function isConversationHistoryEvent(
   event: SessionEvent,
   presentedCallIds: ReadonlySet<string>,
 ): boolean {
-  if (!STEP_TYPES.has(event.type) || !event.turnId) return true;
+  if (!STEP_TYPES.has(event.type)) return true;
   const payload = event.payload as Record<string, unknown> | null;
+  // Presented results stay, with or without a turn (the server keeps them too).
   if (event.type === "agent.toolCall.created") return isPresentedSessionToolName(payload?.name);
   if (event.type === "agent.toolCall.output") {
     return typeof payload?.id === "string" && presentedCallIds.has(payload.id);
   }
+  // Other steps, including turnless PTY and background command output, which
+  // the sandbox terminal reads itself so they never crowd the conversation.
   return false;
 }
 
@@ -2396,8 +2540,9 @@ function mergeLoadedEvents(
   conversation: SessionEvent[],
   stores: TurnStepStores,
   presented: ReadonlyMap<string, SessionEvent>,
+  turnless: readonly SessionEvent[],
 ): SessionEvent[] {
-  if (stores.size === 0 && presented.size === 0) return conversation;
+  if (stores.size === 0 && presented.size === 0 && turnless.length === 0) return conversation;
   const turns = windowTurns(conversation);
   const ids = new Set(conversation.map((event) => event.id));
   const extra: SessionEvent[] = [];
@@ -2408,6 +2553,11 @@ function mergeLoadedEvents(
   };
   for (const [turnId, store] of stores) if (turns.has(turnId)) store.events.forEach(add);
   presented.forEach(add);
+  for (const event of turnless) {
+    if (ids.has(event.id)) continue;
+    ids.add(event.id);
+    extra.push(event);
+  }
   if (extra.length === 0) return conversation;
   return [...conversation, ...extra].sort((left, right) => left.sequence - right.sequence);
 }

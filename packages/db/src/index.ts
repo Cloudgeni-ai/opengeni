@@ -36799,9 +36799,9 @@ export type ListSessionEventsOptions = {
    * Keep `agent.toolCall.created` rows of presented tools (see
    * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
    * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY
-   * output) are kept too: no per-turn step read can find them. No effect
-   * unless `agent.toolCall.created` is excluded.
+   * changes without loading every step. Excluded rows without a turn (PTY and
+   * background command output) stay excluded: the sandbox dock reads them
+   * itself. No effect unless `agent.toolCall.created` is excluded.
    */
   retainPresentedToolCalls?: boolean;
   /**
@@ -36827,8 +36827,6 @@ function sessionEventExcludeTypesFilter(
   const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
   return or(
     excluded,
-    // Turnless rows (PTY output) belong to no turn's step read.
-    isNull(schema.sessionEvents.turnId),
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
       sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
