@@ -1318,7 +1318,7 @@ describe("review regressions: observation, admission and telemetry", () => {
       ]);
     },
   );
-  test("malformed and unowned queue refs are reported without aborting; valid manifest is cached", async () => {
+  test("malformed refs and valid foreign traffic namespace coexist; owned manifest is cached", async () => {
     const f = await fixture(),
       manifest = await f.git.build(spec([pull(1, f.first)], f.base));
     await f.git.exec([
@@ -1327,6 +1327,7 @@ describe("review regressions: observation, admission and telemetry", () => {
       `${manifest.tipSha}:refs/heads/queue/${manifest.batchId}`,
       `${f.base}:refs/heads/queue/${"a".repeat(64)}`,
       `${f.base}:refs/heads/queue/diagnostic`,
+      `${manifest.tipSha}:refs/heads/queue/shadow-traffic/${manifest.batchId}`,
     ]);
     const remoteRefs = f.git.remoteRefs.bind(f.git),
       fetchLocal = f.git.fetch.bind(f.git),
@@ -1350,7 +1351,10 @@ describe("review regressions: observation, admission and telemetry", () => {
     const reader = new LiveReader(new MockReader(settings, new GitHubAuth({})), f.git, settings);
     const first = await reader.observe();
     expect(first.candidates).toHaveLength(1);
-    expect(first.observationWarnings).toHaveLength(2);
+    expect(first.observationWarnings).toHaveLength(3);
+    expect(first.observationWarnings).toContain(
+      `Excluded unowned queue ref refs/heads/queue/shadow-traffic/${manifest.batchId}`,
+    );
     await new LiveReader(new MockReader(settings, new GitHubAuth({})), f.git, settings).observe();
     expect(validInspections).toBe(1);
   });
