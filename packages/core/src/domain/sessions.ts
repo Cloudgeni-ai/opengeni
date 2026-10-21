@@ -259,6 +259,7 @@ import {
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -3250,7 +3251,7 @@ async function createSessionForRequestInFileScope(
   // independently intersected with the exact model-visible selection and the
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
-  const tools = withFirstPartyTools(selectedTools, runtimeSettings);
+  let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
   const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
@@ -3567,6 +3568,7 @@ async function createSessionForRequestInFileScope(
     toolPolicy,
     productServerIds: [],
   }).firstPartyMcpTools;
+  tools = newSessionKnowledgeSearchTools(tools, agentConfig, firstPartyMcpTools);
   const googleDrivePublicationEnabled =
     firstPartyMcpTools.includes("editable_artifact_export") &&
     firstPartyMcpTools.includes("editable_artifact_export_status") &&

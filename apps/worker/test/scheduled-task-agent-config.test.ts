@@ -179,7 +179,9 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
-    const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
+    const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id, {
+      mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+    });
     expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     const defaults = resolveFirstPartyMcpToolPolicy(settings).default;
@@ -187,6 +189,10 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     // including the ordinary bot posting tools.
     expect(session.firstPartyMcpTools).toEqual(defaults);
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+    expect(session.tools.find((tool) => tool.id === "opengeni")?.eager).toEqual([
+      "knowledge_search",
+    ]);
+    expect(accepted?.resolvedTools).toEqual(session.tools);
     for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
       expect(session.firstPartyMcpTools).toContain(tool);
     }

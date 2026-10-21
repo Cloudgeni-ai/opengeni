@@ -470,6 +470,18 @@ describe("automation agent configuration", () => {
       tools: [{ kind: "mcp", id: "acme" }],
     });
   });
+
+  test("an attached first-party search is saved eager only for the new session", async () => {
+    const execution = agentRun(undefined);
+    execution.acceptedExecution.sessionTemplate.tools = [{ kind: "mcp", id: "opengeni" }];
+    const { createInput } = await dispatch(execution);
+    expect(createInput).toMatchObject({
+      tools: [{ kind: "mcp", id: "opengeni", eager: ["knowledge_search"] }],
+    });
+    expect(execution.acceptedExecution.sessionTemplate.tools).toEqual([
+      { kind: "mcp", id: "opengeni" },
+    ]);
+  });
 });
 
 describe("automation run workflow", () => {

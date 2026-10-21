@@ -173,7 +173,22 @@ and other programmatic callers receive the exact bytes. Only a model tool call
 receives a compact copy, projected in the worker at the per-caller seam
 (`projectAttemptToolResultForCaller` with
 `packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
-It is the same JSON without bookkeeping or repeated text:
+Search returns discovery cards: entry `id`, title, kind, scope, revision outcome,
+and at most 200 Unicode code points of the best content excerpt (or preview when
+there is no excerpt). Nondefault archive/change state is preserved. Search mode,
+fallback reason and a non-null pagination cursor remain visible. Use
+`knowledge_get` to read full text, revision IDs for citations, and the current
+version before updating. A snippet is a relevance hint, not the complete finding.
+Pending results remain explicitly `outcome: "pending"`.
+
+Both MCP search tools default to five results; callers can request up to 50 or
+paginate. This default also applies to Codemode's MCP calls, although their
+result shape stays complete. HTTP/SDK list defaults remain 20. The MCP input
+schema uses UUID/date format annotations without long regex patterns; server
+validation remains the same. Advanced scope, group, date, kind and mode filters
+remain available.
+
+Save preparation retains its existing lossless projection:
 
 - kept: entry and collection IDs, `version` (the `expectedVersion` for an
   update), `revision.id` (for evidence pins), scope, `revision.outcome` and
@@ -200,10 +215,28 @@ contract passes through unchanged. The model call's history item and timeline
 event record the compact copy the model received; past tool outputs are never
 re-rendered. MCP transport bounds the exact result to 1 MiB before this
 projection, so compaction only shrinks results that already fit; a result that
-is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
-(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
-search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
-from 21.7 KB to 14.1 KB (35%).
+is still over 1 MiB for the model spills its exact bytes like any tool. Tests in
+`packages/runtime/test/knowledge-model-projection.test.ts` cover exact Codemode
+results, non-mutating model projection, and the unchanged save-preparation shape.
+
+### Search availability and existing sessions
+
+New configured sessions with Knowledge enabled mark only `knowledge_search`
+eager on their already-selected first-party server (or Docs server when that is
+the available search). Creation saves the normal `ToolRef.eager` selection;
+scheduled occurrences freeze it with their accepted execution. No server,
+permission or disabled capability is added. Other Knowledge tools stay deferred.
+This uses the existing first-request preparation barrier in native OpenAI,
+native Codex and generic-dispatch transports, not a second discovery mechanism.
+
+Existing sessions' selections and accepted scheduled executions are not updated.
+They stay deferred unless already explicitly eager. The compact search schema is
+an ordinary schema update: deferred sessions see it on their next disclosure;
+sessions that already explicitly exposed search eagerly may incur a one-time
+tool-prefix cache miss on their next prepared attempt. New result projections
+apply only at execution; previously stored model inputs and tool outputs are
+never rewritten. No adoption marker, catalog version or compaction rewrite is
+introduced.
 
 ## Personal and shared Knowledge
 

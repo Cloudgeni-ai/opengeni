@@ -500,10 +500,11 @@ First-party Opengeni MCP Knowledge tools:
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).
-A model call to `knowledge_search` or `knowledge_prepare_save` receives a
-compact copy without bookkeeping or repeated preview text, keeping every ID,
-version, status, title, description and excerpt; Codemode and other callers
-receive the exact result. See
+A model call to `knowledge_search` receives small discovery cards (identity,
+title, kind, scope, outcome and a short snippet); `knowledge_get` supplies full
+text and citation/update identifiers. MCP search defaults to five results.
+`knowledge_prepare_save` keeps its lossless projection. Codemode and other
+programmatic callers receive the complete result shape. See
 [model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 
