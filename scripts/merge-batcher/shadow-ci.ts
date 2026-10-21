@@ -88,6 +88,7 @@ export class ShadowCiController {
     if (o.ledger.owner !== this.owner && Date.parse(o.ledger.expiresAt) > Date.parse(o.now))
       return wait("another shadow-ci writer holds the durable lease");
     const pulls = fifo(o.ready, this.config.maxBatchSize);
+    if (o.mainBusy) return wait("full-main CI has priority; no new shadow candidate publication");
     if (!pulls.length) return wait("no eligible ready heads");
     const spec = {
       schemaVersion: 1 as const,

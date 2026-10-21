@@ -42,8 +42,11 @@ export interface Transaction {
 }
 export interface Executor {
   capabilities: Capabilities;
-  // Atomic across lease/CAS and any provider-owned admission/effect state.
-  // Never replace with read-then-REST-update or an unfenced local file lock.
+  landingContract?: "exact-tested-snapshot";
+  prepareLedger?(ledger: Ledger, effect: Effect, now: string): Ledger;
+  maintain?(): Promise<string | null>;
+  // Atomic Git lease/CAS. Strict adapters additionally fence admission/effects;
+  // exact-tested-snapshot adapters explicitly reconcile non-atomic REST effects.
   transact(transaction: Transaction): Promise<void>;
 }
 export class LiveReader implements Reader {
@@ -73,6 +76,31 @@ export class LiveReader implements Reader {
         remote,
         admission.ready.map((p) => p.headSha),
       );
+    const ledger = stateSha ? await this.git.readLedger(stateSha) : emptyLedger();
+    // A new head on an already-landed PR is admitted only when it retains that
+    // landed ancestry. merge-tree then composes only its remaining delta.
+    const eligible: Pull[] = [];
+    for (const pull of admission.ready) {
+      const prior = Object.values(ledger.landings).filter(
+        (item) => item.pull.number === pull.number,
+      );
+      if (await this.git.ancestor(pull.headSha, baseSha)) {
+        admission.excluded.push({
+          number: pull.number,
+          reason: "head already contained in main; no remaining delta",
+        });
+      } else if (
+        prior.some((item) => item.pull.headSha !== pull.headSha) &&
+        !(
+          await Promise.all(prior.map((item) => this.git.ancestor(item.pull.headSha, pull.headSha)))
+        ).every(Boolean)
+      ) {
+        admission.excluded.push({
+          number: pull.number,
+          reason: "new head diverges from landed history; rebase remaining work onto main",
+        });
+      } else eligible.push(pull);
+    }
     const candidates: Candidate[] = [];
     for (const [ref, sha] of queue) {
       const manifest = await this.git.inspect(sha);
@@ -90,9 +118,11 @@ export class LiveReader implements Reader {
       now: new Date().toISOString(),
       baseSha,
       ...admission,
+      ready: eligible,
       candidates,
       stateSha,
-      ledger: stateSha ? await this.git.readLedger(stateSha) : emptyLedger(),
+      ledger,
+      mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy(),
     };
   }
 }
@@ -113,17 +143,26 @@ export class Controller {
   async step(): Promise<StepResult> {
     if (this.config.mode === "shadow-ci") throw new Error("Use the restricted ShadowCiController");
     if (this.config.mode === "active") {
-      requireActiveCapabilities(this.executor?.capabilities ?? githubCapabilities);
+      requireActiveCapabilities(
+        this.executor?.capabilities ?? githubCapabilities,
+        this.executor?.landingContract,
+      );
       if (!this.executor) throw new Error("Active mode requires a fenced provider adapter");
     }
+    const maintenance = this.config.mode === "active" ? await this.executor?.maintain?.() : null;
     const observation = await this.reader.observe();
     const action = plan(observation, this.config);
-    const result: StepResult = { mode: this.config.mode, action, manifest: null, reason: null };
+    const result: StepResult = {
+      mode: this.config.mode,
+      action,
+      manifest: null,
+      reason: maintenance ?? null,
+    };
     let ledger = structuredClone(observation.ledger);
     let effect: Effect = { kind: "record" };
     let bindings: Pull[] = [];
     if (action.kind === "wait") {
-      result.reason = action.reason;
+      result.reason = maintenance ? `${action.reason}; ${maintenance}` : action.reason;
       await this.stage(observation, result);
       return result;
     }
@@ -216,6 +255,7 @@ export class Controller {
         ledger.expiresAt = new Date(
           Date.parse(observation.now) + this.config.leaseSeconds * 1000,
         ).toISOString();
+        ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
         const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);
         await this.executor!.transact({
           expectedState: observation.stateSha,
@@ -241,6 +281,7 @@ export class Controller {
       excluded: observation.excluded,
       candidates: observation.candidates,
       stateSha: observation.stateSha,
+      ledger: observation.ledger,
       result,
       providerCapabilities: this.executor?.capabilities ?? githubCapabilities,
     });

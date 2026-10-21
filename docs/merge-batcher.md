@@ -4,46 +4,47 @@ This is the OPE-834 in-house batcher core. It uses Bun 1.4.3, built-in APIs and
 Git (2.38 or newer for `merge-tree --write-tree`). No database, checkout, native
 `merge_group`, vendor queue, cloud SDK or cloud-specific state service is used.
 The default mode is **read-only shadow**. Opt-in `shadow-ci` publishes candidates
-without landing them, subject to the dedicated state-ref authorization below.
+without landing them, using a dedicated configured state ref.
 No live writer was exercised by this implementation task.
 
 ## Activation boundary
 
 The pure planner, candidate builder, inspector, durable state model, controller,
 Git CAS adapter and GitHub read/write surfaces are implemented and locally
-testable. **The shipped GitHub executable refuses active mode before any remote
-write.** This is intentional, not a permissions retry or a simulated active run.
+testable. `main.ts` wires the real `GitHubActiveExecutor` only with explicit
+`BATCHER_MODE=active`. **It has not been activated or remotely exercised.**
+For this rollout, main activation remains prohibited until the parent's release
+has finished and the parent explicitly gives the go-ahead.
 
-The provider contract requires all of:
+The accepted GitHub contract is **only the exact tested snapshot lands**, not
+“no PR head can change after the final HTTP read.” The adapter rechecks every
+head/readiness/evidence binding, source branch head, exact workflow result and
+main-CI headroom immediately before its atomic Git transaction. A last-moment
+PR update remains possible; no local lock or single replica eliminates it.
 
-- Atomic multi-ref compare-and-swap for a changing state/lease ref and the exact
-  tested main tip (or new immutable candidate ref).
-- A provider-side fence that binds each PR's exact head, ready event and evidence
-  revision to the landing transaction. A fresh HTTP read followed by a Git push
-  still has a race; a local leader lock or “one replica” does not close it.
-- Fenced/idempotent rerun and ejection-comment effects, including uncertain
-  outcomes and lease transfer. GitHub REST side effects are not transactions
-  with a Git ref update.
+GitHub advertises atomic receive-pack. The changing lease and FF-only main tip
+(or create-only candidate) are updated together; there is no fallback to
+separate pushes. GitHub does not offer atomic PR-metadata or REST-effect fences.
+`githubCapabilities` continues to report those limitations honestly. The strict
+`AdmissionCoordinator`/`FencedGitExecutor` interface remains available for other
+providers; the real GitHub executor explicitly selects the weaker accepted
+contract rather than falsely advertising stronger capabilities.
 
-Read-only research established that GitHub advertises atomic receive-pack.
-PR-metadata and REST-effect transaction guarantees remain unsupported;
-`githubCapabilities` distinguishes these boundaries. Setting an
-environment variable cannot override them. `AdmissionCoordinator` and
-`FencedGitExecutor` are the typed integration point for a provider that can
-actually supply the contract. Do not implement that contract as read-then-write
-or turn capability booleans on without establishing its semantics;
-this implementation never falls back from `git push --atomic` to separate pushes.
-Repository rulesets, App permissions and bypass policy are separate activation
-dependencies, not evidence that these transaction guarantees exist.
+After landing, the adapter records and comments the exact tested head and landed
+tip, then rereads the actual source branch (including forks). Open newer heads
+retaining landed ancestry automatically re-enter normal admission: they need
+their **own** exact-head VM/review evidence, and the next merge against main
+contains only the remaining delta. Old evidence is never inherited. Divergent
+history is held with a rebase explanation. The adapter never closes/reopens PRs.
+**GitHub may auto-close a PR when its old head reaches main, before a newer push
+is observed.** A merged PR cannot be kept open by this adapter; this case is
+recorded/commented as `closed-newer-head`, requiring a follow-up PR. Closed PRs
+are not silently reopened and newer work is never represented as tested.
 
-The achievable weaker GitHub invariant is “only the exact tested snapshot
-lands,” not “no PR head can change after the final HTTP read.” A future active
-adapter adopting that explicitly accepted invariant must reconcile afterward
-and never automatically close or claim to have tested a newer PR head. This
-executable retains the original strict active-mode refusal rather than silently
-relaxing that invariant. Keep non-FF/deletion guards in a separate ruleset the
-batcher cannot bypass; bypass of a combined PR-admission rule also bypasses its
-non-FF/deletion protections.
+Keep non-FF/deletion guards in a separate ruleset the batcher cannot bypass;
+bypass of a combined PR-admission rule also bypasses its non-FF/deletion guards.
+Repository rulesets, trusted workflow policy and App permissions remain rollout
+dependencies, not substitutes for missing provider transaction guarantees.
 
 The parent workflow integration and production deployment are separate work.
 No branch/ruleset/permission/cloud activation is performed by this code change.
@@ -57,7 +58,7 @@ bun scripts/merge-batcher/main.ts shadow --once
 # Poll; still shadow unless explicitly configured otherwise.
 bun scripts/merge-batcher/main.ts run
 
-# Only after queue publication AND the dedicated state ref are authorized:
+# Opt-in CI shadow; the dedicated state ref is routine controller state:
 BATCHER_MODE=shadow-ci \
 BATCHER_SHADOW_CI_STATE_REF=refs/heads/batcher-shadow-ci-state \
 bun scripts/merge-batcher/main.ts run
@@ -66,7 +67,7 @@ bun scripts/merge-batcher/main.ts run
 bun scripts/merge-batcher/main.ts inspect --tip "$TIP_SHA" --git-dir "$BARE_GIT_DIR"
 
 # Focused verification (two test workers maximum).
-bun test --max-concurrency 2 scripts/merge-batcher/core.test.ts
+bun test --max-concurrency 2 scripts/merge-batcher/*.test.ts
 node node_modules/typescript/bin/tsc -p scripts/merge-batcher/tsconfig.json
 
 docker build -f docker/merge-batcher.Dockerfile -t opengeni-merge-batcher .
@@ -89,9 +90,9 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | --- | --- |
 | `BATCHER_REPOSITORY` | `Cloudgeni-ai/opengeni` |
 | `BATCHER_BASE_BRANCH` | `main` |
-| `BATCHER_BRANCH_PREFIX` | `queue/` |
-| `BATCHER_MODE` | `shadow`, opt-in `shadow-ci`; `active` requires a supported fenced adapter |
-| `BATCHER_SHADOW_CI_STATE_REF` | No default; explicitly authorize `refs/heads/batcher-shadow-ci-state` |
+| `BATCHER_BRANCH_PREFIX` | `queue/live/` in active, otherwise `queue/`; keep diagnostics in a separate namespace |
+| `BATCHER_MODE` | `shadow` by default; explicit `shadow-ci` or `active` |
+| `BATCHER_SHADOW_CI_STATE_REF` | No default; explicitly configure `refs/heads/batcher-shadow-ci-state` |
 | `BATCHER_MAX_BATCH_SIZE` | `16` |
 | `BATCHER_MAX_INFLIGHT` | `1` hosted candidate CI |
 | `BATCHER_SPECULATION_DEPTH` | `2`, including current candidate |
@@ -113,6 +114,9 @@ remote URLs, files, stage output or logs. Provider response bodies and Git stder
 are suppressed on errors to avoid credential leakage.
 Shadow-ci App authentication requests contents/workflows write and
 actions/pull_requests/issues read, not comment/label or Actions rerun writes.
+Active App authentication requests contents/workflows/actions/pull_requests/issues
+write for atomic Git updates, whole-workflow reruns and exact-head comments.
+It never uses labels/readiness changes or PR close/merge endpoints.
 
 Public repository reads can work without credentials, but private repository
 access and GraphQL ready-event discovery require suitable read permissions.
@@ -165,7 +169,9 @@ Each member is one two-parent merge commit built with `git merge-tree --write-tr
 and `git commit-tree`. Parent 1 is the preceding tested/base tip; parent 2 is the
 exact PR head. No checkout or merge-script execution occurs. The commit timestamp
 is deterministic from readiness timestamps. Candidate refs are
-`queue/<64-character batchId>` and are create-only.
+`<configured-prefix><64-character batchId>` and are create-only. Active defaults
+to `queue/live/` and rejects broad `queue/` and `queue/shadow-traffic/`, so the
+separate historical diagnostic worker's refs are not ingested as active batches.
 
 Every merge commit carries one canonical `Batch-Manifest` JSON trailer with the
 batch specification, member index and SHA-256 batch ID. The specification contains
@@ -237,6 +243,10 @@ With one hosted candidate running, the planner constructs one speculative
 successor **locally**, based on the predecessor tip, without publishing it and
 starting another CI run. A speculative candidate is deterministic and can be
 rebuilt after cache loss. Configured additional in-flight capacity is explicit.
+Full-main push CI has priority: an observed queued/running main workflow holds
+candidate publication, retries and landing, while local speculation can continue.
+External workflows can still start after the observation; this is headroom
+coordination, not a GitHub-wide scheduler or a cancellation mechanism.
 Invalidated descendants still occupy CI slots while running: no cancellation
 operation exists in the adapter.
 
@@ -263,10 +273,13 @@ or unverifiable result receipts are infrastructure, never code-red evidence.
 
 Before landing, the controller inspects the exact tested commit, verifies
 fast-forward ancestry separately, re-observes heads/readiness/evidence/run state,
-then asks the provider to atomically fence those bindings and the durable lease
-with main's ref update. Main moves to the **already-tested tip**, never a
+then atomically advances the durable lease with main's ref update. PR metadata
+is not part of GitHub's atomic transaction. Main moves to the **already-tested tip**, never a
 freshly rebuilt commit after testing. Git uses
-`--force-with-lease=<state-ref>:<expected>` **only on the changing state ref**.
+`--force-with-lease=<state-ref>:<expected>` on the changing state ref. Candidate
+creation additionally uses `--force-with-lease=<candidate-ref>:` with an empty
+expected value: this is an absence predicate, rejecting even an existing ancestor
+ref rather than permitting a candidate rewrite.
 Main uses ordinary FF-only semantics plus a separate local ancestry assertion:
 no main-specific force-with-lease, `--force` or `+main`. A main-specific lease
 would authorize non-FF on an unprotected server and is deliberately absent.
@@ -290,6 +303,36 @@ needed to distinguish landed, invalidated, failed and still-running batches.
 State retention/compaction is an operator-owned future extension; no automatic
 remote ref deletion is performed by this implementation.
 
+### Recoverable REST effects
+
+Comment and whole-run retry intents live in `state.json`, with deterministic
+IDs, comment markers, exact run/attempt identity, attempts and next-check times.
+An intent is durably marked `submitting` before POST; a final lease read reduces
+stale-owner races but is **not** an atomic Git/REST fence. Restart reconciliation
+checks the comment marker or advanced attempt before any submission. Accepted
+requests with lost responses are completed from provider evidence. An ambiguous
+POST (including a crash between durable claim and POST) is never blindly retried.
+It receives bounded read-only reconciliation, then becomes visibly `blocked`.
+Definitive permission/validation rejection blocks immediately; throttling backs
+off with a five-submission budget. Uncertain observation has an eight-check budget.
+Blocked effects do not falsely mark an ejection announced or starve unrelated
+queue work. All state is rebuildable from Git, not a local-only outbox.
+
+After investigating a blocked/uncertain effect and confirming it was not applied,
+an operator can explicitly reset only that effect using the observed state SHA:
+
+```sh
+BATCHER_MODE=active bun scripts/merge-batcher/main.ts recover-effect \
+  --effect-id "$EFFECT_ID" --state-sha "$OBSERVED_STATE_SHA" --confirm-not-applied
+```
+
+Recovery refuses a changed state or another live owner's lease and checks the
+provider again: if already applied it marks done rather than resubmitting.
+It is a write operation, not permitted during the current local-only task.
+Exactly-once arbitrary REST effects are not promised: external marker deletion,
+manual reruns, or operator recovery based on incomplete evidence remain provider/
+operator limitations. Git landing itself remains atomic and restart-reconcilable.
+
 ## Shadow evidence and operations
 
 ### Shadow with real CI, never landing
@@ -303,10 +346,10 @@ candidates still occupy that slot. Concurrent controllers atomically compete
 on the state ref. Uncoordinated external publishers/manual reruns are outside
 this rate-limit guarantee: protect the writer namespace.
 
-**Queue publication authority alone does not authorize the control ref.** The
-rollout owner must also authorize `refs/heads/batcher-shadow-ci-state`, then
-set `BATCHER_SHADOW_CI_STATE_REF` to that exact value. Without that explicit
-opt-in, the mode fails before authentication/writes. Keeping lease commits
+Set `BATCHER_SHADOW_CI_STATE_REF` to `refs/heads/batcher-shadow-ci-state` explicitly.
+This is routine controller-state configuration within authorized CI-shadow work,
+not an additional approval ceremony. Without the explicit configuration the
+mode fails before authentication/writes. Keeping lease commits
 outside `queue/**` avoids spurious second CI runs. Neither read-only shadow nor
 this implementation task creates that control ref.
 
@@ -351,8 +394,8 @@ Portable placement options, without deployment by this task:
   same Git-backed state protocol; do not introduce Azure-only state authority.
 
 One-step rollback is `BATCHER_MODE=shadow` followed by the platform's normal
-restart/revision replacement. The current executable is already shadow-only on
-GitHub. A future active rollout must ensure old active instances have stopped or
+restart/revision replacement. Default configuration is still shadow. An active
+rollout must ensure old active instances have stopped or
 their provider authority is fenced before declaring rollback complete. Leave
 running CI untouched, retain state/queue/result evidence, and inspect main's
 exact landed SHA. Do not delete refs, force-reset main or rotate credentials.

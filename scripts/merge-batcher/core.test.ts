@@ -508,7 +508,7 @@ describe("controller isolation and fencing", () => {
         },
       },
     );
-    await expect(controller.step()).rejects.toThrow("Active mode");
+    await expect(controller.step()).rejects.toThrow("GitHub provides atomic");
     expect(reads).toBe(0);
     expect(writes).toBe(0);
     expect(() => requireActiveCapabilities(githubCapabilities)).toThrow();
@@ -1058,7 +1058,7 @@ describe("integration boundaries and queue-only shadow CI", () => {
     expect(command.some((x) => x.startsWith("+") || x === "--force")).toBe(false);
   });
   test("shadow-ci needs separately authorized non-CI state ref and cannot use main or queue", () => {
-    expect(() => config({ BATCHER_MODE: "shadow-ci" })).toThrow("explicitly authorized");
+    expect(() => config({ BATCHER_MODE: "shadow-ci" })).toThrow("explicit");
     for (const ref of ["refs/heads/main", "refs/heads/queue/lease"])
       expect(() =>
         config({ BATCHER_MODE: "shadow-ci", BATCHER_SHADOW_CI_STATE_REF: ref }),

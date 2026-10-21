@@ -3,7 +3,8 @@ import { parseArgs } from "node:util";
 import { Controller, LiveReader, type StepResult } from "./controller";
 import { AtomicGitWriter, GitStore } from "./git";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
-import { GitHubAuth, GitHubReader, githubCapabilities, requireActiveCapabilities } from "./github";
+import { GitHubActiveExecutor } from "./active";
+import { GitHubAuth, GitHubReader, GitHubMutations } from "./github";
 import { assertSha, config, type Config } from "./model";
 
 export async function main(
@@ -17,6 +18,9 @@ export async function main(
       tip: { type: "string" },
       "git-dir": { type: "string" },
       once: { type: "boolean" },
+      "effect-id": { type: "string" },
+      "state-sha": { type: "string" },
+      "confirm-not-applied": { type: "boolean" },
     },
   });
   const command = positionals[0] ?? "shadow";
@@ -28,15 +32,54 @@ export async function main(
     );
     return;
   }
-  if (!["shadow", "run"].includes(command)) throw new Error("Expected inspect, shadow, or run");
+  if (!["shadow", "run", "recover-effect"].includes(command))
+    throw new Error("Expected inspect, shadow, run, or recover-effect");
   const settings = config({ ...env, ...(command === "shadow" ? { BATCHER_MODE: "shadow" } : {}) });
-  // Fail before auth, observation or any write if provider cannot meet fencing.
-  if (settings.mode === "active") requireActiveCapabilities(githubCapabilities);
+  if (
+    command === "recover-effect" &&
+    (settings.mode !== "active" ||
+      !values["confirm-not-applied"] ||
+      !/^[a-f0-9]{64}$/.test(values["effect-id"] ?? "") ||
+      !values["state-sha"])
+  )
+    throw new Error(
+      "recover-effect requires active mode, --effect-id, --state-sha and --confirm-not-applied",
+    );
   const auth = new GitHubAuth({ ...env, BATCHER_MODE: settings.mode });
   const git = new GitStore(settings.gitDir, await auth.gitEnv());
   await git.init();
   const github = new GitHubReader(settings, auth);
   const reader = new LiveReader(github, git, settings);
+  const owner = randomUUID();
+  const writer = new AtomicGitWriter(
+    git,
+    `https://github.com/${settings.repository}.git`,
+    settings.stateRef,
+    `refs/heads/${settings.baseBranch}`,
+  );
+  const executor =
+    settings.mode === "active"
+      ? new GitHubActiveExecutor(
+          settings,
+          git,
+          writer,
+          github,
+          new GitHubMutations(github),
+          owner,
+          {
+            refreshAuth: async () => {
+              Object.assign(git.authEnv, await auth.gitEnv());
+            },
+          },
+        )
+      : undefined;
+  if (command === "recover-effect") {
+    await executor!.recoverEffect(values["effect-id"]!, assertSha(values["state-sha"]!), true);
+    console.log(
+      JSON.stringify({ effectId: values["effect-id"], status: "reconciled-or-requeued" }),
+    );
+    return;
+  }
   const controller =
     settings.mode === "shadow-ci"
       ? new ShadowCiController(
@@ -52,10 +95,10 @@ export async function main(
               `refs/heads/${settings.baseBranch}`,
             ),
           ),
-          randomUUID(),
+          owner,
           github,
         )
-      : new Controller(settings, reader, git, randomUUID());
+      : new Controller(settings, reader, git, owner, executor);
   await runService(settings, controller, values.once ?? false);
 }
 

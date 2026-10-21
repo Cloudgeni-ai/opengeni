@@ -73,6 +73,7 @@ export interface Ejection {
   reason: string;
   batchId: string;
   announced: boolean;
+  effectId?: string;
 }
 export interface RetryIntent {
   runId: number;
@@ -90,6 +91,37 @@ export interface Ledger {
   recovery: { batchId: string; pulls: Pull[] }[];
   retries: Record<string, RetryIntent>;
   codeFailures: Record<string, string[]>;
+  effects: Record<string, DurableEffect>;
+  landings: Record<string, LandedPull>;
+}
+export interface EffectState {
+  id: string;
+  status: "pending" | "submitting" | "uncertain" | "done" | "blocked";
+  attempts: number;
+  checks: number;
+  nextAt: string;
+  lastError: string | null;
+}
+export type DurableEffect = EffectState &
+  ({ kind: "rerun"; run: Run } | { kind: "comment"; number: number; body: string; marker: string });
+export interface LandedPull {
+  batchId: string;
+  tipSha: string;
+  mergeSha: string;
+  pull: Pull;
+  currentHeadSha: string | null;
+  status:
+    | "pending"
+    | "unchanged"
+    | "requeued"
+    | "awaiting-evidence"
+    | "already-contained"
+    | "closed-newer-head"
+    | "history-diverged"
+    | "provider-unavailable";
+  nextCheckAt: string;
+  checkedAt: string | null;
+  note: string | null;
 }
 export const emptyLedger = (): Ledger => ({
   schemaVersion: 1,
@@ -102,6 +134,8 @@ export const emptyLedger = (): Ledger => ({
   recovery: [],
   retries: {},
   codeFailures: {},
+  effects: {},
+  landings: {},
 });
 export interface Observation {
   now: string;
@@ -111,6 +145,7 @@ export interface Observation {
   candidates: Candidate[];
   stateSha: string | null;
   ledger: Ledger;
+  mainBusy?: boolean;
 }
 export interface Config {
   repository: string;
@@ -140,7 +175,7 @@ export function config(env: Record<string, string | undefined>): Config {
   const repository = env.BATCHER_REPOSITORY ?? "Cloudgeni-ai/opengeni";
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid repository");
   const baseBranch = env.BATCHER_BASE_BRANCH ?? "main";
-  const branchPrefix = env.BATCHER_BRANCH_PREFIX ?? "queue/";
+  const branchPrefix = env.BATCHER_BRANCH_PREFIX ?? (mode === "active" ? "queue/live/" : "queue/");
   for (const ref of [baseBranch, `${branchPrefix}test`]) {
     if (!/^[\w/-]+$/.test(ref) || ref.includes("//") || ref.startsWith("-") || ref.endsWith("/"))
       throw new Error("Invalid branch configuration");
@@ -157,7 +192,7 @@ export function config(env: Record<string, string | undefined>): Config {
     stateRef.startsWith(`refs/heads/${branchPrefix}`)
   )
     throw new Error(
-      "Shadow-ci requires explicitly authorized BATCHER_SHADOW_CI_STATE_REF outside main and queue (otherwise its lease would trigger CI)",
+      "Shadow-ci requires explicit BATCHER_SHADOW_CI_STATE_REF outside main and queue (otherwise its lease would trigger CI)",
     );
   return {
     repository,

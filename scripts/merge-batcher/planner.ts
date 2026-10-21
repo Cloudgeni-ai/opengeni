@@ -110,7 +110,13 @@ export function plan(o: Observation, c: Config): Action {
   if (root) {
     const run = latestRun(root, c);
     if (run?.status === "completed") {
-      if (run.trusted && run.outcome === "success") return { kind: "land", candidate: root };
+      if (run.trusted && run.outcome === "success")
+        return o.mainBusy
+          ? {
+              kind: "wait",
+              reason: "full-main CI has priority; tested candidate retained without cancellation",
+            }
+          : { kind: "land", candidate: root };
       if (run.trusted && run.outcome === "code_failure") {
         const children = descendants(root.manifest.batchId, o.candidates).filter(
           (id) => id !== root.manifest.batchId && !ledger.invalidated.includes(id),
@@ -180,7 +186,8 @@ export function plan(o: Observation, c: Config): Action {
       if (
         !run.completedAt ||
         Date.parse(o.now) < Date.parse(run.completedAt) + backoff * 1000 ||
-        inflight >= c.maxInflight
+        inflight >= c.maxInflight ||
+        o.mainBusy
       )
         return { kind: "wait", reason: "bounded retry backoff or CI capacity" };
       return { kind: "retry", candidate: root, run };
@@ -192,7 +199,7 @@ export function plan(o: Observation, c: Config): Action {
           "published candidate has no exact workflow run; inspect workflow admission/permissions",
       };
   }
-  const unannounced = ledger.ejected.find((e) => !e.announced);
+  const unannounced = ledger.ejected.find((e) => !e.announced && !e.effectId);
   if (unannounced) return { kind: "announce", ejection: unannounced };
   // Recovery groups are tested sequentially against the actual landed base.
   if (!live.length && ledger.recovery.length) {
@@ -204,7 +211,14 @@ export function plan(o: Observation, c: Config): Action {
       ledger.recovery.shift();
       return record("discard obsolete recovery bindings");
     }
-    return makeBuild(o.baseSha, null, pulls, group.batchId, inflight < c.maxInflight, 0);
+    return makeBuild(
+      o.baseSha,
+      null,
+      pulls,
+      group.batchId,
+      inflight < c.maxInflight && !o.mainBusy,
+      0,
+    );
   }
   if (ledger.recovery.length || live.some((item) => item.manifest.recoveryOf !== null))
     return { kind: "wait", reason: "bisection recovery is sequential; no speculative regrouping" };
@@ -241,7 +255,7 @@ export function plan(o: Observation, c: Config): Action {
     tail?.manifest.batchId ?? null,
     pulls,
     null,
-    inflight < c.maxInflight,
+    inflight < c.maxInflight && !o.mainBusy,
     null,
   );
 }

@@ -177,6 +177,9 @@ export class GitStore {
   }
   async readLedger(sha: string): Promise<Ledger> {
     const state = JSON.parse(await this.exec(["show", `${assertSha(sha)}:state.json`])) as Ledger;
+    // Additive state fields permit restart from the earlier controller schema.
+    state.effects ??= {};
+    state.landings ??= {};
     if (
       state.schemaVersion !== 1 ||
       !Number.isSafeInteger(state.epoch) ||
@@ -244,6 +247,12 @@ export class AtomicGitWriter {
       "--atomic",
       "--porcelain",
       `--force-with-lease=${this.stateRef}:${fence.expected ?? ""}`,
+      // An empty expected value is a create-only predicate: an existing
+      // candidate is rejected even if it would be a fast-forward. Main NEVER
+      // receives force-with-lease authorization.
+      ...updates
+        .filter((u) => u.ref !== this.stateRef && u.ref !== this.baseRef && u.expected === null)
+        .map((u) => `--force-with-lease=${u.ref}:`),
       this.remote,
       ...updates.map((u) => `${u.next}:${u.ref}`),
     ]);

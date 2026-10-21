@@ -6,6 +6,15 @@ import { verifyResult, type VerifiedResult } from "./result";
 import type { MainOutcome } from "./shadow-ci";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
+export interface PullSnapshot {
+  number: number;
+  headSha: string;
+  branchHeadSha: string | null;
+  headRef: string;
+  headRepository: string | null;
+  state: "open" | "closed";
+  merged: boolean;
+}
 export class ProviderError extends Error {
   constructor(
     readonly status: number,
@@ -39,7 +48,13 @@ export class GitHubAuth {
     // Authentication only; repository mutation permissions are NOT requested in shadow.
     const permissions =
       this.env.BATCHER_MODE === "active"
-        ? { contents: "write", actions: "write", pull_requests: "write", issues: "write" }
+        ? {
+            contents: "write",
+            workflows: "write",
+            actions: "write",
+            pull_requests: "write",
+            issues: "write",
+          }
         : this.env.BATCHER_MODE === "shadow-ci"
           ? {
               contents: "write",
@@ -89,18 +104,19 @@ export class GitHubReader {
     readonly transport: typeof fetch = fetch,
   ) {}
   async get(path: string): Promise<Json | Json[]> {
+    return this.getFromRepository(this.config.repository, path);
+  }
+  async getFromRepository(repository: string, path: string): Promise<Json | Json[]> {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid source repository");
     const token = await this.auth.token();
-    const response = await this.transport(
-      `https://api.github.com/repos/${this.config.repository}/${path}`,
-      {
-        headers: {
-          Accept: "application/vnd.github+json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-        signal: AbortSignal.timeout(30_000),
+    const response = await this.transport(`https://api.github.com/repos/${repository}/${path}`, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        "X-GitHub-Api-Version": "2022-11-28",
       },
-    );
+      signal: AbortSignal.timeout(30_000),
+    });
     if (!response.ok) throw new ProviderError(response.status, "read");
     return response.json() as Promise<Json | Json[]>;
   }
@@ -116,6 +132,73 @@ export class GitHubReader {
       if (list.length < 100) return all;
     }
     throw new Error("GitHub pagination incomplete; refusing partial observation");
+  }
+  async pullSnapshot(number: number): Promise<PullSnapshot> {
+    const pull = (await this.get(`pulls/${number}`)) as Json;
+    const repository =
+      typeof pull.head?.repo?.full_name === "string" ? pull.head.repo.full_name : null;
+    let branchHeadSha: string | null = null;
+    if (repository && typeof pull.head?.ref === "string") {
+      try {
+        const ref = (await this.getFromRepository(
+          repository,
+          `git/ref/heads/${encodeURIComponent(pull.head.ref)}`,
+        )) as Json;
+        if (/^[a-f0-9]{40}$/.test(ref.object?.sha)) branchHeadSha = ref.object.sha;
+      } catch (error) {
+        if (!(error instanceof ProviderError && error.status === 404)) throw error;
+      }
+    }
+    if (!/^[a-f0-9]{40}$/.test(pull.head?.sha) || !["open", "closed"].includes(pull.state))
+      throw new Error("Invalid pull snapshot");
+    return {
+      number,
+      headSha: pull.head.sha,
+      branchHeadSha,
+      headRef: pull.head.ref,
+      headRepository: repository,
+      state: pull.state,
+      merged: Boolean(pull.merged),
+    };
+  }
+  async hasComment(number: number, marker: string): Promise<boolean> {
+    return (await this.pages(`issues/${number}/comments`)).some(
+      (comment) => typeof comment.body === "string" && comment.body.includes(marker),
+    );
+  }
+  async currentAttempt(run: Run): Promise<{ attempt: number; status: string }> {
+    const data = (await this.get(`actions/runs/${run.id}`)) as Json;
+    if (
+      data.head_sha !== run.headSha ||
+      data.head_branch !== run.branch ||
+      data.path !== run.workflow ||
+      data.event !== "push" ||
+      Number(data.id) !== run.id ||
+      !Number.isSafeInteger(data.run_attempt)
+    )
+      throw new Error("Retry run identity changed");
+    return { attempt: data.run_attempt, status: data.status };
+  }
+  async mainBusy(): Promise<boolean> {
+    // Filter server-side instead of truncating recent history: a long-running
+    // older main run still reserves capacity after many subsequent pushes.
+    for (const status of ["in_progress", "queued", "waiting", "pending", "requested"]) {
+      const runs = await this.pages(
+        `actions/workflows/ci.yml/runs?branch=${encodeURIComponent(this.config.baseBranch)}&event=push&status=${status}`,
+        "workflow_runs",
+      );
+      if (
+        runs.some(
+          (run) =>
+            run.head_branch === this.config.baseBranch &&
+            run.path === ".github/workflows/ci.yml" &&
+            run.event === "push" &&
+            run.status !== "completed",
+        )
+      )
+        return true;
+    }
+    return false;
   }
   async timeline(number: number): Promise<ReadyEvent[]> {
     const [owner, name] = this.config.repository.split("/");
@@ -440,10 +523,16 @@ export const githubCapabilities: Capabilities = {
   atomicReadyFence: false,
   fencedSideEffects: false,
   reason:
-    "GitHub advertises atomic receive-pack, but cannot atomically bind PR head/readiness/comments to a main ref update; REST rerun/comment cannot be fenced atomically with a Git lease. Active mode remains unavailable under the strict no-stale-head landing contract. Shadow-ci is a separate queue-only mode.",
+    "GitHub provides atomic Git ref updates, not atomic PR metadata or REST-effect fences. The active adapter uses exact-tested-snapshot semantics, final rereads, durable intents and post-land reconciliation; strict no-last-moment-head-race semantics are unavailable.",
 };
-export function requireActiveCapabilities(caps: Capabilities): void {
-  if (!caps.atomicRefs || !caps.atomicReadyFence || !caps.fencedSideEffects)
+export function requireActiveCapabilities(
+  caps: Capabilities,
+  contract?: "exact-tested-snapshot",
+): void {
+  if (
+    !caps.atomicRefs ||
+    (contract !== "exact-tested-snapshot" && (!caps.atomicReadyFence || !caps.fencedSideEffects))
+  )
     throw new Error(caps.reason);
 }
 
