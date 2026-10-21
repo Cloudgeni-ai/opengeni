@@ -1733,6 +1733,12 @@ tokens per second is derived, not stored:
 `1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
 positive.
 
+The control worker repairs missing call facts through the durable,
+input-paged bootstrap and commit-coupled arrival queue in
+`packages/db/src/model-call-fact-reconciliation.ts`; completed windows are not
+rescanned. Each page commits its progress with its facts, and its database work is joined to
+the activity's existing run deadline and cancellation. See the
+[reconciliation lifecycle](insights-raw-usage-api.md#missing-model-fact-reconciliation).
 Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before
 identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
