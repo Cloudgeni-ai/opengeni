@@ -780,6 +780,39 @@ Supply fixture settings through the service environment, or use an explicit
 
 End-to-end agent runs require the full stack plus valid model and sandbox credentials.
 
+## Reviewed merges to main
+
+Follow [`docs/merge-queue.md`](docs/merge-queue.md). Run the full relevant suites
+on the VM (not only the fast queue checks), with bounded workers and isolated
+services. Obtain an independent agent review of the exact candidate head. Post
+one PR evidence comment containing that head SHA, commands/results, reviewer
+session and any limitations. Recheck the evidence after substantive head changes.
+
+Once the main queue is enabled, enqueue with `gh pr merge <PR> --auto` and observe
+the actual merge-group result and landed SHA; never use `--admin` or a direct
+merge API. Do not rebase merely because main advanced: the queue tests the combined
+tree. Before activation, use the repository's normal squash merge only after the
+same local-test and independent-review evidence. No agent may activate the prepared
+ruleset without the rollout owner's explicit go.
+The native draft's one-PR landing limit is temporary exact-Version-SHA
+compatibility, not CI-sharing batching. Activation is blocked by the measured
+capacity gate. The owner selected an in-house batcher; true batching and descendant
+full-green release admission are a separate implementation and shadow-rollout
+follow-up, not authorization to enable the native draft or install a vendor.
+
+Budget/threshold increases, newly skipped tests and reduced coverage must be
+explicit in the PR and evidence comment, independently confirmed by the reviewer,
+and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+The documented `hotfix/*` → `production` incident lane stays separate; ordinary
+main changes never bypass the queue. See the incident and rollback steps in the
+queue runbook before any exceptional main action.
+
+If full post-merge main CI goes red, identify and reproduce the culprit against
+the last fully green SHA, then **revert the culprit PR first through the queue**
+and fix it afterwards. Do not leave main red while developing the forward fix.
+Coalesced runs can contain several PRs: the tip PR is not automatically the culprit.
+Cancelled runs are not failures. Automatic blind reverts are not authorized.
+
 ## Deployment Work Notes
 
 Runtime posture tolerates securely shaped unknown tables and invoker routines,
