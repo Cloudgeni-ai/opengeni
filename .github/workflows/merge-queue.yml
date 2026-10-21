@@ -3,6 +3,7 @@ name: Merge queue
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -20,8 +21,22 @@ env:
   OPENGENI_TYPECHECK_CONCURRENCY: "1"
 
 jobs:
+  entry:
+    name: ${{ github.event_name == 'pull_request' && 'Queue ready' || 'PR entry (not applicable)' }}
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Explain queue entry and auditable local verification
+        run: |
+          echo 'PR entry only: before enqueueing, an agent must post exact-head full VM test evidence and independent review as required by AGENTS.md.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This entry check is not test or review evidence. The combined merge_group runs all selected source/unit checks before landing; full post-merge CI remains independent.' >> "$GITHUB_STEP_SUMMARY"
+
   plan:
     name: Queue impact
+    # Ordinary PRs use the required VM/review evidence process, not a duplicate
+    # hosted suite. queue-shadow is an explicit pre-rollout measurement lane.
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'queue-shadow') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -34,8 +49,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      # The planner has only Bun/Node built-in dependencies. Do not serialize
+      # every runner behind an unnecessary installation here.
       - name: Plan the complete combined tree, not only the last PR
         id: plan
         env:
@@ -43,12 +58,12 @@ jobs:
         run: |
           set -euo pipefail
           base="${BASE_SHA:-$(git merge-base origin/main HEAD)}"
-          bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output impact-plan.json
-          echo "unit_count=$(jq '.unitTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
+          echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/impact-plan.json")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: queue-impact-plan
-          path: impact-plan.json
+          path: ${{ runner.temp }}/impact-plan.json
           if-no-files-found: error
 
   contracts:
@@ -64,18 +79,23 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: queue-impact-plan
+          path: ${{ runner.temp }}/queue-plan
       - name: Check impacted types
-        run: bun scripts/ci/run-typecheck-plan.ts --plan impact-plan.json
+        run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
       # These three output/service contracts stay mandatory in full CI, not in
       # the fast queue. No unit files, static guards or thresholds are removed.
       - name: Check impacted static contracts
         run: >-
-          bun scripts/ci/run-guards-plan.ts --plan impact-plan.json
+          bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
           --exclude publish-closure --exclude sdk-compat --exclude example-builds
 
   units:
@@ -83,11 +103,13 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.unit_count != '0' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Per-attempt test deadline remains 1200 seconds. This outer envelope allows
+    # the explicitly requested single unchanged-input retry before ejection.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -96,30 +118,38 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: queue-impact-plan
+          path: ${{ runner.temp }}/queue-plan
       - name: Run every impact-selected unit file with real database enforcement
         env:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
+          bun scripts/ci/retry-once.ts --report "$RUNNER_TEMP/queue-retry.json" --
           bun scripts/ci/profile-command.ts --name queue-unit-${{ matrix.shard }}
-          --output queue-unit.json --timeout-seconds 1200 --
-          bun scripts/ci/run-unit-shard.ts --plan impact-plan.json
-          --shard ${{ matrix.shard }} --shards 8
+          --output "$RUNNER_TEMP/queue-unit.json" --timeout-seconds 1200 --
+          bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
+          --shard ${{ matrix.shard }} --shards 16
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
           name: queue-unit-${{ matrix.shard }}
-          path: queue-unit.json
+          path: |
+            ${{ runner.temp }}/queue-unit.json
+            ${{ runner.temp }}/queue-retry.json
           if-no-files-found: ignore
 
   ready:
-    name: Queue ready
+    name: ${{ github.event_name == 'pull_request' && 'Queue shadow result' || 'Queue ready' }}
     needs: [plan, contracts, units]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'queue-shadow')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

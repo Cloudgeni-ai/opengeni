@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-queue.yml",
-      "sha256": "3dc533a013dfd62297ebae4e5d0d1ce2394ea2f84872e514a4fccec4fc8748cc"
+      "sha256": "1b159e97849885b918234dda0d1d81203f64df7e4f598e6fe8d62de4e3dfa15d"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -95,6 +95,10 @@
     {
       "path": ".github/workflows/publish-stable.yml",
       "sha256": "892dc87af9b030ce92a848f4fc8faae97d6aa04f13b7e5b65f4957bb5bab64bb"
+    },
+    {
+      "path": ".github/workflows/queue-health.yml",
+      "sha256": "b07c4f37270adbeeddcca0ee979d8465b2d56bdffc8bb89350a9107ff4daeb99"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
@@ -1271,13 +1275,13 @@
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "contracts",
       "step": "Check impacted static contracts",
-      "sha256": "bcbe0255cefed62738d6623d9735319da2b41c47120282d2519058a2b1c23567"
+      "sha256": "0038f7e1f78ea88c0d7b707a7d34301c2a345949f0975aa3111fe332181b73a6"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "contracts",
       "step": "Check impacted types",
-      "sha256": "1bab0914c2e96260e2b6903ce7bbfd420d9253e0595de3bd91216fd426c92196"
+      "sha256": "83df402e5776c5500e4a6cd33786a86469d35463f3bb084141f82740040808cc"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
@@ -1287,15 +1291,15 @@
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
-      "job": "plan",
-      "step": "Install dependencies",
-      "sha256": "f339d5ec2bade59936b54fa766ae8940059e6516d519013a47ae5e2adbfec27e"
+      "job": "entry",
+      "step": "Explain queue entry and auditable local verification",
+      "sha256": "f5de78c2ef796ee3594f82f158f851a67e17870ce0ab85c743bbe34fab22f9ee"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "plan",
       "step": "Plan the complete combined tree, not only the last PR",
-      "sha256": "d748240453cc196f21f624c3f1e5a1cd93544c50ac65c131579f17690d1d1aee"
+      "sha256": "7f428345e23d167569136898ca0700904e733592586695d14596bf772d2c47be"
     },
     {
       "workflow": ".github/workflows/merge-queue.yml",
@@ -1313,7 +1317,7 @@
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "units",
       "step": "Run every impact-selected unit file with real database enforcement",
-      "sha256": "6d599e6cad47ac34c036f98b636e6edfa504a828ad9ff8d5e5c69b64ec16afbb"
+      "sha256": "839c5d7f1e51a27e61981445fd8d518246d5a9a087448308f191079b1236d1da"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",
@@ -1530,6 +1534,12 @@
       "job": "publish",
       "step": "Verify exact source",
       "sha256": "d7a6ea98d18789bfa7cefb07dc532bd7d386b9a11c4f6ccf9e38c9c2d814c78a"
+    },
+    {
+      "workflow": ".github/workflows/queue-health.yml",
+      "job": "report",
+      "step": "Record stage timings and report failed full main CI",
+      "sha256": "14ffa72484cb553fa714865ca2bb9dbd510c8e2d29b591fb956a682fb251fb1f"
     },
     {
       "workflow": ".github/workflows/reconcile-canary-publication.yml",

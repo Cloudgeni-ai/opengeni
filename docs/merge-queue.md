@@ -6,20 +6,38 @@ Production branch rules and release/environment approvals are not changed here.
 
 ## Two independent test lanes
 
-`merge-queue.yml` runs on main PRs and `merge_group.checks_requested`. It checks
+`merge-queue.yml` admits main PRs and tests `merge_group.checks_requested`. The PR
+entry check is deliberately cheap and explicitly **not test or review evidence**:
+agents must first complete the full VM tests, independent review and evidence
+comment below. This is an auditable agent process, not a new formal approval or
+strict comment-parser gate. Ordinary PRs do not duplicate the hosted fast suite.
+The `queue-shadow` label explicitly runs the suite on a PR for pre-rollout timing;
+its aggregate is named `Queue shadow result`, never confused with queue admission.
+
+On a merge group it checks
 the actual combined SHA, using the merge group's base SHA (not only the final PR's
 diff) and the existing fail-closed impact planner. One required aggregate,
 **Queue ready**, requires successful planning, typechecks/static guards and every
-selected unit shard. All eight unit shards retain real-PostgreSQL enforcement.
+selected unit shard. All sixteen unit shards retain real-PostgreSQL enforcement.
 Unknown/global changes expand the plan rather than skip tests. Cancellation,
 failure and unexpected skips fail the aggregate. There are no test-budget increases.
 
 Package publication closure, example builds, published-SDK real-service tests,
 browser/visual suites, other integrations and images remain in full CI. This is
 a new fast lane, not a reduction in full CI coverage. Its 10–15-minute target is
-not yet proven: historical planner/source/unit critical paths are closer to
-19 minutes. Tune from actual queue profiles, never by increasing budgets or
+not yet proven: historical eight-shard planner/source/unit critical paths are closer to
+19 minutes. The sixteen-shard variant preserves the exact selected file set and
+1200-second per-attempt deadline; it removes the planner's unnecessary dependency
+installation and caches the Bun package store, never unchecked node_modules.
+Tune from actual queue profiles, never by increasing test budgets or
 silently dropping tests.
+
+Failed unit shards retry unchanged inputs **once inside the required job**, before
+GitHub can eject a PR and invalidate its successors. Recovery is recorded in
+`queue-retry.json`; deterministic failure stays red. Cancellation/signals and the
+existing 1200-second deadline do not retry. The new job's 45-minute outer envelope
+accommodates two attempts; individual test and attempt budgets remain unchanged.
+Native queue has no configured flake-retry switch here.
 
 `ci.yml` uses a **full** plan on every admitted main push. Its existing
 `ci-main-push` concurrency group does not cancel the running build; GitHub keeps
@@ -86,7 +104,7 @@ the week's arrival timestamps with eight slots and fixed 20-minute checks yields
 zero p95 waiting time and 13.62 minutes maximum wait **before** checks. This model
 assumes healthy checks and sufficient runners; failures invalidate later groups
 and lower capacity. It is not a latency guarantee. Eight groups can request up to
-72 source/unit runners concurrently, in addition to PR/full CI: observe hosted
+136 source/unit runners concurrently, in addition to full CI: observe hosted
 runner queuing before increasing concurrency. Do not claim a reserved runner pool.
 
 At launch measure enqueue-to-start, check runtime, completion interval, retry
@@ -94,7 +112,28 @@ rate and queue age. If sustained arrivals exceed capacity, prioritize reducing
 measured setup/critical-path costs or obtain an explicit runner/vendor decision.
 Do not disable checks. Alert/investigate if full completion age exceeds 120 minutes
 or queue waiting age exceeds 30 minutes. These are operator thresholds, not a
-new unattended alert service.
+new unattended paging service.
+
+## Continuous timing and post-land watch
+
+`queue-health.yml` records JSON after each queue/full-CI completion and reconciles
+the last day hourly. It reads provider queue-add/remove events, synthetic commit
+timestamps, exact-attempt job starts/finishes and PR merge time. Missing timestamps
+remain null; workflow metadata `updated_at` is not substituted for CI completion.
+It reports ready → candidate, candidate → CI, CI → result and result → merge, with
+separate cancellation/failure counts. Rebuilds count once per enqueue for waiting
+percentiles. A rolling-day p95 enqueue-to-CI-start wait over 30 minutes sets
+`stopSignal: true` and recommends true batching (option B). Reports are retained
+for 30 days; no pre-activation native stage times are invented.
+
+On a completed red **push CI on main**, the watcher comments on the exact landing
+PR and appends a deduplicated alert to the GitHub issue **Main CI health: failed
+full-suite runs**. Hourly reconciliation catches event reports coalesced while the
+single reporter was busy. Cancelled, neutral, skipped and unfinished runs never
+become failures. The landing PR is an investigation suspect, **not a proven
+culprit**: coalesced full CI includes earlier changes too. Compare the last green
+SHA and failing leaf, then bisect/reproduce if needed. There is no automatic revert
+or external paging integration. A failed full run cannot prove causality alone.
 
 ## Agent procedure
 
@@ -163,6 +202,16 @@ run checks the combined SHA, passes `Queue ready`, uses merge commits and produc
 a successful post-merge content check. Check the latest full-green JSON separately.
 
 ## Rollback and production incidents
+
+The one-command queue rollback (only after incident/rollout-owner authorization) is:
+
+```bash
+bun scripts/ci/queue-control.ts disable
+```
+
+It resolves the unique named main-only ruleset, preserves its other fields,
+disables it and verifies the provider result. `--dry-run` prints the intended
+payload without writing. It does not remove production or other branch protections.
 
 Disable only the new queue ruleset by its recorded ID; do not delete other rules.
 Stop new enqueueing first and inspect/drain existing entries. Restore auto-merge

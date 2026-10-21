@@ -13,18 +13,32 @@ test("queue checks cover PR entry and the exact combined merge group", () => {
   const plan = queue.jobs.plan.steps.find((step: any) => step.id === "plan");
   expect(plan.env.BASE_SHA).toContain("github.event.merge_group.base_sha");
   expect(plan.run).toContain('--head "$GITHUB_SHA"');
-  expect(queue.jobs.units.strategy.matrix.shard).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  expect(queue.jobs.units.strategy.matrix.shard).toEqual(
+    Array.from({ length: 16 }, (_, index) => index),
+  );
   expect(
     queue.jobs.units.steps.find((step: any) => step.env?.OPENGENI_REQUIRE_REAL_DB).env
       .OPENGENI_REQUIRE_REAL_DB,
   ).toBe("1");
-  expect(queue.jobs.ready.name).toBe("Queue ready");
-  expect(queue.jobs.ready.if).toBe("${{ always() }}");
+  expect(queue.jobs.ready.name).toBe(
+    "${{ github.event_name == 'pull_request' && 'Queue shadow result' || 'Queue ready' }}",
+  );
+  expect(queue.jobs.ready.if).toContain("always()");
+  expect(queue.jobs.ready.if).toContain("github.event_name != 'pull_request'");
   expect(queue.jobs.ready.needs).toEqual(["plan", "contracts", "units"]);
   const gate = queue.jobs.ready.steps[0].run;
   expect(gate).toContain('test "$PLAN" = success');
   expect(gate).toContain('test "$CONTRACTS" = success');
   expect(gate).toContain('else test "$UNITS" = success');
+});
+
+test("cheap PR entry never masquerades as combined-tree CI or duplicates the heavy suite", () => {
+  expect(queue.jobs.entry.if).toBe("${{ github.event_name == 'pull_request' }}");
+  expect(queue.jobs.entry.name).toContain("'PR entry (not applicable)'");
+  expect(queue.jobs.entry.steps[0].run).toContain("not test or review evidence");
+  expect(queue.jobs.plan.if).toContain("github.event_name != 'pull_request'");
+  expect(queue.jobs.plan.if).toContain("queue-shadow");
+  expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
 });
 
 test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
