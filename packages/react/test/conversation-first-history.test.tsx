@@ -997,9 +997,9 @@ describe("conversation-first session history", () => {
       );
       try {
         await settle(60);
-        const conversationReads = reads.filter((read) => read.excludeTypes);
-        expect(conversationReads.length).toBeGreaterThan(0);
-        for (const read of conversationReads) {
+        const historyReads = reads.filter((read) => read.excludeTypes);
+        expect(historyReads.length).toBeGreaterThan(0);
+        for (const read of historyReads) {
           expect(read.excludeTypes).toContain("terminal.pty.output.delta");
         }
         const result = hook.result.current;
