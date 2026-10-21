@@ -86,6 +86,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         "0769_private_visibility_never_blocks.sql",
         // Patches the account-binding fence as rewritten by the withheld 0501.
         "0873_mcp_binding_delegation_revocation.sql",
+        // The list triggers require the withheld archive/visibility columns.
+        "0888_session_list_invalidation.sql",
       ])
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);

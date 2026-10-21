@@ -2365,6 +2365,16 @@ export function SessionList() {
   const loadedGroupWindows = useRef(
     new Map<string, { generation: number; group: SessionPaginationGroup; rows: number }>(),
   );
+  const groupReadRevisions = useRef(new Map<string, string>());
+  const [failedGroupRefreshes, setFailedGroupRefreshes] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const groupReadRevision = (group: SessionPaginationGroup) =>
+    listHintsAvailable
+      ? `hint:${sessionListGroupRevision(dirtyScopes, group)}`
+      : `poll:${rootReadRevision}`;
+  const currentGroupReadRevision = useRef(groupReadRevision);
+  currentGroupReadRevision.current = groupReadRevision;
   loadedSessionIdsRef.current = new Set(allSessions.map((session) => session.id));
   const loadMoreInGroup = useCallback(
     async (
@@ -2380,6 +2390,8 @@ export function SessionList() {
         requestGeneration,
       );
       if (current.nextCursor === null && !refreshWindow) return;
+      // A quiet reconciliation must not consume an explicit pagination retry.
+      if (refreshWindow && current.failed) return;
       if (
         groupLoadingRef.current.get(group.key) === requestGeneration &&
         (refreshWindow || !groupRefreshing.current.has(group.key))
@@ -2406,6 +2418,15 @@ export function SessionList() {
       const requestIsCurrent = (): boolean =>
         paginationIdentity.current.generation === requestGeneration &&
         groupLoadAttempts.current.get(group.key) === attempt;
+
+      // The first read already observes this revision. Do not immediately
+      // reread its window on settlement; a newer hint during the read still
+      // differs and is reconciled by the effect below.
+      if (
+        !refreshWindow &&
+        loadedGroupWindows.current.get(group.key)?.generation !== requestGeneration
+      )
+        groupReadRevisions.current.set(group.key, currentGroupReadRevision.current(group));
 
       const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;
       // A request for more rows than one step (automatic fill) reads them in
@@ -2492,6 +2513,11 @@ export function SessionList() {
           loadedGroupWindows.current.set(group.key, {
             ...window,
             rows: Math.max(pageSize, rowsRead),
+          });
+          setFailedGroupRefreshes((failed) => {
+            const next = new Map(failed);
+            next.delete(group.key);
+            return next;
           });
           return;
         }
@@ -2592,6 +2618,12 @@ export function SessionList() {
         return { exhausted: page.nextCursor === null, added: newlyLoaded, failed: false };
       } catch {
         if (!requestIsCurrent()) return;
+        if (refreshWindow) {
+          // Keep the accepted rows and disclosure cursor usable. A failed
+          // background refresh is not a failed request for older rows.
+          setFailedGroupRefreshes((failed) => new Map(failed).set(group.key, requestGeneration));
+          return;
+        }
         setGroupContinuations((states) => {
           if (!requestIsCurrent()) return states;
           const latest = activeSessionContinuation(
@@ -2680,7 +2712,6 @@ export function SessionList() {
 
   const refreshGroupWindow = useRef(loadMoreInGroup);
   refreshGroupWindow.current = loadMoreInGroup;
-  const groupReadRevisions = useRef(new Map<string, string>());
   useEffect(() => {
     for (const [key, window] of loadedGroupWindows.current) {
       if (window.generation !== pageGeneration) {
@@ -2692,9 +2723,7 @@ export function SessionList() {
   useEffect(() => {
     for (const window of loadedGroupWindows.current.values()) {
       if (window.generation !== pageGeneration) continue;
-      const revision = listHintsAvailable
-        ? `hint:${sessionListGroupRevision(dirtyScopes, window.group)}`
-        : `poll:${rootReadRevision}`;
+      const revision = currentGroupReadRevision.current(window.group);
       if (groupReadRevisions.current.get(window.group.key) === revision) continue;
       // A hint arriving during a read remains dirty until that read settles.
       if (groupLoadingRef.current.get(window.group.key) === pageGeneration) continue;
@@ -2715,7 +2744,9 @@ export function SessionList() {
   useEffect(() => {
     if (!listHintsAvailable || document.visibilityState === "hidden") return;
     const failedChildren = [...childPages].filter(([, page]) => page.failed);
-    const failedGroups = [...groupContinuations].filter(([, page]) => page.failed);
+    const failedGroups = [...failedGroupRefreshes].filter(
+      ([, generation]) => generation === pageGeneration,
+    );
     if (
       !error &&
       !globalPinsError &&
@@ -2743,7 +2774,7 @@ export function SessionList() {
     listHintsAvailable,
     documentForeground,
     childPages,
-    groupContinuations,
+    failedGroupRefreshes,
     error,
     globalPinsError,
     channelsQuery.error,
