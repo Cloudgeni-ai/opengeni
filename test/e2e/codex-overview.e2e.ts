@@ -68,7 +68,10 @@ const provider = {
       provider.activeOverviewCalls,
     );
     try {
-      await Bun.sleep(20);
+      // Keep reads in flight long enough for organization account prefetches
+      // and the workspace batch to overlap on a fast runner too. Both routes
+      // must share the same four-call provider budget.
+      await Bun.sleep(200);
       return await operation();
     } finally {
       provider.activeOverviewCalls -= 1;
