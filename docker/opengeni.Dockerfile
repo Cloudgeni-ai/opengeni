@@ -66,6 +66,21 @@ COPY --from=bun-target /usr/local/bin/bun /out/bun
 RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
   bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
 
+# Bun (like curl and git) also trusts the OS store in /etc/ssl/certs, and the
+# oven/bun base images ship a ca-certificates older than Debian's distrust of
+# emSign ECC Root CA - G3 and Comodo AAA Services (20250419+deb13u1). Stages
+# that install system packages upgrade ca-certificates with them. Stages that
+# install none (web runs no target-architecture step at all) copy this current
+# store instead, built natively from the same Debian release (the package is
+# architecture-independent), and point OpenSSL-style lookups at it, since a
+# COPY cannot remove the stale entries in /etc/ssl/certs.
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION}-slim AS trust-store
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && cp -rL /etc/ssl/certs /out-certs
+
 FROM oven/bun:${BUN_VERSION} AS source-base
 COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
@@ -237,6 +252,8 @@ RUN bun scripts/build-runtime-processes.ts artifact-outbox
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
 FROM oven/bun:${BUN_VERSION}-slim AS artifact-outbox-dispatcher
 COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs
+ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -315,6 +332,8 @@ RUN bun run --cwd apps/web build \
 # No target-architecture RUN steps or copied native build dependencies.
 FROM oven/bun:${BUN_VERSION} AS web
 COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
+COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs
+ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
