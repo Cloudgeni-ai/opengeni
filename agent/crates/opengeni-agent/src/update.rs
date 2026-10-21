@@ -315,6 +315,34 @@ pub struct ManagedUpdateResult {
     pub expected_sha256: String,
 }
 
+/// The update check for one control-plane request. This path exists only after
+/// an authorized human/control-plane request. Manual opt-in may cross a staged
+/// rollout boundary and may re-pin the same version after a failed/rolled-back
+/// attempt; signature, digest, target, monotonic-version, atomic-apply,
+/// health-gate, and rollback checks remain.
+fn managed_update_config(
+    base_url: &str,
+    channel: &str,
+    agent_id: String,
+    target_version: &str,
+    install_path: &Path,
+) -> UpdateConfig {
+    let mut config = UpdateConfig::new(
+        base_url.trim_end_matches('/'),
+        channel,
+        agent_id,
+        env!("CARGO_PKG_VERSION"),
+    );
+    select_install_target(&mut config, install_path);
+    config.allow_staged_rollout_opt_in = true;
+    config.allow_same_version = true;
+    // The request names its exact release. The channel pointer can still name
+    // the previous release while the control plane rolls out, so read that
+    // release's own signed manifest.
+    config.pinned_version = Some(target_version.to_string());
+    config
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ManagedUpdatePhase {
     Downloading,
@@ -346,19 +374,13 @@ pub fn apply_managed(
     )
     .map_err(|_| "install_identity_unavailable".to_string())?;
     let source = HttpSource::new().map_err(|_| "update_transport_unavailable".to_string())?;
-    let mut config = UpdateConfig::new(
-        base_url.trim_end_matches('/'),
+    let config = managed_update_config(
+        base_url,
         channel,
         install_identity.public_key_base64(),
-        env!("CARGO_PKG_VERSION"),
+        target_version,
+        install_path,
     );
-    select_install_target(&mut config, install_path);
-    // This path exists only after an authorized human/control-plane request.
-    // Manual opt-in may cross a staged rollout boundary and may re-pin the same
-    // version after a failed/rolled-back attempt; signature, digest, target,
-    // monotonic-version, atomic-apply, health-gate, and rollback checks remain.
-    config.allow_staged_rollout_opt_in = true;
-    config.allow_same_version = true;
     let plan = match check_update_manifest(&source, &config) {
         Ok(ManifestCheckOutcome::Available(plan)) => plan,
         Ok(ManifestCheckOutcome::UpToDate(_)) => return Err("target_not_offered".to_string()),
@@ -643,6 +665,21 @@ mod tests {
         let mut standalone = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.28");
         select_install_target(&mut standalone, Path::new("/usr/local/bin/opengeni-agent"));
         assert_eq!(standalone.target, "universal-apple-darwin");
+    }
+
+    #[test]
+    fn a_managed_update_reads_the_requested_release_manifest() {
+        let config = managed_update_config(
+            "https://example.com/",
+            "stable",
+            "agent".to_string(),
+            "0.1.110",
+            Path::new("/usr/local/bin/opengeni-agent"),
+        );
+        assert_eq!(config.pinned_version.as_deref(), Some("0.1.110"));
+        assert_eq!(config.base_url, "https://example.com");
+        assert!(config.allow_staged_rollout_opt_in);
+        assert!(config.allow_same_version);
     }
 
     fn connection(channel: &str) -> StoredConnection {
