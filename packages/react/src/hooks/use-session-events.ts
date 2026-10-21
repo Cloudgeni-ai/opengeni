@@ -248,11 +248,16 @@ export function useSessionEvents(
   // short tail outside the window. The sandbox dock reads their history itself.
   const [turnlessSteps, setTurnlessSteps] = useState<TurnlessSteps>(EMPTY_TURNLESS_STEPS);
   const turnlessStepsRef = useRef<TurnlessSteps>(EMPTY_TURNLESS_STEPS);
-  // Live turnless rows appended since the last render that showed the tail.
-  const unrenderedTurnlessRef = useRef(0);
+  // How many live turnless rows the last committed render had seen, and
+  // whether a gap was already marked for rows appended since.
+  const renderedTurnlessRef = useRef({ appended: 0, marked: false });
   useEffect(() => {
-    unrenderedTurnlessRef.current = 0;
+    renderedTurnlessRef.current = { appended: turnlessSteps.appended, marked: false };
   }, [turnlessSteps]);
+  // Through which sequence the live stream delivered every row. A stream that
+  // starts past it (the conversation side moved the cursor) skipped terminal
+  // output nobody read.
+  const liveThroughRef = useRef(0);
   // Retires step reads issued for a previous stream identity.
   const stepGenerationRef = useRef(0);
   // Each step read's id; a store answers only its newest read.
@@ -354,11 +359,11 @@ export function useSessionEvents(
       if (steps.some((event) => !event.turnId)) {
         const incoming = steps.filter((event) => !event.turnId);
         const turnless = appendTurnlessSteps(turnlessStepsRef.current, incoming);
-        unrenderedTurnlessRef.current += incoming.length;
         // A burst larger than the tail dropped rows no render showed: the
         // terminal re-reads them.
-        if (unrenderedTurnlessRef.current > turnless.events.length) {
-          unrenderedTurnlessRef.current = turnless.events.length;
+        const rendered = renderedTurnlessRef.current;
+        if (!rendered.marked && turnless.appended - rendered.appended > turnless.events.length) {
+          rendered.marked = true;
           if (sessionId) markTurnlessOutputGap(workspaceId, sessionId);
         }
         turnlessStepsRef.current = turnless;
@@ -588,6 +593,7 @@ export function useSessionEvents(
       setInitialHistoryReady(false);
       lastSequenceRef.current = after;
       streamResumeSequenceRef.current = after;
+      liveThroughRef.current = after;
       oldestSequenceRef.current = null;
       newestSequenceRef.current = null;
       hasOlderRef.current = false;
@@ -696,6 +702,7 @@ export function useSessionEvents(
           streamResumeSequenceRef.current,
           batchResumeSequence,
         );
+        liveThroughRef.current = Math.max(liveThroughRef.current, batchResumeSequence);
       }
       const status = observeSessionStatus(batch, sessionStatusRef);
       if (status !== undefined) {
@@ -750,9 +757,6 @@ export function useSessionEvents(
       newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
       lastSequenceRef.current = Math.max(lastSequenceRef.current, head);
       streamResumeSequenceRef.current = Math.max(streamResumeSequenceRef.current, head);
-      // The stream rejoins at the head: terminal output written since the
-      // cursor is in no read the conversation made, so the terminal re-reads.
-      markTurnlessOutputGap(workspaceId, sessionId);
       if (status !== undefined) setSessionStatusProjection(status);
       if (fresh.length > 0) setEventWindow(retained);
       if (retained.truncated) {
@@ -899,6 +903,13 @@ export function useSessionEvents(
         if (fullReplay) {
           setInitialLoading(false);
         }
+        // The stream starts past what it last delivered: a window load,
+        // catch-up, page or jump moved the cursor with conversation reads, which
+        // carry no terminal output, so the sandbox terminal reads it again.
+        if (!fullReplay && streamResumeSequenceRef.current > liveThroughRef.current) {
+          markTurnlessOutputGap(workspaceId, sessionId);
+        }
+        liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
@@ -2303,9 +2314,11 @@ type TurnlessSteps = {
   bytes: number;
   /** Inclusive sequence runs of every live turnless step seen, ascending. */
   ranges: ReadonlyArray<readonly [number, number]>;
+  /** How many live turnless rows were ever appended. */
+  appended: number;
 };
 
-const EMPTY_TURNLESS_STEPS: TurnlessSteps = { events: [], bytes: 2, ranges: [] };
+const EMPTY_TURNLESS_STEPS: TurnlessSteps = { events: [], bytes: 2, ranges: [], appended: 0 };
 // Runs of turnless sequences kept for turn extents; terminal output comes in
 // bursts, so a run usually spans many rows.
 const TURNLESS_STEP_MAX_RANGES = 4096;
@@ -2331,14 +2344,15 @@ function appendTurnlessSteps(
     ranges.splice(0, ranges.length - TURNLESS_STEP_MAX_RANGES);
   }
   const next = appendStepEvents(current, incoming);
+  const appended = current.appended + incoming.length;
   if (next.events.length <= TURNLESS_STEP_TAIL && next.bytes <= TURNLESS_STEP_TAIL_BYTES) {
-    return { ...next, ranges };
+    return { ...next, ranges, appended };
   }
   const kept = boundBrowserSessionEventWindow(next.events, {
     maxCount: TURNLESS_STEP_TAIL,
     maxBytes: TURNLESS_STEP_TAIL_BYTES,
   });
-  return { events: kept.events, bytes: kept.bytes, ranges };
+  return { events: kept.events, bytes: kept.bytes, ranges, appended };
 }
 
 /**

@@ -238,9 +238,23 @@ export function useSandboxTerminal(
         // A gap marked during the read is read again.
         setHistoryTick((tick) => tick + 1);
       },
-      () => {
+      (cause: unknown) => {
         state.inFlight = false;
         if (!current()) return;
+        // A refusal (another 4xx than a timeout or rate limit) will not
+        // change by retrying: wait for the next gap or session instead.
+        if (
+          cause instanceof OpenGeniApiError &&
+          cause.status >= 400 &&
+          cause.status < 500 &&
+          cause.status !== 408 &&
+          cause.status !== 429
+        ) {
+          state.failed = false;
+          state.failures = 0;
+          state.generation = generation;
+          return;
+        }
         state.failed = true;
         state.failures += 1;
         setHistoryTick((tick) => tick + 1);

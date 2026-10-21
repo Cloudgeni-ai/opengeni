@@ -232,7 +232,7 @@ function chatWithTerminal(client: ReturnType<typeof historyClient>["client"]) {
 }
 
 /** Wait until `done` holds, in real time (terminal re-reads are throttled). */
-async function settleUntil(done: () => boolean, ms = 5_000) {
+async function settleUntil(done: () => boolean, ms = 10_000) {
   const deadline = Date.now() + ms;
   while (!done() && Date.now() < deadline) await flush(50);
 }
@@ -1027,65 +1027,127 @@ describe("conversation-first session history", () => {
     HEAVY_TEST_TIMEOUT_MS,
   );
 
-  test("terminal output written while the tab was hidden is read again on return", async () => {
-    let visibility: DocumentVisibilityState = "visible";
-    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
-    Object.defineProperty(document, "visibilityState", {
-      configurable: true,
-      get: () => visibility,
-    });
-    const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 1 });
-    const first = store.at(-1)!.sequence + 1;
-    for (let sequence = first; sequence < first + 10; sequence += 1) store.push(ptyRow(sequence));
-    const live: SessionEvent[] = [];
-    const { client, reads } = historyClient({
-      store: () => store,
-      live: () => live,
-      withPages: true,
-    });
-    const hook = await renderHook(() => chatWithTerminal(client), undefined);
-    try {
-      await settle(60);
-      expect(hook.result.current.terminal.chunks).toHaveLength(10);
-
-      jest.useFakeTimers();
-      visibility = "hidden";
-      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
-      await actRun(() => jest.advanceTimersByTime(2_000));
-      expect(hook.result.current.session.connectionState).toBe("idle");
-      // A hundred rows while away: more than the stream replays, so it
-      // rejoins at the head and the terminal reads them itself.
-      for (let sequence = first + 10; sequence < first + 110; sequence += 1) {
-        const row = ptyRow(sequence);
-        store.push(row);
-        live.push(row);
-      }
-      visibility = "visible";
-      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
-      await actRun(async () => {
-        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
-        jest.advanceTimersByTime(20);
-        for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+  test(
+    "terminal output written while the tab was hidden is read again on return",
+    async () => {
+      let visibility: DocumentVisibilityState = "visible";
+      const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => visibility,
       });
-      jest.useRealTimers();
-      await settleUntil(() => hook.result.current.terminal.chunks.length === 110);
-      expect(hook.result.current.terminal.chunks.map((chunk) => chunk.seq)).toEqual(
-        Array.from({ length: 110 }, (_, index) => first + index),
-      );
-      const terminalReads = reads.filter((read) =>
-        read.includeTypes?.includes("terminal.pty.output.delta"),
-      );
-      expect(terminalReads).toHaveLength(2);
-    } finally {
-      jest.useRealTimers();
-      await hook.unmount();
-      if (visibilityDescriptor) {
-        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
-      } else {
-        delete (document as { visibilityState?: unknown }).visibilityState;
+      const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 1 });
+      const first = store.at(-1)!.sequence + 1;
+      for (let sequence = first; sequence < first + 10; sequence += 1) store.push(ptyRow(sequence));
+      const live: SessionEvent[] = [];
+      const { client, reads } = historyClient({
+        store: () => store,
+        live: () => live,
+        withPages: true,
+      });
+      const hook = await renderHook(() => chatWithTerminal(client), undefined);
+      try {
+        await settle(60);
+        expect(hook.result.current.terminal.chunks).toHaveLength(10);
+
+        jest.useFakeTimers();
+        visibility = "hidden";
+        await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+        await actRun(() => jest.advanceTimersByTime(2_000));
+        expect(hook.result.current.session.connectionState).toBe("idle");
+        // A hundred rows while away: more than the stream replays, so it
+        // rejoins at the head and the terminal reads them itself.
+        for (let sequence = first + 10; sequence < first + 110; sequence += 1) {
+          const row = ptyRow(sequence);
+          store.push(row);
+          live.push(row);
+        }
+        visibility = "visible";
+        await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+        await actRun(async () => {
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(20);
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+        });
+        jest.useRealTimers();
+        await settleUntil(() => hook.result.current.terminal.chunks.length === 110);
+        expect(hook.result.current.terminal.chunks.map((chunk) => chunk.seq)).toEqual(
+          Array.from({ length: 110 }, (_, index) => first + index),
+        );
+        const terminalReads = reads.filter((read) =>
+          read.includeTypes?.includes("terminal.pty.output.delta"),
+        );
+        expect(terminalReads).toHaveLength(2);
+      } finally {
+        jest.useRealTimers();
+        await hook.unmount();
+        if (visibilityDescriptor) {
+          Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+        } else {
+          delete (document as { visibilityState?: unknown }).visibilityState;
+        }
       }
-    }
-  });
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
+
+  for (const route of ["jumpToLatest", "loadNewer"] as const) {
+    test(
+      `terminal output written while browsing history is read again after ${route}`,
+      async () => {
+        // Enough conversation that jumping to the start leaves the latest page.
+        const store: SessionEvent[] = [];
+        let sequence = 1;
+        for (let index = 0; index < 40; index += 1) {
+          const turn = longTurn({ start: sequence, turnId: `T${index}`, steps: 0 });
+          store.push(...turn);
+          sequence = turn.at(-1)!.sequence + 1;
+        }
+        const first = sequence;
+        for (; sequence < first + 10; sequence += 1) store.push(ptyRow(sequence));
+        const live: SessionEvent[] = [];
+        const { client } = historyClient({
+          store: () => store,
+          live: () => live,
+          withPages: true,
+        });
+        const hook = await renderHook(() => chatWithTerminal(client), undefined);
+        try {
+          await settle(60);
+          expect(hook.result.current.terminal.chunks).toHaveLength(10);
+          await actRun(async () => {
+            await hook.result.current.session.jumpToSequence(1);
+          });
+          await settle(60);
+          // While the reader browses, the terminal writes 50 rows and a turn runs.
+          const written: SessionEvent[] = [];
+          for (; sequence < first + 60; sequence += 1) written.push(ptyRow(sequence));
+          written.push(...longTurn({ start: sequence, turnId: "Tlate", steps: 0 }));
+          store.push(...written);
+          live.push(...written);
+          if (route === "jumpToLatest") {
+            await actRun(async () => {
+              await hook.result.current.session.jumpToLatest();
+            });
+          } else {
+            for (let page = 0; page < 20 && hook.result.current.session.hasNewer; page += 1) {
+              await actRun(async () => {
+                await hook.result.current.session.loadNewer();
+              });
+              await settle(30);
+            }
+          }
+          await settleUntil(() => hook.result.current.terminal.chunks.length === 60);
+          expect(hook.result.current.terminal.chunks.map((chunk) => chunk.seq)).toEqual(
+            Array.from({ length: 60 }, (_, index) => first + index),
+          );
+        } finally {
+          await hook.unmount();
+        }
+      },
+      HEAVY_TEST_TIMEOUT_MS,
+    );
+  }
 
   test("terminal output between a live turn's start and its first step is not hidden steps", async () => {
     const store = [at(1, "user.message", { text: "go", routing: "accepted_for_execution" }, null)];

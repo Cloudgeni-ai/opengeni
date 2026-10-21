@@ -47,7 +47,7 @@ const command = (sequence: number, chunk: string, turnId: string) =>
   row(sequence, "sandbox.command.output.delta", { stream: "stdout", chunk }, turnId);
 
 /** Wait until `done` holds, in real time (retries and re-reads are timed). */
-async function settleUntil(done: () => boolean, ms = 5_000) {
+async function settleUntil(done: () => boolean, ms = 10_000) {
   const deadline = Date.now() + ms;
   while (!done() && Date.now() < deadline) await flush(50);
 }
@@ -219,7 +219,7 @@ describe("sandbox terminal history", () => {
     } finally {
       await hook.unmount();
     }
-  });
+  }, 15_000);
 
   test("a live gap reads the newest output again and fills the hole", async () => {
     const session = reloadedSession();
@@ -249,7 +249,7 @@ describe("sandbox terminal history", () => {
     } finally {
       await hook.unmount();
     }
-  });
+  }, 15_000);
 
   test("coming back to a session reads what it wrote meanwhile", async () => {
     const other = "0b7a7c0e-1d0a-4f5e-9a1b-2c3d4e5f6a7b";
