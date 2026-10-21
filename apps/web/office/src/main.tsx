@@ -339,7 +339,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
         ? [
             {
               id: "excel-workbook",
-              text: `The person is writing from the Opengeni add-in in their open Excel workbook "${workbook.name}" (${workbook.app}, workbook id ${connectionId}). Use excel_run to read or change it.`,
+              text: `The person is writing from the Opengeni add-in in their open Excel workbook "${workbook.name}" (${workbook.app}). To read or change it, call excel_run with workbook "${connectionId}".`,
             },
             ...(selection ? [selectionContextItem(selection, workbook.name)] : []),
           ]
