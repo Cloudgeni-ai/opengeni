@@ -31,7 +31,12 @@ const input = `@import "tailwindcss/theme.css" layer(theme);
 @source not "../src/components/artifacts/visualization-assets";
 @source not "../src/components/artifacts/visualization-assets.gen.ts";
 @source not inline("blur collapse filter lowercase ring");
+@source not "../src/ui";
 `;
+// src/ui holds the web app's first-party primitives. The web app compiles them
+// with its own Tailwind; no embeddable component renders them yet, so they stay
+// out of compiled.css until one does (guarded in test/compiled-css.test.ts).
+export const compiledCssInput = input;
 
 const scope = selectorParser().astSync(":where(.og-root)").nodes[0]!.nodes[0]!;
 const tokenContextAttributes = new Set(["data-og-density", "data-og-theme"]);
