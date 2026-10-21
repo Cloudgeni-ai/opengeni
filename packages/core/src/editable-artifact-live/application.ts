@@ -76,6 +76,12 @@ export type ReadEditableArtifactApplicationInput = Readonly<{
   artifactId: EditableArtifactId;
 }>;
 
+export type ReadEditableArtifactsApplicationInput = Omit<
+  ReadEditableArtifactApplicationInput,
+  "artifactId"
+> &
+  Readonly<{ artifactIds: readonly EditableArtifactId[] }>;
+
 export type MintEditableArtifactApplicationTicketInput = ReadEditableArtifactApplicationInput &
   Readonly<{
     modality: EditableArtifactModality;
@@ -94,6 +100,10 @@ export interface EditableArtifactApplicationPort {
   createArtifact(input: CreateEditableArtifactApplicationInput): Promise<EditableArtifact>;
   importArtifact(input: ImportEditableArtifactApplicationInput): Promise<EditableArtifact>;
   readArtifact(input: ReadEditableArtifactApplicationInput): Promise<EditableArtifact>;
+  /** Optional bounded read optimization. Results correspond to input order. */
+  readArtifacts?(
+    input: ReadEditableArtifactsApplicationInput,
+  ): Promise<readonly PromiseSettledResult<EditableArtifact>[]>;
   mintLiveTicket(
     input: MintEditableArtifactApplicationTicketInput,
   ): Promise<EditableArtifactLiveTicket>;
@@ -150,6 +160,18 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
     return await this.dependencies.domain.getArtifact({
       scope,
       artifactId,
+      actor: Object.freeze({ ...input.actor }) as EditableArtifactActor,
+    });
+  }
+
+  async readArtifacts(
+    input: ReadEditableArtifactsApplicationInput,
+  ): Promise<readonly PromiseSettledResult<EditableArtifact>[]> {
+    const scope = editableArtifactScope(input.scope);
+    validateEditableArtifactActor(input.actor);
+    return this.dependencies.domain.getArtifacts({
+      scope,
+      artifactIds: input.artifactIds.map(editableArtifactId),
       actor: Object.freeze({ ...input.actor }) as EditableArtifactActor,
     });
   }

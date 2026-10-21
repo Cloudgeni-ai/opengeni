@@ -49,6 +49,7 @@ function fixture(
   pages: ArtifactCatalogCandidate[][],
   options: {
     read?: EditableArtifactApplicationPort["readArtifact"];
+    readBatch?: EditableArtifactApplicationPort["readArtifacts"];
     privateSession?: boolean;
     absentSession?: boolean;
     agentAttempt?: Partial<Parameters<typeof signDelegatedAccessToken>[1]>;
@@ -205,6 +206,7 @@ function fixture(
     ...(options.read
       ? {
           editableArtifacts: {
+            ...(options.readBatch ? { readArtifacts: options.readBatch } : {}),
             readArtifact: async (
               input: Parameters<EditableArtifactApplicationPort["readArtifact"]>[0],
             ) => {
@@ -775,6 +777,87 @@ test("catalog does not read beyond the authorized lookahead row", async () => {
   const response = await request("kind=document&limit=9");
   expect(response.status, await response.clone().text()).toBe(200);
   expect((await response.json()).items).toHaveLength(9);
+});
+
+test("optional editable batch reads retain denied rows and ordered lookahead", async () => {
+  const ids = Array.from({ length: 20 }, (_, index) => (index + 1).toString(16).padStart(32, "0"));
+  const batches: string[][] = [];
+  const { request, reads } = fixture([ids.map((id) => candidate(id, "document"))], {
+    read: async () => {
+      throw new Error("Batch-capable host should not use scalar reads");
+    },
+    readBatch: async (input) => {
+      batches.push([...input.artifactIds]);
+      return input.artifactIds.map((id) =>
+        id === ids[0]
+          ? {
+              status: "rejected" as const,
+              reason: new EditableArtifactApplicationError("forbidden"),
+            }
+          : {
+              status: "fulfilled" as const,
+              value: {
+                scope: input.scope,
+                id,
+                modality: "document",
+                title: "Report",
+                lifecycle: "active",
+                createdAt,
+                updatedAt: createdAt,
+              } as never,
+            },
+      );
+    },
+  });
+  const response = await request("kind=document&limit=9");
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body.items.map((item: { id: string }) => item.id)).toEqual(ids.slice(1, 10));
+  expect(body.nextCursor).toBeString();
+  expect(batches.map((batch) => batch.length)).toEqual([8, 3]);
+  expect(reads).toHaveLength(0);
+});
+
+test("editable batch errors and mismatched metadata fail closed", async () => {
+  const id = "1".repeat(32);
+  for (const failure of ["unavailable", "throws", "foreign", "missing"] as const) {
+    const { request } = fixture([[candidate(id, "document")]], {
+      read: async () => {
+        throw new Error("Unexpected scalar fallback");
+      },
+      readBatch: (input) => {
+        if (failure === "throws") throw new EditableArtifactApplicationError("unavailable");
+        return Promise.resolve(
+          failure === "missing"
+            ? []
+            : failure === "unavailable"
+              ? [
+                  {
+                    status: "rejected",
+                    reason: new EditableArtifactApplicationError("unavailable"),
+                  },
+                ]
+              : [
+                  {
+                    status: "fulfilled",
+                    value: {
+                      scope: { ...input.scope, workspaceId: "foreign" },
+                      id,
+                      modality: "document",
+                      title: "Secret",
+                      lifecycle: "active",
+                      createdAt,
+                      updatedAt: createdAt,
+                    } as never,
+                  },
+                ],
+        );
+      },
+    });
+    const response = await request("kind=document");
+    expect(response.status).toBe(failure === "unavailable" || failure === "throws" ? 503 : 500);
+    expect(await response.text()).not.toContain("Secret");
+  }
 });
 
 test("concurrent provenance reads deduplicate the source and keep host denials and outages fail closed", async () => {
