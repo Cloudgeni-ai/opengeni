@@ -334,6 +334,8 @@ export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
+  sessionPendingWriterAttemptIdsSql,
+  sessionQuiescenceCandidateAttemptIdsSql,
 } from "./session-attempt-writers";
 import {
   childRecentTurnOutcomesSql,
@@ -54613,6 +54615,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
         ${input.attemptId ? sql`and attempt.id = ${input.attemptId}` : sql``}
         and attempt.state = 'closed'
         and attempt.quiesced_at is null
+        and attempt.id in ${sessionQuiescenceCandidateAttemptIdsSql(input)}
         and (
           ${sessionAttemptPendingWritersSql(sql`attempt`, input.writerMode ?? "physical")}
           or exists (
@@ -73080,6 +73083,7 @@ export async function claimSessionWorkForAttempt(
               and attempt.session_id = ${sessionId}
               and attempt.state = 'closed'
               and attempt.quiesced_at is null
+              and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
               and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
           ) as pending
         `);
@@ -76125,6 +76129,12 @@ async function nextSessionAttemptAwaitingQuiescence(
         eq(schema.sessionTurnAttempts.sessionId, sessionId),
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
+        // Only rows that can satisfy the predicate below; without this every
+        // closed attempt in the session's history runs its subqueries.
+        sql`${schema.sessionTurnAttempts.id} in ${sessionQuiescenceCandidateAttemptIdsSql({
+          workspaceId,
+          sessionId,
+        })}`,
         sql`(
           ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`, writerMode)}
           or exists (
@@ -77798,7 +77808,12 @@ async function settleSessionWorkBeforeAttemptClaim(
             ) and not exists (
               select 1 from session_turn_attempts attempt
               where attempt.workspace_id = ${workspaceId} and attempt.session_id = ${session.id}
-                and (attempt.state <> 'closed' or ${sessionAttemptPendingWritersSql(sql`attempt`)})
+                and attempt.state in ('claimed', 'running')
+            ) and not exists (
+              select 1 from session_turn_attempts attempt
+              where attempt.workspace_id = ${workspaceId} and attempt.session_id = ${session.id}
+                and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId: session.id })}
+                and ${sessionAttemptPendingWritersSql(sql`attempt`)}
             ) and not exists (
               select 1 from session_turns sibling
               where sibling.workspace_id = ${workspaceId} and sibling.session_id = ${session.id}

@@ -55,7 +55,11 @@ export function crashedWorkerOrphanAdmissionSql(admission: SQL): SQL {
  * `containment` is the physical predicate minus crashed-worker orphans
  * (`crashedWorkerOrphanAdmissionSql`). Only sandbox containment, drain and
  * deadline decisions use it, because those settle the orphan themselves once
- * the exact box is gone; the quiescence receipt keeps the strict predicate. */
+ * the exact box is gone; the quiescence receipt keeps the strict predicate.
+ *
+ * The predicate is correlated per attempt row. A session-wide scan must first
+ * restrict rows to `sessionPendingWriterAttemptIdsSql`, otherwise it evaluates
+ * these subqueries for every attempt the session ever ran. */
 export function sessionAttemptPendingWritersSql(
   attempt: SQL,
   mode: "physical" | "inference" | "containment" = "physical",
@@ -128,6 +132,79 @@ export function sessionAttemptPendingWritersSql(
           where command.retained_process_id = process.id
             and command.state in ('running', 'stopping')
         )
+    )
+  )`;
+}
+
+/** One session, addressed by bound workspace and session ids. */
+export type SessionAttemptScope = { workspaceId: string; sessionId: string };
+
+/**
+ * The attempt ids in one session for which `sessionAttemptPendingWritersSql`
+ * can be true, in any mode. It is a superset: callers still apply the exact
+ * predicate to these rows. Every branch of that predicate needs either an
+ * unsettled workspace-mutation admission of the session (owned by the attempt
+ * itself, or by a retained process the attempt owns) or an active retained
+ * process the attempt owns, so these three sources cover it.
+ *
+ * The subquery is uncorrelated. Postgres evaluates it once and probes it as a
+ * hashed set, so the check costs the session's pending work, not its history.
+ * The unsettled admissions are read through
+ * `sandbox_workspace_mutation_admissions_unsettled_session_idx` (migration
+ * 0879) and active processes through `sandbox_retained_processes_active_idx`.
+ */
+export function sessionPendingWriterAttemptIdsSql(scope: SessionAttemptScope): SQL {
+  return sql`(
+    select admission.attempt_id
+    from sandbox_workspace_mutation_admissions admission
+    where admission.workspace_id = ${scope.workspaceId}
+      and admission.session_id = ${scope.sessionId}
+      and admission.settled_at is null
+      and admission.attempt_id is not null
+    union all
+    select process.owner_attempt_id
+    from sandbox_workspace_mutation_admissions admission
+    join sandbox_retained_processes process on process.id = admission.actor_id
+    where admission.workspace_id = ${scope.workspaceId}
+      and admission.session_id = ${scope.sessionId}
+      and admission.settled_at is null
+      and admission.actor_kind = 'process'
+      and process.owner_attempt_id is not null
+    union all
+    select process.owner_attempt_id
+    from sandbox_retained_processes process
+    where process.workspace_id = ${scope.workspaceId}
+      and process.session_id = ${scope.sessionId}
+      and process.state = 'active'
+      and process.owner_attempt_id is not null
+  )`;
+}
+
+/**
+ * The attempt ids in one session that can still await a physical-quiescence
+ * receipt: possible pending writers, attempts with a settled or stale Pause or
+ * Steer interruption, and the session's newest attempt (the only one that can
+ * be an unsucceeded same-turn recovery). Like the writer set it is an
+ * uncorrelated superset, so the exact quiescence predicate runs only on these
+ * rows instead of every closed attempt in the session's history.
+ */
+export function sessionQuiescenceCandidateAttemptIdsSql(scope: SessionAttemptScope): SQL {
+  return sql`(
+    select candidate.id from ${sessionPendingWriterAttemptIdsSql(scope)} as candidate(id)
+    union all
+    select interruption.attempt_id
+    from session_attempt_interruptions interruption
+    where interruption.workspace_id = ${scope.workspaceId}
+      and interruption.session_id = ${scope.sessionId}
+      and interruption.state in ('settled', 'rejected_stale')
+    union all
+    (
+      select latest.id
+      from session_turn_attempts latest
+      where latest.workspace_id = ${scope.workspaceId}
+        and latest.session_id = ${scope.sessionId}
+      order by latest.started_at desc, latest.id desc
+      limit 1
     )
   )`;
 }

@@ -10722,6 +10722,11 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     blocking: index("sandbox_workspace_mutation_admissions_blocking_idx")
       .on(table.leaseId, table.workspaceGeneration)
       .where(sql`${table.settledAt} is null`),
+    // Session-wide pending-writer checks start from this (normally empty) set
+    // instead of probing every attempt the session ever ran (migration 0879).
+    unsettledSession: index("sandbox_workspace_mutation_admissions_unsettled_session_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.settledAt} is null`),
     attempt: index("sandbox_workspace_mutation_admissions_attempt_idx").on(
       table.workspaceId,
       table.attemptId,
