@@ -1,9 +1,28 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot as createReactRoot } from "react-dom/client";
 
+import { AppContext, type AppContextValue } from "../../app-context";
 import type { Session } from "../../types";
+
+// The header only renders inside the session shell, which always has the app
+// context; its chat actions (copy link, pin) run through it. This test runs
+// none of them, so any read of the context fails loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    throw new Error(`The SessionHeader mute test's app context has no ${String(key)}`);
+  },
+});
+
+function createRoot(container: Element) {
+  const root = createReactRoot(container);
+  return {
+    render: (node: ReactNode) =>
+      root.render(<AppContext.Provider value={appContext}>{node}</AppContext.Provider>),
+    unmount: () => root.unmount(),
+  };
+}
 
 // The menu's items, rendered inline so the test reads what the person sees.
 mock.module("../../../ui/dropdown-menu", () => ({
@@ -12,6 +31,9 @@ mock.module("../../../ui/dropdown-menu", () => ({
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuSeparator: () => <hr />,
   DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuShortcut: ({ children }: { children: ReactNode }) => (
+    <span aria-hidden>{children}</span>
+  ),
   DropdownMenuItem: ({
     children,
     onSelect,
