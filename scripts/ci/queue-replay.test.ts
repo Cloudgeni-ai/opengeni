@@ -128,4 +128,118 @@ describe("deterministic failure-aware queue replay", () => {
       replay({ ...base, samples: [{ duration: 1, conclusion: "cancelled" }] }),
     ).toThrow();
   });
+  test("within-candidate flaky retry charges time/work without restarting green successors", () => {
+    const r = replay({
+      ...base,
+      capacity: 3,
+      retryWithinCandidate: true,
+      arrivals: [
+        { id: "a", at: 0, kind: "flaky" },
+        { id: "b", at: 0, kind: "good" },
+        { id: "c", at: 0, kind: "good" },
+      ],
+      samples: [
+        { duration: 5, conclusion: "success" },
+        { duration: 10, conclusion: "failure" },
+      ],
+    });
+    expect(r.merged).toBe(3);
+    expect(r.invalidations).toBe(0);
+    expect(r.retries).toBe(1);
+    expect(r.builds).toBe(4);
+    expect(r.candidateBuilds).toBe(3);
+    expect(r.failedCandidates).toBe(0);
+    expect(r.makespan).toBe(15);
+    expect(r.ciMinutes).toBe(25);
+    expect(r.runnerMinutes).toBe(25);
+    expect(r.events!.filter((e) => e.event === "start" && e.ids[0] === "b")).toHaveLength(1);
+    expect(r.events!.filter((e) => e.event === "merged").map((e) => e.at)).toEqual([15, 15, 15]);
+  });
+  test("within-candidate permanent failure invalidates only after the retry fails", () => {
+    const r = replay({
+      ...base,
+      retryWithinCandidate: true,
+      arrivals: [
+        { id: "a", at: 0, kind: "permanent" },
+        { id: "b", at: 0, kind: "good" },
+      ],
+      samples: [
+        { duration: 5, conclusion: "success" },
+        { duration: 10, conclusion: "failure" },
+      ],
+    });
+    expect(r.retries).toBe(1);
+    expect(r.removed).toBe(1);
+    expect(r.failedCandidates).toBe(1);
+    expect(r.invalidations).toBe(1);
+    expect(r.candidateBuilds).toBe(3);
+    expect(r.builds).toBe(4);
+    expect(r.ciMinutes).toBe(30);
+    expect(r.makespan).toBe(25);
+    expect(r.events!.filter((e) => e.event === "invalidate")).toEqual([
+      { at: 20, event: "invalidate", ids: ["b"] },
+    ]);
+    expect(r.outcomes.find((e) => e.id === "a")!.at).toBe(20);
+  });
+  test("within-candidate retry holds its capacity slot and preserves first-start wait", () => {
+    const r = replay({
+      ...base,
+      capacity: 1,
+      retryWithinCandidate: true,
+      arrivals: [
+        { id: "a", at: 0, kind: "flaky" },
+        { id: "b", at: 1, kind: "good" },
+      ],
+    });
+    expect(r.maxActive).toBe(1);
+    expect(r.makespan).toBe(30);
+    expect(r.outcomes[0]!.wait).toBe(0);
+    expect(r.outcomes[1]!.wait).toBe(19);
+    expect(r.candidateBuilds).toBe(2);
+  });
+  test("ancestor invalidation gives the rebuilt candidate a fresh internal retry budget", () => {
+    const r = replay({
+      ...base,
+      capacity: 3,
+      retryWithinCandidate: true,
+      arrivals: [
+        { id: "a", at: 0, kind: "permanent" },
+        { id: "b", at: 0, kind: "permanent" },
+        { id: "c", at: 0, kind: "good" },
+      ],
+      samples: [
+        { duration: 10, conclusion: "success" },
+        { duration: 2, conclusion: "failure" },
+      ],
+    });
+    expect(r.removed).toBe(2);
+    expect(r.merged).toBe(1);
+    expect(r.retries).toBe(3);
+    expect(r.candidateBuilds).toBe(6);
+    expect(r.builds).toBe(9);
+    expect(r.invalidations).toBe(3);
+    expect(r.ciMinutes).toBe(30);
+    expect(r.makespan).toBe(18);
+    expect(
+      r
+        .events!.filter((e) => e.event === "retry-within-candidate" && e.ids[0] === "b")
+        .map((e) => e.at),
+    ).toEqual([2, 6]);
+  });
+  test("legacy default/false and batch outputs are unchanged; new mode is deterministic", () => {
+    const input = {
+      ...base,
+      arrivals: arrivals(40).map(({ kind: _, ...a }) => a),
+      permanentProbability: 0.1,
+      flakyProbability: 0.2,
+    };
+    expect(replay({ ...input, retryWithinCandidate: false })).toEqual(replay(input));
+    expect(replay({ ...input, mode: "batch", retryWithinCandidate: true })).toEqual(
+      replay({ ...input, mode: "batch" }),
+    );
+    const r = replay({ ...input, retryWithinCandidate: true });
+    expect(r).toEqual(replay({ ...input, retryWithinCandidate: true }));
+    expect(r.merged + r.removed).toBe(40);
+    expect(r.maxActive).toBeLessThanOrEqual(input.capacity!);
+  });
 });

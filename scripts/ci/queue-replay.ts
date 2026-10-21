@@ -1,7 +1,7 @@
 /** Deterministic, provider-free queue replay. Run: bun scripts/ci/queue-replay.ts input.json
  * Times are minutes relative to a common origin. Arrivals must be explicitly labelled
  * by the caller (creation/ready-for-review are NOT verified merge readiness).
- * Native models a C-entry speculative window, in-order landing, immediate successor
+ * Native defaults to a C-entry speculative window, in-order landing, immediate successor
  * invalidation on any red result, and one retry per entry before removal. Passed but
  * blocked entries occupy the window. Detection is attributed to the failing entry;
  * correlated failures, Git conflicts, runner scheduling and coordination are not inferred.
@@ -15,6 +15,13 @@
  * blocking. Wait/completion quantiles are for merged entries, resolution for all.
  * Cancelled speculative work is charged in proportion to elapsed build time; this
  * approximation is not a replay of individual job-level runner allocation.
+ * Native retryWithinCandidate keeps successors intact during the first red attempt;
+ * only a second red result removes the entry and invalidates successors. A rebuilt
+ * candidate gets a fresh retry budget. Retry duration/work use the same conditional
+ * samples as other attempts: this isolates invalidation policy, not actual one-shard
+ * retry cost. builds/redBuilds count attempts; candidateBuilds/failedCandidates are
+ * additionally reported in this mode. Batch already retries before bisection and is
+ * unaffected by this native-only option. No physical runner scheduler is modeled.
  */
 export type Arrival = { id: string; at: number; kind?: "good" | "flaky" | "permanent" };
 export type Sample = { duration: number; conclusion: string; runnerMinutes?: number };
@@ -28,6 +35,7 @@ export type ReplayInput = {
   flakyProbability?: number;
   durationScale?: number;
   trace?: boolean;
+  retryWithinCandidate?: boolean;
 };
 export function calibration(samples: Sample[]) {
   const success = samples.filter(
@@ -90,6 +98,7 @@ export function replay(input: ReplayInput) {
   type Entry = Arrival & {
     kind: "good" | "flaky" | "permanent";
     reds: number;
+    candidateReds: number;
     firstStart?: number;
     start?: number;
     end?: number;
@@ -106,6 +115,7 @@ export function replay(input: ReplayInput) {
         kind:
           a.kind ?? (draw < permanent ? "permanent" : draw < permanent + flaky ? "flaky" : "good"),
         reds: 0,
+        candidateReds: 0,
       };
     });
   const outcomes: {
@@ -122,6 +132,8 @@ export function replay(input: ReplayInput) {
     redBuilds = 0,
     retries = 0,
     invalidations = 0;
+  let withinCandidateRetries = 0,
+    failedCandidates = 0;
   let ciMinutes = 0,
     runnerMinutes = 0,
     maxActive = 0;
@@ -203,7 +215,9 @@ export function replay(input: ReplayInput) {
     }
   } else {
     const stack: Entry[] = [];
-    const launch = (e: Entry) => {
+    const launch = (e: Entry, withinCandidate = false) => {
+      if (withinCandidate) withinCandidateRetries++;
+      else e.candidateReds = 0;
       e.firstStart ??= now;
       e.start = now;
       e.red = bad(e);
@@ -238,7 +252,15 @@ export function replay(input: ReplayInput) {
       }
       redBuilds++;
       e.reds++;
+      e.candidateReds++;
       log("red", [e]);
+      if (input.retryWithinCandidate && e.candidateReds === 1) {
+        retries++;
+        log("retry-within-candidate", [e]);
+        launch(e, true);
+        continue;
+      }
+      if (input.retryWithinCandidate) failedCandidates++;
       const successors = stack.slice(index + 1);
       invalidations += successors.length;
       log("invalidate", successors);
@@ -275,6 +297,13 @@ export function replay(input: ReplayInput) {
     ciMinutes,
     runnerMinutes,
     maxActive,
+    ...(input.mode === "native" && input.retryWithinCandidate
+      ? {
+          retryWithinCandidate: true,
+          candidateBuilds: builds - withinCandidateRetries,
+          failedCandidates,
+        }
+      : {}),
     excludedSamples: dist.excluded,
     medianWait: quantile(waits, 0.5),
     p95Wait: quantile(waits, 0.95),
