@@ -417,7 +417,7 @@ export function OrganizationModelsList({
                 scope="workspace"
                 scopeId={workspace.id}
                 account={account}
-                canManage={workspace.canManage}
+                canManage={workspace.canManage && account.scope !== "organization"}
               />
             ),
           }}

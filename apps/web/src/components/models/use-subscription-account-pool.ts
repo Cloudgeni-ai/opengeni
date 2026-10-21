@@ -33,6 +33,21 @@ export function subscriptionAccountName(account: SubscriptionPoolAccount) {
   return account.label ?? account.email ?? account.subject;
 }
 
+/**
+ * Whether this pool's scope can change (and live-refresh) one listed account.
+ * A workspace list also carries the organization's shared accounts that serve
+ * it; only the organization manages those, and the workspace routes refuse
+ * them (409), so a workspace never treats them as its own.
+ */
+export function managesSubscriptionAccount(
+  pool: { canManageAccounts: boolean; organizationId?: string | null | undefined },
+  account: Pick<SubscriptionPoolAccount, "scope">,
+) {
+  return (
+    pool.canManageAccounts && (Boolean(pool.organizationId) || account.scope !== "organization")
+  );
+}
+
 /** Shared-cache key prefix for one provider's subscription pools (every scope). */
 export const subscriptionPoolQueryPrefix = (providerName: string) =>
   ["subscription-pool", providerName] as SharedQueryKey;
@@ -162,6 +177,11 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   const data = query.error ? null : (query.data as SubscriptionAccountPoolData<Account> | null);
   const inherited = !input.organizationId && data?.source === "organization";
   const canManageAccounts = input.canManage && !inherited;
+  const managesAccount = (account: Account) =>
+    managesSubscriptionAccount(
+      { canManageAccounts, organizationId: input.organizationId },
+      account,
+    );
   return {
     data,
     accounts: data?.accounts ?? [],
@@ -186,7 +206,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.resolve(),
     activate: (account: Account) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `activate:${account.id}`,
             () => input.operations.activate(account),
@@ -194,7 +214,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.resolve(),
     setAllocator: (account: Account, allocatorEnabled: boolean) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `allocator:${account.id}`,
             () => input.operations.allocator(account, allocatorEnabled),
@@ -204,7 +224,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.resolve(),
     rename: (account: Account, label: string) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `rename:${account.id}`,
             () => input.operations.rename(account, label.trim() || null),
@@ -213,7 +233,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.reject(new Error("Manage this account in its owning scope.")),
     disconnect: (account: Account) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `disconnect:${account.id}`,
             () => input.operations.disconnect(account),

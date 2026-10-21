@@ -11,6 +11,7 @@ import {
   useModelsListLabel,
 } from "./models-ui";
 import {
+  managesSubscriptionAccount,
   subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
@@ -178,7 +179,10 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = subscriptionAccountName(account);
-  const canEdit = pool.canManageAccounts;
+  const canEdit = managesSubscriptionAccount(pool, account);
+  // A workspace also lists the organization's shared accounts; the organization manages them.
+  const organizationManaged =
+    pool.inherited || (!pool.organizationId && account.scope === "organization");
   const organization = Boolean(pool.organizationId);
   const status =
     account.status !== "active"
@@ -196,7 +200,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   });
   const scopeLabel = pool.organizationId
     ? organizationReachLabel(places.scope, access.data)
-    : pool.inherited
+    : organizationManaged
       ? places.scope.organization
       : account.scope === "user"
         ? places.scope.user
@@ -232,7 +236,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         }
       />
       <DetailPageBody>
-        {pool.inherited ? (
+        {organizationManaged ? (
           <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
