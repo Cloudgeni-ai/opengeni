@@ -9690,6 +9690,12 @@ export const sessionEvents = pgTable(
     // code; a plain column keeps the usage idempotency lookup indexable under
     // row-level security, where the payload expression index cannot be used.
     usageSourceKey: text("usage_source_key"),
+    // Filled by a BEFORE INSERT OR UPDATE OF payload trigger from
+    // payload ->> 'name' for agent.toolCall.created rows (migration 0888).
+    // Never written by application code. Rows written before 0888 keep NULL;
+    // readers fall back to the payload only then, so the presented-tool filter
+    // does not detoast every excluded call's arguments.
+    toolName: text("tool_name"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
