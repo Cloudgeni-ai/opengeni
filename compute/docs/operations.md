@@ -832,6 +832,22 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   asked for them; do not accept routes or use an exit node on hosts, and
   give hosts an overlay identity that may reach only the service's host
   endpoint and Opengeni's endpoints.
+- **A control service in another cloud.** Where the control service runs
+  outside the hosts' network with no private path to it, such as in an
+  Opengeni cluster on another cloud, both directions go over public
+  addresses, still mutual TLS of the hosts' authority alone: the GCP
+  root's `assign_external_ip` and `advertise_public_address` make each
+  host give the service its public address, `control_source_ranges`
+  admits only the service's egress addresses to port 7443, and
+  `computeControl.hostsService` is a public `LoadBalancer` on a static
+  address whose name `hostUrl` gives. Hosts' public addresses change as
+  hosts are replaced, so the hosts endpoint takes connections from
+  anywhere: a caller without a certificate of the hosts' authority is
+  refused by every route but the one that issues a first certificate,
+  and that one needs an identity token of the configured project and host
+  account. A host's public address carries its traffic to the internet,
+  sandboxes' included, and the startup script blocks it to sandboxes
+  (`--block`).
 - **Upgrading a host in place.** An agent that starts forgets the
   connections sandboxes made under an older version that its rules refuse
   ([ADR 11](adr/0011-fixed-guest-network.md)), such as queries a guest

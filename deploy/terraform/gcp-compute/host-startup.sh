@@ -12,21 +12,23 @@ export PATH=$PATH:/snap/bin
 
 meta() { curl -fsS -H Metadata-Flavor:Google "http://metadata.google.internal/computeMetadata/v1/$1"; }
 attr() { meta "instance/attributes/$1"; }
-# An attribute the template may leave out: empty when the metadata server
-# says it is not there, a failed attempt (tried again) on any other error,
-# so a configured setting is never mistaken for an absent one.
-optional_attr() {
+# Metadata that may be absent, such as an attribute the template leaves out:
+# empty when the metadata server says it is not there, a failed attempt
+# (tried again) on any other error, so a configured setting is never
+# mistaken for an absent one.
+optional_meta() {
   local body status
   body=$(mktemp)
   status=$(curl -sS -o "$body" -w '%{http_code}' -H Metadata-Flavor:Google \
-    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1") || status=error
+    "http://metadata.google.internal/computeMetadata/v1/$1") || status=error
   case "$status" in
     200) cat "$body" ;;
     404) ;;
-    *) rm -f "$body"; log "reading the attribute $1 failed ($status)" >&2; return 1 ;;
+    *) rm -f "$body"; log "reading $1 failed ($status)" >&2; return 1 ;;
   esac
   rm -f "$body"
 }
+optional_attr() { optional_meta "instance/attributes/$1"; }
 log() { echo "compute-startup: $*"; }
 
 # Every step below is safe to run again, and several reach the network
@@ -53,10 +55,19 @@ if [ -n "$prelude" ]; then
 fi
 
 NAME=$(meta instance/name)
-# The address the control service dials: the VPC's, or that of the
-# interface advertise_interface names once it has one.
+# The instance's public address, if it has one (assign_external_ip). The
+# cloud maps it onto the VPC address, so sandboxes could reach the host
+# through it: the agent blocks it for them.
+PUBLIC=$(optional_meta instance/network-interfaces/0/access-configs/0/external-ip)
+# The address the control service dials: the VPC's, the public one
+# (advertise_public_address), or that of the interface advertise_interface
+# names once it has one.
 interface=$(optional_attr compute-advertise)
-if [ -n "$interface" ]; then
+advertise_public=$(optional_attr compute-advertise-public)
+if [ "$advertise_public" = true ]; then
+  [ -n "$PUBLIC" ] || { log "the instance has no public address to advertise"; exit 1; }
+  ADDRESS=$PUBLIC
+elif [ -n "$interface" ]; then
   ADDRESS=
   for _ in $(seq 120); do
     # Until the interface exists, ip fails; that is waited out too.
@@ -133,6 +144,9 @@ if [ "$profile" = nested ]; then
   huge_pages=$(($(awk '/MemTotal/ {print $2}' /proc/meminfo) * percent / 100 / 2048))
 fi
 args="--memory-profile $profile $args"
+if [ -n "$PUBLIC" ]; then
+  args="$args --block $PUBLIC/32"
+fi
 umask 077
 cat >/etc/compute/host.env.new <<ENV
 COMPUTE_CONTROL=$(attr compute-control)
