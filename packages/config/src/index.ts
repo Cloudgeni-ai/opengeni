@@ -3091,6 +3091,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-organization",
   "direct-openai-workspace",
   "direct-azure-workspace",
+  "direct-openai-organization",
+  "direct-azure-organization",
   "openrouter-workspace",
   "openrouter-organization",
   "opper-workspace",
@@ -3300,6 +3302,15 @@ export const WORKSPACE_OPPER_PROVIDER_ID = "workspace-opper" as const;
 export const WORKSPACE_OPPER_MODEL_ID_PREFIX = "workspace-opper/" as const;
 export const ORGANIZATION_OPPER_PROVIDER_ID = "organization-opper" as const;
 export const ORGANIZATION_OPPER_MODEL_ID_PREFIX = "organization-opper/" as const;
+/**
+ * Organization-owned OpenAI and Azure OpenAI: one connection each (an API key,
+ * plus a resource endpoint for Azure) whose curated models (Azure deployments)
+ * inherit into shared workspaces.
+ */
+export const ORGANIZATION_OPENAI_PROVIDER_ID = "organization-openai" as const;
+export const ORGANIZATION_OPENAI_MODEL_ID_PREFIX = "organization-openai/" as const;
+export const ORGANIZATION_AZURE_OPENAI_PROVIDER_ID = "organization-azure-openai" as const;
+export const ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX = "organization-azure-openai/" as const;
 /** Opper's OpenAI-compatible Chat Completions surface (Bearer key). */
 export const OPPER_BASE_URL = "https://api.opper.ai/v3/compat" as const;
 
@@ -3317,6 +3328,8 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   OPPER_PROVIDER_ID,
   WORKSPACE_OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   "organization-anthropic",
   "organization-claude-subscription",
   "workspace-anthropic",
@@ -6872,6 +6885,188 @@ export function withOrganizationOpperCredential(
   return { ...catalog, modelProvidersJson: JSON.stringify(providers) };
 }
 
+/** The organization's own OpenAI or Azure OpenAI key (a direct, non-gateway route). */
+export type OrganizationDirectModelProvider = "openai" | "azure_openai";
+
+const ORGANIZATION_DIRECT_ROUTES = {
+  openai: {
+    kind: "direct-openai-organization",
+    id: ORGANIZATION_OPENAI_PROVIDER_ID,
+    prefix: ORGANIZATION_OPENAI_MODEL_ID_PREFIX,
+    label: "Organization OpenAI",
+    wireProfile: "openai",
+  },
+  azure_openai: {
+    kind: "direct-azure-organization",
+    id: ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
+    prefix: ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX,
+    label: "Organization Azure OpenAI",
+    wireProfile: "azure-openai",
+  },
+} as const;
+
+/** The organization direct route a product model id belongs to, if any. */
+export function organizationDirectModelProviderOf(
+  modelId: string | null | undefined,
+): OrganizationDirectModelProvider | null {
+  if (modelId?.startsWith(ORGANIZATION_OPENAI_MODEL_ID_PREFIX)) return "openai";
+  if (modelId?.startsWith(ORGANIZATION_AZURE_OPENAI_MODEL_ID_PREFIX)) return "azure_openai";
+  return null;
+}
+
+export function organizationDirectModelIdPrefix(provider: OrganizationDirectModelProvider): string {
+  return ORGANIZATION_DIRECT_ROUTES[provider].prefix;
+}
+
+/**
+ * One organization-owned OpenAI or Azure OpenAI route with its curated models.
+ * A custom model's `upstreamModelId` is the exact OpenAI model or Azure
+ * deployment name. Capabilities match the workspace direct routes: Responses
+ * with ordinary function tools only, no reasoning control or hosted web search
+ * inferred for an arbitrary model or deployment name.
+ */
+function organizationDirectRegistryProvider(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  input: {
+    endpoint?: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+    apiKey?: string;
+  },
+): InternalRegistryProvider | null {
+  const route = ORGANIZATION_DIRECT_ROUTES[provider];
+  const baseUrl =
+    provider === "openai"
+      ? "https://api.openai.com/v1"
+      : input.endpoint
+        ? organizationAzureOpenAIBaseUrl(input.endpoint)
+        : null;
+  if (!baseUrl) return null;
+  const seen = new Set<string>();
+  const models: RegistryProvider["models"] = [];
+  for (const model of input.models) {
+    if (seen.has(model.upstreamModelId)) continue;
+    seen.add(model.upstreamModelId);
+    models.push({
+      id: `${route.prefix}${model.upstreamModelId}`,
+      upstreamModelId: model.upstreamModelId,
+      aliases: [],
+      label: model.label?.trim() || model.upstreamModelId,
+      capabilities: legacyModelCapabilities(settings, {
+        reasoningEffort: false,
+        hostedWebSearch: false,
+      }),
+      toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+    });
+  }
+  if (models.length === 0) return null;
+  return {
+    kind: route.kind,
+    id: route.id,
+    label: route.label,
+    api: "responses",
+    wireProfile: route.wireProfile,
+    baseUrl,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    models,
+  };
+}
+
+/**
+ * The official `https://<resource>.openai.azure.com/openai/v1` base for a
+ * stored organization endpoint, or null for anything else. The API validates
+ * the endpoint on write; this keeps a malformed persisted value from routing.
+ */
+function organizationAzureOpenAIBaseUrl(endpoint: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash ||
+    !/^[a-z0-9-]+\.openai\.azure\.com$/i.test(url.hostname) ||
+    !["", "/", "/openai/v1", "/openai/v1/"].includes(url.pathname)
+  )
+    return null;
+  return `${url.origin}/openai/v1`;
+}
+
+function withOrganizationDirectProvider(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  overlay: InternalRegistryProvider | null,
+): Settings {
+  if (!overlay) return settings;
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (candidate) => candidate.id !== ORGANIZATION_DIRECT_ROUTES[provider].id,
+  );
+  return { ...settings, modelProvidersJson: JSON.stringify([...providers, overlay]) };
+}
+
+/** Secret-free organization OpenAI or Azure OpenAI catalog overlay (models, and Azure's endpoint). */
+export function withOrganizationDirectCatalogProvider(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  input: {
+    endpoint?: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  return withOrganizationDirectProvider(
+    settings,
+    provider,
+    organizationDirectRegistryProvider(settings, provider, input),
+  );
+}
+
+/** Runtime overlay after the worker resolves the organization's encrypted key. */
+export function withOrganizationDirectCredential(
+  settings: Settings,
+  provider: OrganizationDirectModelProvider,
+  apiKey: string,
+  input: {
+    endpoint?: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  if (!apiKey.trim()) throw new Error(`organization ${provider} credential is empty`);
+  return withOrganizationDirectProvider(
+    settings,
+    provider,
+    organizationDirectRegistryProvider(settings, provider, { ...input, apiKey }),
+  );
+}
+
+/** Secret-free organization Azure OpenAI catalog overlay (endpoint + deployments). */
+export function withOrganizationAzureOpenAICatalogProvider(
+  settings: Settings,
+  input: {
+    endpoint: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  return withOrganizationDirectCatalogProvider(settings, "azure_openai", input);
+}
+
+/** Runtime overlay after the worker resolves the organization's encrypted Azure key. */
+export function withOrganizationAzureOpenAICredential(
+  settings: Settings,
+  apiKey: string,
+  input: {
+    endpoint: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  return withOrganizationDirectCredential(settings, "azure_openai", apiKey, input);
+}
+
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
 export function withOrganizationGatewayCatalogProvider(
   settings: Settings,
@@ -7264,6 +7459,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "anthropic-organization":
     case "openrouter-organization":
     case "opper-organization":
+    case "direct-openai-organization":
+    case "direct-azure-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -7298,6 +7495,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "anthropic-organization":
     case "openrouter-organization":
     case "opper-organization":
+    case "direct-openai-organization":
+    case "direct-azure-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -7945,6 +8144,8 @@ const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
   ORGANIZATION_OPENROUTER_PROVIDER_ID,
   WORKSPACE_OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   "workspace-anthropic",
   "organization-anthropic",
   "workspace-claude-subscription",
@@ -8392,6 +8593,9 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
       ? settings
       : withOrganizationOpperCatalogProvider(settings);
   }
+  // Organization OpenAI and Azure OpenAI have no secret-free fallback: each
+  // provider exists only with the organization's own curated models, which
+  // the workspace boundary overlays. Without them the model stays unresolved.
   return settings;
 }
 
@@ -8737,6 +8941,7 @@ function reviewedProviderModelPricing(
       }
       break;
     case "direct-openai-workspace":
+    case "direct-openai-organization":
       if (isDirectOpenAiApiBaseUrl(provider.baseUrl) && upstream.startsWith("gpt-")) {
         priceId = upstream;
       }
@@ -11172,6 +11377,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-organization" ||
       provider.kind === "direct-openai-workspace" ||
       provider.kind === "direct-azure-workspace" ||
+      provider.kind === "direct-openai-organization" ||
+      provider.kind === "direct-azure-organization" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "opper-workspace" ||

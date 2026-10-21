@@ -703,7 +703,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       getOrganizationModelProviderCatalogForWorkspace(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-        providerKinds,
+        // Organization Azure OpenAI has no workspace custom-model rail.
+        providerKinds: [...providerKinds, "openai", "azure_openai"],
       }),
       getWorkspace(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
@@ -760,6 +761,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceOpperCustomModels: workspaceCustomModels.opper,
       organizationOpperConnectionActive: organizationProviders.opper.active,
       organizationOpperCustomModels: organizationProviders.opper.models,
+      organizationDirect: {
+        openai: {
+          active: organizationProviders.openai?.active === true,
+          models: organizationProviders.openai?.models ?? [],
+        },
+        azure_openai: {
+          active: organizationProviders.azure_openai?.active === true,
+          endpoint: organizationProviders.azure_openai?.endpoint ?? null,
+          models: organizationProviders.azure_openai?.models ?? [],
+        },
+      },
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.

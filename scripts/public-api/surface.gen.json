@@ -21092,7 +21092,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"elevenlabs\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
+        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"azure_openai\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"elevenlabs\\\"\",\"\\\"openai\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
     "OrganizationModelUsage": {
@@ -28585,6 +28585,7 @@
         "$.claudeIdentity": "object?",
         "$.claudeIdentity.accountUuid": "string!",
         "$.claudeIdentity.deviceId": "string!",
+        "$.endpoint": "string?",
         "$.expectedVersion": "integer?",
         "$.operationId": "string!"
       }
@@ -35486,6 +35487,7 @@
       "SessionUsageLimitStop": "type",
       "shouldSteerOnKey": "value",
       "shouldSubmitOnKey": "value",
+      "TimelineAnnotationSourceDescriptor": "type",
       "TimelineGroup": "type",
       "TimelineItem": "type",
       "ToolCallItem": "type",
@@ -35805,10 +35807,19 @@
     "@opengeni/react/timeline-model": {
       "ActivityGroup": "type",
       "AgentTitleParts": "type",
+      "ANNOTATION_MAX_NOTE_LENGTH": "value",
+      "ANNOTATION_MAX_QUOTE_BYTES": "value",
+      "ANNOTATION_SOURCE_CONTEXT_BYTES": "value",
+      "annotationDisplayOrdinal": "value",
+      "annotationFromSelection": "value",
+      "annotationHasNote": "value",
+      "annotationNoteNeedsDisclosure": "value",
+      "AnnotationSelection": "type",
       "answersFromDrafts": "value",
       "applyPatchOpsFromToolItem": "value",
       "applyPatchPresentation": "value",
       "askPresentation": "value",
+      "bestQuoteOccurrence": "value",
       "BUILT_IN_TOOL_STEP_NAMES": "value",
       "BUILT_IN_TURN_SUMMARY_FACET_IDS": "value",
       "BUILT_IN_TURN_SUMMARY_FACETS": "value",
@@ -35841,6 +35852,7 @@
       "isActionableHumanInputRequest": "value",
       "isApplyPatch": "value",
       "isPreparingWork": "value",
+      "matchingQuoteInSource": "value",
       "mcpToolLeaf": "value",
       "namedAgentTitle": "value",
       "noticeDisplayText": "value",
@@ -35849,6 +35861,7 @@
       "NotificationBlock": "type",
       "notificationPlainText": "value",
       "NotificationSpan": "type",
+      "occurrenceOffsets": "value",
       "parseNotificationInline": "value",
       "parseNotificationText": "value",
       "parseToolArgs": "value",
@@ -35922,6 +35935,7 @@
       "toolStepLabel": "value",
       "toolStepPhase": "value",
       "ToolStepPhase": "type",
+      "truncateAnnotationQuote": "value",
       "truncatePreview": "value",
       "tryParseJson": "value",
       "TurnGroup": "type",
