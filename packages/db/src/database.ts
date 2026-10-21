@@ -19,24 +19,18 @@ import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 import { startDatabaseTiming } from "./database-timing";
 
-// §7.7 driver widening (Step I). `Database` is the structural, cross-driver
-// query-layer port: every helper in this file accepts `db: Database` and uses
-// only the methods present on drizzle's base `PgDatabase` (select/insert/update/
-// delete/transaction/execute). Widening from the concrete
-// `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
-// pure TYPE change — no runtime behavior changes — that lets an embedded host
-// inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
-// Opengeni's schema, not just the postgres-js handle `createDb` builds. The
-// `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
-// callable across drivers whose raw-result shapes differ (postgres-js returns a
-// row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
-// reads that index a row array (`getManagedUserByEmail` here is the only
-// host-facing one — see `userLookup`) stay postgres-js-shaped for standalone;
-// `userLookup` is the injection seam for hosts on a different driver.
-// `PostgresJsDatabase<typeof schema>` is assignable to this, so standalone is
-// unaffected.
-
-export type Database = PgDatabase<any, typeof schema>;
+// Structural cross-driver query port. Opengeni passes explicit tables to its
+// builders; it never uses Drizzle's schema-registered relational `query` API.
+// Omit that API at both root and transaction scope without rejecting a host's
+// richer schema-configured handle. The query-result HKT remains deliberately
+// driver-independent; standalone raw row arrays retain their existing shape.
+export type Database = Omit<PgDatabase<any, any>, "query" | "transaction"> & {
+  transaction<T>(
+    run: (tx: DatabaseTransaction) => Promise<T>,
+    config?: PgTransactionConfig,
+  ): Promise<T>;
+};
+type DatabaseTransaction = Database & { rollback(): never };
 
 declare const sessionActivityDatabaseBrand: unique symbol;
 
@@ -512,7 +506,9 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       // their own SET clause.
     },
   });
-  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client, { schema });
+  // Registering the full schema eagerly allocates one relational query builder
+  // per table on every transaction/savepoint, even for a single raw SQL query.
+  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client);
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),

@@ -1047,6 +1047,14 @@ Standalone uses `createDb(settings.databaseUrl)` and no search-path override. Em
 - `createDb(databaseUrl, { searchPath, rlsStrategy, userLookup, max })` for postgres-js handles.
 - `registerDbBinding(db, { rlsStrategy, userLookup })` for an externally constructed Drizzle handle.
 
+`createDb` and the exported `Database` port use explicit-table builders, not
+Drizzle's relational `db.query.<table>` API. Use, for example,
+`db.select().from(schema.sessions).where(eq(schema.sessions.id, id))`, importing
+tables from `@opengeni/db/schema`. This avoids constructing unused relational
+builders for every transaction. An injected schema-configured Drizzle handle
+remains compatible; a host can still use relational queries through its original
+handle. Transactions, savepoints, prepared statements, and RLS scopes are unchanged.
+
 For `rlsStrategy: "force"`, role provisioning rejects every privilege-bearing
 role relationship. PostgreSQL 16+ managed services may retain the automatic
 ADMIN-only reverse grant from `opengeni_app` to the non-superuser `CREATEROLE`
