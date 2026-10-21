@@ -117,6 +117,11 @@ for machine heartbeat/event and Hello persistence. One member handles each
 delivery; other machine-event subscribers remain broadcast. Queue delivery is
 not durable or globally ordered: exact-runner database fences remain authoritative,
 and heartbeat renewal commits before optional inventory or telemetry work.
+Attached-browser inventory liveness is stored once per enrollment; unchanged
+profiles are neither rewritten nor row-locked. Connected-profile reads derive
+their last-seen time from that inventory observation, and disconnects freeze it.
+Enrollment serialization and device locks for material changes remain intact
+(see `docs/connected-machines.md`).
 
 Established-chat composer submissions (web and native) persist the submitted
 model, reasoning and latency as session defaults in the same transaction as

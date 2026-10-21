@@ -487,6 +487,16 @@ diagnostics are written to stderr because stdout carries Chrome frames.
 Oversized tab titles are truncated and oversized tab URLs make only that tab
 uncontrollable; neither ends the profile's connection.
 
+An accepted full inventory snapshot observes every connected profile once through
+`attached_browser_inventories.observed_at`. Unchanged profiles need neither a
+device update nor a device row lock; enrollment and inventory cursor locks still
+serialize snapshots. Reads derive connected profiles' `lastSeenAt` from that
+observation, while a disconnect freezes the effective value on the device.
+Material changes re-read device rows under their existing locks before mutation;
+equal-revision snapshots still apply corrective metadata and reconnects. During a
+mixed-version API rollout, older readers can briefly show an older per-profile
+last-seen timestamp, without changing connection state or bridge freshness.
+
 Renaming a Chrome profile is inventory metadata, not a connection transition.
 The extension keeps the same ready native port and sends optional
 `profile: { profileLabel }` metadata with its inventory revision. The agent updates

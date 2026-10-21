@@ -120,7 +120,14 @@ async function visibleEnrollments(
 function visibleDevice(
   row: DeviceRow,
   visibility: EnrollmentVisibility,
+  observedAt: Date | null = null,
 ): AttachedBrowserDeviceValue | null {
+  // A full accepted snapshot observes every still-connected profile. Keep that
+  // liveness once per enrollment, not as a repeated write to every device row.
+  // Disconnected rows freeze their last observation when they transition.
+  if (row.disconnectedAt === null && observedAt && observedAt > row.lastSeenAt) {
+    row = { ...row, lastSeenAt: observedAt };
+  }
   if (visibility.active.has(row.enrollmentId)) return deviceFromRow(row);
   if (!visibility.revoked.has(row.enrollmentId)) return null;
   const revokedAt = visibility.revoked.get(row.enrollmentId) ?? row.updatedAt;
@@ -235,10 +242,11 @@ export async function reconcileAttachedBrowserInventory(
         }
 
         const now = new Date();
-        // Lock only the rows this heartbeat can touch: this enrollment's devices
-        // plus any announced id (a device reclaimed from a revoked enrollment).
-        // Locking every device in the workspace serialized unrelated machines'
-        // heartbeats behind each other.
+        // The enrollment lock serializes its snapshots and excludes revocation /
+        // cross-enrollment reclaim. An unchanged snapshot needs no device locks:
+        // those create WAL and contend with controller operations even without
+        // an UPDATE. Re-read under the existing device locks before changing any
+        // material state, including reclaim, generation changes and disconnects.
         const announcedIds = snapshot.devices.map((device) => device.id);
         const ownedOrAnnounced =
           announcedIds.length > 0
@@ -247,13 +255,33 @@ export async function reconcileAttachedBrowserInventory(
                 inArray(schema.attachedBrowserDevices.id, announcedIds),
               )
             : eq(schema.attachedBrowserDevices.enrollmentId, input.enrollmentId);
-        const rows = await tx
-          .select()
-          .from(schema.attachedBrowserDevices)
-          .where(
-            and(eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId), ownedOrAnnounced),
-          )
-          .for("update");
+        const readRows = () =>
+          tx
+            .select()
+            .from(schema.attachedBrowserDevices)
+            .where(
+              and(
+                eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
+                ownedOrAnnounced,
+              ),
+            );
+        let rows = await readRows();
+        const observed = new Map(rows.map((row) => [row.id, row]));
+        const announced = new Set(announcedIds);
+        const materialChange =
+          snapshot.devices.some((device) => {
+            const row = observed.get(device.id);
+            return (
+              !row || row.enrollmentId !== input.enrollmentId || !sameAnnouncement(row, device)
+            );
+          }) ||
+          rows.some(
+            (row) =>
+              row.enrollmentId === input.enrollmentId &&
+              row.disconnectedAt === null &&
+              !announced.has(row.id),
+          );
+        if (materialChange) rows = await readRows().for("update");
         const byId = new Map(rows.map((row) => [row.id, row]));
         const generationChangedDeviceIds = new Set<string>();
         const insertedDeviceIds = new Set<string>();
@@ -311,31 +339,38 @@ export async function reconcileAttachedBrowserInventory(
           }
           const materialChanged =
             reclaimingRevokedEnrollment || !sameAnnouncement(existing, device);
-          await tx
-            .update(schema.attachedBrowserDevices)
-            .set({
-              enrollmentId: input.enrollmentId,
-              name: device.name,
-              profileLabel: device.profileLabel,
-              browserName: device.browserName,
-              browserVersion: device.browserVersion,
-              extensionVersion: device.extensionVersion,
-              platform: device.platform,
-              architecture: device.architecture,
-              connectionGeneration: device.connectionGeneration,
-              inventoryRevision: device.inventoryRevision,
-              tabCount: device.tabCount,
-              capabilities: device.capabilities,
-              lastSeenAt: now,
-              disconnectedAt: null,
-              updatedAt: materialChanged ? now : existing.updatedAt,
-            })
-            .where(
-              and(
-                eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
-                eq(schema.attachedBrowserDevices.id, device.id),
-              ),
-            );
+          if (materialChanged)
+            await tx
+              .update(schema.attachedBrowserDevices)
+              .set({
+                enrollmentId: input.enrollmentId,
+                name: device.name,
+                profileLabel: device.profileLabel,
+                browserName: device.browserName,
+                browserVersion: device.browserVersion,
+                extensionVersion: device.extensionVersion,
+                platform: device.platform,
+                architecture: device.architecture,
+                connectionGeneration: device.connectionGeneration,
+                inventoryRevision: device.inventoryRevision,
+                tabCount: device.tabCount,
+                capabilities: device.capabilities,
+                lastSeenAt: new Date(
+                  Math.max(
+                    now.getTime(),
+                    existing.lastSeenAt.getTime(),
+                    cursor?.observedAt.getTime() ?? 0,
+                  ),
+                ),
+                disconnectedAt: null,
+                updatedAt: new Date(Math.max(now.getTime(), existing.updatedAt.getTime())),
+              })
+              .where(
+                and(
+                  eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
+                  eq(schema.attachedBrowserDevices.id, device.id),
+                ),
+              );
           changed ||= materialChanged;
         }
 
@@ -348,7 +383,6 @@ export async function reconcileAttachedBrowserInventory(
           changed = true;
         }
 
-        const announced = new Set(snapshot.devices.map((device) => device.id));
         const disconnectedIds = rows
           .filter(
             (row) =>
@@ -360,7 +394,13 @@ export async function reconcileAttachedBrowserInventory(
         if (disconnectedIds.length > 0) {
           await tx
             .update(schema.attachedBrowserDevices)
-            .set({ disconnectedAt: now, updatedAt: now })
+            .set({
+              disconnectedAt: now,
+              updatedAt: sql`greatest(${schema.attachedBrowserDevices.updatedAt}, ${now.toISOString()}::timestamptz)`,
+              lastSeenAt: cursor
+                ? sql`greatest(${schema.attachedBrowserDevices.lastSeenAt}, ${cursor.observedAt.toISOString()}::timestamptz)`
+                : schema.attachedBrowserDevices.lastSeenAt,
+            })
             .where(
               and(
                 eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
@@ -388,10 +428,15 @@ export async function reconcileAttachedBrowserInventory(
           await tx
             .update(schema.attachedBrowserInventories)
             .set({
-              bridgeGeneration: snapshot.bridgeGeneration,
-              revision: snapshot.revision,
-              observedAt: now,
-              updatedAt: now,
+              observedAt: sql`greatest(${schema.attachedBrowserInventories.observedAt}, ${now.toISOString()}::timestamptz)`,
+              ...(cursor.bridgeGeneration !== snapshot.bridgeGeneration ||
+              cursor.revision !== snapshot.revision
+                ? {
+                    bridgeGeneration: snapshot.bridgeGeneration,
+                    revision: snapshot.revision,
+                    updatedAt: sql`greatest(${schema.attachedBrowserInventories.updatedAt}, ${now.toISOString()}::timestamptz)`,
+                  }
+                : {}),
             })
             .where(
               and(
@@ -656,10 +701,32 @@ export async function disconnectAttachedBrowserDevices(
     async (scopedDb) =>
       await scopedDb.transaction(async (rawTx) => {
         const tx = rawTx as unknown as Database;
+        // Serialize the disconnect with accepted snapshots so their shared
+        // observation is frozen at the same boundary as connection state.
+        await tx
+          .select({ id: schema.enrollments.id })
+          .from(schema.enrollments)
+          .where(
+            and(
+              eq(schema.enrollments.id, input.enrollmentId),
+              eq(schema.enrollments.accountId, input.accountId),
+              eq(schema.enrollments.workspaceId, input.workspaceId),
+            ),
+          )
+          .for("update");
         const now = new Date();
         const rows = await tx
           .update(schema.attachedBrowserDevices)
-          .set({ disconnectedAt: now, updatedAt: now })
+          .set({
+            disconnectedAt: now,
+            updatedAt: sql`greatest(${schema.attachedBrowserDevices.updatedAt}, ${now.toISOString()}::timestamptz)`,
+            lastSeenAt: sql`greatest(${schema.attachedBrowserDevices.lastSeenAt}, (
+              select ${schema.attachedBrowserInventories.observedAt}
+              from ${schema.attachedBrowserInventories}
+              where ${schema.attachedBrowserInventories.workspaceId} = ${schema.attachedBrowserDevices.workspaceId}
+                and ${schema.attachedBrowserInventories.enrollmentId} = ${schema.attachedBrowserDevices.enrollmentId}
+            ))`,
+          })
           .where(
             and(
               eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
@@ -725,8 +792,11 @@ export async function listAttachedBrowserDevices(
           desc(schema.attachedBrowserInventories.observedAt),
           asc(schema.attachedBrowserInventories.enrollmentId),
         );
+      const observations = new Map(
+        inventories.map((inventory) => [inventory.enrollmentId, inventory.observedAt]),
+      );
       const devices = rows
-        .map((row) => visibleDevice(row, visibility))
+        .map((row) => visibleDevice(row, visibility, observations.get(row.enrollmentId) ?? null))
         .filter(
           (device): device is AttachedBrowserDeviceValue =>
             device !== null && (input.includeDisconnected === true || device.state === "connected"),
@@ -778,8 +848,24 @@ export async function getAttachedBrowserDevice(
     input,
     async (scopedDb) => {
       const [row] = await scopedDb
-        .select()
+        .select({
+          device: schema.attachedBrowserDevices,
+          observedAt: schema.attachedBrowserInventories.observedAt,
+        })
         .from(schema.attachedBrowserDevices)
+        .leftJoin(
+          schema.attachedBrowserInventories,
+          and(
+            eq(
+              schema.attachedBrowserInventories.workspaceId,
+              schema.attachedBrowserDevices.workspaceId,
+            ),
+            eq(
+              schema.attachedBrowserInventories.enrollmentId,
+              schema.attachedBrowserDevices.enrollmentId,
+            ),
+          ),
+        )
         .where(
           and(
             eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
@@ -787,7 +873,7 @@ export async function getAttachedBrowserDevice(
           ),
         )
         .limit(1);
-      const device = row ? visibleDevice(row, visibility) : null;
+      const device = row ? visibleDevice(row.device, visibility, row.observedAt) : null;
       if (!device) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
       return device;
     },
