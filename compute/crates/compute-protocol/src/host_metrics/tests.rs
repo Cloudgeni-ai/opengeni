@@ -37,8 +37,7 @@ fn every_metric_is_named_once_and_each_label_once() {
                 label.name
             );
             assert!(
-                !DESCRIBED_BY.contains(&label.name)
-                    && !["host.name", "service.name", "service.instance.id"].contains(&label.name),
+                !RESOURCE.contains(&label.name),
                 "{} labels data points with a resource attribute",
                 metric.name
             );
@@ -167,17 +166,12 @@ fn what_keeps_to_the_list_goes_on_under_the_hosts_own_name() {
             ("service.name", "compute-host"),
             ("service.instance.id", "hosts-a"),
             ("host.name", "hosts-a"),
-            ("service.version", "0.0.0-sha.abc123"),
-            ("compute.memory_profile", "bare_metal"),
         ]
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
     );
     let out: Json = serde_json::from_slice(&checked.export).unwrap();
     let scope = &out["resourceMetrics"][0]["scopeMetrics"][0];
-    assert_eq!(
-        scope["scope"],
-        json!({"name": "compute-host", "version": "0.0.0-sha.abc123"})
-    );
+    assert_eq!(scope["scope"], json!({"name": "compute-host"}));
     assert_eq!(scope["metrics"][1]["unit"], "{sandbox}");
     assert_eq!(scope["metrics"][1]["gauge"]["dataPoints"][1]["asInt"], "1");
 }
@@ -296,21 +290,51 @@ fn values_and_shapes_are_what_hosts_send() {
 }
 
 #[test]
-fn only_short_plain_values_describe_a_host() {
-    let long = "v".repeat(65);
-    let sent = export(
-        &[
-            ("host.name", "hosts-a"),
-            ("service.version", &long),
-            ("host.arch", "amd64"),
-            ("os.type", "linux\"} 1\nforged"),
-        ],
-        &[],
-    );
-    let checked = check(&sent, &names(&["hosts-a"])).unwrap();
+fn what_a_host_says_of_itself_adds_no_series() {
+    // However a host varies its own resource attributes and scope, its
+    // metrics go on under the same resource and scope, so it cannot grow
+    // the series its metrics make.
+    let points = [gauge(
+        "compute.sandbox.count",
+        &[number(
+            &[("compute.level", "running")],
+            &json!({"asInt": "1"}),
+        )],
+    )];
+    let passed: Vec<Vec<u8>> = (0..32)
+        .map(|version| {
+            let version = format!("0.0.{version}");
+            let version = version.as_str();
+            let team = format!("team.{version}");
+            let sent = serde_json::to_vec(&json!({"resourceMetrics": [{
+                "resource": {"attributes": attributes(&[
+                    ("host.name", "hosts-a"),
+                    ("service.version", version),
+                    ("compute.memory_profile", version),
+                    ("host.arch", version),
+                    ("os.type", version),
+                    (team.as_str(), "x"),
+                ])},
+                "scopeMetrics": [{"scope": {"name": version, "version": version}, "metrics": points}],
+            }]}))
+            .unwrap();
+            check(&sent, &names(&["hosts-a"])).unwrap().export
+        })
+        .collect();
+    assert!(passed.iter().all(|export| *export == passed[0]));
+    let out: Json = serde_json::from_slice(&passed[0]).unwrap();
+    let resource = &out["resourceMetrics"][0];
     assert_eq!(
-        resource_of(&checked).last(),
-        Some(&("host.arch".to_owned(), "amd64".to_owned()))
+        resource["resource"]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attribute| attribute["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        RESOURCE
     );
-    assert_eq!(resource_of(&checked).len(), 4);
+    assert_eq!(
+        resource["scopeMetrics"][0]["scope"],
+        json!({"name": "compute-host"})
+    );
 }

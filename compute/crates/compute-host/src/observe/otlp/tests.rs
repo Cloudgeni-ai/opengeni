@@ -303,21 +303,18 @@ fn the_control_service_passes_on_every_data_point_a_host_sends() {
         .unwrap()
         .len();
     assert_eq!(sent, listed, "every listed metric is one a host sends");
-    let described = |body: &[u8]| {
-        let mut attributes: Vec<String> =
-            parse(body)["resourceMetrics"][0]["resource"]["attributes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-        attributes.sort();
-        attributes
+    let keys = |body: &[u8]| -> Vec<String> {
+        parse(body)["resourceMetrics"][0]["resource"]["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attribute| attribute["key"].as_str().unwrap().to_owned())
+            .collect()
     };
     assert_eq!(
-        described(&checked.export),
-        described(&body),
-        "everything a host describes itself by goes on"
+        keys(&checked.export),
+        compute_protocol::host_metrics::RESOURCE,
+        "only the service's name and the host's go on"
     );
 }
 

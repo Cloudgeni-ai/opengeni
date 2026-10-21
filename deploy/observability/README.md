@@ -105,8 +105,9 @@ bun run deployment:observability -- --profile single-node --compute
 ```
 
 That flag adds `values.compute.yaml`, turning on Prometheus's OTLP receiver
-with `host.name`, `service.version` and `compute.memory_profile` promoted to
-labels. Set `computeControl.metrics.hostsTo` in the application release to
+with `host.name` promoted to the `host_name` label; the control service's
+`compute_fleet_host_info` gives each host's zone, memory profile and CPU
+template. Set `computeControl.metrics.hostsTo` in the application release to
 `http://<release>-kub-prometheus.<namespace>:9090/api/v1/otlp/v1/metrics` and
 run the hosts with `--otlp-metrics-to-control`: they post their metrics to the
 control service over their mutual TLS with it, and it passes them on. The

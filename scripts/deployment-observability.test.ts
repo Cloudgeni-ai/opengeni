@@ -102,8 +102,9 @@ describe("observability deployment plan", () => {
     const spec = overlay["kube-prometheus-stack"].prometheus.prometheusSpec;
     expect(spec.enableOTLPReceiver).toBe(true);
     // The label the control service's compute_fleet_host_info shares, which
-    // scopes hosts to their release in alerts and the dashboard.
-    expect(spec.otlp.promoteResourceAttributes).toContain("host.name");
+    // scopes hosts to their release in alerts and the dashboard, and the only
+    // one: the service passes on no other resource attribute of a host's.
+    expect(spec.otlp.promoteResourceAttributes).toEqual(["host.name"]);
     expect(observabilityStackPlanFor().compute).toBe(false);
     const plan = observabilityStackPlanFor({ compute: true });
     expect(plan.valuesFiles).toEqual(["deploy/observability/values.compute.yaml"]);

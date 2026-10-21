@@ -428,22 +428,18 @@ pub fn metric(name: &str) -> Option<&'static Metric> {
     METRICS.iter().find(|metric| metric.name == name)
 }
 
-/// The resource attributes a host describes itself by. The control
-/// service sets the ones that name the host (`host.name`,
-/// `service.instance.id`) and the service (`service.name`) itself.
-pub const DESCRIBED_BY: [&str; 4] = [
-    "service.version",
-    "host.arch",
-    "os.type",
-    "compute.memory_profile",
-];
+/// The only resource attributes the control service passes on with a
+/// host's metrics, all of which it sets itself: the service
+/// (`service.name`) and the host's name as its certificate proved it
+/// (`service.instance.id`, `host.name`). Whatever else a host says about
+/// itself is left out, so a host cannot add series by varying it; what
+/// the fleet registered about a host, such as its memory profile, is on
+/// the control service's own `compute_fleet_host_info`.
+pub const RESOURCE: [&str; 3] = ["service.name", "service.instance.id", "host.name"];
 
 /// The instrumentation scope a host's metrics come under, and its
 /// `service.name`.
 pub const SERVICE: &str = "compute-host";
-
-/// The longest value a describing resource attribute may have.
-const MAX_DESCRIPTION: usize = 64;
 
 /// What [`check`] kept of an export.
 #[derive(Debug)]
@@ -473,8 +469,9 @@ pub enum Refused {
 /// proved it is one of `names`. Every resource must name that host in
 /// `host.name`, or leave it out when there is only one. What keeps to
 /// [`METRICS`] is rebuilt under the host's name, with the service's own
-/// name and scope; of the host's resource attributes only
-/// [`DESCRIBED_BY`] go on, and only short, plain values.
+/// name and scope and only the [`RESOURCE`] attributes, so the series a
+/// host's metrics make depend on nothing but its name and what keeps to
+/// the list.
 ///
 /// # Errors
 ///
@@ -487,24 +484,11 @@ pub fn check(export: &[u8], names: &[String]) -> Result<Checked, Refused> {
     let mut resources = Vec::with_capacity(export.resource_metrics.len());
     for resource in export.resource_metrics {
         let host = host_of(&resource.resource.attributes, names)?;
-        let mut attributes = vec![
+        let attributes = vec![
             text("service.name", SERVICE),
             text("service.instance.id", &host),
             text("host.name", &host),
         ];
-        let mut version = String::new();
-        for attribute in &resource.resource.attributes {
-            let Some(value) = attribute.value.string_value.as_deref() else {
-                continue;
-            };
-            if DESCRIBED_BY.contains(&attribute.key.as_str()) && describes(value) {
-                if attribute.key == "service.version" {
-                    value.clone_into(&mut version);
-                }
-                attributes.retain(|kept: &KeyValue| kept.key != attribute.key);
-                attributes.push(text(&attribute.key, value));
-            }
-        }
         let metrics = resource
             .scope_metrics
             .into_iter()
@@ -514,10 +498,7 @@ pub fn check(export: &[u8], names: &[String]) -> Result<Checked, Refused> {
         resources.push(OutResource {
             resource: OutAttributes { attributes },
             scope_metrics: vec![OutScope {
-                scope: OutScopeName {
-                    name: SERVICE,
-                    version,
-                },
+                scope: OutScopeName { name: SERVICE },
                 metrics,
             }],
         });
@@ -550,15 +531,6 @@ fn host_of(attributes: &[KeyValue], names: &[String]) -> Result<String, Refused>
             "every resource names its host in host.name".to_owned(),
         )),
     }
-}
-
-/// Whether `value` may describe a host: short and plain.
-fn describes(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_DESCRIPTION
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
 }
 
 /// What is kept and left out so far.
@@ -926,7 +898,6 @@ struct OutScope {
 #[derive(Serialize)]
 struct OutScopeName {
     name: &'static str,
-    version: String,
 }
 
 #[derive(Serialize)]

@@ -695,9 +695,12 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `compute-protocol`'s `host_metrics`): each with its kind, cumulative
     counters, exactly its labels with their listed values, plain values
     and the shared histogram bounds, under the host's own name and with
-    only the resource attributes that describe a host. A host cannot pass
-    off the control service's or the fleet's series, another host's, or
-    labels of its own. Data points left out are answered as an OTLP partial
+    no resource attributes but the service's name and the host's. A host
+    cannot pass off the control service's or the fleet's series, another
+    host's, or labels of its own, and cannot add series by varying what it
+    says about itself: its zone, memory profile and CPU template come from
+    its registration, on the leader's `compute_fleet_host_info`. Data
+    points left out are answered as an OTLP partial
     success and counted in
     `compute_control_host_metric_points_left_out_total`. It passes them on to `--host-metrics-to`
     (`computeControl.metrics.hostsTo`): Prometheus's OTLP receiver,

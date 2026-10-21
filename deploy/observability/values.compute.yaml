@@ -10,7 +10,9 @@
 # A host's series carry its name in the fleet as host_name, the label the
 # control service's own compute_fleet_host_info carries, which scopes each
 # host to its Opengeni release in the chart's alerts and the Compute
-# dashboard.
+# dashboard and gives its zone, memory profile and CPU template. The service
+# passes on no other resource attributes, so a host's series depend only on
+# its name.
 kube-prometheus-stack:
   prometheus:
     prometheusSpec:
@@ -18,5 +20,3 @@ kube-prometheus-stack:
       otlp:
         promoteResourceAttributes:
           - host.name
-          - service.version
-          - compute.memory_profile

@@ -157,14 +157,13 @@ async fn a_host_s_own_metrics_are_passed_on_under_its_name_and_no_other_s() {
         shape(sent),
         (
             vec![
-                pair("compute.memory_profile", "bare_metal"),
                 pair("host.name", "hosts-a"),
                 pair("service.instance.id", "hosts-a"),
                 pair("service.name", "compute-host"),
             ],
             vec!["compute.sandbox.count".to_owned()],
         ),
-        "under the host's own name, with only what describes a host"
+        "under the host's own name, with nothing else the host says of itself"
     );
     let points =
         &sent["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]["gauge"]["dataPoints"];
