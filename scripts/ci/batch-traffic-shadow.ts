@@ -811,13 +811,13 @@ export class CachedTrafficReader extends GitHubReader {
     settings: Config,
     auth: GitHubAuth,
     transport: typeof fetch,
-    readonly cache: TrafficCache,
+    readonly trafficCache: TrafficCache,
   ) {
     super(settings, auth, transport);
   }
   override async get(path: string): ReturnType<GitHubReader["get"]> {
     const key = `get:${this.config.repository}:${path}`;
-    const cached = await this.cache.get<Awaited<ReturnType<GitHubReader["get"]>>>(key);
+    const cached = await this.trafficCache.get<Awaited<ReturnType<GitHubReader["get"]>>>(key);
     if (cached !== null) return cached;
     const value = await super.get(path);
     const jobs = !Array.isArray(value) && Array.isArray(value.jobs) ? value.jobs : null;
@@ -839,7 +839,7 @@ export class CachedTrafficReader extends GitHubReader {
     } else if (/^actions\/runs\/\d+\/attempts\/\d+$/.test(path) && !Array.isArray(value)) {
       immutable = value.status === "completed";
     }
-    await this.cache.put(key, value, immutable ? null : 300);
+    await this.trafficCache.put(key, value, immutable ? null : 300);
     return value;
   }
   async fresh(path: string) {
@@ -851,11 +851,11 @@ export class CachedTrafficReader extends GitHubReader {
     attempt: number,
   ): Promise<VerifiedResult | null> {
     const key = `result:${this.config.repository}:${manifest.batchId}:${manifest.tipSha}:${runId}:${attempt}`;
-    const cached = await this.cache.get<VerifiedResult>(key);
+    const cached = await this.trafficCache.get<VerifiedResult>(key);
     if (cached) return cached;
     const result = await super.resultArtifact(manifest, runId, attempt);
     if (result && result.outcome !== "infrastructure" && result.outcome !== "unknown")
-      await this.cache.put(key, result, null);
+      await this.trafficCache.put(key, result, null);
     return result;
   }
 }
@@ -1210,7 +1210,15 @@ export async function publishOneTraffic(
     headroom,
   });
   const state = async () => {
-    ledger = { ...ledger, epoch: ledger.epoch + 1, owner: "merged-traffic-shadow", expiresAt: now };
+    // Identical next OIDs make Git omit the ref update before checking its
+    // lease. Each transaction must therefore have a distinct changing fence,
+    // even when concurrent publishers observe the same clock and candidate.
+    ledger = {
+      ...ledger,
+      epoch: ledger.epoch + 1,
+      owner: `merged-traffic-shadow:${randomUUID()}`,
+      expiresAt: now,
+    };
     return git.stateCommit(ledger, stateSha, now);
   };
   const wait = async (reason: string): Promise<TrafficPublication> => {

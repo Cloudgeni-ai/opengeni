@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AtomicGitWriter, GitStore } from "../merge-batcher/git";
 import { GitHubAuth, GitHubReader } from "../merge-batcher/github";
+import { LiveReader } from "../merge-batcher/controller";
+import { config as coreConfig } from "../merge-batcher/model";
 import { type Run } from "../merge-batcher/model";
 import { verifyResult } from "../merge-batcher/result";
 import {
@@ -231,48 +233,38 @@ describe("merged traffic replay", () => {
       expect(await adapterPresent(f.origin, f.base, changed)).toBe(false);
     }
   });
-  test.skipIf(!process.env.TRAFFIC_SHADOW_CORE_MODULES)(
-    "core LiveReader ignores nested traffic refs under default queue and recognizes the explicit traffic prefix",
-    async () => {
-      const core = process.env.TRAFFIC_SHADOW_CORE_MODULES!;
-      const { LiveReader } = await import(join(core, "controller.ts"));
-      const { GitStore: CoreGitStore } = await import(join(core, "git.ts"));
-      const { config: coreConfig } = await import(join(core, "model.ts"));
-      const { GitHubAuth: CoreAuth, GitHubReader: CoreReader } = await import(
-        join(core, "github.ts")
-      );
-      const f = await fixture();
-      const report = await replayTraffic(f.git, f.origin.dir, f.input);
-      const manifest = report.cohorts[0]!.manifest!;
-      await f.origin.fetch(f.git.dir, [manifest.tipSha]);
-      await f.origin.exec([
-        "update-ref",
-        `refs/heads/${TRAFFIC_PREFIX}${manifest.batchId}`,
-        manifest.tipSha,
-      ]);
-      const git = new CoreGitStore(join(f.root, "interop.git"));
-      await git.init();
-      const fetchLocal = git.fetch.bind(git);
-      git.remoteRefs = async () => f.git.remoteRefs(f.origin.dir);
-      git.fetch = async (_remote: string, refs: string[]) => fetchLocal(f.origin.dir, refs);
-      for (const branchPrefix of ["queue/", TRAFFIC_PREFIX]) {
-        const settings = {
-          ...coreConfig({ BATCHER_MODE: "shadow" }),
-          branchPrefix,
-          gitDir: git.dir,
-          outputDir: join(f.root, "interop-output"),
-          stateRef: "refs/heads/interop-state",
-        };
-        const reader = new CoreReader(settings, new CoreAuth({}), async () => {
-          throw Error("No provider calls allowed");
-        });
-        reader.ready = async () => ({ ready: [], excluded: [] });
-        reader.runs = reader.observedRuns = async () => [];
-        const observation = await new LiveReader(reader, git, settings).observe();
-        expect(observation.candidates).toHaveLength(branchPrefix === "queue/" ? 0 : 1);
-      }
-    },
-  );
+  test("core LiveReader ignores nested traffic refs under default queue and recognizes the explicit traffic prefix", async () => {
+    const f = await fixture();
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const manifest = report.cohorts[0]!.manifest!;
+    await f.origin.fetch(f.git.dir, [manifest.tipSha]);
+    await f.origin.exec([
+      "update-ref",
+      `refs/heads/${TRAFFIC_PREFIX}${manifest.batchId}`,
+      manifest.tipSha,
+    ]);
+    const git = new GitStore(join(f.root, "interop.git"));
+    await git.init();
+    const fetchLocal = git.fetch.bind(git);
+    git.remoteRefs = async () => f.git.remoteRefs(f.origin.dir);
+    git.fetch = async (_remote: string, refs: string[]) => fetchLocal(f.origin.dir, refs);
+    for (const branchPrefix of ["queue/", TRAFFIC_PREFIX]) {
+      const settings = {
+        ...coreConfig({ BATCHER_MODE: "shadow" }),
+        branchPrefix,
+        gitDir: git.dir,
+        outputDir: join(f.root, "interop-output"),
+        stateRef: "refs/heads/interop-state",
+      };
+      const reader = new GitHubReader(settings, new GitHubAuth({}), (async () => {
+        throw Error("No provider calls allowed");
+      }) as unknown as typeof fetch);
+      reader.ready = async () => ({ ready: [], excluded: [] });
+      reader.runs = reader.observedRuns = async () => [];
+      const observation = await new LiveReader(reader, git, settings).observe();
+      expect(observation.candidates).toHaveLength(branchPrefix === "queue/" ? 0 : 1);
+    }
+  });
   test("real squash/merge history reconstructs equivalent trees; remote refs unchanged", async () => {
     const f = await fixture(),
       before = await f.git.remoteRefs(f.origin.dir);
@@ -717,6 +709,9 @@ describe("traffic recovery and bounded reads", () => {
       );
     }) as typeof fetch;
     const reader = new CachedTrafficReader(f.settings, new GitHubAuth({}), transport, cache);
+    expect(reader.trafficCache).toBe(cache);
+    expect(reader.cache).not.toBe(cache);
+    expect(typeof reader.cache.set).toBe("function");
     await reader.get("actions/runs/1/attempts/1/jobs?per_page=100");
     now += 3600000;
     await reader.get("actions/runs/1/attempts/1/jobs?per_page=100");
@@ -906,6 +901,7 @@ describe("restricted optional traffic CI", () => {
           f.origin.dir,
           report,
           f.publisher,
+          { now: date(10) },
         ),
       ),
     );
