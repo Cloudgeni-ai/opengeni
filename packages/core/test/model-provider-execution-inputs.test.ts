@@ -185,7 +185,9 @@ test("one scope replaces the serial provider reads without changing settings", a
     () => batched(scope),
   );
   expect(actual).toEqual(expected);
-  expect(before).toBe(18);
+  // The serial reference reads each organization provider kind twice (catalog, then
+  // credential); #5359 added OpenAI and Azure OpenAI, so it grew from 18 to 22.
+  expect(before).toBe(22);
   expect(after).toBe(1);
   for (const config of [
     { ...settings, environmentsEncryptionKey: undefined },
