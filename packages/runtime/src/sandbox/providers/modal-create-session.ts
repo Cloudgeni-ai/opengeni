@@ -15,7 +15,6 @@ import {
   SandboxUnsupportedFeatureError,
   type Entry,
 } from "@openai/agents/sandbox";
-import { UserError } from "@openai/agents-core";
 import {
   assertHostPathGrantsRebound,
   materializeEnvironment,
@@ -397,6 +396,13 @@ export async function createModalSessionWithLifecycle(
   }
 }
 
+/** A resume that cannot proceed for this state (no persisted id, or a box
+ * that already stopped). Kept local so the sandbox leaf never imports the
+ * agent loop; callers classify these by their exact message. */
+class ModalResumeUnavailableError extends Error {
+  override readonly name = "UserError";
+}
+
 /** The pinned adapter's provider-error shape: a SandboxProviderError naming the
  * operation, with the provider failure as its exact cause. */
 async function withModalProviderError<T>(
@@ -407,7 +413,7 @@ async function withModalProviderError<T>(
   try {
     return await run();
   } catch (error) {
-    if (error instanceof UserError) throw error;
+    if (error instanceof ModalResumeUnavailableError) throw error;
     const cause = error instanceof Error ? error.message : String(error);
     throw Object.assign(
       new SandboxProviderError(
@@ -431,7 +437,7 @@ export async function resumeModalSessionOnSharedClient(
 ): Promise<ModalSandboxSession> {
   assertHostPathGrantsRebound(state);
   if (!state.sandboxId) {
-    throw new UserError("Modal sandbox resume requires a persisted sandboxId.");
+    throw new ModalResumeUnavailableError("Modal sandbox resume requires a persisted sandboxId.");
   }
   const sandboxId = state.sandboxId;
   const modal = sharedModalClient(
@@ -468,7 +474,7 @@ export async function resumeModalSessionOnSharedClient(
     async () => await sandbox.poll(),
   );
   if (exitCode !== null) {
-    throw new UserError(`Modal sandbox ${state.sandboxId} is no longer running.`);
+    throw new ModalResumeUnavailableError(`Modal sandbox ${state.sandboxId} is no longer running.`);
   }
   const constructorArgs = {
     state,
