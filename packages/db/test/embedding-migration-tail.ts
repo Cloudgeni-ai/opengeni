@@ -356,5 +356,7 @@ export const embeddingMigrationTail = [
   "0873_mcp_binding_delegation_revocation.sql",
   // Rewrites the resolver installed by withheld 0478; replay after it.
   "0876_connection_validation_shared_locks.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];
