@@ -161,7 +161,10 @@ describe("provider-neutral operational instructions", () => {
       "including audit or summary reports produced while doing another task",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "only when the user asks for a document or file (for example a DOCX or PDF), asks to edit an existing document, or the deliverable is too long to read comfortably in chat (several pages)",
+      "only when the user asks for a document, asks to edit an existing document Artifact, or the deliverable is too long to read comfortably in chat (several pages)",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox with ordinary tools",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "give a short summary and the artifact link in chat, not a full restatement",

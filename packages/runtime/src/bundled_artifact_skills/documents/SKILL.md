@@ -1,6 +1,6 @@
 ---
 name: documents
-description: Create, inspect, edit, review, import, and export durable document artifacts and explicit DOCX file boundaries. Use when the user asks for a document or file, asks to edit one, or the result is too long for chat (DOCX, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery). Briefs, letters, plans and reports written on request are chat answers and do not need it.
+description: Create, inspect, edit, review, import, and export durable document artifacts and explicit DOCX file boundaries. Use when the user asks for a document, asks to edit one, or the result is too long for chat (forms, tables, sections, headers, footers, comments and tracked changes), and when they ask for a Word or PDF file. Briefs, letters, plans and reports written on request are chat answers and do not need it.
 ---
 
 # Documents
@@ -8,11 +8,12 @@ description: Create, inspect, edit, review, import, and export durable document 
 The durable artifact is the default working document. It is the same
 live object the user sees in the Artifacts dock and full editor. Never create a
 mutable DOCX shadow, publish a sandbox file, or alternate between file and
-artifact state.
+artifact state. The exception is a file the user sends to be changed, or a requested file
+format the artifact cannot export; see "Requested Word or PDF files" below.
 
-Create a document when the user asks for a document or file (for example a
-DOCX or PDF), asks to edit an existing document, or when a deliverable is too
-long to read comfortably in chat (several pages); otherwise answer in chat,
+Create a document when the user asks for a document, asks to edit an existing
+document artifact, or when a deliverable is too long to read comfortably in
+chat (several pages); otherwise answer in chat,
 including briefs, letters, plans and reports written on request. This also
 applies when a report is a secondary output of another task, such as
 a Knowledge cleanup audit. If the session has a goal,
@@ -41,6 +42,21 @@ Skill was installed or explicitly checked out to the filesystem.
 - Use a standalone local DOCX only when the user explicitly asks to manipulate
   sandbox-local bytes and the pinned local runtime is actually available.
   Normal import/export uses workspace `fileId` boundaries without local bytes.
+
+## Requested Word or PDF files
+
+When the user sends a Word or PDF file to be changed and returned, or asks for a
+new Word or PDF file while `opengeni__editable_artifact_export` is unavailable
+or does not list that format, the file itself is the deliverable:
+
+1. Make or edit it in the sandbox with ordinary tools (`python-docx` for Word;
+   `pandoc` or LibreOffice (`soffice --headless --convert-to pdf`) for PDF).
+   Install a missing package with `pip install <package>` if needed.
+2. When editing a sent file, open the original and change only what was asked,
+   keeping its other content, formatting and objects.
+3. Read the result back to check the content.
+4. Publish the file and reply with a short summary and its link. Do not also
+   build a native artifact of the same content.
 
 ## Edit and verify
 
@@ -81,6 +97,9 @@ Skill was installed or explicitly checked out to the filesystem.
 - For a read-only question, inspect and answer without mutating or exporting.
 
 ## Completion gate
+
+This gate applies to native document work, not to a Word or PDF file made
+under the procedure above.
 
 - Every declared report requirement has server-verified artifact delivery
   evidence at goal completion. Use the exact artifact and inspection identities
