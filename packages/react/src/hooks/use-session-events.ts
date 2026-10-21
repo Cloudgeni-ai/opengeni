@@ -20,6 +20,7 @@ import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeli
 import type { TimelineItem, TurnStepsItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
+import { joinSessionDetailRead, sessionDetailReadMark } from "../lib/session-detail-read";
 import { usePageLiveActivity } from "./internal";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
@@ -695,6 +696,8 @@ export function useSessionEvents(
     const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
     reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
+    // A head read joins a fresh detail read (useSession's) started from here on.
+    const detailReadMark = sessionDetailReadMark();
     const isCurrent = () =>
       generationRef.current === generation &&
       !controller.signal.aborted &&
@@ -823,20 +826,30 @@ export function useSessionEvents(
      * steps. Resolves "reload" when the missed conversation is too long to
      * append (the caller then loads the latest window).
      */
-    // Async, so a client that throws at once still settles as a rejected read.
-    const readSessionHead = async () =>
-      await client.getSession(workspaceId, sessionId, { fresh: true, signal: controller.signal });
-    const rejoinLive = async (
-      force: boolean,
-      sessionRead?: ReturnType<typeof readSessionHead>,
-    ): Promise<"joined" | "reload"> => {
+    // The durable head: the conversation's fresh detail read when one started
+    // since this stream began loading (the session view's own), else a new one.
+    const readSessionHead = async () => {
+      const joined = joinSessionDetailRead(client, workspaceId, sessionId, detailReadMark);
+      if (joined) {
+        try {
+          return await joined;
+        } catch (cause) {
+          if (controller.signal.aborted) throw cause;
+        }
+      }
+      return await client.getSession(workspaceId, sessionId, {
+        fresh: true,
+        signal: controller.signal,
+      });
+    };
+    const rejoinLive = async (force: boolean): Promise<"joined" | "reload"> => {
       const activeTurn = activeConversationTurn(eventWindowRef.current.events);
       if (!force && !activeTurn) return "joined";
       const cursor = streamResumeSequenceRef.current;
       let head: number;
       let sessionActiveTurn: string | null = null;
       try {
-        const session = await (sessionRead ?? readSessionHead());
+        const session = await readSessionHead();
         head = session.lastSequence;
         sessionActiveTurn = session.activeTurnId;
       } catch (cause) {
@@ -904,11 +917,6 @@ export function useSessionEvents(
           attempt += 1
         ) {
           setConnectionState("connecting");
-          // The durable head is read alongside the window, so joining the live
-          // stream at it adds no round trip before the stream opens. A head
-          // read before the window's newest row only replays a little more.
-          const headRead = readSessionHead();
-          headRead.catch(() => undefined);
           // First paint is ONE compact fetch of the conversation — the newest
           // window, revealed at the bottom in a few hundred ms. Deeper history
           // loads only when the reader scrolls up (the sentinel drives
@@ -966,7 +974,7 @@ export function useSessionEvents(
           // window's last conversation event: a working turn's steps (its
           // latest are read), or terminal output written after the last turn,
           // which only the sandbox dock reads.
-          if ((await rejoinLive(true, headRead)) === "reload" && attempt === 0) {
+          if ((await rejoinLive(true)) === "reload" && attempt === 0) {
             initialWindowLoadedRef.current = false;
           }
         }

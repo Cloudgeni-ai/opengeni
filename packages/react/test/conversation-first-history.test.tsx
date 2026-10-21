@@ -17,6 +17,7 @@ import {
   isConversationHistoryEvent,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
+import { useSession } from "../src/hooks/use-session";
 import { useSandboxTerminal } from "../src/hooks/use-sandbox-terminal";
 import {
   buildTimeline,
@@ -1058,6 +1059,36 @@ describe("conversation-first session history", () => {
       expect(
         hook.result.current.events.some((event) => event.type === "terminal.pty.output.delta"),
       ).toBe(false);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("beside the session's detail read, the chat joins the head without reading the session again", async () => {
+    const store = longTurn({ start: 1, turnId: "T1", steps: 3 });
+    const settled = store.at(-1)!.sequence;
+    for (let sequence = settled + 1; sequence <= settled + 3000; sequence += 1) {
+      store.push(ptyRow(sequence));
+    }
+    const head = store.at(-1)!.sequence;
+    const { client, reads, streamCalls, headReads } = historyClient({ store: () => store });
+    // As the session views wire them: the feed, then the detail watching it.
+    const hook = await renderHook(() => {
+      const feed = useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID });
+      const detail = useSession(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: feed.events,
+      });
+      return { feed, detail };
+    }, undefined);
+    try {
+      await settle(60);
+      expect(hook.result.current.detail.session?.lastSequence).toBe(head);
+      // The detail read is the head read: the stream still joins at the head.
+      expect(headReads()).toBe(1);
+      expect(reads.at(-1)).toMatchObject({ after: settled, before: head + 1 });
+      expect(streamCalls).toEqual([head]);
     } finally {
       await hook.unmount();
     }
