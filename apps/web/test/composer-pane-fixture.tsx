@@ -1,6 +1,7 @@
 import { ChatComposer, ComposerTranscriptionControl } from "@opengeni/react";
 import { createRoot } from "react-dom/client";
 import { lazy, Suspense, useState, type ReactNode } from "react";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
 import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import { NewSessionDraftSyncNotice } from "@opengeni/react/app/components/new-session-draft-sync-notice";
@@ -24,6 +25,24 @@ const AgentLearningSettingsEditor = lazy(() =>
     default: module.AgentLearningSettingsEditor,
   })),
 );
+
+// Keep the production settings editor, but supply deterministic context at the
+// fixture boundary instead of bootstrapping a live authenticated app.
+let learningSettings: Record<string, string> = {};
+const fixtureContext = {
+  client: {
+    getAgentLearningSettings: async () => ({ version: 1, settings: learningSettings }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      learningSettings = { ...learningSettings, ...input.settings };
+      return { version: 2, settings: learningSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
 
 function PickerFixture({ leading, label }: { leading?: ReactNode; label: string }) {
   return (
@@ -185,4 +204,8 @@ function Fixture() {
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);

@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import {
   RepositoryContextMenuBody,
@@ -22,6 +23,33 @@ const AgentLearningSettingsEditor = lazy(() =>
     default: module.AgentLearningSettingsEditor,
   })),
 );
+
+// Deterministic service boundary for the production settings editor, supplied
+// through the real app context instead of bootstrapping an authenticated app.
+const learningSettings: Record<string, string> = {};
+const fixtureContext = {
+  accessContext: { subjectId: "fixture-user" },
+  client: {
+    getAgentLearningSettings: async (_workspaceId: string, _scope: string, source?: unknown) => ({
+      version: 1,
+      settings: source
+        ? learningSettings
+        : { knowledge: "automatic", instructions: "review_first", skills: "off" },
+    }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      for (const [key, value] of Object.entries(input.settings)) {
+        if (value === "inherit") delete learningSettings[key];
+        else learningSettings[key] = value;
+      }
+      return { version: 2, settings: learningSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
 
 const repositories: GitHubRepository[] = Array.from({ length: 20 }, (_, index) => ({
   id: index + 1,
@@ -222,4 +250,8 @@ function Fixture() {
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);
