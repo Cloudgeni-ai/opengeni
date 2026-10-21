@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionEventToolOutputPreview } from "@opengeni/sdk";
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useLayoutEffect, useMemo, useSyncExternalStore } from "react";
 
 /**
  * Exact reads of tool outputs a step page delivered as bounded previews.
@@ -206,7 +206,9 @@ export function useToolOutputReads(
 } {
   const store = useMemo(() => new ToolOutputReads(read), [read]);
   const entries = useSyncExternalStore(store.subscribe, store.snapshot, store.snapshot);
-  useEffect(() => {
+  // A layout effect: the loaded turns are known before any row's on-mount
+  // read (a passive effect) asks, so a turn shown again is never forgotten.
+  useLayoutEffect(() => {
     store.retainTurns(new Set(turns.keys()));
   }, [store, turns]);
   return useMemo(() => {

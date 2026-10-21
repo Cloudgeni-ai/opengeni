@@ -37287,8 +37287,12 @@ function sessionEventTransferBytes(toolOutputPreview: boolean): SQL {
   if (!toolOutputPreview) return exact;
   const ceiling = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES + 2048));
   const share = sql.raw(String(TOOL_OUTPUT_PREVIEW_SOURCE_SHARE));
-  // offset 0 keeps the serialized size computed once instead of inlined.
+  // offset 0 keeps the serialized size computed once instead of inlined. The
+  // payload is read here anyway, so only a row the projection can preview (an
+  // object with an `output`) is planned below its exact size.
   return sql`(select case when ${toolOutputPreviewCandidate(schema.sessionEvents)}
+        and jsonb_typeof(${schema.sessionEvents.payload}) = 'object'
+        and (${schema.sessionEvents.payload} -> 'output') is not null
       then least(tool_output_row.bytes, greatest(${ceiling}, tool_output_row.bytes / ${share}))
       else tool_output_row.bytes end
     from (select ${exact} as bytes offset 0) as tool_output_row)`;
