@@ -704,6 +704,9 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "billing_subscription_operations",
       // 0820 (retained browser downloads).
       "browser_session_retained_downloads",
+      // 0890 reconciliation tables are absent from this historical schema.
+      "model_call_fact_reconciliation_candidates",
+      "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
