@@ -45,7 +45,13 @@ variable "network" {
 }
 
 variable "assign_external_ip" {
-  description = "Give hosts ephemeral public addresses. Off in production: hosts reach the internet (registries, Firecracker downloads, sandboxes' traffic) through Cloud NAT instead."
+  description = "Give hosts ephemeral public addresses, which then carry their traffic to the internet (registries, Firecracker downloads, sandboxes' traffic) instead of Cloud NAT. Needed for advertise_public_address. Sandboxes are never let reach a host through its public address."
+  type        = bool
+  default     = false
+}
+
+variable "advertise_public_address" {
+  description = "Each host gives the control service its public address to dial (port 7443) instead of its VPC address: for a control service outside this network, such as in another cloud. Needs assign_external_ip and no advertise_interface; set control_source_ranges to the addresses the service connects from. Either way the service and hosts accept only each other's certificates of the hosts' authority."
   type        = bool
   default     = false
 }
@@ -153,7 +159,7 @@ variable "previous_host_authority_pem" {
 }
 
 variable "control_source_ranges" {
-  description = "Addresses the control service reaches hosts from (port 7443), such as the cluster's pod or node ranges."
+  description = "Addresses the control service reaches hosts from (port 7443), such as the cluster's pod or node ranges, or with advertise_public_address the public addresses it connects from."
   type        = list(string)
 }
 

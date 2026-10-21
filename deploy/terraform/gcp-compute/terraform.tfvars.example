@@ -18,6 +18,12 @@ control_workload_identity = {
   namespace       = "opengeni"
   service_account = "opengeni-compute-control"
 }
+# A control service in another cloud instead dials hosts at their public
+# addresses, from its cluster's egress address, and hosts dial its public
+# load balancer (compute/docs/operations.md, Network):
+# assign_external_ip       = true
+# advertise_public_address = true
+# control_source_ranges    = ["203.0.113.10/32"]
 
 machine_type  = "n2-standard-16"
 initial_hosts = 3
