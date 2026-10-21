@@ -95,11 +95,15 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
-import type { TurnAttemptFenceResult } from "./session-attempt-fence";
-export type SessionEventMutation = (
+import type { TurnAttemptEventFenceResult, TurnAttemptFenceResult } from "./session-attempt-fence";
+export type SessionEventMutation<Projection extends "full" | "event" = "full"> = (
   tx: Database,
-  fence: TurnAttemptFenceResult,
+  fence: Projection extends "event" ? TurnAttemptEventFenceResult : TurnAttemptFenceResult,
 ) => Promise<boolean>;
+/** Plain callbacks retain full rows; checkpoints may explicitly request only fence fields. */
+export type SessionEventMutationInput =
+  | SessionEventMutation
+  | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
 export { sessionHasToolRouterHistory } from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
@@ -39833,7 +39837,7 @@ function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
 export async function registerPendingSessionToolCallInTransaction(
   tx: Database,
   input: PendingSessionToolCallInput,
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; registered: boolean }> {
   assertPendingToolCallCheckpointScope(input, fence);
   const inserted = await tx
@@ -39921,7 +39925,7 @@ export async function registerPendingSessionToolCallInTransaction(
 
 function assertPendingToolCallCheckpointScope(
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem">,
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): void {
   if (
     fence.workspace.id !== input.workspaceId ||
@@ -39946,7 +39950,7 @@ export async function registerPendingSessionToolCall(
         db,
         { accountId: input.accountId, workspaceId: input.workspaceId },
         async (tx) => {
-          const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+          const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
           if (!fence.allowed) return { accepted: false, registered: false };
           return await registerPendingSessionToolCallInTransaction(tx, input, fence);
         },
@@ -40005,7 +40009,7 @@ export async function recordPendingSessionToolCallResultInTransaction(
       requestDigest: string;
     };
   },
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; recorded: boolean }> {
   assertPendingToolCallCheckpointScope(input, fence);
   const [pending] = await tx
@@ -40126,7 +40130,7 @@ export async function recordPendingSessionToolCallResult(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_pending_tool_call_result", correlationId: input.callId },
     async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return { accepted: false, recorded: false };
       return await recordPendingSessionToolCallResultInTransaction(tx, input, fence);
     },
@@ -40290,7 +40294,7 @@ export async function clearDurablePendingSessionToolCallsInTransaction(
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
     callIds: string[];
   },
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; cleared: number }> {
   assertPendingToolCallCheckpointScope(input, fence);
   if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
@@ -40325,7 +40329,7 @@ export async function clearDurablePendingSessionToolCalls(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return { accepted: false, cleared: 0 };
       return await clearDurablePendingSessionToolCallsInTransaction(tx, input, fence);
     },
@@ -86470,7 +86474,7 @@ export async function appendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   observer?: SessionEventAppendObserver,
-  mutate?: SessionEventMutation,
+  mutate?: SessionEventMutationInput,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -86522,10 +86526,12 @@ export async function appendTurnCapabilityCardOnce(
     executionGeneration,
     attemptId,
     [input],
-    async (tx) => {
-      const [existing] = await rawRows<{ id: string }>(
-        tx,
-        sql`
+    {
+      rowProjection: "event",
+      mutate: async (tx) => {
+        const [existing] = await rawRows<{ id: string }>(
+          tx,
+          sql`
           select id from session_events
           where workspace_id = ${workspaceId}::uuid
             and session_id = ${sessionId}::uuid
@@ -86537,9 +86543,10 @@ export async function appendTurnCapabilityCardOnce(
           order by sequence
           limit 1
         `,
-      );
-      existingEventId = existing?.id ?? null;
-      return existingEventId === null;
+        );
+        existingEventId = existing?.id ?? null;
+        return existingEventId === null;
+      },
     },
   );
   return {
@@ -86638,7 +86645,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-  mutate: SessionEventMutation | undefined,
+  mutate: SessionEventMutationInput | undefined,
   observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
@@ -86694,10 +86701,10 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         ? ("no_key_update" as const)
                         : ("key_share" as const),
                   };
-                  // Preserve the full-row callback contract. An event-only
-                  // batch uses the same locks and decisions without copying
-                  // frozen configuration and authority catalogs across the wire.
-                  if (mutate) {
+                  // Preserve plain callbacks' full-row contract. Explicit
+                  // checkpoints use the same fence without copying frozen
+                  // configuration and authority catalogs across the wire.
+                  if (typeof mutate === "function") {
                     const fence = await lockTurnAttemptWriteFenceTx(tx, input);
                     return { fence, applyMutation: () => mutate(tx, fence) };
                   }
@@ -86705,7 +86712,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     ...input,
                     rowProjection: "event",
                   });
-                  return { fence, applyMutation: async () => true };
+                  return {
+                    fence,
+                    applyMutation: () =>
+                      mutate ? mutate.mutate(tx, fence) : Promise.resolve(true),
+                  };
                 },
                 ({ fence }) => (fence.allowed ? "ok" : "rejected"),
               );
@@ -87125,26 +87136,29 @@ export async function settleCodemodeOperationWithOutput(
         },
       },
     ],
-    async (tx) =>
-      settlement.state === "completed"
-        ? await completeCodemodeOperationInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            attemptId: input.attemptId,
-            operationId: input.operationId,
-            claimId: input.claimId,
-            result: settlement.result,
-          })
-        : await failCodemodeOperationInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            attemptId: input.attemptId,
-            operationId: input.operationId,
-            claimId: input.claimId,
-            state: settlement.state,
-            errorCode: settlement.errorCode,
-            errorMessage: settlement.errorMessage,
-          }),
+    {
+      rowProjection: "event",
+      mutate: async (tx) =>
+        settlement.state === "completed"
+          ? await completeCodemodeOperationInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              operationId: input.operationId,
+              claimId: input.claimId,
+              result: settlement.result,
+            })
+          : await failCodemodeOperationInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              operationId: input.operationId,
+              claimId: input.claimId,
+              state: settlement.state,
+              errorCode: settlement.errorCode,
+              errorMessage: settlement.errorMessage,
+            }),
+    },
   );
   return {
     committed: result.mutationApplied,

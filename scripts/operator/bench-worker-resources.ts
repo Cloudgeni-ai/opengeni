@@ -20,6 +20,7 @@ type Sample = {
   statements: number;
   transactions: number;
   cycles: number;
+  responseBytes: number;
   ms: number;
   cpuMs: number;
   queries: Record<string, number>;
@@ -56,6 +57,9 @@ const relay = createServer((frontend) => {
     }),
   );
   frontend.pipe(backend);
+  backend.on("data", (chunk: Buffer) => {
+    if (current) current.responseBytes += chunk.length;
+  });
   backend.pipe(frontend);
   const close = () => {
     frontend.destroy();
@@ -93,6 +97,7 @@ const measure = async <T>(operation: string, run: () => Promise<T>): Promise<T> 
     statements: 0,
     transactions: 0,
     cycles: 0,
+    responseBytes: 0,
     ms: 0,
     cpuMs: 0,
     queries: {},
