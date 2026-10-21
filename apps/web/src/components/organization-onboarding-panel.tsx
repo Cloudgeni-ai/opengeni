@@ -27,15 +27,15 @@ import {
   type OnboardingDestination,
 } from "@/components/onboarding/developer-setup-step";
 import { OnboardingUseCaseStep } from "@/components/onboarding/use-case-step";
-import { Button } from "@/components/ui/button";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@opengeni/react/ui/button";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import {
   apiErrorTechnicalFacts,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
 import {

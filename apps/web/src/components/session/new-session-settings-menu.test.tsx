@@ -17,7 +17,7 @@ const {
   runsOnAttention,
   runsOnSummary,
 } = await import("./new-session-settings-menu");
-const { DropdownMenu, DropdownMenuContent } = await import("@/components/ui/dropdown-menu");
+const { DropdownMenu, DropdownMenuContent } = await import("@opengeni/react/ui/dropdown-menu");
 const { emptySessionDraft } = await import("@/lib/session-create");
 
 afterAll(() => GlobalRegistrator.unregister());

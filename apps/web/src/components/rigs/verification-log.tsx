@@ -4,8 +4,8 @@
 import { ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
 
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusDot } from "@/components/ui/status-dot";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { withOccurrenceKeys } from "@/lib/react-key";
 import { cn } from "@/lib/utils";
 import type { RigChangeVerification, RigCheckResult } from "@/types";

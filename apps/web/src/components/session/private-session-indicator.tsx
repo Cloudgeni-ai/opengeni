@@ -1,6 +1,11 @@
 import { LockIcon } from "lucide-react";
 
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@opengeni/react/ui/tooltip";
 
 /*
  * Chats in a Personal workspace are private to its owner (docs/organization-

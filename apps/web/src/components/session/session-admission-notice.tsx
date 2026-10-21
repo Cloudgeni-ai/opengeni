@@ -1,8 +1,8 @@
 import type { Session, SessionMachineAccess } from "@opengeni/sdk";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { PersonalMachineExplanation } from "./session-machine-access-notice";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /** Stream, detail, and mutation receipts can arrive in different orders. */
 export function admissionRecheckControl(

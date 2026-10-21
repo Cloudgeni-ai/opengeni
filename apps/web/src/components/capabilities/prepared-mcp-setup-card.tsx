@@ -4,7 +4,7 @@ import { ConnectController } from "@opengeni/connect";
 import { ConnectSetup, useConnect } from "@opengeni/react/connect";
 import { attachSessionCapability, type AuthNeededItem } from "@opengeni/react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import "@opengeni/react/connect.css";
 

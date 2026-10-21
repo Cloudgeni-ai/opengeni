@@ -1,7 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
-import { HelpLink } from "@/components/ui/inline-help";
+import { HelpLink } from "@opengeni/react/ui/inline-help";
 
 /** A HelpLink to a page inside the app: a plain click navigates without a page load. */
 export function InAppHelpLink({

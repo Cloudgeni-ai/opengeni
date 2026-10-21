@@ -4,13 +4,13 @@ import { ArrowUpRightIcon, BookMarkedIcon, CheckIcon, Loader2Icon, LockIcon } fr
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";

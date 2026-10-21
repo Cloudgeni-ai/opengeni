@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 
 import { CapabilityPage, CapabilityStatus } from "@/components/capabilities/capability-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { ListRow, RowList } from "@/components/ui/list-row";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 
 /* ----------------------------------------------------------------------------
    One provider, several ways to use it (Slack: the Opengeni bot or your own

@@ -9,7 +9,7 @@
  */
 import { ModelMark, modelDisplayName, modelHasMark, type ModelDisplayInput } from "@opengeni/react";
 
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
 
 export { ModelMark, ModelName, modelDisplayName, modelHasMark, modelVendor } from "@opengeni/react";
 export type { ModelDisplayInput } from "@opengeni/react";

@@ -1,7 +1,7 @@
 import { CalendarClockIcon, KeyRoundIcon, StarIcon } from "lucide-react";
 import { Fragment, type ReactNode } from "react";
 
-import { MetaChip, type MetaChipVariant } from "@/components/ui/meta-chip";
+import { MetaChip, type MetaChipVariant } from "@opengeni/react/ui/meta-chip";
 import {
   PRODUCT_STATUS_KEYS,
   PRODUCT_STATUSES,
@@ -9,8 +9,12 @@ import {
   StatusBadgeSkeleton,
   type ProductStatus,
   type StatusBadgeVariant,
-} from "@/components/ui/status-badge";
-import { SEMANTIC_TONE_META, SEMANTIC_TONES, type SemanticTone } from "@/components/ui/status-dot";
+} from "@opengeni/react/ui/status-badge";
+import {
+  SEMANTIC_TONE_META,
+  SEMANTIC_TONES,
+  type SemanticTone,
+} from "@opengeni/react/ui/status-dot";
 import { cn } from "@/lib/utils";
 import {
   apiKeys,

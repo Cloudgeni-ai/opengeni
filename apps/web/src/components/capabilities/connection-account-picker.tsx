@@ -1,7 +1,7 @@
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ComposerMenuSwitchIndicator } from "@opengeni/react/ui/composer-menu";
 import type {
   ConnectedAccountGroup,
   ConnectionAccountChoices,

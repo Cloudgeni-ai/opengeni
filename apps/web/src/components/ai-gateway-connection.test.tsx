@@ -125,7 +125,7 @@ mock.module("sonner", () => ({
   toast: { error: toastError, success: toastSuccess },
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     confirmLabel,
@@ -154,8 +154,8 @@ mock.module("@/components/ui/confirm-dialog", () => ({
 
 // The one-field Replace key prompt renders its real form frame inline: the
 // Radix dialog around it is a portal.
-const actualFormDialog = await import("@/components/ui/form-dialog");
-mock.module("@/components/ui/form-dialog", () => ({
+const actualFormDialog = await import("@opengeni/react/ui/form-dialog");
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   ...actualFormDialog,
   FormDialog: ({
     open,
@@ -176,7 +176,7 @@ mock.module("@/components/ui/form-dialog", () => ({
 }));
 
 // Menus and the disconnect confirm as plain buttons: the real ones are Radix portals.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,

@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
 import { invalidateSharedQueries, MODEL_SETTINGS_STALE_TIME_MS } from "@/lib/shared-query";
 

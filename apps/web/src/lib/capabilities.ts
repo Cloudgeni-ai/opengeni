@@ -1,5 +1,5 @@
 import type { IntegrationChip } from "@/components/capabilities/integration-view-model";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,

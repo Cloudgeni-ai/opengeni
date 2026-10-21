@@ -11,13 +11,13 @@ import { ArchiveIcon, PlusIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { useAppContext } from "@/context";
-import { apiErrorFacts } from "@/lib/api-error";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { Session } from "@/types";
 

@@ -13,20 +13,20 @@ import type {
   ComposerPlusProps,
   Panel,
 } from "./composer-mobile-plus-panel";
-import { Button } from "@/components/ui/button";
-import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
-import { Dialog } from "@/components/ui/dialog";
-import { MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
+import { Button } from "@opengeni/react/ui/button";
+import { COMPOSER_MENU_PANEL_CLASS } from "@opengeni/react/ui/composer-menu";
+import { Dialog } from "@opengeni/react/ui/dialog";
+import { MENU_NOTE_CLASS } from "@opengeni/react/ui/menu-styles";
 import {
   ComposerMenuRowsSkeleton,
   lazyComposerPanel,
   preloadComposerMenuPanels,
-} from "@/components/ui/composer-menu";
+} from "@opengeni/react/ui/composer-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 
 export type { ComposerPlusProps, Panel as ComposerPlusPanel } from "./composer-mobile-plus-panel";
 

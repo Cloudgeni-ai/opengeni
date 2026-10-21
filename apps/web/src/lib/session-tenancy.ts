@@ -5,7 +5,7 @@ import type {
   SessionVisibilityWork,
 } from "@opengeni/sdk";
 
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 export type SessionTenancyTarget = {
   workspaceId: string;

@@ -8,7 +8,7 @@ import {
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
 } from "../../../src/components/models/model-account-settings";
-import { SectionStack } from "../../../src/components/ui/section";
+import { SectionStack } from "@opengeni/react/ui/section";
 import { PersonalFallbackPreference } from "../../../src/components/models/model-account-policy-controls";
 import "../../../src/styles.css";
 

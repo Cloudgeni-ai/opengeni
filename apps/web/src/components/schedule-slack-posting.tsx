@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { Field } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { Field } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   activeOpenGeniSlackBotConnections,

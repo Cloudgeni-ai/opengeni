@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { SandboxRecoverySelection, SandboxRecoveryTarget } from "@opengeni/sdk";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import {
   automaticRecoveryRetryNotice,
   createSandboxRecoveryController,

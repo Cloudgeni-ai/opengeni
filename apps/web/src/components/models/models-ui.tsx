@@ -10,10 +10,10 @@ import {
   type ReactNode,
 } from "react";
 
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { userErrorText } from "@/lib/api-error";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { returnToSearch, type ReturnTo } from "@/lib/return-to";
 import { ModelSettingsPlaceholder } from "./model-settings-placeholder";

@@ -15,14 +15,18 @@ import {
   TrendingUpIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { EmptyState, EmptyStateTemplate, EmptyStateTemplates } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  EmptyState,
+  EmptyStateTemplate,
+  EmptyStateTemplates,
+} from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";

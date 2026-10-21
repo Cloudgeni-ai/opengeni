@@ -11,7 +11,7 @@ import { PluginRemovalImpact } from "./plugin-removal-impact";
 import { SourceImportDialog } from "@/components/capabilities/source-import-dialog";
 import type { SourceImportState } from "@/components/capabilities/source-import-flow";
 import type { SourceRemoveTarget } from "@/components/capabilities/use-source-packages";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import type { ConnectionMetadata } from "@/types";
 
 export function SourcePackageDialogs({

@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { IntegrationRow } from "./integration-row";
-import { Sheet } from "@/components/ui/sheet";
+import { Sheet } from "@opengeni/react/ui/sheet";
 import { IntegrationSheetBody, integrationDisclosureElementId } from "./integration-sheet";
 import { INTEGRATION_LOCKED_SENTENCE, type IntegrationViewModel } from "./integration-view-model";
 

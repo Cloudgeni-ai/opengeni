@@ -50,9 +50,9 @@ import {
 } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
 import { ModelAccountIndicator } from "@/components/session/model-account-indicator";
-import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { Button } from "@opengeni/react/ui/button";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@opengeni/react/ui/sheet";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { matchesShortcut, NEW_SESSION_SHORTCUT } from "@/lib/keyboard-shortcuts";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";

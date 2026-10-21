@@ -32,34 +32,34 @@ import {
 import { toast } from "sonner";
 import { modelDisplayName } from "@opengeni/react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailFact, DetailFacts, DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { InlineHelp } from "@/components/ui/inline-help";
+} from "@opengeni/react/ui/detail-page";
+import { DetailFact, DetailFacts, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
 import { modelPayerHint } from "@/lib/model-payer";
 import { useAppContext } from "@/context";
 import { formatElapsedSeconds } from "@/lib/format";
@@ -120,7 +120,7 @@ import { ScheduleBlockerNotice, SchedulePausedChatNotice } from "./schedule-bloc
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
 import { ScheduleAccounts, scheduleAccountsDescription } from "./schedule-accounts";
 import { useScheduleActions } from "./use-schedule-actions";
-import { MoreMenu } from "@/components/ui/page-actions";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 const POLL_MS = 30_000;
 

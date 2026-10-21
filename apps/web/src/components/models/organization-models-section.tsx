@@ -7,8 +7,8 @@ import {
   WorkspaceModelsPageBody,
   useOrganizationModelAccounts,
 } from "@/components/models/workspace-models-page";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { organizationModelsSearch, type ModelsView } from "@/lib/models-route";

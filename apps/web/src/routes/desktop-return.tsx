@@ -6,7 +6,7 @@
 import { AppWindowIcon } from "lucide-react";
 import { useEffect, useMemo } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { desktopBridge } from "@/lib/desktop";
 import { desktopReturnAppLink, desktopReturnTarget } from "@/lib/desktop-return";
 

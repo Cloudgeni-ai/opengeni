@@ -58,8 +58,8 @@ import { SessionRowHoverDetails } from "@/components/rail/session-row-hover-deta
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { sessionHoverDescription, sessionHoverFacts } from "@/lib/session-hover-facts";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -67,7 +67,7 @@ import {
   ContextMenuLabel,
   ContextMenuSeparator,
   ContextMenuTrigger,
-} from "@/components/ui/context-menu";
+} from "@opengeni/react/ui/context-menu";
 import {
   DropdownMenu,
   DropdownMenuCheck,
@@ -76,10 +76,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+} from "@opengeni/react/ui/dropdown-menu";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@opengeni/react/ui/hover-card";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@/context";
 import {
   activeSessionContinuation,
@@ -115,7 +115,7 @@ import {
   writeSessionGroupWindows,
 } from "@/lib/session-group-window-memory";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { countNeedsYou, filterNeedsYou } from "@/lib/needs-you";
 import {
   SESSION_TITLE_MAX_LENGTH,

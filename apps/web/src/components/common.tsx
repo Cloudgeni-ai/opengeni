@@ -8,7 +8,7 @@ import {
   apiErrorTechnicalFacts,
   isPermissionDenied,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { cn } from "@/lib/utils";
 
 const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
@@ -16,7 +16,7 @@ const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
 // Startup code: the disclosure lives with the management UI primitives, so it
 // loads only once a load error actually has details to show.
 const TechnicalDetails = lazy(() =>
-  import("@/components/ui/error-message").then((module) => ({
+  import("@opengeni/react/ui/error-message").then((module) => ({
     default: module.TechnicalDetails,
   })),
 );

@@ -9,10 +9,10 @@ import {
 import { ArrowUpRightIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { userErrorText } from "@/lib/api-error";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import {
   causeOf,

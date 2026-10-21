@@ -3,7 +3,7 @@ import type { RetainedArtifactMetadata, RetainedArtifactReference } from "@openg
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "@opengeni/react/artifacts";
 import { createWorkspaceRetainedArtifactLoader, useLightboxOptional } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { Link } from "@tanstack/react-router";
 import { DeferredChatMedia } from "@opengeni/react/artifacts";
 import {

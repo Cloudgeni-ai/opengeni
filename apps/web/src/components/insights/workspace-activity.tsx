@@ -14,15 +14,15 @@ import {
   type FloorSession,
   type InsightsRange,
 } from "@/components/insights/activity-data";
-import { Button } from "@/components/ui/button";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { StatGroup, StatTile, type StatDelta } from "@/components/ui/stat-tile";
+import { Button } from "@opengeni/react/ui/button";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { StatGroup, StatTile, type StatDelta } from "@opengeni/react/ui/stat-tile";
 import { useAppContext } from "@/context";
-import { apiErrorAdvice } from "@/lib/api-error";
+import { apiErrorAdvice } from "@opengeni/react/ui/api-error";
 import { cn } from "@/lib/utils";
 
 import { modelDisplayName } from "./model-display";

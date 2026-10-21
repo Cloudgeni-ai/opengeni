@@ -10,20 +10,20 @@ import {
   RetainedFilePreview,
   retainedPreviewKind,
 } from "@/components/artifacts/retained-file-preview";
-import { ContentPage } from "@/components/ui/content-layout";
-import { Button } from "@/components/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
 import { CopyableMono } from "@/components/common";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { Skeleton } from "@/components/ui/skeleton";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
   ARTIFACT_DETAIL_FRAME,
   ArtifactKindTile,
   useArtifactsBackLink,
   useArtifactFullView,
 } from "@/components/artifacts/artifact-page-chrome";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
 import {
   isPrivateFileLoadError,

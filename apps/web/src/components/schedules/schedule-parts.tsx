@@ -14,15 +14,15 @@ import {
   Trash2Icon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/dropdown-menu";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { useAppContext } from "@/context";
 import { creatorInitials } from "@/lib/creator-initials";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -133,7 +133,7 @@ export function useScheduleNavigation(workspaceId: string) {
   };
 }
 
-export { inAppClick } from "@/lib/in-app-click";
+export { inAppClick } from "@opengeni/react/ui/in-app-click";
 
 /* ----------------------------------------------------------------------------
    Values.

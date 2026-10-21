@@ -27,22 +27,22 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   Toolbar,
   ToolbarFilterChips,
@@ -51,14 +51,14 @@ import {
   ToolbarSearch,
   type ToolbarFilterGroup,
   type ToolbarFilterValue,
-} from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { useDuplicateSite } from "@/lib/use-duplicate-site";
 import { FILE_AUDIENCE_COPY, useArtifactAudience } from "./site-audience";
-import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
 import { ARTIFACT_ACCESS_REQUIRED } from "@/lib/artifact-access";
 import {
   artifactKey,

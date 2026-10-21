@@ -30,24 +30,24 @@ import {
   ComposerMenuHeader,
   ComposerMenuRowsSkeleton,
   lazyComposerPanel,
-} from "@/components/ui/composer-menu";
-import { MENU_BACK_BUTTON_CLASS, MENU_CHEVRON_CLASS } from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/composer-menu";
+import { MENU_BACK_BUTTON_CLASS, MENU_CHEVRON_CLASS } from "@opengeni/react/ui/menu-styles";
 const loadAgentLearning = () => import("@/components/knowledge/agent-learning-settings");
 const AgentLearningDraftEditor = lazyComposerPanel(() =>
   loadAgentLearning().then((module) => module.AgentLearningDraftEditor),
 );
-import { DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { DialogContent, DialogTitle } from "@opengeni/react/ui/dialog";
 import { useOptionalAppContext } from "@/context";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuMeta,
   DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
-import { ConnectorAction } from "@/components/ui/composer-menu-action";
+import { ConnectorAction } from "@opengeni/react/ui/composer-menu-action";
 import {
   ComposerCapabilitiesMenuBody,
   type ComposerAgentCapabilities,

@@ -1,7 +1,7 @@
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { SubscriptionUsagePoolView } from "@/components/models/subscription-usage-pool";
-import { Section, SectionStack } from "@/components/ui/section";
-import { Select } from "@/components/ui/select";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { Select } from "@opengeni/react/ui/select";
 import { useState } from "react";
 
 export const POOL_PREVIEW_NOW = Date.parse("2026-10-20T09:30:00Z");

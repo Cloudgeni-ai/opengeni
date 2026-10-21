@@ -7,31 +7,31 @@ import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 
 import { toast } from "sonner";
 
 import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   RoleSelect,
   roleLabel,
   type RoleOption,
   type RoleValue,
-} from "@/components/ui/role-select";
-import { Section, SectionStack } from "@/components/ui/section";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@opengeni/react/ui/role-select";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
   apiErrorTechnicalFacts,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { permissionLabel } from "@/lib/api-key-presets";
 import { orgLabel } from "@/lib/org";
 import {
@@ -44,7 +44,7 @@ import type {
   WorkspaceMember,
   WorkspaceMemberCandidate,
 } from "@/types";
-import { FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Roles and rows, shared with the organization-managed Access page.

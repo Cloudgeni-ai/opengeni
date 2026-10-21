@@ -17,12 +17,12 @@ import {
 import { PlusIcon, Trash2Icon, UploadIcon } from "lucide-react";
 import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import { SecretInput } from "@/components/ui/secret-field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { cn } from "@/lib/utils";
 
 import { fieldLabel } from "./item-page";

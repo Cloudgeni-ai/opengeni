@@ -2,18 +2,18 @@ import { vaultErrorCode, type VaultSummary } from "@opengeni/react";
 import { KeyRoundIcon, LinkIcon, RotateCcwIcon, UnplugIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { MoreMenu } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section } from "@/components/ui/section";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section } from "@opengeni/react/ui/section";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import { ProviderTile } from "./provider-marks";
 import {

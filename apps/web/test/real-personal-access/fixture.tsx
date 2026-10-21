@@ -20,8 +20,8 @@ import {
   FollowUpRepositoryMenuBody,
 } from "../../src/components/follow-up-repository-picker";
 import { ComposerMobilePlus } from "../../src/components/composer-mobile-plus";
-import { Button } from "../../src/components/ui/button";
-import { TooltipProvider } from "../../src/components/ui/tooltip";
+import { Button } from "@opengeni/react/ui/button";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import type { RepositoryContextPickerProps } from "../../src/components/repository-picker";
 import { PersonalResourceAttachmentControl } from "../../src/components/personal-resource-attachment-control";
 import type { PersonalResourceAttachmentController } from "../../src/lib/use-personal-resource-attachment";

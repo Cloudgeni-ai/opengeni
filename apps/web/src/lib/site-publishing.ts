@@ -14,7 +14,7 @@ import {
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 
-import { apiErrorFacts } from "@/lib/api-error";
+import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 
 /* ----------------------------------------------------------------------------
    Publishing a Site to the web: the pure parts of the Publish page. The API

@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
 import type { ScheduledTask } from "@/types";
 

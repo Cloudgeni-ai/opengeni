@@ -12,18 +12,18 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MoreMenu } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Toolbar, ToolbarGroup, ToolbarSearch } from "@/components/ui/toolbar";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { Toolbar, ToolbarGroup, ToolbarSearch } from "@opengeni/react/ui/toolbar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 
 import {
   expiryState,

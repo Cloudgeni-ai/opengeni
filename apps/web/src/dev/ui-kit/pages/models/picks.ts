@@ -1,17 +1,17 @@
-import type { ChoiceCardsVariant } from "@/components/ui/choice-cards";
+import type { ChoiceCardsVariant } from "@opengeni/react/ui/choice-cards";
 import type { DestructiveConfirmVariant } from "@/components/ui/destructive-confirm";
-import type { DisclosureVariant } from "@/components/ui/disclosure";
-import type { LineTabsVariant } from "@/components/ui/line-tabs";
-import type { RowListVariant } from "@/components/ui/list-row";
-import type { MetaChipVariant } from "@/components/ui/meta-chip";
-import type { PageHeaderIconMode, PageHeaderVariant } from "@/components/ui/page-header";
-import type { SectionVariant } from "@/components/ui/section";
-import type { SegmentedControlVariant } from "@/components/ui/segmented-control";
-import type { SelectMenuVariant } from "@/components/ui/select-menu";
-import type { SettingRowVariant } from "@/components/ui/setting-row";
-import type { StatusBadgeVariant } from "@/components/ui/status-badge";
-import type { SwitchVariant } from "@/components/ui/switch";
-import type { UsageMeterVariant } from "@/components/ui/usage-meter";
+import type { DisclosureVariant } from "@opengeni/react/ui/disclosure";
+import type { LineTabsVariant } from "@opengeni/react/ui/line-tabs";
+import type { RowListVariant } from "@opengeni/react/ui/list-row";
+import type { MetaChipVariant } from "@opengeni/react/ui/meta-chip";
+import type { PageHeaderIconMode, PageHeaderVariant } from "@opengeni/react/ui/page-header";
+import type { SectionVariant } from "@opengeni/react/ui/section";
+import type { SegmentedControlVariant } from "@opengeni/react/ui/segmented-control";
+import type { SelectMenuVariant } from "@opengeni/react/ui/select-menu";
+import type { SettingRowVariant } from "@opengeni/react/ui/setting-row";
+import type { StatusBadgeVariant } from "@opengeni/react/ui/status-badge";
+import type { SwitchVariant } from "@opengeni/react/ui/switch";
+import type { UsageMeterVariant } from "@opengeni/react/ui/usage-meter";
 
 import { usePick } from "../../picks";
 

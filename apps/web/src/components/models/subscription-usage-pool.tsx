@@ -1,7 +1,7 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
-import { RelativeTime, formatShortTime, useMinuteNow } from "@/components/ui/relative-time";
-import { UsageMeter } from "@/components/ui/usage-meter";
+import { RelativeTime, formatShortTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 import { useSharedQuery } from "@/lib/shared-query";
 
 export const SUBSCRIPTION_USAGE_POOL_QUERY_PREFIX = ["subscription-usage-pools"] as const;

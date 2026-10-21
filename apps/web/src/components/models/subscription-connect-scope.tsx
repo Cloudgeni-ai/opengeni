@@ -1,4 +1,4 @@
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 
 /** Shared ownership choice for subscription accounts in an ordinary workspace. */
 export function SubscriptionConnectScope({

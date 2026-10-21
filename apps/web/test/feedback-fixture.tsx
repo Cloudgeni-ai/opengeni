@@ -7,7 +7,7 @@ import { SessionTenancyOperationController } from "../src/lib/session-tenancy-op
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { Session } from "../src/types";
 import { FeedbackDialog } from "../src/components/feedback";
-import { Button } from "../src/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import type { CreateFeedbackRequest, Feedback } from "@opengeni/sdk";
 import "../src/styles.css";
 const workspaceId = "11111111-1111-4111-8111-111111111111";

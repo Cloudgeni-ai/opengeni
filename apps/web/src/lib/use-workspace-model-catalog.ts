@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useAppContext } from "@/context";
 import { CREDIT_BALANCE_CHANGED } from "./credit-balance-events";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "@/lib/model-policy";
 import { invalidateSharedQueries, useSharedQuery } from "@/lib/shared-query";
 

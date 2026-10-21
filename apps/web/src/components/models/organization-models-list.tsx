@@ -67,17 +67,17 @@ import {
   superGrokAccountName,
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { billingClassForModel } from "@/lib/model-policy";
 import { accountKey, type GatewayId } from "@/lib/models-route";
 import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";

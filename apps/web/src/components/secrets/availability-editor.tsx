@@ -1,9 +1,9 @@
 import type { VaultAvailability } from "@opengeni/react";
 import { useMemo, useState } from "react";
 
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Checkbox, CheckboxField } from "@/components/ui/field";
-import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Checkbox, CheckboxField } from "@opengeni/react/ui/field";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 
 /* ----------------------------------------------------------------------------
    "Available in" (S6): which workspaces can use a vault. For an organization

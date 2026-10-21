@@ -9,7 +9,7 @@ import {
 } from "@opengeni/react";
 
 import { resolveWorkspaceAgentDefaults, type AgentCapabilities } from "@opengeni/contracts";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /* ----------------------------------------------------------------------------
    Secrets: vocabulary, grouping and error copy shared by every Secrets page.

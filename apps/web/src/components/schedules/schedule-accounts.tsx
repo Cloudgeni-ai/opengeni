@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
-import { DetailFact, DetailFacts } from "@/components/ui/detail-sheet";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailFact, DetailFacts } from "@opengeni/react/ui/detail-sheet";
 import type { ScheduledTask, ScheduledTaskAccountPlan } from "@/types";
 
 type PlanConnector = ScheduledTaskAccountPlan["connectors"][number];

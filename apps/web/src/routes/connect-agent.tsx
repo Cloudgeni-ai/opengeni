@@ -4,10 +4,10 @@ import { useEffect, useState } from "react";
 
 import { apiBaseUrl } from "@/api";
 import { ConsentFrame, McpConsentPage } from "@/components/organization-access/mcp-consent-page";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /* ----------------------------------------------------------------------------
    /connect-agent: where an agent's sign-in to the organization MCP server

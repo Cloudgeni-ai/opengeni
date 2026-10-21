@@ -4,12 +4,12 @@ import { Loader2Icon, PauseIcon, PlayIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { DisabledReasonTooltip, SettingRow } from "@/components/ui/setting-row";
-import { StatusDot } from "@/components/ui/status-dot";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { DisabledReasonTooltip, SettingRow } from "@opengeni/react/ui/setting-row";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { cn } from "@/lib/utils";
 import { durationLabel, useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 

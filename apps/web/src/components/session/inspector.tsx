@@ -17,11 +17,15 @@ import { toast } from "sonner";
 import { ConnectionPill, CopyableMono, InfoRow, InspectorSection } from "@/components/common";
 import { ModelContextInspectorPane } from "@/components/session/model-context-inspector";
 import { sessionSandboxLabel } from "@/components/session/sandbox-switcher";
-import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Select } from "@/components/ui/select";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
+import { ScrollArea } from "@opengeni/react/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@opengeni/react/ui/tabs";
+import { Select } from "@opengeni/react/ui/select";
 import { useAppContext } from "@/context";
 import { eventDisplayLabel, isTerminalSessionStatus } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";

@@ -2,26 +2,26 @@ import { useId, useState, type ReactNode } from "react";
 import { BuildingIcon, CalendarIcon, ShieldIcon, UserPlusIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { AccessList, type AccessMember } from "@/components/ui/access-list";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
+import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { CheckboxField, Field, FieldStack } from "@/components/ui/field";
-import { FormDialog, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
-import { HelpLink } from "@/components/ui/inline-help";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RoleSelect, roleLabel, type RoleValue } from "@/components/ui/role-select";
-import { Section, SectionStack } from "@/components/ui/section";
+import { CheckboxField, Field, FieldStack } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
+import { HelpLink } from "@opengeni/react/ui/inline-help";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RoleSelect, roleLabel, type RoleValue } from "@opengeni/react/ui/role-select";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
 
 import {
   KIT_NOW,

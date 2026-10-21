@@ -13,19 +13,19 @@ import {
 } from "react";
 
 import { BrandMark, Wordmark } from "@/components/brand-mark";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { SectionVariantProvider } from "@/components/ui/section-variant";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
 import {
   Sheet,
   SheetContent,
   SheetDescription,
   SheetTitle,
   SheetTrigger,
-} from "@/components/ui/sheet";
-import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/sheet";
+import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { desktopBridge, windowControlsInPage } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";

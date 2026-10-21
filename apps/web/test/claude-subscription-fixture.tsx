@@ -18,7 +18,7 @@ import {
 } from "../src/components/ai-gateway-connection";
 import { useOrganizationProviderConnection } from "../src/components/organization-model-provider-connection";
 import { ACCOUNT_COLUMNS } from "../src/components/models/codex-models";
-import { RowList } from "../src/components/ui/list-row";
+import { RowList } from "@opengeni/react/ui/list-row";
 import { AppearanceProvider } from "../src/lib/appearance";
 import "../src/styles.css";
 

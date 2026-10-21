@@ -134,7 +134,7 @@ import {
 import { toast } from "sonner";
 
 import { isApiErrorStatus, voiceRealtimeClient } from "@/api";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
@@ -168,8 +168,8 @@ import { useBackgroundAttentionTitle } from "@/lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type { SessionArtifactSourceCache } from "@/lib/session-artifact-discovery";

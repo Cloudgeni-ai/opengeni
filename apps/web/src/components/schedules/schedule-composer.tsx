@@ -23,10 +23,10 @@ import {
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useFieldControlProps } from "@/components/ui/field";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+} from "@opengeni/react/ui/dropdown-menu";
+import { useFieldControlProps } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { gitHubRepositoryResource, isRepositoryResourceForGitHubRepo } from "@/lib/session-tools";

@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { CreditsCelebrationDialog } from "@/components/credits/checkout-credits-celebration";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -17,13 +17,13 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@opengeni/react/ui/dialog";
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
-import { Notice } from "@/components/ui/notice";
+import { Notice } from "@opengeni/react/ui/notice";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { validTopupAmount } from "@/lib/format";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
 import { subscriptionAction } from "@/lib/subscription-plans";
 

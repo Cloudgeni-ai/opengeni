@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import { PreparedMcpSetupCard } from "./prepared-mcp-setup-card";
 

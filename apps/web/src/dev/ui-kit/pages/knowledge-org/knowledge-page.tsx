@@ -11,26 +11,26 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { InlineHelp } from "@/components/ui/inline-help";
+} from "@opengeni/react/ui/dropdown-menu";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { PageHeader } from "@/components/ui/page-header";
-import type { Revision } from "@/components/ui/revision-history";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import type { Revision } from "@opengeni/react/ui/revision-history";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import { KIT_NOW, skillCapabilities, type LearningMode } from "../../fixtures";
 import { KitBlock } from "../../kit";

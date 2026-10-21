@@ -20,12 +20,12 @@ import {
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { FieldStack } from "@/components/ui/field";
-import { ListRow } from "@/components/ui/list-row";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { FieldStack } from "@opengeni/react/ui/field";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageMeterGroup, UsageReadout } from "@opengeni/react/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /* ----------------------------------------------------------------------------

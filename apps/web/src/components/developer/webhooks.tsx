@@ -22,35 +22,35 @@ import {
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { CheckboxField, Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { CheckboxField, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { FLUSH_DETAIL_PAGE_CLASS, FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
-import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import type { SemanticTone } from "@/components/ui/status-dot";
-import { userErrorText } from "@/lib/api-error";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import type { SemanticTone } from "@opengeni/react/ui/status-dot";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import type { DeveloperIntegrationsApi, IntegrationWebhook } from "./integrations-api";
 import {

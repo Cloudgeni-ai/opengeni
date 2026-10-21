@@ -5,9 +5,9 @@ import {
 } from "@opengeni/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { Button } from "@opengeni/react/ui/button";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { useAppContext } from "@/context";
 import { builtInMcpCapability, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import {
