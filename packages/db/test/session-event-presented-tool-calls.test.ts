@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_STEP_TYPES,
   isPresentedSessionToolName,
 } from "@opengeni/contracts/session-history";
 import {
+  appendSessionEvents,
   bootstrapWorkspace,
   createDb,
   createSession,
@@ -394,4 +396,32 @@ test("SQL tool-name classification equals isPresentedSessionToolName, named or n
   );
   expect(kept.map((event) => event.sequence)).toEqual(expected);
   expect(expected.length).toBe(2 * 8);
+  // The regex the filter used before migration 0888 agrees on every row.
+  const previousFilter = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  const previous = await shared.admin<{ sequence: number }[]>`
+    select sequence from session_events
+    where workspace_id = ${grant.workspaceId} and session_id = ${session.id}
+      and (payload ->> 'name') ~ ${previousFilter}
+    order by sequence`;
+  expect(previous.map((row) => row.sequence)).toEqual(expected);
+}, 120_000);
+
+test("the application writer fills tool_name under row-level security", async () => {
+  const { grant, session } = await seedToolNameSession();
+  await appendSessionEvents(client.db, grant.workspaceId, session.id, [
+    {
+      type: "agent.toolCall.created",
+      payload: { id: "w1", name: "opengeni__sandbox_file_publish", arguments: {} },
+    },
+    { type: "agent.toolCall.output", payload: { id: "w1", name: "x", output: {} } },
+  ]);
+  const rows = await shared.admin<{ type: string; tool_name: string | null }[]>`
+    select type, tool_name from session_events
+    where workspace_id = ${grant.workspaceId} and session_id = ${session.id}
+      and type like 'agent.toolCall.%'
+    order by sequence`;
+  expect(rows).toEqual([
+    { type: "agent.toolCall.created", tool_name: "opengeni__sandbox_file_publish" },
+    { type: "agent.toolCall.output", tool_name: null },
+  ]);
 }, 120_000);
