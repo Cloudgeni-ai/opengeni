@@ -1187,6 +1187,63 @@ describe("integration boundaries and queue-only shadow CI", () => {
 });
 
 describe("review regressions: observation, admission and telemetry", () => {
+  test("same-owner same-clock transactions have distinct state OIDs and exactly one CAS winner", async () => {
+    const f = await fixture();
+    const manifest = await f.git.build(spec([pull(1, f.first)], f.base));
+    const ledger = {
+      ...emptyLedger(),
+      owner: "same-process-owner",
+      epoch: 1,
+      expiresAt: "2026-10-21T13:00:00Z",
+    };
+    const first = await f.git.stateCommit(ledger, null, NOW);
+    const second = await f.git.stateCommit(ledger, null, NOW);
+    expect(first).not.toBe(second);
+    expect(await f.git.readLedger(first)).toEqual(await f.git.readLedger(second));
+    const exec = f.git.exec.bind(f.git);
+    let arrived = 0,
+      releaseBoth: () => void = () => {},
+      releaseFirst: () => void = () => {};
+    const bothRead = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+    const firstPushed = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    f.git.exec = async (args, input, extraEnv) => {
+      if (args[0] !== "push") return exec(args, input, extraEnv);
+      if (++arrived === 1) {
+        await bothRead;
+        try {
+          return await exec(args, input, extraEnv);
+        } finally {
+          releaseFirst();
+        }
+      }
+      releaseBoth();
+      await firstPushed;
+      return exec(args, input, extraEnv);
+    };
+    const writer = new AtomicGitWriter(
+      f.git,
+      f.origin.dir,
+      "refs/heads/batcher-state",
+      "refs/heads/main",
+    );
+    const publish = (next: string) =>
+      writer.transaction([
+        { ref: "refs/heads/batcher-state", expected: null, next },
+        { ref: `refs/heads/queue/${manifest.batchId}`, expected: null, next: manifest.tipSha },
+      ]);
+    const outcomes = await Promise.allSettled([publish(first), publish(second)]);
+    expect(arrived).toBe(2); // Both pre-push rereads saw the same empty refs.
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(await f.origin.exec(["rev-parse", "refs/heads/batcher-state"])).toBe(
+      outcomes[0]!.status === "fulfilled" ? first : second,
+    );
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+  });
   test("batcher bookkeeping receipt does not revoke the human evidence it is reconciling", () => {
     const input: PullInput = {
       number: 1,

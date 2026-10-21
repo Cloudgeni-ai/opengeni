@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import {
   assertSha,
   canonical,
@@ -177,7 +178,16 @@ export class GitStore {
   async stateCommit(ledger: Ledger, parent: string | null, now: string): Promise<string> {
     const blob = await this.exec(["hash-object", "-w", "--stdin"], canonical(ledger));
     const tree = await this.exec(["mktree"], `100644 blob ${blob}\tstate.json\n`);
-    return this.commit(tree, parent ? [parent] : [], "Merge batcher state v1", now);
+    // Lease transaction identity is deliberately unique even for the same owner,
+    // ledger and clock tick. Otherwise Git can omit an identical already-current
+    // state OID before checking its lease and falsely report two winners.
+    // Candidate manifests/commits remain deterministic; only state commits vary.
+    return this.commit(
+      tree,
+      parent ? [parent] : [],
+      `Merge batcher state v1\n\nTransaction-ID: ${randomUUID()}`,
+      now,
+    );
   }
   async readLedger(sha: string): Promise<Ledger> {
     const state = JSON.parse(await this.exec(["show", `${assertSha(sha)}:state.json`])) as Ledger;

@@ -326,6 +326,10 @@ ancestor of the tested tip may still be accepted. Receive-pack checks its
 advertised old main value atomically with the changing lease.
 It also checks snapshots explicitly because Git omits already-up-to-date refs
 before wire-level lease checks. The lease ref must change in every transaction.
+Each state commit also carries a fresh Transaction-ID nonce, so the same owner,
+ledger and clock tick cannot generate identical next-state OIDs. This prevents
+Git's already-up-to-date omission from reporting two successful concurrent CAS
+writes. CLI owners remain unique per process; candidate commits stay deterministic.
 Expiry is a client takeover policy; stale owners are fenced by a changed remote
 lease generation, not wall-clock expiry alone.
 
