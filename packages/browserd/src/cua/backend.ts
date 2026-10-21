@@ -76,6 +76,11 @@ export class CuaComputerBackend implements ComputerBackend {
    * checked against a fresh observation, which mints new refs, so the ref is
    * resolved in the observation it came from and CUA validates its token. */
   private readonly recentObservations = new Map<string, ComputerBackendObservation[]>();
+  /** CUA's element token behind each ref of a window's latest reading. CUA
+   * accepts only the tokens of a window's latest snapshot; a ref outlives
+   * readings for as long as its element stays (see stabilizeRefs). */
+  private readonly tokens = new Map<string, Map<string, string>>();
+  private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
@@ -807,10 +812,14 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     }
-    const roots = projectElements(
-      state.elements,
-      this.identity.platform,
-      unindexedTextByElement(state.tree_markdown, this.identity.platform),
+    const roots = this.stabilizeRefs(
+      targetId,
+      target.native.title,
+      projectElements(
+        state.elements,
+        this.identity.platform,
+        unindexedTextByElement(state.tree_markdown, this.identity.platform),
+      ),
     );
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
@@ -836,6 +845,72 @@ export class CuaComputerBackend implements ComputerBackend {
     while (this.recentObservations.size > 32)
       this.recentObservations.delete(this.recentObservations.keys().next().value!);
     return observation;
+  }
+
+  /** Gives each element of a fresh reading the ref it had in the window's
+   * previous reading, so refs stay valid while their element stays and a
+   * reading after an action differs from the one before only where the window
+   * changed. An element keeps its ref when its role, name, description and
+   * actions match. Elements alike in all of those keep theirs only when they
+   * are as many as before, matched in order: one added or removed among them
+   * could otherwise move a ref onto a neighbour. A window whose title changed
+   * shows another document, where a button alike (Delete) acts on something
+   * else, so none of its refs carry over. Every other element gets a new ref.
+   * CUA's token for each ref is kept for the action that names it. */
+  private stabilizeRefs(
+    targetId: string,
+    title: string,
+    roots: InteractionSemanticNodeValue[],
+  ): InteractionSemanticNodeValue[] {
+    const last = this.recentObservations.get(targetId)?.at(-1);
+    const previous = last?.target.title === title ? last : undefined;
+    const identity = (node: InteractionSemanticNodeValue) =>
+      JSON.stringify([
+        node.ref.startsWith("read-only:"),
+        node.role,
+        node.name ?? null,
+        node.description ?? null,
+        node.actions,
+      ]);
+    const earlier = new Map<string, string[]>();
+    for (const node of previous?.roots ?? []) {
+      const key = identity(node);
+      earlier.set(key, [...(earlier.get(key) ?? []), node.ref]);
+    }
+    const current = new Map<string, number>();
+    for (const node of roots) current.set(identity(node), (current.get(identity(node)) ?? 0) + 1);
+    const tokens = new Map<string, string>();
+    const used = new Map<string, number>();
+    const stable = roots.map((node) => {
+      const key = identity(node);
+      const refs = earlier.get(key);
+      const index = used.get(key) ?? 0;
+      used.set(key, index + 1);
+      const readOnly = node.ref.startsWith("read-only:");
+      const ref =
+        refs && refs.length === current.get(key)
+          ? refs[index]!
+          : `${readOnly ? "read-only:" : ""}e${++this.lastRef}`;
+      if (!readOnly) tokens.set(ref, node.ref);
+      return { ...node, ref };
+    });
+    this.tokens.delete(targetId);
+    this.tokens.set(targetId, tokens);
+    while (this.tokens.size > 32) this.tokens.delete(this.tokens.keys().next().value!);
+    return stable;
+  }
+
+  /** CUA's token for a ref of the window's latest reading. */
+  private elementToken(targetId: string, ref: string): string {
+    const token = this.tokens.get(targetId)?.get(ref);
+    if (!token)
+      throw new ComputerBackendError(
+        "observation_stale",
+        `CUA ref ${ref} is not in the latest observation of this window; observe it again`,
+        false,
+        false,
+      );
+    return token;
   }
 
   private async captureTarget(
@@ -1135,7 +1210,7 @@ export class CuaComputerBackend implements ComputerBackend {
             name: "set_value",
             args: {
               ...args,
-              element_token: node.ref,
+              element_token: this.elementToken(command.targetId, node.ref),
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
@@ -1147,7 +1222,7 @@ export class CuaComputerBackend implements ComputerBackend {
           name: "click",
           args: {
             ...args,
-            element_token: node.ref,
+            element_token: this.elementToken(command.targetId, node.ref),
             // Both the pinned SDK and the current typed click contract use
             // right for a semantic context menu; invoke uses the default left.
             button: action.action === "show_menu" ? "right" : "left",
@@ -1162,7 +1237,7 @@ export class CuaComputerBackend implements ComputerBackend {
     // field focuses it), so the keys go to whatever has the focus then.
     const focused =
       !laterInBatch && observed.focusedRef && !observed.focusedRef.startsWith("read-only:")
-        ? { element_token: observed.focusedRef }
+        ? { element_token: this.elementToken(command.targetId, observed.focusedRef) }
         : {};
     if (action.action === "type")
       return [
@@ -1356,12 +1431,13 @@ export class CuaComputerBackend implements ComputerBackend {
         throw error;
       const recent = this.recentObservations.get(targetId) ?? [];
       const latest = recent.at(-1);
-      for (const earlier of [...recent].reverse()) {
-        const node = earlier.roots.find((candidate) => candidate.ref === locator.ref);
-        if (!node) continue;
-        if (earlier === latest) return node;
-        if (!locator.ref.startsWith("read-only:") && sameContent(earlier, latest!))
-          return latest!.roots[earlier.roots.indexOf(node)]!;
+      if (latest && latest !== observed) {
+        const node = latest.roots.find((candidate) => candidate.ref === locator.ref);
+        if (node) return node;
+      }
+      // Refs carry over between readings while their element stays, so a ref
+      // only an earlier reading has names an element that changed or went.
+      if (recent.some((earlier) => earlier.roots.some((node) => node.ref === locator.ref)))
         // Names no label: one could be a typed secret.
         throw new ComputerBackendError(
           "observation_stale",
@@ -1369,7 +1445,6 @@ export class CuaComputerBackend implements ComputerBackend {
           false,
           false,
         );
-      }
       throw new ComputerBackendError(
         "locator_not_found",
         `CUA ref ${locator.ref} is not in a recent observation of this window; observe it again and use a ref from the latest observation (${observed.observationId.split(":").pop()})`,
@@ -1395,22 +1470,6 @@ const RECENT_OBSERVATIONS = 4;
 /** The app name CUA's worker process lists its own overlay windows under. */
 const CUA_WORKER_APP = "cua-driver";
 
-/** Whether two readings show the same window (title, process, generation,
- * place) with the same elements in the same order: everything but the
- * snapshot-bound tokens. Then an element's position is its identity. */
-function sameContent(
-  earlier: ComputerBackendObservation,
-  latest: ComputerBackendObservation,
-): boolean {
-  const content = (node: InteractionSemanticNodeValue) =>
-    JSON.stringify({ ...node, ref: node.ref.startsWith("read-only:") ? node.ref : null });
-  return (
-    JSON.stringify(earlier.target) === JSON.stringify(latest.target) &&
-    earlier.roots.length === latest.roots.length &&
-    (earlier.incomplete === undefined) === (latest.incomplete === undefined) &&
-    earlier.roots.every((node, index) => content(node) === content(latest.roots[index]!))
-  );
-}
 /** A Linux process's parent from /proc, or null when it cannot be read. */
 function procParentPid(pid: number): number | null {
   try {
