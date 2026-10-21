@@ -160,7 +160,7 @@ impl Host {
         Capacity {
             memory_mib: HOST_MEMORY_MIB,
             free_memory_mib: HOST_MEMORY_MIB.saturating_sub(self.awake() * SANDBOX_MIB),
-            free_cpu_millis: None,
+            free_cpu_millis: 1_000_000,
             free_disk_mib: 1_000_000,
             ready: Vec::new(),
             sandboxes: u32::try_from(self.sandboxes.len()).unwrap(),

@@ -4,7 +4,7 @@ import {
   AccountGroupHeading,
   SubscriptionAccountRow,
 } from "@/components/models/subscription-account-ui";
-import { ProviderTile } from "@/components/models/provider-mark";
+import { ProviderTile } from "@opengeni/react/app/components/models/provider-mark";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { Select } from "@opengeni/react/ui/select";

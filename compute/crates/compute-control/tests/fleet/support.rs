@@ -396,8 +396,8 @@ impl Fleet {
 pub fn roomy() -> Capacity {
     Capacity {
         memory_free_mib: 64 * 1024,
-        cpu_millis: None,
-        cpu_free_millis: None,
+        cpu_millis: 64_000,
+        cpu_free_millis: 64_000,
         disk_free_mib: 1 << 20,
         ready: Vec::new(),
         awake: 0,
@@ -714,7 +714,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             profile: "nested".into(),
             cpu_template: "none".into(),
             memory_mib: 64 * 1024,
-            cpu_millis: None,
+            cpu_millis: 64_000,
             disk_mib: 1 << 20,
         },
         capacity: inner.capacity.lock().unwrap().clone(),
@@ -876,6 +876,59 @@ fn error(code: ErrorCode, message: &str) -> Reply {
     }
 }
 
+/// The status of sandbox `id` as a host reports it, at its first boot
+/// under `owner_epoch`, at `level` with `holds` holds.
+pub fn sandbox_status(
+    id: Id,
+    owner_epoch: u64,
+    level: &str,
+    durability: &str,
+    holds: usize,
+) -> Value {
+    serde_json::json!({
+        "id": id.to_string(),
+        "generation": 1,
+        "owner_epoch": owner_epoch,
+        "revision": 1,
+        "level": level,
+        "durability": durability,
+        "backed_up_ms": null,
+        "memory_saved": true,
+        "step": null,
+        "holds": holds,
+        "launches": 1,
+        "resident_bytes": null,
+        "unsavable": false,
+        "broken": false,
+    })
+}
+
+/// A host's status holding `sandboxes`, with everything else a host
+/// reports empty.
+pub fn host_status(sandboxes: &[Value]) -> Reply {
+    let status = serde_json::json!({
+        "sandboxes": sandboxes,
+        "steps": [],
+        "available_memory": null,
+        "reclaimable_memory": 0,
+        "blocked": [],
+        "capacity": null,
+        "disk": null,
+        "templates": [],
+        "unseen_activity": 0,
+        "about": {
+            "build": "test",
+            "runtime": "test",
+            "memory_profile": "test",
+            "base_image": "test",
+            "checkpoints": false,
+        },
+    });
+    Reply::Status(Box::new(
+        serde_json::from_value(status).expect("a host's status"),
+    ))
+}
+
 /// An ordinary host's status: each sandbox it holds runs its first boot.
 fn status(inner: &HostInner) -> Reply {
     let sandboxes: Vec<Value> = inner
@@ -883,29 +936,9 @@ fn status(inner: &HostInner) -> Reply {
         .lock()
         .unwrap()
         .iter()
-        .map(|(id, owner_epoch)| {
-            serde_json::json!({
-                "id": id.to_string(),
-                "generation": 1,
-                "owner_epoch": owner_epoch,
-                "revision": 1,
-                "level": "running",
-                "durability": "volatile",
-                "memory_saved": true,
-                "step": null,
-                "holds": 0,
-                "broken": false,
-            })
-        })
+        .map(|(id, owner_epoch)| sandbox_status(*id, *owner_epoch, "running", "volatile", 0))
         .collect();
-    let status = serde_json::json!({
-        "sandboxes": sandboxes,
-        "steps": [],
-        "available_memory": null,
-    });
-    Reply::Status(Box::new(
-        serde_json::from_value(status).expect("a host's status"),
-    ))
+    host_status(&sandboxes)
 }
 
 /// What an ordinary host answers.

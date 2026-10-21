@@ -22,7 +22,7 @@ import {
   CredentialForm,
   FikenConnectorControls,
   type ConnectAction,
-} from "@/components/capabilities/capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import {
   CapabilityAside,
   CapabilityMark,
@@ -33,14 +33,14 @@ import {
 import {
   ConnectorToolPermissions,
   hasConnectorToolPermissionTarget,
-} from "@/components/capabilities/connector-tool-permissions";
+} from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {
   capabilityPresentation,
   presentationPermissions,
-} from "@/components/capabilities/integration-experience";
-import type { IntegrationViewModel } from "./integration-view-model";
-import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
-import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
+} from "@opengeni/react/app/components/capabilities/integration-experience";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { McpAuthDiscoveryNotice } from "@opengeni/react/app/components/capabilities/mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "@opengeni/react/app/components/capabilities/onepassword-catalog-link";
 import {
   CatalogConnectedAccounts,
   type CatalogConnectedAccountsManagement,
@@ -64,8 +64,12 @@ import {
   GENERIC_API_KEY_FIELD,
   socialConnectionsForOwnership,
   type ConnectionHealth,
-} from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
+} from "@opengeni/react/app/lib/capabilities";
+import type {
+  CapabilityCatalogItem,
+  ConnectionOwnership,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    The page for a catalog entry: a connection from the catalog or the public

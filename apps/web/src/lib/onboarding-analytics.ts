@@ -12,7 +12,7 @@
 // account, or closing the tab).
 import { useEffect } from "react";
 
-import { captureAnalyticsEvent } from "./analytics-observer";
+import { captureAnalyticsEvent } from "@opengeni/react/app/lib/analytics-observer";
 
 export const ONBOARDING_STEPS = [
   "use_case",

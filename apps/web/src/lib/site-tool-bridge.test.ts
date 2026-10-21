@@ -5,9 +5,10 @@ import type {
   ToolGatewayCatalog,
 } from "@opengeni/sdk";
 
+import { webAppApiHost } from "@/app-host";
 import { ApiError, apiErrorFromResponseBody } from "@/api";
 
-import { createSiteToolBridge } from "./site-tool-bridge";
+import { createSiteToolBridge } from "@opengeni/react/app/lib/site-tool-bridge";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const artifactId = "22222222-2222-4222-8222-222222222222";
@@ -65,7 +66,7 @@ describe("Site tool bridge direct calls", () => {
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
     try {
-      const bridge = createSiteToolBridge({
+      const bridge = createSiteToolBridge(webAppApiHost, {
         workspaceTools: {} as OpenGeniWorkspaceTools,
         workspaceId,
         artifactId,
@@ -97,7 +98,7 @@ describe("Site tool bridge direct calls", () => {
   test("calls an allowed live tool directly with host-owned Site context", async () => {
     const catalogCalls: Array<boolean | undefined> = [];
     let callRequest: Record<string, unknown> | null = null;
-    const bridge = createSiteToolBridge({
+    const bridge = createSiteToolBridge(webAppApiHost, {
       workspaceTools: {
         $catalog: async (options?: { refresh?: boolean }) => {
           catalogCalls.push(options?.refresh);
@@ -149,7 +150,7 @@ describe("Site tool bridge direct calls", () => {
     const catalogs = [catalog("a"), catalog("b")];
     const catalogCalls: Array<boolean | undefined> = [];
     const callDigests: string[] = [];
-    const bridge = createSiteToolBridge({
+    const bridge = createSiteToolBridge(webAppApiHost, {
       workspaceTools: {
         $catalog: async (options?: { refresh?: boolean }) => {
           catalogCalls.push(options?.refresh);
@@ -188,7 +189,7 @@ describe("Site tool bridge direct calls", () => {
   test("does not retry when the refreshed catalog no longer exposes the Site tool", async () => {
     const catalogs = [catalog("a"), catalog("b", false)];
     let callCount = 0;
-    const bridge = createSiteToolBridge({
+    const bridge = createSiteToolBridge(webAppApiHost, {
       workspaceTools: {
         $catalog: async () => catalogs.shift() ?? catalog("b", false),
       } as unknown as OpenGeniWorkspaceTools,

@@ -4,6 +4,9 @@ import { extname, join, relative } from "node:path";
 
 const repositoryRoot = join(import.meta.dir, "..");
 const webSourceRoot = join(repositoryRoot, "apps/web/src");
+// The session app layer the web console and embeds share; it ships inside
+// @opengeni/react and imports the public entry modules by relative path.
+const appSourceRoot = join(repositoryRoot, "packages/react/src/app");
 const reactDemoRoot = join(repositoryRoot, "packages/react/demo");
 
 async function sourceFiles(directory: string): Promise<string[]> {
@@ -19,9 +22,10 @@ async function sourceFiles(directory: string): Promise<string[]> {
 }
 
 describe("public realtime ownership", () => {
-  test("keeps realtime UI and controller orchestration out of apps/web", async () => {
+  test("keeps realtime UI and controller orchestration out of the app layers", async () => {
     const violations: string[] = [];
-    for (const file of await sourceFiles(webSourceRoot)) {
+    const files = [...(await sourceFiles(webSourceRoot)), ...(await sourceFiles(appSourceRoot))];
+    for (const file of files) {
       const source = await readFile(file, "utf8");
       const path = relative(repositoryRoot, file);
       for (const [label, pattern] of [
@@ -54,13 +58,14 @@ describe("public realtime ownership", () => {
   });
 
   test("dogfoods the public React realtime subpath in both composer routes", async () => {
-    const sessionRoute = await readFile(join(webSourceRoot, "routes/session.tsx"), "utf8");
+    const sessionRoute = await readFile(join(appSourceRoot, "routes/session.tsx"), "utf8");
     const newSessionRoute = await readFile(
-      join(webSourceRoot, "routes/sessions-index.tsx"),
+      join(appSourceRoot, "routes/sessions-index.tsx"),
       "utf8",
     );
-    expect(sessionRoute).toContain('import("@opengeni/react/realtime")');
-    expect(newSessionRoute).toContain('from "@opengeni/react/realtime"');
+    // `../../realtime` is the module behind the public `@opengeni/react/realtime` subpath.
+    expect(sessionRoute).toContain('import("../../realtime")');
+    expect(newSessionRoute).toContain('from "../../realtime"');
   });
 
   test("keeps the public React demo on published package imports", async () => {

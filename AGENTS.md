@@ -748,7 +748,7 @@ User-message file attachments enter the runtime manifest and eager materializati
 
 Published-file chat links use `artifact:<id>` and host artifact navigation;
 `sandbox:` links still open the workspace inspector. Media previews share
-`apps/web/src/components/artifacts/retained-file-preview.tsx`. Preserve closed
+`packages/react/src/app/components/artifacts/retained-file-preview.tsx`. Preserve closed
 publication receipts and legacy non-media identities; see `docs/artifact-library.md`.
 
 Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:
@@ -829,6 +829,13 @@ Coalesced runs can contain several PRs: the tip PR is not automatically the culp
 Cancelled runs are not failures. Automatic blind reverts are not authorized.
 
 ## Deployment Work Notes
+
+Runtime posture tolerates securely shaped unknown tables and invoker routines,
+not changes to known contracts or unknown callable SECURITY DEFINER routines.
+Run the pinned previous-binary readiness test for schema changes and keep its
+production baseline advancement separate from migration PRs. The initial pin
+is bootstrap evidence until this compatibility binary ships; see
+`docs/migrations-expand-contract.md#pinned-previous-binary-readiness`.
 
 When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.
 

@@ -38,6 +38,10 @@
       "types": "./src/this-computer.ts",
       "default": "./src/this-computer.ts"
     },
+    "./desktop-bridge": {
+      "types": "./src/desktop-bridge.ts",
+      "default": "./src/desktop-bridge.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

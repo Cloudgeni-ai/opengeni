@@ -70,7 +70,7 @@ export interface ThisComputerOfferProps {
   onDismiss?(): void;
   /** The mark beside the title; a laptop by default. */
   icon?: ReactNode;
-  className?: string;
+  className?: string | undefined;
 }
 
 /**
@@ -183,7 +183,7 @@ export interface ThisComputerPanelProps {
   /** Opens `ThisComputerSetup`. */
   onSetup(): void;
   icon?: ReactNode;
-  className?: string;
+  className?: string | undefined;
 }
 
 /**

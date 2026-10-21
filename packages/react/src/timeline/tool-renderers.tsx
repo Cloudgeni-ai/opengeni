@@ -57,6 +57,7 @@ import {
   createToolRegistry,
   type ToolRegistry,
   type ToolRegistryEntry,
+  type ToolRenderer,
   type ToolRendererProps,
 } from "./registry";
 import {
@@ -84,12 +85,15 @@ import {
   machinePresentation,
   runOnPresentation,
   plainToolRow,
+  presentedToolKind,
+  presentsToolOutputPreview,
   toolRowPresentation,
   toolSearchPreview,
   toolSearchQuery,
   truncatePreview,
   webSearchPresentation,
   writeStdinPresentation,
+  type PresentedToolKind,
   type ToolBody,
   type ToolIconKind,
   type ToolPreview,
@@ -2255,6 +2259,31 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     render: SetSessionTitleRenderer,
   },
 ];
+
+/** Built-in renderers that draw their row from the shared presentation. */
+const PRESENTATION_RENDERERS: ReadonlyMap<ToolRenderer, PresentedToolKind> = new Map<
+  ToolRenderer,
+  PresentedToolKind
+>([
+  [ExecRenderer, "exec"],
+  [WriteStdinRenderer, "write_stdin"],
+  [ApplyPatchRenderer, "apply_patch"],
+  [GenericRenderer, "generic"],
+]);
+
+/**
+ * Whether `renderer` can draw `item` while its output is a bounded preview
+ * (see {@link presentsToolOutputPreview}). Every other row (media, receipts,
+ * cards that parse their result, consumer renderers) needs its exact output
+ * before it renders.
+ */
+export function rendersToolOutputPreview(renderer: ToolRenderer, item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  return (
+    PRESENTATION_RENDERERS.get(renderer) === presentedToolKind(item) &&
+    presentsToolOutputPreview(item)
+  );
+}
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */
 export const defaultToolRegistry: ToolRegistry = createToolRegistry(BASE_ENTRIES, GenericRenderer);

@@ -17,7 +17,7 @@ import {
   requestFromDraft,
   withCapability,
   withStartingPoint,
-} from "./agent-capabilities";
+} from "@opengeni/react/app/lib/agent-capabilities";
 import { workspaceAgentDefaultsSummary } from "./agent-defaults-summary";
 import { agentConfigFromFormState, formStateFromScheduledTask } from "./scheduled-tasks";
 import {
@@ -26,7 +26,7 @@ import {
   newSessionDraftOptionsFromSessionDraft,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
-} from "./session-create";
+} from "@opengeni/react/app/lib/session-create";
 
 const everything = capabilityAvailability(null);
 

@@ -1,7 +1,7 @@
 import type { SVGProps } from "react";
 import { OpenRouterMark, OpperMark } from "@opengeni/react";
 
-import { ChatGptMark } from "@/components/chatgpt-mark";
+import { ChatGptMark } from "@opengeni/react/app/components/chatgpt-mark";
 import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
 
 /* ----------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reactModuleNeedsFullReload } from "../vite-safe-react-hmr";
+import { isReactModule, reactModuleNeedsFullReload } from "../vite-safe-react-hmr";
 
 describe("safe React HMR boundary", () => {
   test("keeps component-only modules on Fast Refresh", () => {
@@ -24,6 +24,16 @@ describe("safe React HMR boundary", () => {
       reactModuleNeedsFullReload(
         "export type BrowserViewerProps = { id: string };\nexport function BrowserViewer() { return null; }\n",
       ),
+    ).toBe(false);
+  });
+
+  test("treats only JSX-rendering modules as React modules", () => {
+    expect(isReactModule("/a/view.tsx", "export function View() { return <div />; }\n")).toBe(true);
+    expect(isReactModule("/a/view.tsx", "export const View = () => <>x</>;\n")).toBe(true);
+    expect(isReactModule("/a/helpers.tsx", "export function pick<T>(items: T[]) {}\n")).toBe(false);
+    expect(isReactModule("/a/helpers.ts", "export const x = 1;\n")).toBe(false);
+    expect(
+      isReactModule("/node_modules/x/view.tsx", "export function View() { return <div />; }\n"),
     ).toBe(false);
   });
 });

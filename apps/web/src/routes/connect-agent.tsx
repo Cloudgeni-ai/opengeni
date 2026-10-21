@@ -6,7 +6,7 @@ import { apiBaseUrl } from "@/api";
 import { ConsentFrame, McpConsentPage } from "@/components/organization-access/mcp-consent-page";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /* ----------------------------------------------------------------------------

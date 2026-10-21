@@ -9,7 +9,10 @@ import {
   registerDom,
   renderHook,
 } from "../../../../packages/react/test/render-hook";
-import { useNewSessionDraft, type NewSessionDraftEditable } from "./use-new-session-draft";
+import {
+  useNewSessionDraft,
+  type NewSessionDraftEditable,
+} from "@opengeni/react/app/lib/use-new-session-draft";
 
 registerDom();
 

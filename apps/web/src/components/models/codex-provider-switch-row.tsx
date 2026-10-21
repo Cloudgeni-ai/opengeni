@@ -3,7 +3,7 @@ import { toast } from "sonner";
 
 import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 /**
  * Whether NEW Codex chats here are portable (`codexCompactionDefault`).

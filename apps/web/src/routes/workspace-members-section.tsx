@@ -1,6 +1,6 @@
 // Settings > Access: who can use this workspace, with one role each. The same
 // AccessList rows and verbs as every other place access is edited.
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { SearchIcon, UserPlusIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
@@ -10,7 +10,7 @@ import { SettingsHeaderActions } from "@/components/settings/settings-header-act
 import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
 import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { TechnicalDetails } from "@opengeni/react/ui/error-message";
 import { CheckboxField, Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
@@ -25,7 +25,7 @@ import {
 } from "@opengeni/react/ui/role-select";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorTechnicalFacts,
   isPermissionDenied,
@@ -33,17 +33,17 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { permissionLabel } from "@/lib/api-key-presets";
-import { orgLabel } from "@/lib/org";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   workspaceAccessLevels,
   workspaceMemberPermissionGroups,
   type WorkspaceAccessLevel,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-} from "@/types";
+} from "@opengeni/react/app/types";
 import { FLUSH_FORM_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------

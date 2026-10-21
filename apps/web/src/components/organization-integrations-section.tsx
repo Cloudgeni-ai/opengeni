@@ -26,8 +26,8 @@ import {
   isOrganizationConflict,
   type OrganizationAdminIdentity,
   type OrganizationAdminOperation,
-} from "@/lib/organization-admin";
-import type { OrganizationMembershipRole } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import type { OrganizationMembershipRole } from "@opengeni/react/app/types";
 
 type Props = {
   client: Parameters<typeof getOrganizationIntegrationPolicy>[0];

@@ -22,6 +22,7 @@ import {
   useState,
 } from "react";
 import { AlertDialog } from "radix-ui";
+import { usePortalContainer } from "../ui/portal-container";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
 import { MENU_BUTTON_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
@@ -1163,6 +1164,7 @@ function DeleteDialog({
   onConfirm: () => void;
 }) {
   const t = useOpenGeniText();
+  const portalContainer = usePortalContainer();
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(true);
   const closeIntentRef = useRef<"cancel" | "confirm">("cancel");
@@ -1204,7 +1206,9 @@ function DeleteDialog({
         }
       }}
     >
-      <AlertDialog.Portal container={typeof document === "undefined" ? null : document.body}>
+      <AlertDialog.Portal
+        container={portalContainer ?? (typeof document === "undefined" ? null : document.body)}
+      >
         <AlertDialog.Overlay className="og-root fixed inset-0 z-[100] bg-black/45 backdrop-blur-[2px]" />
         <AlertDialog.Content
           className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-hidden"

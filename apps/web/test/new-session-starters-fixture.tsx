@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { OpenGeniProvider } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
-import { SessionsIndexRoute } from "../src/routes/sessions-index";
+import { SessionsIndexRoute } from "@opengeni/react/app/routes/sessions-index";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { evidence, fixtureClient, workspaceId } from "./new-session-starters-context";
 import "../src/styles.css";

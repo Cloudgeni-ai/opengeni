@@ -797,6 +797,7 @@ async fn files_only<S: Store>(
                 save: change.save,
                 receipt,
                 memory: false,
+                disk_bytes: claimed.disk_bytes,
             })
         }
     }
@@ -810,4 +811,5 @@ fn remote_record(record: &mut Record, owner: OwnerEpoch, claimed: &Claimed) {
     record.archived = true;
     record.owner_epoch = owner.0;
     record.saves = claimed.save;
+    record.allocation.disk_bytes = Some(claimed.disk_bytes);
 }

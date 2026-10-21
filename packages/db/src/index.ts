@@ -897,6 +897,8 @@ import {
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -1335,6 +1337,7 @@ import {
 } from "./database";
 export {
   createDb,
+  sessionListChangesFor,
   databaseReconnectBackoffSeconds,
   defaultDatabasePreparedStatements,
   isTransactionHandle,
@@ -1377,6 +1380,11 @@ export {
   withSessionRlsActorContext,
 } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
+export type {
+  SessionListChangeSource,
+  SessionListDatabaseChange,
+  SessionListNotification,
+} from "./session-list-notifications";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,
   brokeredCredentialBundleProblem,
@@ -33763,6 +33771,76 @@ export async function listSessionEntriesForSubject(
   return page;
 }
 
+type SessionListReadAuthority = Pick<
+  ListSessionsForSubjectOptions,
+  "subjectId" | "authorizationScope" | "personalWorkspaceOwnerException"
+>;
+
+/** Apply the same removal fence to pages and their transient invalidation hints. */
+async function requireSessionListReadAuthorityInScope(
+  tx: Database,
+  workspaceId: string,
+  options: SessionListReadAuthority,
+): Promise<void> {
+  // READ COMMITTED observes a removal that held the exclusive fence first.
+  await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
+  const [membership] = await tx
+    .select({ id: schema.workspaceMemberships.id })
+    .from(schema.workspaceMemberships)
+    .where(
+      and(
+        eq(schema.workspaceMemberships.workspaceId, workspaceId),
+        eq(schema.workspaceMemberships.subjectId, options.subjectId),
+      ),
+    )
+    .limit(1);
+  // Non-user credentials legitimately have no membership. Managed personal
+  // owners require the route's verified provenance AND current canonical grant.
+  if (
+    !membership &&
+    options.subjectId.startsWith("user:") &&
+    !(
+      options.personalWorkspaceOwnerException === true &&
+      (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: await accountIdInRlsScope(tx),
+        workspaceId,
+        subjectId: options.subjectId,
+      }))
+    )
+  )
+    throw new SessionListAccessError();
+}
+
+/** No configuration, parent IDs or inaccessible IDs cross the hint boundary. */
+export async function listVisibleSessionInvalidationIds(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authority: SessionListReadAuthority,
+): Promise<string[]> {
+  if (!sessionIds.length) return [];
+  return await withWorkspaceSubjectRls(
+    db,
+    workspaceId,
+    authority.subjectId,
+    async (tx) => {
+      await requireSessionListReadAuthorityInScope(tx, workspaceId, authority);
+      const rows = await tx
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            inArray(schema.sessions.id, sessionIds),
+            ...sessionFilters({ ...authority, archiveStatus: "all" }),
+          ),
+        );
+      return rows.map((row) => row.id);
+    },
+    { isolationLevel: "read committed" },
+  );
+}
+
 async function readSessionListForSubject(
   db: Database,
   workspaceId: string,
@@ -33779,59 +33857,7 @@ async function readSessionListForSubject(
       workspaceId,
       options.subjectId,
       async (tx) => {
-        // READ COMMITTED is deliberate: if removal already owns the exclusive
-        // advisory fence, this transaction waits before checking membership and
-        // then observes the committed deletion in a fresh statement snapshot.
-        // The shared fence keeps every personal pin row stable across the page's
-        // ordinary/pinned queries while allowing concurrent list readers.
-        await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
-        // Authorization is resolved before this helper by the API, but that
-        // grant can be stale by the time this transaction starts. The subject
-        // fence above makes removal and listing deterministic: listing first lets
-        // removal clean its committed snapshot, while removal first makes this
-        // fresh membership read observe the deletion and do no writes.
-        const [membership] = await tx
-          .select({ id: schema.workspaceMemberships.id })
-          .from(schema.workspaceMemberships)
-          .where(
-            and(
-              eq(schema.workspaceMemberships.workspaceId, workspaceId),
-              eq(schema.workspaceMemberships.subjectId, options.subjectId),
-            ),
-          )
-          .limit(1);
-        // A missing membership only means "denied" for user subjects — people
-        // are authorized exclusively through memberships, so absence here is a
-        // removal that the route-level grant hasn't observed yet. Non-user
-        // principals (workspace-scoped `api_key:*`, delegated service subjects)
-        // are authorized by requireAccessGrant from their own credential row and
-        // may legitimately have no membership; they list without the removal
-        // serialization. That is sound: member-removal cleanup already purges a
-        // removed subject's pins and snapshots, and any snapshot a never-member
-        // subject writes is bounded by TTL expiry.
-        //
-        // The one human who is authorized WITHOUT a membership row is the owner
-        // of a managed personal workspace: migration 0219 raises if that
-        // workspace ever gets one, so the pointer on their own organization
-        // membership is the whole grant. Ask the canonical resolver rather than
-        // re-deriving that rule here — it runs on this same transaction handle,
-        // so the shared personal-state fence above still serializes it against
-        // member removal. Gated on the caller's canonical managed-cookie
-        // assertion; see PersonalWorkspaceOwnerException.
-        if (
-          !membership &&
-          options.subjectId.startsWith("user:") &&
-          !(
-            options.personalWorkspaceOwnerException === true &&
-            (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
-              accountId: await accountIdInRlsScope(tx),
-              workspaceId,
-              subjectId: options.subjectId,
-            }))
-          )
-        ) {
-          throw new SessionListAccessError();
-        }
+        await requireSessionListReadAuthorityInScope(tx, workspaceId, options);
 
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
@@ -36775,11 +36801,20 @@ export type ListSessionEventsOptions = {
    * Keep `agent.toolCall.created` rows of presented tools (see
    * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
    * conversation-first reader still sees images, published files and Skill
-   * changes without loading every step. Excluded rows without a turn (PTY
-   * output) are kept too: no per-turn step read can find them. No effect
-   * unless `agent.toolCall.created` is excluded.
+   * changes without loading every step. Excluded rows without a turn (PTY and
+   * background command output) stay excluded: the sandbox dock reads them
+   * itself. No effect unless `agent.toolCall.created` is excluded.
    */
   retainPresentedToolCalls?: boolean;
+  /**
+   * Full-mode step reads: return each `agent.toolCall.output` payload larger
+   * than SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES as a bounded preview
+   * (long strings keep their head and tail around an explicit omission
+   * marker) carrying an `outputPreview` fact. Readers load one row's exact
+   * payload with an ordinary full read when they need it. No effect in other
+   * payload modes.
+   */
+  toolOutputPreview?: boolean;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
@@ -36790,6 +36825,16 @@ export type ListSessionEventsOptions = {
   authoritativeLatest?: boolean;
 };
 
+/**
+ * LIKE patterns equal to isPresentedSessionToolName: each leaf alone, or after
+ * `__`. One LIKE ANY evaluates the name once per row and costs a fraction of
+ * the equivalent regex, which dominated long scans even on a short column.
+ */
+const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -36798,16 +36843,19 @@ function sessionEventExcludeTypesFilter(
   if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
     return excluded;
   }
-  // The name check reads only created rows (never tool outputs), but it still
-  // detoasts large arguments on each excluded call it scans.
-  const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  // The name check reads only created rows (never tool outputs) and uses the
+  // trigger-filled tool_name column (migration 0889), so it never detoasts a
+  // call's arguments. Rows written before 0889 keep a NULL column; only they
+  // fall back to the payload name, which classifies them exactly as before.
+  const patterns = sql.join(
+    PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
-    // Turnless rows (PTY output) belong to no turn's step read.
-    isNull(schema.sessionEvents.turnId),
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
+      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
     ),
   )!;
 }
@@ -36840,6 +36888,25 @@ export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
  */
 export const SESSION_EVENT_FULL_READ_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const SESSION_EVENT_FULL_READ_PREVIEW_CHARS = 32 * 1024;
+/** A previewed step read returns tool-output payloads up to this size exactly. */
+export const SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES = 4 * 1024;
+/** Hard ceiling of one previewed tool-output payload (structured or text). */
+export const SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES = 16 * 1024;
+/** Strings longer than this keep only their head and tail in a preview. */
+const TOOL_OUTPUT_PREVIEW_STRING_MAX_CHARS = 2048;
+const TOOL_OUTPUT_PREVIEW_HEAD_CHARS = 1024;
+const TOOL_OUTPUT_PREVIEW_TAIL_CHARS = 512;
+/**
+ * Nesting below `output` whose strings are shortened in place
+ * (output.content[i].text is 3). Containers are walked above this depth only.
+ */
+const TOOL_OUTPUT_PREVIEW_DEPTH = 3;
+/** A walked array or object wider than this sends the row to the text preview. */
+const TOOL_OUTPUT_PREVIEW_MAX_WIDTH = 16;
+/** Internal marker of a container too wide to walk; never delivered. */
+const TOOL_OUTPUT_PREVIEW_TOO_WIDE = "opengeni:tool-output-preview:too-wide";
+/** A previewed output plans at least this share of its source bytes (1/n). */
+const TOOL_OUTPUT_PREVIEW_SOURCE_SHARE = 16;
 const SESSION_EVENT_DB_BATCH_SIZE = 256;
 const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
@@ -36926,6 +36993,8 @@ export async function listSessionEventPage(
   const before = hasBefore ? Math.floor(options.before as number) : undefined;
   const direction = options.direction ?? (hasBefore ? "before" : "after");
   const payloadMode = options.payloadMode ?? "full";
+  const toolOutputPreview = payloadMode === "full" && options.toolOutputPreview === true;
+  const transferBytesSql = sessionEventTransferBytes(toolOutputPreview);
   const typeFilters = resolveSessionEventTypeFilters({
     includeTypes: options.includeTypes,
     excludeTypes: options.excludeTypes,
@@ -37050,7 +37119,7 @@ export async function listSessionEventPage(
             ),
             bounded as (
               select ordered.id, ordered.row_number,
-                octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                ${transferBytesSql} + 1
                   as cumulative_transfer_bytes
               from ordered
               join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
@@ -37058,7 +37127,7 @@ export async function listSessionEventPage(
               union all
               select ordered.id, ordered.row_number,
                 bounded.cumulative_transfer_bytes
-                  + octet_length(row_to_json(${schema.sessionEvents})::text)::bigint + 1
+                  + ${transferBytesSql} + 1
               from bounded
               join ordered on ordered.row_number = bounded.row_number + 1
               join ${schema.sessionEvents} on ${schema.sessionEvents.id} = ordered.id
@@ -37071,7 +37140,7 @@ export async function listSessionEventPage(
           ) as session_event_page_selected`;
           const selectedRows = await scopedDb
             .select({
-              ...sessionEventProjectionSelect("full"),
+              ...sessionEventProjectionSelect("full", schema.sessionEvents, { toolOutputPreview }),
               sourceRowCount: sql<number>`session_event_page_selected.source_row_count`,
             })
             .from(schema.sessionEvents)
@@ -37090,7 +37159,7 @@ export async function listSessionEventPage(
           // public event, so this conservatively bounds ordinary page transfer.
           // One oversized event is selected alone and remains exact.
           const metadataRows = await scopedDb
-            .select(sessionEventProjectionMetadataSelect())
+            .select(sessionEventProjectionMetadataSelect(toolOutputPreview))
             .from(schema.sessionEvents)
             .where(and(...filters))
             .orderBy(ordering)
@@ -37129,7 +37198,9 @@ export async function listSessionEventPage(
 
           if (exactIds.length > 0) {
             rows = await scopedDb
-              .select(sessionEventProjectionSelect("full"))
+              .select(
+                sessionEventProjectionSelect("full", schema.sessionEvents, { toolOutputPreview }),
+              )
               .from(schema.sessionEvents)
               .where(and(...filters, inArray(schema.sessionEvents.id, exactIds)))
               .orderBy(ordering)
@@ -37157,6 +37228,7 @@ export async function listSessionEventPage(
         }
         const event = mapProjectedEvent(row);
         if (row.payloadReadBounded === true) fullPayloadsExact = false;
+        if (toolOutputPreview && isToolOutputPreviewEvent(event)) fullPayloadsExact = false;
         const eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
@@ -37197,17 +37269,362 @@ export async function listSessionEventPage(
   });
 }
 
-function sessionEventProjectionMetadataSelect() {
+export type SessionEventConversationTurn = {
+  turnId: string;
+  /**
+   * Sequence of the turn's first `turn.started` in the page, if the page holds
+   * one. The turn's first stored `turn.started` takes precedence.
+   */
+  started: number | null;
+};
+
+const SESSION_TURN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Bookkeeping rows one turn may add to a conversation page (normally a handful). */
+const SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN = 64;
+
+/**
+ * The bookkeeping rows (SESSION_EVENT_BOOKKEEPING_STEP_TYPES) a conversation
+ * page that excludes them still carries, strictly inside `(after, before)`,
+ * for the page's turns and the turn last started at or before `after` (its
+ * rows may continue into this page without any of its rows on it):
+ *
+ * - a turn with no content step at all (SESSION_EVENT_CONTENT_STEP_TYPES)
+ *   keeps every bookkeeping row, so its window skips no sequence and a reader
+ *   is not offered steps that are not there;
+ * - any other turn keeps its model request rows from its first `turn.started`
+ *   through its first model response: the only ones its startup phases draw.
+ *   Later request rows and all usage rows are steps. The segment depends only
+ *   on stored rows, so every page boundary splits it the same way.
+ *
+ * One statement plans the ids from indexes (per turn, at most
+ * SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN rows of each kind) and a
+ * second reads them, ascending.
+ */
+export async function listSessionEventConversationBookkeeping(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: {
+    turns: readonly SessionEventConversationTurn[];
+    after: number;
+    before?: number | undefined;
+    payloadMode?: SessionEventPayloadMode;
+  },
+): Promise<SessionEvent[]> {
+  const turns = options.turns.filter((turn) => SESSION_TURN_ID_PATTERN.test(turn.turnId));
+  const after = Math.max(0, Math.floor(options.after));
+  const before =
+    options.before !== undefined && Number.isFinite(options.before)
+      ? Math.min(POSTGRES_INT_MAX, Math.floor(options.before))
+      : POSTGRES_INT_MAX;
+  if (before <= after + 1) return [];
+  const turnIds = `{${turns.map((turn) => turn.turnId).join(",")}}`;
+  const anchors = `{${turns.map((turn) => (turn.started === null ? "NULL" : String(Math.floor(turn.started)))).join(",")}}`;
+  const contentTypes = `{${SESSION_EVENT_CONTENT_STEP_TYPES.join(",")}}`;
+  const bookkeepingTypes = `{${SESSION_EVENT_BOOKKEEPING_STEP_TYPES.join(",")}}`;
+  const perTurn = SESSION_EVENT_CONVERSATION_BOOKKEEPING_PER_TURN;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const planned = await rawRows<{ id: string }>(
+      scopedDb,
+      sql`with open_turn as (
+          select e.turn_id, e.sequence as anchor from session_events e
+          where e.workspace_id = ${workspaceId}::uuid
+            and e.session_id = ${sessionId}::uuid
+            and e.type = 'turn.started'
+            and e.sequence <= ${after}
+            and e.turn_id is not null
+          order by e.sequence desc
+          limit 1
+        ),
+        listed as (
+          select turn_id, anchor from unnest(${turnIds}::uuid[], ${anchors}::int[]) as t(turn_id, anchor)
+          union all
+          select turn_id, anchor from open_turn
+        ),
+        turn_list as (
+          select turn_id, min(anchor) as listed_anchor from listed group by turn_id
+        ),
+        page_turns as (
+          select t.turn_id, coalesce((
+            select min(s.sequence) from session_events s
+            where s.workspace_id = ${workspaceId}::uuid
+              and s.turn_id = t.turn_id
+              and s.type = 'turn.started'
+              and s.session_id = ${sessionId}::uuid
+          ), t.listed_anchor) as anchor, exists (
+            select 1 from session_events c
+            where c.workspace_id = ${workspaceId}::uuid
+              and c.turn_id = t.turn_id
+              and c.type = any(${contentTypes}::text[])
+              and c.session_id = ${sessionId}::uuid
+          ) as has_content
+          from turn_list t
+        ),
+        content_free as (
+          select b.id from page_turns p
+          cross join lateral (
+            select e.id from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.turn_id = p.turn_id
+              and e.type = any(${bookkeepingTypes}::text[])
+              and e.session_id = ${sessionId}::uuid
+              and e.sequence > ${after}
+              and e.sequence < ${before}
+            order by e.sequence
+            limit ${perTurn}
+          ) b
+          where not p.has_content
+        ),
+        startup as (
+          select r.id, p.turn_id, r.sequence, r.responded from page_turns p
+          cross join lateral (
+            select e.id, e.turn_id, e.sequence,
+              coalesce(e.payload ->> 'phase', '') in ('first_byte', 'first_event') as responded
+            from session_events e
+            where e.workspace_id = ${workspaceId}::uuid
+              and e.session_id = ${sessionId}::uuid
+              and e.type = 'agent.model.request'
+              and e.sequence > p.anchor
+              and e.sequence < ${before}
+            order by e.sequence
+            limit ${perTurn}
+          ) r
+          where p.has_content and p.anchor is not null and r.turn_id = p.turn_id
+        ),
+        startup_segment as (
+          select id from (
+            select id, sequence, coalesce(sum(case when responded then 1 else 0 end) over (
+              partition by turn_id order by sequence
+              rows between unbounded preceding and 1 preceding
+            ), 0) as earlier_responses
+            from startup
+          ) ranked
+          where earlier_responses = 0 and sequence > ${after}
+        )
+        select id from content_free
+        union
+        select id from startup_segment`,
+    );
+    if (planned.length === 0) return [];
+    const rows = await scopedDb
+      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          inArray(
+            schema.sessionEvents.id,
+            planned.map((row) => row.id),
+          ),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    return rows.map(mapProjectedEvent);
+  });
+}
+
+function sessionEventProjectionMetadataSelect(toolOutputPreview = false) {
   return {
     id: schema.sessionEvents.id,
     sequence: schema.sessionEvents.sequence,
-    transferBytes: sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`,
+    transferBytes: sql<number>`(${sessionEventTransferBytes(toolOutputPreview)})::int`,
   } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
+}
+
+/**
+ * Conservative transfer size used to plan a page before payloads are read. A
+ * tool output a previewed read may bound counts its preview ceiling, or a
+ * sixteenth of its source when larger: the page then also bounds the source
+ * bytes the projection walks, not only the bytes it delivers. A row the
+ * projection then returns exact is still bounded by the delivered page check.
+ */
+function sessionEventTransferBytes(toolOutputPreview: boolean): SQL {
+  const exact = sql`octet_length(row_to_json(${schema.sessionEvents})::text)::bigint`;
+  if (!toolOutputPreview) return exact;
+  const ceiling = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES + 2048));
+  const share = sql.raw(String(TOOL_OUTPUT_PREVIEW_SOURCE_SHARE));
+  // offset 0 keeps the serialized size computed once instead of inlined. The
+  // payload is read here anyway, so only a row the projection can preview (an
+  // object with an `output`) is planned below its exact size.
+  return sql`(select case when ${toolOutputPreviewCandidate(schema.sessionEvents)}
+        and jsonb_typeof(${schema.sessionEvents.payload}) = 'object'
+        and (${schema.sessionEvents.payload} -> 'output') is not null
+      then least(tool_output_row.bytes, greatest(${ceiling}, tool_output_row.bytes / ${share}))
+      else tool_output_row.bytes end
+    from (select ${exact} as bytes offset 0) as tool_output_row)`;
+}
+
+/**
+ * A row a previewed read may bound: a tool output not stored with the
+ * lossless string codec (shortening an encoded string would corrupt it).
+ * Decided from columns alone, without reading the payload; its shape and size
+ * are decided once inside the projection.
+ */
+function toolOutputPreviewCandidate(
+  source: Pick<SessionEventProjectionSource, "type" | "payloadCodecVersion">,
+): SQL {
+  return sql`(
+    ${source.type} = 'agent.toolCall.output'
+    and ${source.payloadCodecVersion} is null
+  )`;
+}
+
+/** Head and tail of a long string around an explicit omission marker. */
+function toolOutputPreviewText(text: SQL): SQL {
+  const max = sql.raw(String(TOOL_OUTPUT_PREVIEW_STRING_MAX_CHARS));
+  const head = sql.raw(String(TOOL_OUTPUT_PREVIEW_HEAD_CHARS));
+  const tail = sql.raw(String(TOOL_OUTPUT_PREVIEW_TAIL_CHARS));
+  const kept = sql.raw(String(TOOL_OUTPUT_PREVIEW_HEAD_CHARS + TOOL_OUTPUT_PREVIEW_TAIL_CHARS));
+  return sql`case when char_length(${text}) <= ${max} then ${text}
+    else left(${text}, ${head}) || chr(10) || '…[' || (char_length(${text}) - ${kept})::text
+      || ' characters omitted from this preview]…' || chr(10) || right(${text}, ${tail})
+    end`;
+}
+
+/**
+ * Shorten the long strings of one JSON value, keeping its shape. Inline media
+ * (data URLs, `data`/`image_url` fields) is kept whole: a shortened image is
+ * not an image, so such a row falls back to the text preview below. A
+ * container wider than TOOL_OUTPUT_PREVIEW_MAX_WIDTH is not walked: it becomes
+ * a marker that sends the row to the text preview, so the walk stays bounded
+ * however large the output is. Each string is extracted once (offset 0).
+ */
+function toolOutputPreviewValue(value: SQL, key: SQL | null, depth: number): SQL {
+  const t = sql.raw(`tool_output_s${depth}.t`);
+  const shortened = sql`(select case when left(${t}, 5) = 'data:' then ${value}
+      else to_jsonb(${toolOutputPreviewText(t)}) end
+    from (select ${value} #>> '{}' as t offset 0) as ${sql.raw(`tool_output_s${depth}`)})`;
+  const string = key
+    ? sql`case when ${key} in ('data', 'image_url', 'blob') then ${value} else ${shortened} end`
+    : shortened;
+  if (depth >= TOOL_OUTPUT_PREVIEW_DEPTH) {
+    return sql`case when jsonb_typeof(${value}) = 'string' then ${string} else ${value} end`;
+  }
+  const width = sql.raw(String(TOOL_OUTPUT_PREVIEW_MAX_WIDTH));
+  const wide = sql.raw(`to_jsonb('${TOOL_OUTPUT_PREVIEW_TOO_WIDE}'::text)`);
+  const k = sql.raw(`tool_output_k${depth}`);
+  const x = sql.raw(`tool_output_x${depth}`);
+  const o = sql.raw(`tool_output_o${depth}`);
+  return sql`case jsonb_typeof(${value})
+    when 'string' then ${string}
+    when 'object' then case
+      when (select count(*) from (
+        select 1 from jsonb_object_keys(${value}) limit ${width} + 1
+      ) as ${sql.raw(`tool_output_w${depth}`)}) > ${width} then ${wide}
+      else coalesce((
+        select jsonb_object_agg(${k}, ${toolOutputPreviewValue(x, k, depth + 1)})
+        from jsonb_each(${value}) as ${sql.raw(`tool_output_e${depth}`)}(${k}, ${x})
+      ), '{}'::jsonb) end
+    when 'array' then case
+      when jsonb_array_length(${value}) > ${width} then ${wide}
+      else coalesce((
+        select jsonb_agg(${toolOutputPreviewValue(x, null, depth + 1)} order by ${o})
+        from jsonb_array_elements(${value}) with ordinality as ${sql.raw(`tool_output_a${depth}`)}(${x}, ${o})
+      ), '[]'::jsonb) end
+    else ${value}
+  end`;
+}
+
+/**
+ * The bounded preview of one tool-output payload. A payload that is not an
+ * object with an `output`, or is within SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES,
+ * is exact. Otherwise every field but `output` is kept and the output keeps
+ * its shape with long strings shortened (`shape: "structured"`). When that is
+ * too wide or still exceeds the ceiling, a payload within the ceiling is exact
+ * and a larger one becomes the head and tail of its output text
+ * (`shape: "text"`). A payload with nothing to shorten is returned exact,
+ * without a preview fact.
+ *
+ * Each step is fenced with offset 0 so the planner does not inline it: the
+ * payload is read (detoasted) and serialized once, and the output text at
+ * most once more.
+ */
+function toolOutputPreviewPayload(payload: SQLWrapper): SQL {
+  const min = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MIN_BYTES));
+  const max = sql.raw(String(SESSION_EVENT_TOOL_OUTPUT_PREVIEW_MAX_BYTES));
+  const wide = sql.raw(`'"${TOOL_OUTPUT_PREVIEW_TOO_WIDE}"'`);
+  const source = sql.raw("tool_output_source.payload");
+  const output = sql.raw("tool_output_source.output");
+  const structuredText = sql.raw("tool_output_structured.text");
+  const flatText = sql.raw("tool_output_flat.preview");
+  const fact = (shape: "structured" | "text", previewBytes: SQL) => sql`jsonb_build_object(
+    'truncated', true,
+    'reason', 'tool_output_preview',
+    'shape', ${sql.raw(`'${shape}'`)},
+    'originalBytes', tool_output_size.original_bytes,
+    'previewBytes', ${previewBytes}
+  )`;
+  const textPreview = sql`(select jsonb_strip_nulls(jsonb_build_object(
+      'id', left(${source} ->> 'id', 256),
+      'name', left(${source} ->> 'name', 256),
+      'toolName', left(${source} ->> 'toolName', 256),
+      'status', left(${source} ->> 'status', 128),
+      'error', case
+        when jsonb_typeof(${source} -> 'error') = 'boolean' then ${source} -> 'error'
+        when jsonb_typeof(${source} -> 'error') = 'string'
+          then to_jsonb(left(${source} ->> 'error', 1024))
+        when ${output} -> 'isError' = 'true'::jsonb then 'true'::jsonb
+      end,
+      'failed', case when jsonb_typeof(${source} -> 'failed') = 'boolean'
+        then ${source} -> 'failed' end,
+      'truncation', case when octet_length((${source} -> 'truncation')::text) <= 4096
+        then ${source} -> 'truncation' end,
+      'output', to_jsonb(${flatText}),
+      'outputPreview', ${fact("text", sql`octet_length(${flatText})`)}
+    ))
+    from (select coalesce(
+        case when jsonb_typeof(${output}) = 'string' then ${output} #>> '{}' end,
+        ${output} #>> '{content,0,text}',
+        ${output}::text
+      ) as text offset 0) as tool_output_text,
+      lateral (select ${toolOutputPreviewText(sql.raw("tool_output_text.text"))} as preview
+        offset 0) as tool_output_flat)`;
+  return sql`(select case
+      when not tool_output_source.previewable then ${payload}
+      when tool_output_size.original_bytes <= ${min} then ${source}
+      when position(${wide} in ${structuredText}) = 0
+        and octet_length(${structuredText}) <= ${max}
+        then case when octet_length(${structuredText}) = tool_output_size.original_bytes
+          then ${source}
+          else tool_output_structured.payload || jsonb_build_object('outputPreview', ${fact(
+            "structured",
+            sql`octet_length(${structuredText})`,
+          )}) end
+      when tool_output_size.original_bytes <= ${max} then ${source}
+      else ${textPreview}
+    end
+    from (select tool_output_read.payload,
+        tool_output_read.payload -> 'output' as output,
+        jsonb_typeof(tool_output_read.payload) = 'object'
+          and (tool_output_read.payload -> 'output') is not null as previewable
+        from (select ${payload} || '{}'::jsonb as payload offset 0) as tool_output_read
+        offset 0) as tool_output_source,
+      lateral (select octet_length((${source})::text) as original_bytes offset 0)
+        as tool_output_size,
+      lateral (select tool_output_structured_value.payload,
+          tool_output_structured_value.payload::text as text
+        from (select case when tool_output_source.previewable
+            and tool_output_size.original_bytes > ${min} then
+          (${source} - 'output') || jsonb_build_object(
+            'output', ${toolOutputPreviewValue(output, null, 0)}
+          ) end as payload offset 0) as tool_output_structured_value
+        offset 0) as tool_output_structured)`;
+}
+
+function isToolOutputPreviewEvent(event: SessionEvent): boolean {
+  return (
+    event.type === "agent.toolCall.output" &&
+    typeof event.payload === "object" &&
+    event.payload !== null &&
+    Object.prototype.hasOwnProperty.call(event.payload, "outputPreview")
+  );
 }
 
 function sessionEventProjectionSelect(
   payloadMode: SessionEventPayloadMode = "full",
   source: SessionEventProjectionSource = schema.sessionEvents,
+  options: { toolOutputPreview?: boolean | undefined } = {},
 ) {
   const typeInvalid = sql`(
     octet_length(${source.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
@@ -37334,6 +37751,11 @@ function sessionEventProjectionSelect(
         ))
       )
     ))
+    ${
+      options.toolOutputPreview
+        ? sql`when ${toolOutputPreviewCandidate(source)} then ${toolOutputPreviewPayload(source.payload)}`
+        : sql``
+    }
     else ${source.payload}
   end`;
   const selectedPayload =
@@ -37457,7 +37879,12 @@ export async function listSessionEvents(
       filters.push(lt(schema.sessionEvents.sequence, before));
     }
     const rows = await scopedDb
-      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
+      .select(
+        sessionEventProjectionSelect(options.payloadMode ?? "full", schema.sessionEvents, {
+          toolOutputPreview:
+            (options.payloadMode ?? "full") === "full" && options.toolOutputPreview,
+        }),
+      )
       .from(schema.sessionEvents)
       .where(and(...filters))
       .orderBy(
@@ -39699,6 +40126,7 @@ export async function appendSessionHistoryItems(
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -40218,6 +40646,7 @@ export async function attachOpenSuffixToPendingToolCalls(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          rowProjection: "event",
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -41554,7 +41983,7 @@ export async function markSessionTurnModelTransportHttpOnly(
 ): Promise<boolean> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return false;
       await tx
         .update(schema.sessionTurns)
@@ -41591,6 +42020,7 @@ export async function setSessionLastInputTokensForTurnAttempt(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
       const fence = await lockTurnAttemptWriteFenceTx(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -64745,6 +65175,9 @@ export async function getSandbox(
   access: string | { accountId: string; workspaceId: string; subjectId: string },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  // Sandbox ids are UUIDs. Anything else (for example a machine's display name)
+  // names no sandbox, so answer "not found" rather than failing the uuid cast.
+  if (!UUID_PATTERN.test(sandboxId)) return null;
   if (typeof access !== "string") {
     return await withRlsContext(db, access, async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, access.subjectId);
@@ -64783,6 +65216,7 @@ export async function getSandboxForAttempt(
   },
   sandboxId: string,
 ): Promise<SandboxRecord | null> {
+  if (!UUID_PATTERN.test(sandboxId)) return null;
   const projection = await withRlsContext(db, input, async (scopedDb) => {
     await setMachineAttemptSubject(scopedDb, input.subjectId);
     const [row] = await rawRows<{ value: { sandbox: SandboxRecord | null } | null }>(
@@ -85831,6 +86265,7 @@ export async function appendSessionEvents(
           .map((input) => input.turnAttemptId)
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
           sessionIds: [sessionId],
@@ -87319,6 +87754,7 @@ export async function appendSessionEventsAndUpdateSession(
           .map((input) => input.turnAttemptId)
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
           sessionIds: [sessionId],

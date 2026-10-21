@@ -42,7 +42,7 @@ import {
   type NavItemSize,
 } from "@opengeni/react/ui/settings-nav";
 import { Switch } from "@opengeni/react/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   chats,

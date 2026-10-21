@@ -17,7 +17,7 @@ import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorDetails,
   isPermissionDenied,
@@ -34,12 +34,12 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
   type OrganizationAdminResource,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import type {
   OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import { useOrganizationDirectory } from "./organization-directory";
 

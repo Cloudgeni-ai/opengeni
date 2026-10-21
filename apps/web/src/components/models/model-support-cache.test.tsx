@@ -15,8 +15,8 @@ import {
   clearSharedQueries,
   invalidateSharedQueries,
   retainSharedQueries,
-} from "@/lib/shared-query";
-import { notifyCreditBalanceChanged } from "@/lib/credit-balance-events";
+} from "@opengeni/react/app/lib/shared-query";
+import { notifyCreditBalanceChanged } from "@opengeni/react/app/lib/credit-balance-events";
 
 const defaults: OrganizationModelDefaults = {
   sessionDefaults: null,
@@ -53,7 +53,7 @@ const context = {
     accountGrants: [{ accountId: "organization-a", permissions: ["billing:read"] }],
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { error: mock(() => undefined) } }));
 
 const { useOrganizationModelDefaults } = await import("./use-organization-model-defaults");

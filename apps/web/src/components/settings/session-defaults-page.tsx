@@ -17,18 +17,18 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
+import { AgentCapabilityPicker } from "@opengeni/react/app/components/agent/agent-capability-picker";
 import {
   learningModesEqual,
   useLearningSettings,
   type LearningModes,
-} from "@/components/agent/capability-learning";
-import { InAppHelpLink } from "@/components/in-app-help-link";
+} from "@opengeni/react/app/components/agent/capability-learning";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
 import { Button } from "@opengeni/react/ui/button";
 import { Field, FieldStack, TextArea } from "@opengeni/react/ui/field";
 import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import { Notice } from "@opengeni/react/ui/notice";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   agentConfigErrorText,
   capabilityAvailability,
@@ -37,8 +37,8 @@ import {
   requestFromDraft,
   workspaceAgentDefaultsDraft,
   type AgentCapabilityDraft,
-} from "@/lib/agent-capabilities";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
+} from "@opengeni/react/app/lib/agent-capabilities";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 
 export const IDENTITY_PLACEHOLDER =
   "You are Acme's operations assistant. You help the team triage support tickets and keep answers short and friendly.";

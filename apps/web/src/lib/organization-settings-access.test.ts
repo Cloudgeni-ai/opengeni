@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
-import { organizationLandingWorkspaceId, organizationSettingsWorkspaceId } from "./org";
+import {
+  organizationLandingWorkspaceId,
+  organizationSettingsWorkspaceId,
+} from "@opengeni/react/app/lib/org";
 import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "./organization-settings-access";
-import type { AccessContext, Workspace } from "@/types";
+import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 const managed = { productAccessMode: "managed", auth: { mode: "managedSession" } } as const;
 const local = { productAccessMode: "local", auth: { mode: "none" } } as const;

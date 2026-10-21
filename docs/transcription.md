@@ -250,7 +250,7 @@ available independently when a provider is ready.
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
 | React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
 | Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
-| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `apps/web/src/components/transcription-settings.tsx` |
+| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `packages/react/src/app/components/transcription-settings.tsx` |
 
 Deprecated host-adapter types remain exported from
 `packages/sdk/src/transcription.ts` for one compatibility release.

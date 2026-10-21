@@ -2,9 +2,9 @@ import { ChatComposer, ComposerTranscriptionControl } from "@opengeni/react";
 import { createRoot } from "react-dom/client";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
-import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
-import { ModelPicker } from "../src/components/pickers";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { NewSessionDraftSyncNotice } from "@opengeni/react/app/components/new-session-draft-sync-notice";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   emptyAttachments,
@@ -20,7 +20,7 @@ const newSession = new URLSearchParams(location.search).has("new-session");
 const sendingPreview = new URLSearchParams(location.search).has("sending");
 const attachmentPreview = new URLSearchParams(location.search).has("attachment");
 const AgentLearningSettingsEditor = lazy(() =>
-  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+  import("@opengeni/react/app/components/knowledge/agent-learning-settings").then((module) => ({
     default: module.AgentLearningSettingsEditor,
   })),
 );

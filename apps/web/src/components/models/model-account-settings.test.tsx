@@ -7,7 +7,7 @@ import {
   clearSharedQueries,
   invalidateSharedQueries,
   retainSharedQueries,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Sharing subscriptions, against a mocked client: the organization's rules,
@@ -100,7 +100,7 @@ const client = {
 const toastError = mock((_message: string) => undefined);
 let subject: string | null = "owner";
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({ client, authSession: subject ? { user: { id: subject } } : null }),
 }));
 mock.module("sonner", () => ({ toast: { error: toastError, success: mock(() => undefined) } }));

@@ -57,7 +57,7 @@ import {
   ToolbarSummary,
   type ToolbarFilterValue,
 } from "@opengeni/react/ui/toolbar";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { organization, type WorkspaceRole } from "../../fixtures";
 import {

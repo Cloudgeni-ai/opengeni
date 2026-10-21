@@ -20,7 +20,9 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
-use crate::support::{Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, until};
+use crate::support::{
+    Act, FakeHost, Fleet, GuestStream, KEY, OTHER_KEY, host_status, sandbox_status, until,
+};
 
 /// What the fake guest saw.
 #[derive(Default)]
@@ -184,19 +186,12 @@ async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>)
                     .at
                     .iter()
                     .map(|(id, level)| {
-                        json!({
-                            "id": id.to_string(), "generation": 1, "revision": 1,
-                            "level": level, "durability": "local", "memory_saved": true,
-                            "step": null, "holds": state.holds.get(id).map_or(0, BTreeSet::len),
-                            "resident_bytes": null, "broken": false,
-                        })
+                        let level = serde_json::to_value(level).unwrap();
+                        let holds = state.holds.get(id).map_or(0, BTreeSet::len);
+                        sandbox_status(*id, 1, level.as_str().unwrap(), "local", holds)
                     })
                     .collect();
-                let status =
-                    json!({ "sandboxes": sandboxes, "steps": [], "available_memory": null });
-                return Act::Reply(Reply::Status(Box::new(
-                    serde_json::from_value(status).unwrap(),
-                )));
+                return Act::Reply(host_status(&sandboxes));
             }
             Request::Remove { id, .. } => {
                 state.at.remove(id);

@@ -60,9 +60,9 @@ import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
-import { modelPayerHint } from "@/lib/model-payer";
-import { useAppContext } from "@/context";
-import { formatElapsedSeconds } from "@/lib/format";
+import { modelPayerHint } from "@opengeni/react/app/lib/model-payer";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatElapsedSeconds } from "@opengeni/react/app/lib/format";
 import {
   markScheduledTaskAttentionSeen,
   notifyScheduledTaskAttentionUpdated,
@@ -82,17 +82,17 @@ import {
   scheduledTaskStateLabel,
   visibleScheduledTaskPolicyDrift,
 } from "@/lib/scheduled-tasks";
-import { sessionDisplayTitle } from "@/lib/session-rename";
-import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import { cn } from "@/lib/utils";
+import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
+import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type {
   ScheduledTask,
   ScheduledTaskAccessAttention,
   ScheduledTaskRun,
   Session,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   NAME_MAX_LENGTH,

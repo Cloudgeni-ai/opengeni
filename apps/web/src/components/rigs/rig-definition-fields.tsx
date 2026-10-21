@@ -8,7 +8,7 @@ import { useRef } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
-import type { RigCheck } from "@/types";
+import type { RigCheck } from "@opengeni/react/app/types";
 
 export type RigDefinitionDraft = {
   setupScript: string;

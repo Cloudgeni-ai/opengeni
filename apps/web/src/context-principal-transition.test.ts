@@ -6,14 +6,18 @@ import {
   invalidateWorkspaceTransition,
   ownsWorkspaceOperation,
   settleWorkspaceOperation,
-} from "./lib/workspace-transition";
+} from "@opengeni/react/app/lib/workspace-transition";
 
-const contextSource = await Bun.file(`${import.meta.dir}/context.tsx`).text();
+// The web shell (context.tsx) composes the shared state machine (app-state.tsx).
+const contextSource = [
+  await Bun.file(`${import.meta.dir}/context.tsx`).text(),
+  await Bun.file(`${import.meta.dir}/../../../packages/react/src/app/app-state.tsx`).text(),
+].join("\n");
 const sessionListSource = await Bun.file(
-  `${import.meta.dir}/components/rail/session-list.tsx`,
+  `${import.meta.dir}/../../../packages/react/src/app/components/rail/session-list.tsx`,
 ).text();
 const transcriptionSettingsSource = await Bun.file(
-  `${import.meta.dir}/components/transcription-settings.tsx`,
+  `${import.meta.dir}/../../../packages/react/src/app/components/transcription-settings.tsx`,
 ).text();
 const workspaceSettingsSource = await Bun.file(
   `${import.meta.dir}/routes/workspace-settings.tsx`,
@@ -32,6 +36,17 @@ function sourceBetween(start: string, end: string): string {
 }
 
 describe("principal transition contract", () => {
+  test("shared console queries follow the client replaced on every identity change", () => {
+    const memo = contextSource.indexOf("const client = useMemo(() => {");
+    expect(memo).toBeGreaterThanOrEqual(0);
+    const wiring = contextSource.indexOf("useConsoleSharedQueries(client);", memo);
+    expect(wiring).toBeGreaterThan(memo);
+    // The client is recreated per access-key version (the identity fence).
+    expect(contextSource.slice(memo, wiring)).toContain(
+      "[accessKeyVersion, createOpenGeniClient, sessionChannelProjectionAuthority]",
+    );
+  });
+
   test("every credential and managed-principal mutation uses the complete invalidation seam", () => {
     expect(sourceBetween("function saveAccessKey()", "function forgetAccessKey()")).toContain(
       "invalidatePrincipalWorkspaceState();",
@@ -51,7 +66,7 @@ describe("principal transition contract", () => {
       "useEffect(() => {",
     );
     expect(invalidation).toContain("invalidatePrincipalTransition(");
-    expect(invalidation).toContain("slackLinkPrepareController.clear()");
+    expect(invalidation).toContain("slackLink.clear()");
     expect(invalidation).toContain("options?.preservePendingSlackLink !== true");
     expect(invalidation).toContain("managedSelfContextIdentityRef.current = null");
     expect(invalidation).toContain("setManagedSelfContext(null)");
@@ -81,7 +96,7 @@ describe("principal transition contract", () => {
       "async function handleManagedSignOut()",
     );
     expect(managedAuth).toContain("preservePendingSlackLink: preserveSlackLinkForManagedAuth(");
-    expect(managedAuth).toContain("slackLinkPrepareController.phase()");
+    expect(managedAuth).toContain("slackLink.phase()");
 
     for (const unrelatedTransition of [
       sourceBetween("function saveAccessKey()", "function forgetAccessKey()"),

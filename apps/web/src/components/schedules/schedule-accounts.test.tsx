@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { ScheduledTaskAccountPlan } from "@/types";
+import type { ScheduledTaskAccountPlan } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

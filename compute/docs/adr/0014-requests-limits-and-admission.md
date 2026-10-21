@@ -306,9 +306,8 @@ pick a VM.
   A sandbox's bound comes from its own disk's length, recorded when its
   disk is made, so a base image that changes later does not change what
   older sandboxes book; a new one before its disk exists uses today's
-  base image. A record written before lengths were kept learns its length
-  on the next start, before anything of it is admitted, from its local
-  disk or the store's copy, and is blocked if neither can say. An awake VM's
+  base image. A sandbox adopted from the store keeps the length of the
+  disk in the copy it claims. An awake VM's
   measurement uses its own disk's length too. A boot also relinks the
   kernel (tens of MiB, replacing the previous copy), which the reserve
   covers. A wake that cannot book what it needs

@@ -13,8 +13,8 @@ import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-ro
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
-import { useAppContext } from "@/context";
-import type { PrivateScheduledTaskSummary } from "@/types";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import type { PrivateScheduledTaskSummary } from "@opengeni/react/app/types";
 
 import { scheduleWords } from "./schedule-model";
 

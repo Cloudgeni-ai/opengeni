@@ -24,7 +24,7 @@ import {
   PLAN_LABEL,
   vaultErrorText,
   vaultsOfConnection,
-} from "./vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
 import { SecretsLoadFailure, SyncStatus, VaultTile } from "./vault-parts";
 import {
   connectionAttention,

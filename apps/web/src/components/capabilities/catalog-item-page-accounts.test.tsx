@@ -10,7 +10,7 @@ afterAll(() => GlobalRegistrator.unregister());
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { CatalogItemPage } = await import("./catalog-item-page");
-type CapabilityCatalogItem = import("@/types").CapabilityCatalogItem;
+type CapabilityCatalogItem = import("@opengeni/react/app/types").CapabilityCatalogItem;
 
 async function render(node: import("react").ReactNode) {
   const container = document.createElement("div");

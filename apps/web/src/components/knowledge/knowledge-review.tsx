@@ -21,14 +21,14 @@ import { toast } from "sonner";
 
 import { notifyKnowledgeReviewUpdated } from "@/components/rail/use-knowledge-review-indicator";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { DiffView } from "@opengeni/react/ui/diff-view";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Field, TextArea, TextInput } from "@opengeni/react/ui/field";
-import { InAppHelpLink } from "@/components/in-app-help-link";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
 import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
 import { inAppClick } from "@opengeni/react/ui/in-app-click";
@@ -39,13 +39,13 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { ToolbarSummary } from "@opengeni/react/ui/toolbar";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
   canManageWorkspaceSettings,
   hasAccountPermission,
   hasWorkspacePermission,
-} from "@/lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 
 import { errorText } from "./knowledge-data";
 import { Markdown } from "./knowledge-markdown";

@@ -20,7 +20,7 @@ const context = {
     updateWorkspaceSettings,
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
 const { RealtimeVoiceSettingsRows } = await import("./realtime-voice-settings");
 

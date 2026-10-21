@@ -29,7 +29,7 @@ import {
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import { EmptyState } from "@opengeni/react/ui/empty-state";

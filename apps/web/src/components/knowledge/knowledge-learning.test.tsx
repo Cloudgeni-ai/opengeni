@@ -48,7 +48,7 @@ const context = {
   captureWorkspaceInvocation: () => ({}),
   ownsWorkspaceInvocation: () => true,
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: Object.assign(() => 0, { error: () => 0 }) }));
 const {
   LearningSettings,

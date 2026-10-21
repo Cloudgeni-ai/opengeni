@@ -8,7 +8,7 @@ import {
 } from "@/components/organization-access/organization-access-fields";
 import { Button } from "@opengeni/react/ui/button";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,

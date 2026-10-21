@@ -13,8 +13,8 @@ import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { rigActorLabel } from "@/lib/rig-status";
-import { withOccurrenceKeys } from "@/lib/react-key";
-import type { RigCheck, RigVersion } from "@/types";
+import { withOccurrenceKeys } from "@opengeni/react/app/lib/react-key";
+import type { RigCheck, RigVersion } from "@opengeni/react/app/types";
 
 export function RigVersionsTimeline({
   versions,

@@ -5,8 +5,8 @@ import { toast } from "sonner";
 
 import { Button } from "@opengeni/react/ui/button";
 import { Notice } from "@opengeni/react/ui/notice";
-import { useAppContext } from "@/context";
-import { canManageWorkspaceSettings } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 import { useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 /**

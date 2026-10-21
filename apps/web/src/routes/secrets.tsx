@@ -5,7 +5,7 @@
 //   /secrets?connection=<id>      a password manager connection   &view=choose-vaults|replace-token
 //   /secrets/$vaultId             a vault's page   ?view=availability|new-item&type=
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
   useVault,
   useVaultItem,
@@ -47,7 +47,7 @@ import {
   secretsCapabilityOff,
   vaultError,
   vaultsOfConnection,
-} from "@/components/secrets/vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   acceptsItem,
   connectionName,
@@ -64,11 +64,11 @@ import {
 } from "@/components/secrets/vault-providers";
 import { SecretsMissing, VaultPage, VaultPageLoading } from "@/components/secrets/vault-page";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
-import { useAppContext } from "@/context";
-import { orgLabel } from "@/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import {
   connectViewProvider,
   type SecretsConnectOwner,

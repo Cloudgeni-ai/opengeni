@@ -1,4 +1,7 @@
-import { AccountGroupHeading, SubscriptionAccountRow } from "./subscription-account-ui";
+import {
+  AccountGroupHeading,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
@@ -19,7 +22,7 @@ import type {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { KeyRoundIcon, LockIcon, PlusIcon } from "lucide-react";
 import { isValidElement, useMemo, type ReactNode } from "react";
-import { useOrganizationCodexUsage } from "./use-organization-codex-overview";
+import { useOrganizationCodexUsage } from "@/components/models/use-organization-codex-overview";
 
 import {
   PROVIDER_CONNECTION_CONFIGS,
@@ -52,7 +55,7 @@ import {
   payerShortLabel,
   resetsLabel,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { OpenGeniCreditsRow, type OpenGeniCredits } from "@/components/models/opengeni-credits-row";
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
@@ -78,9 +81,9 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
-import { billingClassForModel } from "@/lib/model-policy";
-import { accountKey, type GatewayId } from "@/lib/models-route";
-import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@/lib/shared-query";
+import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
+import { accountKey, type GatewayId } from "@opengeni/react/app/lib/models-route";
+import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Models, the list: every account that pays for

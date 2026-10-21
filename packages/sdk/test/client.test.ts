@@ -1557,6 +1557,7 @@ describe("OpenGeniClient", () => {
             "X-OpenGeni-Covered-Last": "42",
             "X-OpenGeni-Next-After": "42",
             "X-OpenGeni-Forensic-Exact": "true",
+            "X-OpenGeni-Conversation-Filter": "2",
           },
         }),
     );
@@ -1589,9 +1590,24 @@ describe("OpenGeniClient", () => {
       nextAfter: 42,
       nextBefore: null,
       forensicExact: true,
+      conversationFilter: 2,
     });
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure`,
+    );
+  });
+
+  test("listEventPage asks for tool-output previews only when requested", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      includeTypes: ["agent.toolCall.output"],
+      payloadMode: "full",
+      toolOutputs: "preview",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=full&includeTypes=agent.toolCall.output&toolOutputs=preview`,
     );
   });
 

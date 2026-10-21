@@ -8,7 +8,7 @@ import { CheckIcon, CopyIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import {
   PermissionChecklist,
   WorkspaceScopeFields,
@@ -16,7 +16,7 @@ import {
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
@@ -42,7 +42,7 @@ import {
   scopeSummary,
   type OrganizationWorkspaceScope,
 } from "@/lib/organization-access";
-import type { ApiKey } from "@/types";
+import type { ApiKey } from "@opengeni/react/app/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
   OpenGeniBrowserClient["createOrganizationApiKey"]

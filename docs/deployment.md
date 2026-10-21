@@ -2916,6 +2916,16 @@ The runtime secret must provide values such as:
   re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
   including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
+- Optional `OPENGENI_DATABASE_NOTIFICATION_URL`: a direct or session-pooled connection
+  to the **same database and runtime role**, for committed sidebar invalidations.
+  Each API process lazily opens one dedicated `LISTEN` connection, shared by its
+  open workspace streams. Direct deployments use `OPENGENI_DATABASE_URL` by default.
+  Transaction-pooled deployments (port 6432 or prepared statements explicitly
+  disabled) must provide this separate URL to enable hints; otherwise clients keep
+  their existing polling. Do not point this at a transaction-mode pooler or an
+  owner credential. Listener loss restores polling, and reconnect reconciles every
+  loaded list before the client resumes hint-driven reads. Rolling migrations
+  must run before the new API starts serving, as for the other runtime schema.
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
 - `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS without an API key

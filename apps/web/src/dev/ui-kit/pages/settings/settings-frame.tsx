@@ -32,7 +32,7 @@ import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
 import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
 import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { chats, organization, organizationRoles, type Person } from "../../fixtures";
 import type { SectionKey } from "../../sections/registry";

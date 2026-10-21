@@ -544,6 +544,14 @@ Independent package defaults inherit without replacing host `--og-*` values;
 derived defaults use scoped effective values so changing a base accent, radius,
 motion, or surface token updates its dependents at runtime.
 
+`compiled.css` covers the documented embeddable components. The
+`@opengeni/react/ui/*` subpaths are first-party building blocks for the
+Opengeni web app, not a documented public API, and `compiled.css` does not
+style them. A host that imports them anyway must compile them through the
+Tailwind source bridge below. Some use Tailwind's `dark:` variant, which
+follows the host's own `dark` variant (Tailwind's default is the operating
+system's color scheme), not `data-og-theme`.
+
 The original Tailwind v4 bridge remains available for hosts that intentionally
 want Opengeni utilities compiled into their own Tailwind entry:
 
@@ -1075,8 +1083,10 @@ state remains application-owned; durable draft and session state remain in
   window.
 - History is conversation-first: windowed reads exclude a turn's steps
   (`SESSION_EVENT_STEP_TYPES`: tool calls, tool outputs, reasoning and command
-  output deltas) but keep presented tool results such as images and published
-  files. Each turn with unloaded steps gets a `turn-steps` timeline item, which
+  output deltas, and the model request and usage rows of each model call) but
+  keep presented tool results such as images and published files, and the
+  model request rows up to a turn's first model response (its startup phases).
+  Each turn with unloaded steps gets a `turn-steps` timeline item, which
   readable work rows render when opened. Opening a turn reads its newest
   `SESSION_TURN_STEP_PAGE_SIZE` steps, and "Show earlier steps" pages back.
   Live steps go to per-turn stores outside the conversation window, so a long
@@ -1084,6 +1094,25 @@ state remains application-owned; durable draft and session state remain in
   `SESSION_TURN_LIVE_STEP_TAIL` steps, an opened turn keeps every step, and
   steps of turns nobody has open are limited to
   `SESSION_STEP_BROWSER_MAX_BYTES`. `replay: "full"` still reads everything.
+  Turnless step rows (PTY and background command output) are not part of the
+  conversation window either: the sandbox terminal reads its own newest
+  1,000 PTY and command-output rows by type the first time it is shown for a
+  session, and live output keeps streaming in. When `useSessionEvents` rejoins
+  the stream past unread terminal output (opening a chat, returning from a
+  hidden tab or from history) or a burst overflows its live tail, the terminal
+  reads its newest page again. That signal comes from this package's
+  `useSessionEvents`; a terminal fed with `events` from elsewhere reads its
+  history only when opened.
+- The package and the Opengeni server can be upgraded in either order. A
+  server that applies the conversation filter says so in the
+  `X-OpenGeni-Conversation-Filter` response header
+  (`SESSION_EVENT_CONVERSATION_FILTER_VERSION`). Without it, history reads keep
+  tool calls and model bookkeeping and drop non-presented calls in the browser,
+  so an older server that ignores `presentedToolCalls` loses no image,
+  published file or Skill card. The header is read through `listEventPage`:
+  a client without it (for example a host proxy exposing only `listEvents`)
+  always uses that fallback. `createEmbeddedSessionClient` keeps
+  `listEventPage` when the base client has it.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
   The live working set is at most 16 MiB or 20,000 events. One event larger than

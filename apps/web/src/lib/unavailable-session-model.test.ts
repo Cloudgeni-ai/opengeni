@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
@@ -12,7 +12,7 @@ import {
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
-} from "./unavailable-session-model";
+} from "@opengeni/react/app/lib/unavailable-session-model";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,

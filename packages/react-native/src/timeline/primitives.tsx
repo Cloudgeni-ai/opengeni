@@ -13,6 +13,7 @@ import Animated, {
 import { Icon, type NativeIconName } from "./icon";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
 import { useOpenGeniText } from "@opengeni/react/messages";
+import type { ToolOutputPreview } from "@opengeni/react/session";
 
 /**
  * A reader opening or closing a disclosure owns the scroll position: the
@@ -160,6 +161,11 @@ export interface ActivityDisclosureProps {
   /** Compact reel rendering for the rolling status (no chevron, no body). */
   compact?: boolean | undefined;
   accessibilityLabel?: string | undefined;
+  /**
+   * Set while a tool row's output is a bounded preview: opening the row reads
+   * the exact output, and the body waits for it (or says it is a preview).
+   */
+  outputPreview?: ToolOutputPreview | null | undefined;
   children?: ReactNode | undefined;
 }
 
@@ -179,10 +185,19 @@ export function ActivityDisclosure({
   defaultOpen,
   compact,
   accessibilityLabel,
+  outputPreview,
   children,
 }: ActivityDisclosureProps) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const [open, setOpen] = useState(defaultOpen ?? false);
+  // A previewed output reads its exact output when the row opens (once: a
+  // failed read waits for Retry).
+  const loadOutput = outputPreview?.load;
+  const outputPending = outputPreview?.state === "preview";
+  useEffect(() => {
+    if (open && outputPending && !compact) loadOutput?.();
+  }, [open, outputPending, loadOutput, compact]);
   const releaseFollow = useReleaseFollow();
   const iconTone = failed && iconToneProp === "muted" ? "failed" : iconToneProp;
   const chip =
@@ -327,7 +342,41 @@ export function ActivityDisclosure({
         {row}
       </Pressable>
       {open ? (
-        <View style={{ marginLeft: 28, marginTop: 6, marginBottom: 8, gap: 8 }}>{children}</View>
+        <View style={{ marginLeft: 28, marginTop: 6, marginBottom: 8, gap: 8 }}>
+          {outputPreview && loadOutput && outputPreview.state !== "error" ? (
+            // Never show a preview's body as if it were the whole output.
+            <BodyNote>{t("timeline.shared.loadingFullOutput")}</BodyNote>
+          ) : outputPreview ? (
+            <>
+              <View
+                style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}
+              >
+                <BodyNote>
+                  {loadOutput
+                    ? t("timeline.shared.outputPreviewFailed")
+                    : t("timeline.shared.outputPreviewOnly")}
+                </BodyNote>
+                {loadOutput ? (
+                  <Pressable accessibilityRole="button" onPress={loadOutput} hitSlop={8}>
+                    <Text
+                      style={{
+                        ...fontStyle(theme, 500),
+                        fontSize: theme.size.sm,
+                        lineHeight: 20,
+                        color: theme.colors["fg-muted"],
+                      }}
+                    >
+                      {t("timeline.shared.retryFullOutput")}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+              {children}
+            </>
+          ) : (
+            children
+          )}
+        </View>
       ) : null}
     </View>
   );

@@ -17,6 +17,7 @@ export default defineConfig({
     "src/learning-refusal.ts",
     "src/app-links.ts",
     "src/this-computer.ts",
+    "src/desktop-bridge.ts",
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
     "src/session-proxy.ts",

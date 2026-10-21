@@ -1,0 +1,111 @@
+// Pieces every artifact page shares: the type glyph and tile, the detail
+// frame and the back link to the library. Kept apart from the library and the
+// Site route so a file page does not load either.
+import { useNavigate, useSearch, useStringifySearch } from "../../lib/navigation";
+import {
+  FileIcon,
+  FileTextIcon,
+  Globe2Icon,
+  ImageIcon,
+  PresentationIcon,
+  Table2Icon,
+  type LucideIcon,
+} from "lucide-react";
+import type { MouseEvent } from "react";
+
+import type { DetailBackLink } from "../../../ui/detail-page";
+import { LogoTile } from "../../../ui/logo-tile";
+import { artifactKindLabel, type ArtifactKind } from "../../lib/artifact-catalog";
+import {
+  artifactLibraryFilters,
+  artifactLibrarySearch,
+} from "../../lib/artifact-library-navigation";
+import type { ArtifactReturnSearch } from "../../lib/routes";
+
+// Resolved at render, not in a module-level table: these icons can live in a
+// chunk that loads after this one, and a table built while this module loads
+// would hold undefined (the Artifacts list then fails to render).
+function artifactTypeGlyph(kind: ArtifactKind): LucideIcon {
+  switch (kind) {
+    case "site":
+      return Globe2Icon;
+    case "image":
+      return ImageIcon;
+    case "document":
+      return FileTextIcon;
+    case "spreadsheet":
+      return Table2Icon;
+    case "presentation":
+      return PresentationIcon;
+    default:
+      return FileIcon;
+  }
+}
+
+export function ArtifactTypeIcon({
+  kind,
+  className,
+}: {
+  kind: ArtifactKind;
+  className?: string | undefined;
+}) {
+  const Icon = artifactTypeGlyph(kind);
+  return <Icon className={className ?? "size-4"} aria-hidden />;
+}
+
+/** The artifact's leading tile on its own page: its type glyph on the neutral tile. */
+export function ArtifactKindTile({ kind }: { kind: ArtifactKind }) {
+  return <LogoTile icon={<ArtifactTypeIcon kind={kind} />} name={artifactKindLabel[kind]} />;
+}
+
+/** Detail pages fill the content column; `DetailPage` draws the 960px frame. */
+export const ARTIFACT_DETAIL_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
+
+/**
+ * Whether the artifact page shows the artifact itself, full screen. Links from
+ * outside the Artifacts list (chats, notifications, copied or pasted URLs)
+ * do; the list marks its links with `browse` to land on the detail page.
+ * Switching replaces the history entry, so the browser's back button still
+ * returns to wherever the person came from.
+ */
+export function useArtifactFullView(): [boolean, (fullView: boolean) => void] {
+  const navigate = useNavigate();
+  const search: ArtifactReturnSearch = useSearch({ strict: false });
+  // A link to one of a Site's tabs (Settings, Versions…) lands on its page.
+  const fullView = search.browse !== true && search.view === undefined && search.tab === undefined;
+  const setFullView = (next: boolean) =>
+    void navigate({
+      to: ".",
+      search: { ...search, browse: next ? undefined : true },
+      replace: true,
+    });
+  return [fullView, setFullView];
+}
+
+/** "← Artifacts", keeping the way back to the session it was opened from. */
+export function useArtifactsBackLink(workspaceId: string, fromSession?: string): DetailBackLink {
+  const navigate = useNavigate();
+  const search = artifactLibrarySearch(
+    artifactLibraryFilters(useSearch({ strict: false })),
+    fromSession,
+  );
+  const query = useStringifySearch()(search);
+  return {
+    label: "Artifacts",
+    href: `/workspaces/${encodeURIComponent(workspaceId)}/artifacts${query}`,
+    // The link keeps a real href (new tab, copy); a plain click stays in the router.
+    onClick: (event?: MouseEvent) => {
+      if (
+        event &&
+        (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      )
+        return;
+      event?.preventDefault();
+      void navigate({
+        to: "/workspaces/$workspaceId/artifacts",
+        params: { workspaceId },
+        search,
+      });
+    },
+  };
+}

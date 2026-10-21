@@ -199,6 +199,6 @@ describe("eager graph build check", () => {
 describe("web build configuration", () => {
   test("checks the initial load and direct chat loads", async () => {
     const source = await Bun.file(path.join(import.meta.dir, "vite.config.ts")).text();
-    expect(source).toContain('eagerGraphPlugin({ directRoutes: ["src/routes/session.tsx"]');
+    expect(source).toContain('eagerGraphPlugin({ directRoutes: ["src/routes/session-route.tsx"]');
   });
 });

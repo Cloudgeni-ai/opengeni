@@ -13,13 +13,16 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
 import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import { Button } from "@opengeni/react/ui/button";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { DestructiveConfirm, showUndoToast } from "@/components/ui/destructive-confirm";
+import {
+  DestructiveConfirm,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
@@ -49,7 +52,7 @@ import type {
   OrganizationMember,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   useOrganizationDirectory,
@@ -69,7 +72,7 @@ import {
   WORKSPACE_SEARCH_THRESHOLD,
 } from "./organization-people-model";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
-import type { ReturnTo } from "@/lib/return-to";
+import type { ReturnTo } from "@opengeni/react/app/lib/return-to";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Workspaces: every shared workspace, who is in it

@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { EyeIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog, FormFrame } from "@opengeni/react/ui/form-dialog";

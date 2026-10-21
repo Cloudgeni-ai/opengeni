@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import type { IntegrationFacetBindingSummary, IntegrationFacetDefinitionSummary } from "@/types";
+import type {
+  IntegrationFacetBindingSummary,
+  IntegrationFacetDefinitionSummary,
+} from "@opengeni/react/app/types";
 
 import {
   facetConfigFromForm,

@@ -1,7 +1,7 @@
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback, useEffect, useState } from "react";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 export type AgentKnowledgePromptKind = "company_profile" | "skill" | "workspace_instructions";
 

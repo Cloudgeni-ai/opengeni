@@ -371,6 +371,8 @@ async function mountStockChat(
         headers: {
           "X-OpenGeni-Covered-First": "1",
           "X-OpenGeni-Covered-Last": String(events.length),
+          // A current server: its reply is the conversation as it stands.
+          "X-OpenGeni-Conversation-Filter": "2",
         },
       });
     }

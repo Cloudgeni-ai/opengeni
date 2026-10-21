@@ -5,6 +5,8 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
+  // Session list notifications reference the final imported/archive/site fields.
+  "0888_session_list_invalidation.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",

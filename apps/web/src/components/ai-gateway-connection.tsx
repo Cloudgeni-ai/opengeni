@@ -8,8 +8,8 @@ import {
   useClaudeUsage,
   type ClaudeUsageState,
 } from "@/components/models/claude-usage";
-import { trackModelConnection } from "@/lib/analytics-observer";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
@@ -27,7 +27,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   ConnectionAccessFormPage,
   ConnectionAccessRows,
@@ -40,11 +40,11 @@ import {
   NOT_IN_USE,
   ProviderTile,
   useModelsListLabel,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
@@ -68,7 +68,7 @@ import {
   peekSharedQuery,
   sharedQueryWriter,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 // Workspace API-key providers (Vercel AI Gateway, OpenRouter, Opper) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list

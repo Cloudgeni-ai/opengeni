@@ -30,9 +30,9 @@ async fn a_sandbox_keeps_its_disk_length_when_the_base_image_changes() {
     lab.assert_clean();
 }
 
-/// A VM left running whose record predates keeping disk lengths books its
-/// own disk's length while a restart's removal cannot end it, never
-/// today's base image, however much shorter that is.
+/// A VM left running books its own disk's length while a restart's removal
+/// cannot end it, however much it grew past the length its record keeps,
+/// and never today's base image, however much shorter that is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_vm_left_running_books_its_own_disk_not_todays_image() {
     const LONG: u64 = 1 << 40;
@@ -56,8 +56,8 @@ async fn a_vm_left_running_without_its_disk_file_books_an_unknown_length() {
 }
 
 /// Leaves sandbox `n`'s VM running, unadoptable and unending, with a
-/// legacy record under removal and `change` made to its disk, and checks
-/// that a restart books at least `booked` for it until a removal ends it.
+/// record under removal and `change` made to its disk, and checks that a
+/// restart books at least `booked` for it until a removal ends it.
 async fn retained_disk_booking(n: u128, booked: u64, change: impl FnOnce(&std::path::Path)) {
     let policy = HostPolicy {
         disk: Some(DiskPolicy {
@@ -75,10 +75,6 @@ async fn retained_disk_booking(n: u128, booked: u64, change: impl FnOnce(&std::p
     let path = dir.join("sandbox.json");
     let mut record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    record["allocation"]
-        .as_object_mut()
-        .unwrap()
-        .remove("disk_bytes");
     record["removing"] = true.into();
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
     let disk = std::fs::read_dir(&dir)
@@ -113,39 +109,6 @@ async fn retained_disk_booking(n: u128, booked: u64, change: impl FnOnce(&std::p
     })
     .await;
     lab.assert_clean();
-}
-/// A record written before disk lengths were kept learns its own on the
-/// next start, from its local disk, before anything of it is admitted;
-/// one only in the store, which cannot say here, is blocked rather than
-/// booked by today's base image.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_record_without_its_disk_length_learns_it_or_is_blocked() {
-    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
-    let (local, remote) = (id(51), id(52));
-    lab.create(local, NEVER).await;
-    lab.create(remote, NEVER).await;
-    let length = lab.record(local)["allocation"]["disk_bytes"].clone();
-    let (local_dir, remote_dir) = (lab.sandbox_dir(local), lab.sandbox_dir(remote));
-    let (root, world) = lab.stop().await;
-    for (dir, disk) in [(&local_dir, "local"), (&remote_dir, "remote")] {
-        let path = dir.join("sandbox.json");
-        let mut record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        record["allocation"]
-            .as_object_mut()
-            .unwrap()
-            .remove("disk_bytes");
-        record["disk"] = disk.into();
-        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-    }
-    // Today's base image no longer says how long their disks are.
-    std::fs::write(root.join("base.img"), vec![1; 64 << 10]).unwrap();
-
-    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
-    assert_eq!(lab.record(local)["allocation"]["disk_bytes"], length);
-    let status = lab.status().await;
-    assert_eq!(status.blocked.len(), 1, "{status:?}");
-    assert_eq!(status.blocked[0].id, remote);
 }
 
 /// A VM a restart cannot take back may still write to local disk: a save

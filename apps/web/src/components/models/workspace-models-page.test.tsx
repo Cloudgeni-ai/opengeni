@@ -1,3 +1,4 @@
+import "@/app-host";
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type {
@@ -10,8 +11,8 @@ import type {
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { ModelsView } from "@/lib/models-route";
-import { useConsoleSharedQueries } from "@/lib/shared-query";
+import type { ModelsView } from "@opengeni/react/app/lib/models-route";
+import { useConsoleSharedQueries } from "@opengeni/react/app/lib/shared-query";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
@@ -287,18 +288,21 @@ let navigateTo: (search: {
 }) => void = () => {};
 let lastNavigation: { to?: string; search: Record<string, unknown> } | null = null;
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
 }));
-mock.module("@tanstack/react-router", () => ({
+const navigationMock = () => ({
   useNavigate:
     () => (options: { to?: string; search: { account?: string; view?: ModelsView } }) => {
       lastNavigation = options;
       navigateTo(options.search);
     },
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
-}));
+});
+// The page itself and the shared session pieces it renders both navigate.
+mock.module("@tanstack/react-router", navigationMock);
+mock.module("@opengeni/react/app/lib/navigation", navigationMock);
 mock.module("@/components/default-session-model", () => ({
   DefaultSessionModelPreferenceRow: ({
     describePayer,
@@ -330,7 +334,7 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     title,
@@ -524,7 +528,7 @@ beforeAll(() => undefined);
 
 beforeEach(async () => {
   // Account lists are retained per client between mounts; every test starts cold.
-  const { clearSharedQueries } = await import("@/lib/shared-query");
+  const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
   clearSharedQueries(client);
   organizationAdmin = false;
   organizationList = false;
@@ -647,7 +651,7 @@ async function cleanup({ container, root }: { container: HTMLElement; root: Root
 
 /** Start an explicitly cold mock scenario without relying on teardown timers. */
 async function renderColdModelsFixture(): ReturnType<typeof render> {
-  const { clearSharedQueries } = await import("@/lib/shared-query");
+  const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
   clearSharedQueries(client);
   return render();
 }
@@ -761,7 +765,7 @@ describe("Codex rows", () => {
 
   test("a fresh revisit renders retained accounts and live usage without reads; Refresh re-reads", async () => {
     // The console retains reads for its client (OpenGeniProvider retainReadsAcrossMounts).
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     try {
@@ -803,7 +807,8 @@ describe("Codex rows", () => {
 
   test("a reset redemption completion after unmount evicts retained inventory before revisit", async () => {
     const { useCodexSubscriptions } = await import("@/components/codex-connection");
-    const { retainSharedQueries, peekSharedQuery } = await import("@/lib/shared-query");
+    const { retainSharedQueries, peekSharedQuery } =
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     let remaining = 1;
     client.codexOverview.mockImplementation(async () => {
@@ -845,7 +850,7 @@ describe("Codex rows", () => {
   });
 
   test("an explicit live refresh failure says Usage unavailable, not the older reading", async () => {
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     try {
@@ -879,7 +884,7 @@ describe("Codex rows", () => {
 
   test("an account change elsewhere is never shown stale on the next visit", async () => {
     const { invalidateSharedQueries, peekSharedQuery, retainSharedQueries } =
-      await import("@/lib/shared-query");
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     await cleanup(first);
@@ -898,7 +903,7 @@ describe("Codex rows", () => {
   });
 
   test("a retained live overview older than five minutes revalidates on revisit", async () => {
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     await cleanup(first);
@@ -1546,8 +1551,9 @@ describe("Connect Codex", () => {
   }
 
   test("a sign-in that finishes after leaving Settings refreshes every Codex list for the workspace", async () => {
-    const { codexAccountsQueryKey, peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
-      await import("@/lib/shared-query");
+    const { codexAccountsQueryKey } = await import("@opengeni/react/app/lib/codex-usage-query");
+    const { peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const originalOpen = window.open;
     window.open = (() => null) as typeof window.open;
@@ -2761,7 +2767,7 @@ describe("One Models page for the organization and the workspace", () => {
     });
 
     test("retains successful access across navigation but reads a deliberately cold error fixture", async () => {
-      const { retainSharedQueries } = await import("@/lib/shared-query");
+      const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
       const release = retainSharedQueries(client);
       organizationAdmin = true;
       routeBoth();

@@ -22,7 +22,7 @@ import {
   vaultErrorText,
   type ConnectionOwner,
   type CreatedManagedVault,
-} from "./vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
 import { SecretsLoadFailure, VaultTile } from "./vault-parts";
 import {
   connectionName,

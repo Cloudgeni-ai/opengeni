@@ -1,7 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { OrganizationOnboardingPanel } from "../src/components/organization-onboarding-panel";
-import { Toaster } from "../src/components/ui/sonner";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import "../src/styles.css";
 
 // Local fixture for the post-signup onboarding: a recording fake client, a

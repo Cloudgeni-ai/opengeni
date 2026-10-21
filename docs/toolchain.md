@@ -12,8 +12,8 @@ and native-builder mirror. There is no `npm`/`pnpm`/`yarn` lockfile in this repo
 
 Specialized build boundaries remain explicit:
 
-- publishable libraries use `tsup` (esbuild) for release-shaped ESM and stable TypeScript 7
-  `tsc` for declarations. Bun 1.4.0's bundler emitted invalid ESM for the re-export-heavy SDK
+- publishable libraries use `tsup` (esbuild) for release-shaped ESM and pinned tsrs
+  for declarations. Bun 1.4.0's bundler emitted invalid ESM for the re-export-heavy SDK
   and React barrels during migration validation, so this stays until that correctness defect is
   fixed and the full external-consumer matrix proves parity;
 - `apps/web` uses Vite/Rolldown because TanStack Router and Tailwind provide supported Vite
@@ -38,9 +38,21 @@ prebuilt targets are Linux x64/arm64 (glibc and musl) and macOS arm64; there is 
 Windows or Intel macOS prebuilt in this release. Use Linux/WSL or an available supported host
 for repository checks on those systems, rather than silently falling back to a different checker.
 
-Official stable TypeScript 7 remains installed for compiler APIs, declaration emission and editor
-workflows. Vue's standalone example retains `vue-tsc` because its single-file-component plugin
-is not provided by tsrs. These are deliberate boundaries, not alternative CI checkers.
+The repository does not execute the `tsc`, `tsgo` or `vue-tsc` compilers. Declarations,
+compiler fixtures and packed external-consumer checks also use tsrs. TypeScript packages may
+remain installed for framework setup metadata, editor workflows and dependency compatibility;
+their presence is not a compiler fallback. The Next.js bundling-only consumer keeps its existing
+setup dependency and disabled internal typecheck; strict package consumer checks run with tsrs.
+
+The standalone Vue example uses tsrs's CLI content-mapper protocol with exact-pinned
+`@chatium/vue-ts-mapper-rs@0.2.7`, not a wrapper that can fall back to another compiler.
+It checks scripts, templates and imported component props, with regression fixtures exercising
+deliberate errors and their removal. The mapper does not load JavaScript Vue language plugins
+(such as Pug); the example uses ordinary HTML templates. tsrs's content-mapper support is CLI-only,
+so this does not replace the editor's Vue language service.
+
+`scripts/typescript-toolchain.test.ts` audits tracked manifests, command-bearing source strings,
+shell scripts and workflows for reintroduced compiler launchers and keeps tsrs pins aligned.
 
 The checked-in `ts-proto` patch generates TypeScript 7.1-compatible exact partial constructors.
 Exact validation is kept on the public `MessageFns` interface, including nested oneof payloads;
@@ -50,7 +62,7 @@ type-only `postcss-selector-parser` patch expresses its recursive child union by
 Regenerate protocol sources with `packages/agent-proto/scripts/codegen.sh`, never by hand.
 
 Publishable packages use `scripts/build-typescript-package.ts`: `tsup` still creates JavaScript
-and source maps, then stable TypeScript 7 `tsc` emits declarations. This split is intentional;
+and source maps, then pinned tsrs emits declarations. This split is intentional;
 `tsup` 8's declaration bundler requires the legacy JavaScript compiler API, which stable
 TypeScript 7 no longer exports. The generated package declarations remain release-gated by the
 external-consumer and publish-closure tests.

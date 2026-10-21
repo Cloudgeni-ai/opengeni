@@ -12,9 +12,9 @@ import { useMemo, useState } from "react";
 import { Button } from "@opengeni/react/ui/button";
 import { Field, TextArea } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { useAgentBrainPromptCatalog } from "@/routes/agent-brain-prompt";
 
 import { scheduleAgentOpeningMessage } from "./schedule-model";

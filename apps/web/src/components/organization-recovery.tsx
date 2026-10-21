@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { CheckboxField } from "@opengeni/react/ui/field";
 import { InlineHelp } from "@opengeni/react/ui/inline-help";
@@ -26,13 +26,13 @@ import {
   type OrganizationAdminIdentity,
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import {
   apiErrorDetails,
   userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import type { OrganizationRecoveryOverview } from "@/types";
+import type { OrganizationRecoveryOverview } from "@opengeni/react/app/types";
 
 type RecoveryState = {
   ownerKey: string;

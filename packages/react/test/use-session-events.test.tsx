@@ -21,7 +21,7 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 import { timelineQuestionPlacement } from "../src/timeline/projection";
 import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
 import {
-  SESSION_EVENT_STEP_TYPES,
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_TYPES,
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -39,8 +39,10 @@ registerDom();
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const SESSION_HISTORY_PAGE_SIZE = 1000;
 // Windowed history reads the conversation; a turn's steps load when opened.
+// These fakes have no listEventPage, so they cannot see the server announce
+// its conversation filter: tool calls are read and dropped by the reader.
 const CONVERSATION_READ = {
-  excludeTypes: [...SESSION_EVENT_STEP_TYPES],
+  excludeTypes: [...SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES],
   presentedToolCalls: "include",
 } as const;
 
@@ -1830,7 +1832,9 @@ describe("useSessionEvents", () => {
       expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000, 6_000]);
       expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
-      expect(headReadCalls).toHaveLength(6);
+      // One per foreground resume, plus one for each freshly loaded window
+      // (the first open and the two reloads), which joins at the durable head.
+      expect(headReadCalls).toHaveLength(9);
       for (const options of headReadCalls) {
         expect(options.fresh).toBe(true);
         expect(options.signal).toBeDefined();

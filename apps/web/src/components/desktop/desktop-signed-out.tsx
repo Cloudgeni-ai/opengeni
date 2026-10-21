@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
-import { desktopCapability, restoreDesktopWebSession } from "@/lib/desktop";
+import { desktopCapability, restoreDesktopWebSession } from "@opengeni/react/app/lib/desktop";
 
 /**
  * Inside the desktop app the person is still signed in to the app when the

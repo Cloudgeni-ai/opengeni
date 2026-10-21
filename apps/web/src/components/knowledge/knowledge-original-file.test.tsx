@@ -15,7 +15,7 @@ const context = {
   accessContext: {},
   workspaceStateOwnerId: "owner",
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 const { KnowledgeOriginalFile } = await import("./knowledge-original-file");
 beforeAll(() => {
   GlobalRegistrator.register();

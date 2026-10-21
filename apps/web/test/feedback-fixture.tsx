@@ -1,12 +1,12 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { MessageTimeline } from "@opengeni/react/session-ui";
-import MessageActions from "../src/components/session/message-actions";
-import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
-import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
+import MessageActions from "@opengeni/react/app/components/session/message-actions";
+import { SessionTenancyControl } from "@opengeni/react/app/components/session/session-tenancy-control";
+import { SessionTenancyOperationController } from "@opengeni/react/app/lib/session-tenancy-operation-controller";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import type { Session } from "../src/types";
-import { FeedbackDialog } from "../src/components/feedback";
+import type { Session } from "@opengeni/react/app/types";
+import { FeedbackDialog } from "@opengeni/react/app/components/feedback";
 import { Button } from "@opengeni/react/ui/button";
 import type { CreateFeedbackRequest, Feedback } from "@opengeni/sdk";
 import "../src/styles.css";

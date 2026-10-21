@@ -141,6 +141,10 @@
       "sha256": "0e23abea6dedd011ac5280d5bf9c6abab2c91bffc06e77a5fc251c409b05e23c"
     },
     {
+      "path": ".github/workflows/runtime-posture-compatibility.yml",
+      "sha256": "b0655e3225e8e61a6686372847fae324f4b0d49ccfb5a7689181504ba110816c"
+    },
+    {
       "path": ".github/workflows/seal-release-head.yml",
       "sha256": "62dc8c926a23692a931c6257100a4ded7d4d80d2e127868255c057e1a123a022"
     },
@@ -2108,6 +2112,42 @@
       "job": "retain",
       "step": "Retain exact current-main workflow authority",
       "sha256": "ef34014d19f61bc9bd00e3aa06615e8b4f396c7c6d3ca798f65face133452cd8"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Database package typecheck",
+      "sha256": "e9cd13e489a44a5698a122ed3dd5383d80b8bf4eaff7b16921da6dfa0c1184af"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Fetch the exact pinned source (including the bootstrap PR commit)",
+      "sha256": "216c86899001f6a44c47535461f435cc371a45bd64f22b8528ac9b4c28b1179c"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Install dependencies",
+      "sha256": "6485dcd2a7ad5c3a60909d2ebf74fcf89a326a553c0c096d0547b315bb3ed5b0"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Migrate, provision restricted roles and run pinned readiness",
+      "sha256": "e0bdb8e121d2550455a25cf91f6439dacb93f5d10851582147f385eacb2e9844"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Unit regressions and baseline validation",
+      "sha256": "df1c3c249feaa261b1447215d1d76fbd344eeeab531733ca43c256171b9cf3f5"
+    },
+    {
+      "workflow": ".github/workflows/runtime-posture-compatibility.yml",
+      "job": "compatibility",
+      "step": "Validate baseline advancement scope",
+      "sha256": "8405c48a52927764784dc531e96339f791883d9a4c7d217270f83a699ac7ca63"
     },
     {
       "workflow": ".github/workflows/seal-release-head.yml",

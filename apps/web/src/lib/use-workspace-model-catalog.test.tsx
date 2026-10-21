@@ -7,14 +7,15 @@ import {
   registerDom,
   renderHook,
 } from "../../../../packages/react/test/render-hook";
-import { notifyCreditBalanceChanged } from "./credit-balance-events";
-import { invalidateSharedQueries, retainSharedQueries } from "./shared-query";
+import { notifyCreditBalanceChanged } from "@opengeni/react/app/lib/credit-balance-events";
+import { invalidateSharedQueries, retainSharedQueries } from "@opengeni/react/app/lib/shared-query";
 
 const context: { client: OpenGeniBrowserClient } = { client: {} as OpenGeniBrowserClient };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
-const { useWorkspaceModelCatalog } = await import("./use-workspace-model-catalog");
+const { useWorkspaceModelCatalog } =
+  await import("@opengeni/react/app/lib/use-workspace-model-catalog");
 
 registerDom();
 afterEach(() => document.body.replaceChildren());

@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { Button } from "@opengeni/react/ui/button";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DiffView, type DiffViewVariant } from "@opengeni/react/ui/diff-view";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { formatDate } from "@opengeni/react/ui/relative-time";

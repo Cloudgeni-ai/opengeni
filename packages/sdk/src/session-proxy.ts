@@ -2068,7 +2068,7 @@ function workspaceLiveStream(
       const event = next.value;
       controller.enqueue(
         encoder.encode(
-          `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+          `${"sequence" in event ? `id: ${event.sequence}\n` : ""}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
         ),
       );
     },

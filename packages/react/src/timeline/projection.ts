@@ -34,6 +34,7 @@ import {
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { presentTurnFailureText } from "./compaction-copy";
+import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -55,6 +56,7 @@ import type {
   TurnEndItem,
   TurnStepsItem,
   ToolCallItem,
+  ToolOutputPreview,
   ToolCallTruncation,
   UserMessageItem,
   WorkerItem,
@@ -170,6 +172,12 @@ export type BuildTimelineOptions = {
    * row even when none of its steps are in the browser.
    */
   turnSteps?: ReadonlyMap<string, Pick<TurnStepsItem, "state" | "load" | "retain">>;
+  /**
+   * Exact reads of tool outputs a step page delivered as previews, by output
+   * event. A previewed tool row carries its read's state and loader in
+   * `outputPreview`; without a reader it is still marked as a preview.
+   */
+  toolOutputs?: ToolOutputReader | undefined;
 };
 
 export function buildTimeline(
@@ -971,6 +979,22 @@ export function buildTimeline(
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
         const truncation = toolCallTruncation(payload);
+        const previewFact = toolOutputPreviewFact(payload);
+        const previewRead = previewFact
+          ? options.toolOutputs?.(event.id, event.sequence, event.turnId ?? null)
+          : undefined;
+        // An exact read that landed replaced this event; a forged fact on an
+        // exact output must not ask again.
+        const outputPreview: ToolOutputPreview | null =
+          previewFact && previewRead?.state !== "loaded"
+            ? {
+                shape: previewFact.shape,
+                originalBytes: previewFact.originalBytes,
+                previewBytes: previewFact.previewBytes,
+                state: previewRead?.state ?? "preview",
+                ...(previewRead ? { load: previewRead.load } : {}),
+              }
+            : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
@@ -978,12 +1002,14 @@ export function buildTimeline(
             ? payload.preview
             : payload.output;
         target.truncation = truncation;
+        target.outputPreview = outputPreview;
         const sourceText = timelineAnnotationToolOutputText(
           Object.prototype.hasOwnProperty.call(payload, "output")
             ? payload.output
             : payload.preview,
         );
-        if (sourceText !== null) {
+        // Annotations anchor in the exact text, which a preview is not.
+        if (sourceText !== null && !outputPreview) {
           target.annotationSource = {
             kind: "tool_output",
             eventId: event.id,

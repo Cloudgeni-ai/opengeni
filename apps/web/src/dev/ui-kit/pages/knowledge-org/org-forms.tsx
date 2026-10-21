@@ -2,7 +2,7 @@ import { useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from
 import { CircleAlertIcon, XIcon } from "lucide-react";
 
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   CheckboxField,
   Field,
@@ -15,7 +15,7 @@ import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
 import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { RoleSelect } from "@opengeni/react/ui/role-select";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { organization, type OrganizationRole, type WorkspaceRole } from "../../fixtures";
 import {

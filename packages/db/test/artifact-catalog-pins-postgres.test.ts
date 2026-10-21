@@ -101,7 +101,10 @@ postgresTest(
             const pins = posture.privateTables.find(
               (table) => table.name === "artifact_catalog_pins",
             )!;
-            expect(pins[privilegeFlags[privilege]]).toBe(true);
+            // The inspector preserves table/column ACL identity; the evaluator
+            // still emits the exact known pin-capability denial below.
+            expect(pins[privilegeFlags[privilege]]).toBe(false);
+            expect(pins.columnPrivileges).toContain(privilege);
             expect(evaluateRuntimeDatabasePosture(posture, postureOptions)).toContain(
               "runtime role has forbidden direct artifact pin authority",
             );

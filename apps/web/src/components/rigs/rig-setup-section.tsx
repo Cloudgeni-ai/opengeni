@@ -11,7 +11,7 @@ import {
 } from "@/components/rigs/rig-definition-fields";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
-import type { ProposeRigChangeRequest, RigVersion } from "@/types";
+import type { ProposeRigChangeRequest, RigVersion } from "@opengeni/react/app/types";
 
 export function RigSetupEditPage({
   rigName,

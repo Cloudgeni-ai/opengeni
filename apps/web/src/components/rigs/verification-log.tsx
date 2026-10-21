@@ -6,9 +6,9 @@ import { useState } from "react";
 
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusDot } from "@opengeni/react/ui/status-dot";
-import { withOccurrenceKeys } from "@/lib/react-key";
-import { cn } from "@/lib/utils";
-import type { RigChangeVerification, RigCheckResult } from "@/types";
+import { withOccurrenceKeys } from "@opengeni/react/app/lib/react-key";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { RigChangeVerification, RigCheckResult } from "@opengeni/react/app/types";
 
 export function VerificationLog({ verification }: { verification: RigChangeVerification }) {
   const platformCheckResults = verification.platformCheckResults ?? [];

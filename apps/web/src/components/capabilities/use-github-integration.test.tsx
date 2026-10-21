@@ -3,15 +3,18 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniClient, type GitHubActionPoliciesResponse } from "@opengeni/sdk";
-import type { AccessContext, GitHubAppInfo } from "@/types";
-import type { IntegrationChoiceOption, IntegrationViewModel } from "./integration-view-model";
+import type { AccessContext, GitHubAppInfo } from "@opengeni/react/app/types";
+import type {
+  IntegrationChoiceOption,
+  IntegrationViewModel,
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_WORKSPACE_ID = "44444444-4444-4444-8444-444444444444";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => {
     const client = mutableContext.current.client as Record<string, unknown>;
     client.connectTransport ??= () =>

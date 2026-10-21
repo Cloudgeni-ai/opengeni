@@ -37,7 +37,7 @@ mock.module("@opengeni/react", () => ({
 }));
 mock.module("@tanstack/react-router", () => ({ ...router, useNavigate: () => navigate }));
 mock.module("sonner", () => ({ ...sonner, toast: { ...sonner.toast, warning, success } }));
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 const { SecretsRoute } = await import("./secrets");
 
 let host: HTMLDivElement;

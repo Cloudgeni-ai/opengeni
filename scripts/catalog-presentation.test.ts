@@ -4,7 +4,10 @@ import {
   CapabilityCatalogItem as CapabilityCatalogItemSchema,
   type CapabilityCatalogItem,
 } from "@opengeni/contracts";
-import { capabilityCuration, filterCapabilityCatalogItems } from "../apps/web/src/lib/capabilities";
+import {
+  capabilityCuration,
+  filterCapabilityCatalogItems,
+} from "../packages/react/src/app/lib/capabilities";
 import {
   opaqueCatalogName,
   sortConnectorsForPresentation,
@@ -12,13 +15,13 @@ import {
 import {
   capabilityLogoSource,
   FIRST_PARTY_CAPABILITY_LOGOS,
-} from "../apps/web/src/components/capabilities/capability-logo-source";
+} from "../packages/react/src/app/components/capabilities/capability-logo-source";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
   partitionConnectionServices,
 } from "../apps/web/src/components/capabilities/connection-services";
-import { sortFeaturedFirst } from "../apps/web/src/lib/capabilities";
+import { sortFeaturedFirst } from "../packages/react/src/app/lib/capabilities";
 import { VENDORED_LOGO_MANIFEST } from "./catalog-vendored-logos";
 import {
   catalogCapabilityId,

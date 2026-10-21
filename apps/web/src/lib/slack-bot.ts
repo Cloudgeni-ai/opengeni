@@ -1,5 +1,5 @@
-import { formatTimestamp } from "@/lib/format";
-import type { ConnectionMetadata } from "@/types";
+import { formatTimestamp } from "@opengeni/react/app/lib/format";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,

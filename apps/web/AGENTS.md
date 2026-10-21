@@ -1,7 +1,7 @@
 # Opengeni web UI
 
 Before adding a control, search the shared primitives in `packages/react/src/ui` (imported as
-`@opengeni/react/ui/<name>`), `src/components/pickers.tsx`, and the chat
+`@opengeni/react/ui/<name>`), `packages/react/src/app/components/pickers.tsx`, and the chat
 composer for an existing workspace-wide pattern. Reuse or extend the shared component instead of
 building a route-specific lookalike.
 

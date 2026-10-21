@@ -19,7 +19,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { RevisionHistory, type Revision } from "@opengeni/react/ui/revision-history";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { defaultModel, KIT_NOW, KIT_TIME_ZONE, organizationIdentity } from "../../fixtures";
 import { KNOWLEDGE_WORKSPACE } from "./knowledge-data";

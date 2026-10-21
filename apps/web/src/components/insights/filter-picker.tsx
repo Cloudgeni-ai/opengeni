@@ -15,7 +15,7 @@ import {
   MENU_LABEL_CLASS,
   MENU_SURFACE_CLASS,
 } from "@opengeni/react/ui/menu-styles";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 export type FilterOption = {
   /** One or more raw ids joined by "," (one option can stand for several ids). */

@@ -10,8 +10,8 @@ import { Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field
 import { FormPage } from "@opengeni/react/ui/form-dialog";
 import { Notice } from "@opengeni/react/ui/notice";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { useAppContext } from "@/context";
-import type { ScheduledTask } from "@/types";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import type { ScheduledTask } from "@opengeni/react/app/types";
 
 import { NAME_MAX_LENGTH } from "./schedule-model";
 

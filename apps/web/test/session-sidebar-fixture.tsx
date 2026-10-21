@@ -3,12 +3,12 @@ import { useState } from "react";
 import { OpenGeniProvider } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { Toaster } from "sonner";
-import { SessionList } from "../src/components/rail/session-list";
+import { SessionList } from "@opengeni/react/app/components/rail/session-list";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   sessionBrowsePreferenceStorageId,
   writeSessionBrowsePreferences,
-} from "../src/lib/session-browse-preferences";
+} from "@opengeni/react/app/lib/session-browse-preferences";
 import { client, evidence, subjectId, workspaceId } from "./session-sidebar-context";
 import "../src/styles.css";
 

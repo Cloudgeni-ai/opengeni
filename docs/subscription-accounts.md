@@ -290,7 +290,7 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   this") waits instead of failing over. Verification: `packages/subscriptions/test/failover-policy.test.ts`.
 - **SUB-FAIL-06** Every switch is recorded as a visible session event with the
   reason, and the session model indicator shows what is running.
-  Verification: `packages/db/test/subscription-failover-wait-recovery-postgres.test.ts`, `apps/web/src/components/session/model-account-indicator.test.tsx`.
+  Verification: `packages/db/test/subscription-failover-wait-recovery-postgres.test.ts`, `packages/react/test/app-model-account-indicator.test.tsx`.
 - **SUB-FAIL-07** After a cross-provider failover, the session returns to the
   preferred model once that model has capacity and the current cache is cold.
   Verification: `packages/subscriptions/test/failover-policy.test.ts`.

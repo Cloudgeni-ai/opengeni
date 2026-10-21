@@ -21,7 +21,7 @@ const {
   deliverAppShot,
   resetAppShotTargetsForTest,
   useAppShotTarget,
-} = await import("./app-shots");
+} = await import("@opengeni/react/app/components/desktop/app-shots");
 const { acceleratorFromKey, shortcutLabel } = await import("./app-shots-settings");
 
 afterAll(() => {

@@ -4,6 +4,9 @@ import { Dialog as SheetPrimitive } from "radix-ui";
 
 import { SectionFrameReset } from "./section-variant";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const SheetContainedPortal = containedPortal(SheetPrimitive.Portal);
 
 function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
   return <SheetPrimitive.Root data-slot="sheet" {...props} />;
@@ -18,7 +21,7 @@ function SheetClose({ ...props }: React.ComponentProps<typeof SheetPrimitive.Clo
 }
 
 function SheetPortal({ ...props }: React.ComponentProps<typeof SheetPrimitive.Portal>) {
-  return <SheetPrimitive.Portal data-slot="sheet-portal" {...props} />;
+  return <SheetContainedPortal data-slot="sheet-portal" {...props} />;
 }
 
 function SheetOverlay({

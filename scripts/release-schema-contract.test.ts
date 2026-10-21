@@ -2325,6 +2325,8 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0889_session_events_tool_name.sql",
+      "0888_session_list_invalidation.sql",
       "0887_session_events_attempt_reference_index.sql",
       "0886_remove_duplicate_session_identity_indexes.sql",
       "0885_checkpoint_gc_reference_sets.sql",

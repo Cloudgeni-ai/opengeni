@@ -38,13 +38,13 @@ import {
   sortFeaturedFirst,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
-} from "./capabilities";
+} from "@opengeni/react/app/lib/capabilities";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,
   ConnectionMetadata,
   SocialConnection,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   return {

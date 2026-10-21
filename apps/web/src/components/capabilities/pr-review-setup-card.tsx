@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import type {
   PrReviewAppRegistration,
   PrReviewManagedGitHubSetup,
@@ -16,11 +16,14 @@ import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { Select } from "@opengeni/react/ui/select";
 import { Textarea } from "@opengeni/react/ui/textarea";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { findPickerRow, groupPickerRowsByBillingClass } from "@/lib/model-policy";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
+import { findPickerRow, groupPickerRowsByBillingClass } from "@opengeni/react/app/lib/model-policy";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@opengeni/react/app/components/capabilities/native-connect-setup";
 
 export function PrReviewSetupCard(props: {
   client: OpenGeniBrowserClient;

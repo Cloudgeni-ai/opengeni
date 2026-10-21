@@ -1,6 +1,6 @@
 // Deterministic mock data for the SessionChrome DEV harness
 // (`/dev/composer-chrome`). No live session, queue, or goal APIs.
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import type {
   ComposerState,
   UseFileAttachmentsResult,
@@ -20,8 +20,11 @@ import type {
 } from "@opengeni/sdk";
 import { FIRST_PARTY_MCP_TOOL_NAMES, type FirstPartyMcpToolName } from "@opengeni/contracts";
 
-import type { SessionToolSelection } from "@/components/pickers";
-import { firstPartySessionToolOptions, type McpServerOption } from "@/lib/session-tools";
+import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
+import {
+  firstPartySessionToolOptions,
+  type McpServerOption,
+} from "@opengeni/react/app/lib/session-tools";
 
 export const GALLERY_WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 export const GALLERY_SESSION_ID = "22222222-2222-4222-8222-222222222222";

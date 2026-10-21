@@ -21,7 +21,7 @@ import {
   rigChangeKindLabel,
   rigChangeStatusView,
 } from "@/lib/rig-status";
-import type { RigChange } from "@/types";
+import type { RigChange } from "@opengeni/react/app/types";
 
 export function RigChangesQueue({
   changes,

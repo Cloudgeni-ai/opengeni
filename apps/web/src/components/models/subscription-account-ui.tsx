@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { ProviderTile } from "./models-ui";
+import { ProviderTile } from "@opengeni/react/app/components/models/models-ui";
 import { ListRow } from "@opengeni/react/ui/list-row";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";

@@ -7,9 +7,9 @@ import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { Section } from "@opengeni/react/ui/section";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { formatBudget, formatCredits } from "@/lib/usage-allowances";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { loadWorkspaceBudgetRows, type WorkspaceBudgetRow } from "./workspace-budget-rows";
 
 // One fact column: on a phone the list folds a single fact under the name,

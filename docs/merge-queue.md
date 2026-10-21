@@ -117,8 +117,10 @@ Prepared settings (disabled; **not yet a capacity-qualified activation choice**)
 
 The one-PR landing limit is a temporary Version-SHA compatibility safeguard, not
 the requested CI-sharing batching. It must not be presented as a final throughput
-solution. The parent explicitly directed inert landing while the owner chooses
-a true batcher; see the [inactive Mergify draft](queue-options/mergify-rollout.md).
+solution. The parent explicitly directed inert landing. On October 21 at 11:04 UTC
+the owner chose an in-house batcher using GitHub-hosted CI; native enforcement and
+vendor installation remain off. The [Mergify draft](queue-options/mergify-rollout.md)
+is retained as an inactive comparison, not the selected rollout path.
 
 **Do not multiply by batch size.** GitHub's merge limits combine successful merges,
 not `merge_group` builds. Maximum landing size is one so each Version PR gets its
@@ -440,10 +442,9 @@ bisect bounded subsets; preserve independent-review/head evidence and retain eve
 stage/candidate receipt. Changes to base/head invalidate only the affected
 candidate. Version commits still need their exact full-CI release evidence.
 
-Estimated engineering effort: 5–10 engineer-days for a shadow-only prototype and
-another 5–10 for race recovery, durable ownership, bisection, release admission,
-audit/rollback and production hardening, followed by at least a week's shadow
-comparison. This is an estimate, not a commitment. Main risks are stale-head races,
+The selected implementation needs a shadow-only controller, race recovery,
+durable ownership, bisection, release admission, audit/rollback and real shadow
+evidence before it controls main. Main risks are stale-head races,
 partial/uncertain writes, merge conflicts, cross-PR interaction failures, flake
 attribution, accidental content loss, privileged writer scope and breaking exact
 Version-SHA admission. Do not replace native enforcement with an unreviewed

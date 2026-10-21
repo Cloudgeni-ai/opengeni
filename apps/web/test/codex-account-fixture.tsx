@@ -3,9 +3,9 @@ import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { useOrganizationCodexSubscriptions } from "../src/components/organization-codex-subscriptions";
 import { OrgCodexAccountPage } from "../src/components/models/organization-codex-models";
-import { modelsScopeLabels } from "../src/components/models/models-ui";
-import { AppearanceProvider } from "../src/lib/appearance";
-import { Toaster } from "../src/components/ui/sonner";
+import { modelsScopeLabels } from "@opengeni/react/app/components/models/models-ui";
+import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import "../src/styles.css";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";

@@ -9,8 +9,8 @@ import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
-import type { CapabilityCatalogItem } from "@/types";
-import { matchingConnectionAccounts } from "./session-connection-accounts";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
+import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 
 const ACCOUNT_STATUS = {
   active: "connected",

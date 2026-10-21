@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -23,7 +24,7 @@ const context = {
     getFile: async () => ({ id: artifactId, workspaceId, filename: "notes.txt" }),
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 beforeAll(() => {
   GlobalRegistrator.register({ url: "https://example.test" });
   (
@@ -34,7 +35,7 @@ afterAll(() => GlobalRegistrator.unregister());
 
 for (const fromSession of [undefined, sessionId]) {
   test(`real retained route back link preserves return context ${fromSession ?? "absent"}`, async () => {
-    const { RetainedArtifactRoute } = await import("./retained-artifact");
+    const { RetainedArtifactRoute } = await import("@opengeni/react/app/routes/retained-artifact");
     const route = createRootRoute({
       component: () => (
         <RetainedArtifactRoute

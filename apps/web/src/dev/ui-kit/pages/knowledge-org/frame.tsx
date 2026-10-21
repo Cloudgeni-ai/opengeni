@@ -14,7 +14,7 @@ import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import { Button } from "@opengeni/react/ui/button";
 import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
 import { NavGroup, NavItem } from "@opengeni/react/ui/settings-nav";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { chats, organization, you } from "../../fixtures";
 import { PagePreview, useKitPane } from "../../kit";

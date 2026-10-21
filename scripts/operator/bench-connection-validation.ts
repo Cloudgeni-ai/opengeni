@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createConnection, createServer } from "node:net";
 import { tool } from "@openai/agents";
 import { z } from "zod";
@@ -62,6 +63,23 @@ if (!address || typeof address === "string") throw new Error("No benchmark relay
 const databaseUrl = new URL(services.runtimeDatabaseUrl);
 databaseUrl.port = String(address.port);
 const client = createDb(databaseUrl.href, { max: 16 });
+const compareListNotifications = process.env.OPENGENI_BENCH_LIST_NOTIFICATIONS === "1";
+const concurrentTurns = Number(process.env.OPENGENI_BENCH_CONCURRENT_TURNS ?? "1");
+if (!Number.isSafeInteger(concurrentTurns) || concurrentTurns < 1)
+  throw new Error("OPENGENI_BENCH_CONCURRENT_TURNS must be a positive integer");
+const commitSamples = new AsyncLocalStorage<number[]>();
+const transact = client.db.transaction.bind(client.db);
+client.db.transaction = async (callback, config) => {
+  let callbackFinished: number | undefined;
+  const value = await transact(async (tx) => {
+    const result = await callback(tx);
+    callbackFinished = performance.now();
+    return result;
+  }, config);
+  if (callbackFinished !== undefined)
+    commitSamples.getStore()?.push(performance.now() - callbackFinished);
+  return value;
+};
 const endpoint = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -238,16 +256,19 @@ async function fiveToolTurn() {
   budget = { statements: 0, transactions: 0, cycles: 0, responseBytes: 0 };
   const started = performance.now(),
     cpu = process.cpuUsage();
+  const commitMs: number[] = [];
   try {
-    const result = await activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      attemptId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-      workflowId: `benchmark:${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-    });
+    const result = await commitSamples.run(commitMs, () =>
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        attemptId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+        workflowId: `benchmark:${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+      }),
+    );
     const used = process.cpuUsage(cpu);
     if (result.status !== "idle" || model.calls !== 2 || finished !== 5 || maxActive !== 5)
       throw new Error(
@@ -255,8 +276,9 @@ async function fiveToolTurn() {
       );
     return {
       wallMs: performance.now() - started,
-      cpuMs: (used.user + used.system) / 1000,
-      ...budget,
+      // Process CPU and one wire relay cannot attribute overlapping turns.
+      ...(concurrentTurns === 1 ? { cpuMs: (used.user + used.system) / 1000, ...budget } : {}),
+      commitMs,
       toolMs,
       maxActive,
       modelCalls: model.calls,
@@ -326,6 +348,12 @@ async function sampled<T>(run: () => Promise<T>) {
 const phases = [];
 try {
   await services.migrate();
+  let notificationCount = 0;
+  if (compareListNotifications) {
+    await admin.listen("opengeni_session_lists", () => {
+      notificationCount++;
+    });
+  }
   const [versionRow] = await admin<{ version: string }[]>`select version() as version`;
   const [definitionRow] = await admin<{ definition: string }[]>`select pg_get_functiondef(
     'resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)'::regprocedure) as definition`;
@@ -360,11 +388,26 @@ try {
   // Repeat both directions to expose warmup/order effects rather than publish
   // the fastest one-off sample. The first two turns in each phase are warmups.
   const modes: Array<"before" | "after"> =
-    process.env.OPENGENI_BENCH_TURN_ONLY === "1"
+    process.env.OPENGENI_BENCH_TURN_ONLY === "1" && !compareListNotifications
       ? ["after"]
       : ["before", "after", "before", "after"];
   for (const mode of modes) {
-    await admin.unsafe(mode === "before" ? before : after);
+    await admin.unsafe(compareListNotifications || mode === "after" ? after : before);
+    if (compareListNotifications) {
+      const triggers = await admin<{ schema: string; table: string; trigger: string }[]>`
+        select n.nspname as schema,c.relname as table,t.tgname as trigger
+        from pg_trigger t join pg_class c on c.oid=t.tgrelid
+        join pg_namespace n on n.oid=c.relnamespace join pg_proc p on p.oid=t.tgfoid
+        where p.proname='notify_session_list_change' and not t.tgisinternal`;
+      if (!triggers.length) throw new Error("List notification migration missing");
+      for (const trigger of triggers) {
+        const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+        await admin.unsafe(
+          `alter table ${quote(trigger.schema)}.${quote(trigger.table)} ${mode === "before" ? "disable" : "enable"} trigger ${quote(trigger.trigger)}`,
+        );
+      }
+    }
+    const notificationsBefore = notificationCount;
     const fixture = await validatorFixture();
     const start = await counters();
     const validators = await sampled(async () => {
@@ -383,12 +426,28 @@ try {
     const middle = await counters();
     const turns = await sampled(async () => {
       const results = [];
-      for (let i = 0; i < Number(process.env.OPENGENI_BENCH_TURN_SAMPLES ?? "8"); i++)
-        results.push(await fiveToolTurn());
+      for (
+        let i = 0;
+        i < Number(process.env.OPENGENI_BENCH_TURN_SAMPLES ?? "8");
+        i += concurrentTurns
+      )
+        results.push(
+          ...(await Promise.all(Array.from({ length: concurrentTurns }, () => fiveToolTurn()))),
+        );
       return results;
     });
     const end = await counters();
-    const phase = { mode, start, middle, end, validators, turns };
+    const phase = {
+      mode,
+      compareListNotifications,
+      concurrentTurns,
+      notifications: notificationCount - notificationsBefore,
+      start,
+      middle,
+      end,
+      validators,
+      turns,
+    };
     phases.push(phase);
     console.log(
       JSON.stringify({

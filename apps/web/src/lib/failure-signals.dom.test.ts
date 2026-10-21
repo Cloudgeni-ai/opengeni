@@ -22,7 +22,7 @@ describe("failure signals in the browser", () => {
     const { managedActorFetch } = await import("../api");
     const { beaconSender } = await import("./client-error-reporting");
     const { createClientSignalReporter, setClientSignalReporter } =
-      await import("./client-signals");
+      await import("@opengeni/react/app/lib/client-signals");
     const beacons: Array<{ url: string; init: RequestInit }> = [];
     let online = false;
     Object.defineProperty(navigator, "onLine", { configurable: true, get: () => online });
@@ -87,9 +87,10 @@ describe("failure signals in the browser", () => {
   });
 
   test("an OAuth error return is reported as denied for the redirected class", async () => {
-    const { retainIntegrationConnectReturn } = await import("./integration-connect-return");
+    const { retainIntegrationConnectReturn } =
+      await import("@opengeni/react/app/lib/integration-connect-return");
     const { beginIntegrationConnect, captureIntegrationConnectReturn } =
-      await import("./integration-connect-analytics");
+      await import("@opengeni/react/app/lib/integration-connect-analytics");
     // The redirect started from this tab before the provider sent it back.
     beginIntegrationConnect("atlassian", "oauth", { capture: () => true }).redirecting();
     retainIntegrationConnectReturn(window.location.search);

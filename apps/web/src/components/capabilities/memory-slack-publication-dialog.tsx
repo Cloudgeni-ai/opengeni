@@ -30,9 +30,9 @@ import {
 } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { StatusBadge, type StatusBadgeProps } from "@opengeni/react/ui/status-badge";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { openGeniSlackBotConnectionOptions } from "@/lib/slack-bot";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 const IMPORTANCES: MemorySlackImportance[] = ["major", "normal", "minor"];
 

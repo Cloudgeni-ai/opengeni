@@ -25,7 +25,7 @@ import {
 } from "@opengeni/react/ui/page-header";
 import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { organization, reviewItems, schedules, variableSets } from "../fixtures";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";

@@ -885,7 +885,7 @@ const initialMetrics = await metrics(assetPaths(initialGraph, true));
 const initialTotal = total(initialMetrics);
 const largestInitial = largest(initialMetrics, "gzip");
 
-const sessionRouteKey = "src/routes/session.tsx";
+const sessionRouteKey = "src/routes/session-route.tsx";
 if (!manifest[sessionRouteKey]) {
   throw new Error(`bundle manifest is missing ${sessionRouteKey}`);
 }

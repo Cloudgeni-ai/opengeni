@@ -18,7 +18,7 @@ import {
   subscribeManagedActorMutationBusy,
 } from "@/api";
 import { Button } from "@opengeni/react/ui/button";
-import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
 import type { OnboardingDestination } from "@/components/onboarding/developer-setup-step";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
@@ -28,7 +28,7 @@ import {
   browserAccountBridgeBlockersSnapshot,
   installBrowserAccountBridgeOperations,
   subscribeBrowserAccountBridgeBlockers,
-} from "@/lib/browser-account-bridge";
+} from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   clearOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,

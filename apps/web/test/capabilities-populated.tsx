@@ -12,7 +12,7 @@ import { ConnectionAccessNotice } from "../src/components/capabilities/connectio
 import { Button } from "@opengeni/react/ui/button";
 import { Input } from "@opengeni/react/ui/input";
 import { Dialog, DialogTitle, DialogDescription } from "@opengeni/react/ui/dialog";
-import { CapabilityDialogContent } from "../src/components/capabilities/detail-dialog";
+import { CapabilityDialogContent } from "@opengeni/react/app/components/capabilities/detail-dialog";
 import "@opengeni/react/connect.css";
 import "../src/styles.css";
 

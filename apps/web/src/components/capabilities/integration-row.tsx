@@ -1,14 +1,14 @@
 import type { ReactNode } from "react";
 import { CapabilityCatalogIndicator, CapabilityCatalogRow } from "@opengeni/react/connect";
 
-import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
 import {
   catalogStatusForChip,
   type IntegrationChip,
   type IntegrationMark,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /** The same provider logo used by the catalog and details. */
 export function IntegrationMarkView({

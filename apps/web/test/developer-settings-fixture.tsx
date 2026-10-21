@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 
 import { WorkspaceDeveloperSettings } from "../src/components/workspace-developer-settings";
 import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
-import { Toaster } from "../src/components/ui/sonner";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import type { DeveloperLocation } from "../src/lib/developer-route";
 import { parseDeveloperView, parseWebhookParam } from "../src/lib/developer-route";

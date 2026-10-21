@@ -1,5 +1,6 @@
 import type { CodexRateLimitResetCreditsAccountResult } from "@opengeni/db";
 import type { CodexResetRedemptionRecovery } from "@opengeni/db";
+import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overview-budget";
 // Codex (ChatGPT) subscription connect / status / usage routes.
 //
 // Connect uses the device-code flow split into two stateless calls: `start`
@@ -550,37 +551,7 @@ function freshActionableCredit(
   return credit && actionableCredit(credit) ? credit : null;
 }
 
-type CodexProviderCall = <T>(operation: () => Promise<T>) => Promise<T>;
-
 const CODEX_OVERVIEW_ROUTE_TIMEOUT_MS = 12_000;
-
-function createProviderCallLimiter(limit: number): CodexProviderCall {
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error("Codex provider concurrency limit must be a positive integer");
-  }
-  let permits = limit;
-  const waiters: Array<() => void> = [];
-  const acquire = async (): Promise<void> => {
-    if (permits > 0) {
-      permits -= 1;
-      return;
-    }
-    await new Promise<void>((resolve) => waiters.push(resolve));
-  };
-  const release = (): void => {
-    const next = waiters.shift();
-    if (next) next();
-    else permits += 1;
-  };
-  return async <T>(operation: () => Promise<T>): Promise<T> => {
-    await acquire();
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  };
-}
 
 type CodexRedemptionAccess = {
   ownership: "current_human" | "unowned" | "different_human" | "managed_human_unavailable";
@@ -1753,7 +1724,7 @@ async function coreOrganizationCodexOverview(
       canResumeRedemption && row.status === "active",
       canResumeRedemption,
       redemptions,
-      createProviderCallLimiter(2),
+      codexOverviewProviderCall(deps, organizationId),
       sources,
     ),
   );
@@ -2184,7 +2155,7 @@ async function coreCodexOverview(
   };
   const overview: Record<string, Awaited<ReturnType<typeof fetchCodexAccountOverview>>> = {};
   const queue = [...accounts];
-  const providerCall = createProviderCallLimiter(4);
+  const providerCall = codexOverviewProviderCall(deps, grant.accountId);
   let routeTimedOut = false;
   const worker = async (): Promise<void> => {
     for (;;) {

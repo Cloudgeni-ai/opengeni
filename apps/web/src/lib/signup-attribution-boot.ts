@@ -1,4 +1,4 @@
-import { retainIntegrationConnectReturn } from "./integration-connect-return";
+import { retainIntegrationConnectReturn } from "@opengeni/react/app/lib/integration-connect-return";
 import { retainSignupAttribution } from "./signup-attribution";
 
 // Side-effect entry imported by main.tsx ahead of the router: capture

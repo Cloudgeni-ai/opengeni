@@ -14,7 +14,10 @@ import {
   customApiConnectionLabel,
   connectionOwnership,
 } from "@/components/capabilities/custom-api-flow";
-import type { ApiIntegrationInstallationSummary, ConnectionMetadata } from "@/types";
+import type {
+  ApiIntegrationInstallationSummary,
+  ConnectionMetadata,
+} from "@opengeni/react/app/types";
 
 export function CustomApiSection({
   instances,
