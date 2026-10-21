@@ -46,13 +46,19 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSError, NSString, NSURL};
 
 use super::{ax_element::AxElement, ShareableWindow};
+use crate::window_presence::{classify_window, AxWindowFacts};
 use crate::{
     MacAxAction, MacAxActionValue, MacAxElementSelector, MacAxFingerprint, MacAxNode,
     MacAxObservedState, MacAxPathStep, MacAxSnapshot, MacAxValue, MacAxWindowSelector, MacFfiError,
-    MacRect, MacTargetInfo, MacTargetKind,
+    MacRect, MacTargetInfo, MacTargetKind, MacWindowPresence, MacWindowQuery,
 };
 
 const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.5;
+/// Restoring a minimized window animates it out of the Dock for about half a
+/// second. Its end is awaited no longer than this, so a missed notification
+/// never holds the restore.
+const DEMINIATURIZE_SETTLE: Duration = Duration::from_secs(2);
+const AX_WINDOW_DEMINIATURIZED_NOTIFICATION: &str = "AXWindowDeminiaturized";
 const AX_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(6);
 const AX_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const AX_WORKER_POLL: Duration = Duration::from_millis(20);
@@ -1291,6 +1297,128 @@ pub(super) fn current_target_bounds(target: &MacTargetInfo) -> Result<MacRect, M
                 "AX target no longer exposes finite logical bounds".to_string(),
             )
         })
+}
+
+pub(super) fn window_presence(query: &MacWindowQuery) -> Result<MacWindowPresence, MacFfiError> {
+    locate_window(query).map(|(presence, _, _)| presence)
+}
+
+pub(super) fn restore_window_behind(
+    query: &MacWindowQuery,
+) -> Result<MacWindowPresence, MacFfiError> {
+    let (presence, window, application) = locate_window(query)?;
+    let (MacWindowPresence::Minimized | MacWindowPresence::ApplicationHidden, Some(window)) =
+        (presence, window)
+    else {
+        return Ok(presence);
+    };
+    // A restored window is ordered in front of every other window, but it
+    // must not cover what the person is working in. Note their front window
+    // first and raise it again afterwards: its app is already active, so this
+    // reorders windows without activating anything.
+    let front_window = focused_window_of_frontmost_application().filter(|front| *front != window);
+    if application.isHidden() {
+        // Unhiding orders the app's windows back behind the active app's
+        // without activating it. AppKit reports false even when it succeeds.
+        let _ = application.unhide();
+    }
+    if presence == MacWindowPresence::Minimized {
+        deminiaturize(query.process_id, &window)?;
+    }
+    if let Some(front) = front_window {
+        // The window is back either way; a front window that cannot be raised
+        // only leaves it in front.
+        let _ = front.raise_if_supported();
+    }
+    Ok(presence)
+}
+
+/// Restores a minimized window and waits for its animation to end: the window
+/// server orders the window to the front only then, so the person's window is
+/// raised over it afterwards, and a read finds it settled.
+fn deminiaturize(process_id: u32, window: &AxElement) -> Result<(), MacFfiError> {
+    let pid = i32::try_from(process_id).map_err(|_| {
+        MacFfiError::Invalid("window process id exceeds the macOS pid range".to_string())
+    })?;
+    let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_AX_NOTIFICATIONS);
+    let mut observer =
+        AxObserver::open(pid, &AxElement::application(pid), sender, Arc::default()).ok();
+    let watching = observer
+        .as_mut()
+        .and_then(|observer| observer.register(window, AX_WINDOW_DEMINIATURIZED_NOTIFICATION))
+        .is_some();
+    set_bool_attribute(window, kAXMinimizedAttribute, false)?;
+    let settle_by = Instant::now() + DEMINIATURIZE_SETTLE;
+    while watching && Instant::now() < settle_by {
+        let _ = unsafe {
+            CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(20), true)
+        };
+        while let Ok((element, notification)) = receiver.try_recv() {
+            if notification == AX_WINDOW_DEMINIATURIZED_NOTIFICATION && element.0 == *window {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Finds a window the window server lists among its application's
+/// Accessibility windows, and says why it is not on screen.
+fn locate_window(
+    query: &MacWindowQuery,
+) -> Result<
+    (
+        MacWindowPresence,
+        Option<AxElement>,
+        objc2::rc::Retained<NSRunningApplication>,
+    ),
+    MacFfiError,
+> {
+    require_accessibility()?;
+    let pid = i32::try_from(query.process_id).map_err(|_| {
+        MacFfiError::Invalid("window process id exceeds the macOS pid range".to_string())
+    })?;
+    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .filter(|application| !application.isTerminated())
+        .ok_or_else(|| MacFfiError::TargetStale("application is no longer running".to_string()))?;
+    let element = AxElement::application(pid);
+    let _ = element.set_messaging_timeout(AX_MESSAGE_TIMEOUT_SECONDS);
+    let Ok((windows, truncated)) = element.windows_bounded(MAX_AX_WINDOWS_PER_APP) else {
+        return Ok((MacWindowPresence::Unknown, None, application));
+    };
+    let facts: Vec<AxWindowFacts> = windows
+        .iter()
+        .map(|window| AxWindowFacts {
+            bounds: ax_bounds(window),
+            title: window
+                .string_attribute(kAXTitleAttribute)
+                .ok()
+                .map(|title| title.to_string()),
+            minimized: optional_bool(window, kAXMinimizedAttribute).unwrap_or(false),
+        })
+        .collect();
+    let (presence, index) = classify_window(query, &facts, application.isHidden());
+    // A truncated list cannot show that a window is absent from it.
+    let presence = if truncated && presence == MacWindowPresence::NotShown {
+        MacWindowPresence::Unknown
+    } else {
+        presence
+    };
+    Ok((
+        presence,
+        index.map(|index| windows[index].clone()),
+        application,
+    ))
+}
+
+fn focused_window_of_frontmost_application() -> Option<AxElement> {
+    let front = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let application = AxElement::application(front.processIdentifier());
+    let _ = application.set_messaging_timeout(AX_MESSAGE_TIMEOUT_SECONDS);
+    application
+        .attribute(kAXFocusedWindowAttribute)
+        .ok()?
+        .downcast::<AxElement>()
 }
 
 pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError> {

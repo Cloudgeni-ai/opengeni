@@ -2326,6 +2326,8 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0881_knowledge_scope_expression.sql",
+      "0880_quiescence_repair_skips_parked_waits.sql",
+      "0879_unsettled_admissions_session_index.sql",
       "0878_keyed_knowledge_visibility.sql",
       "0877_single_semantic_event_projection.sql",
       "0876_connection_validation_shared_locks.sql",

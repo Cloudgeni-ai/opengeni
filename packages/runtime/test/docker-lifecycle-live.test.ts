@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import { testSettings } from "@opengeni/testing";
 import {
   captureVerifiedWorkspaceArchive,
+  createSandboxClientForBackend,
+  deserializeSandboxSessionStateEnvelope,
   establishSandboxSessionFromEnvelope,
   sandboxProviderContinuityForState,
   serializeEstablishedSandboxEnvelope,
@@ -34,12 +36,17 @@ type DockerSession = {
 
 const cleanupContainers = new Set<string>();
 const cleanupRoots = new Set<string>();
+const cleanupImageTags = new Set<string>();
 
 afterEach(async () => {
   for (const containerId of cleanupContainers) {
     await execFileAsync("docker", ["rm", "-f", containerId]).catch(() => undefined);
   }
   cleanupContainers.clear();
+  for (const tag of cleanupImageTags) {
+    await execFileAsync("docker", ["rmi", tag]).catch(() => undefined);
+  }
+  cleanupImageTags.clear();
   for (const root of cleanupRoots) {
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -118,6 +125,87 @@ describe("Docker sandbox lifecycle (live daemon)", () => {
       } finally {
         source.stop(true);
       }
+    },
+    180_000,
+  );
+
+  test.skipIf(!enabled)(
+    "a container that was live across a sandbox image upgrade stays attachable, serializable and drainable",
+    async () => {
+      const workspaceBaseDir = await mkdtemp(join(tmpdir(), "opengeni-docker-upgrade-"));
+      cleanupRoots.add(workspaceBaseDir);
+      const before = testSettings({
+        sandboxBackend: "docker",
+        dockerImage: image,
+        dockerWorkspaceBaseDir: workspaceBaseDir,
+      });
+      // The upgrade changes only the configured image reference; the running
+      // container keeps the image it was created with.
+      const upgradedImage = `opengeni-lifecycle-upgrade:${randomUUID()}`;
+      await execFileAsync("docker", ["image", "inspect", image]).catch(
+        async () => await execFileAsync("docker", ["pull", image]),
+      );
+      await execFileAsync("docker", ["tag", image, upgradedImage]);
+      cleanupImageTags.add(upgradedImage);
+      const after = testSettings({
+        sandboxBackend: "docker",
+        dockerImage: upgradedImage,
+        dockerWorkspaceBaseDir: workspaceBaseDir,
+      });
+
+      const created = await establishSandboxSessionFromEnvelope(before, null, {
+        sessionId: "docker-upgrade-created",
+        recovery: "create-or-restore",
+        backendOverride: "docker",
+        environment: {},
+      });
+      cleanupContainers.add(created.instanceId);
+      cleanupRoots.add((created.session as DockerSession).state.workspaceRootPath);
+      expect(
+        await (created.session as DockerSession).exec({
+          cmd: "printf 'survives-upgrade' > /workspace/upgrade.txt",
+        }),
+      ).toMatchObject({ exitCode: 0 });
+      const envelope = await serializeEstablishedSandboxEnvelope(created);
+      expect(envelope).not.toBeNull();
+
+      // A worker running the upgraded configuration takes the live box over.
+      const exact = await establishSandboxSessionFromEnvelope(after, envelope, {
+        sessionId: "docker-upgrade-exact",
+        recovery: "resume-only",
+        backendOverride: "docker",
+        environment: {},
+      });
+      expect(exact.instanceId).toBe(created.instanceId);
+      expect(
+        await (exact.session as DockerSession).exec({ cmd: "cat /workspace/upgrade.txt" }),
+      ).toMatchObject({ exitCode: 0, stdout: "survives-upgrade" });
+      const upgradedEnvelope = await serializeEstablishedSandboxEnvelope(exact);
+      expect(upgradedEnvelope).not.toBeNull();
+
+      // The upgraded reaper drains it: capture, then exact teardown.
+      const client = createSandboxClientForBackend("docker", after) as {
+        attachWorkspaceForDrain(
+          state: unknown,
+          fence: () => Promise<{ archivePublished: boolean }>,
+        ): Promise<{ persistWorkspace(): Promise<Uint8Array>; delete(): Promise<void> }>;
+      };
+      const state = await deserializeSandboxSessionStateEnvelope(
+        client as never,
+        (upgradedEnvelope as { sessionState: unknown }).sessionState,
+        created.instanceId,
+      );
+      let published = false;
+      const drain = await client.attachWorkspaceForDrain(state, async () => ({
+        archivePublished: published,
+      }));
+      expect((await drain.persistWorkspace()).byteLength).toBeGreaterThan(0);
+      published = true;
+      await drain.delete();
+      await expect(
+        execFileAsync("docker", ["inspect", "--type", "container", created.instanceId]),
+      ).rejects.toThrow();
+      cleanupContainers.delete(created.instanceId);
     },
     180_000,
   );

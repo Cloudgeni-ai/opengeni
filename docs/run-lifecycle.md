@@ -1355,6 +1355,15 @@ regardless of a stale idle/queued session projection. Its scoped repair uses
 capacity and sandbox setup/lifecycle blockers. Current runnable recovery wakes
 cannot be acknowledged merely because Temporal accepted a signal; claim of that
 same turn consumes the obligation.
+A quiesced turn parked by Pause (direct, ancestor or workspace) is a durable
+wait for Resume, not a lost wake: migration 0880 omits it from that inventory
+once its projection is no longer `recovering`, and likewise omits quiesced
+turns behind a durable admission block or a sandbox setup outcome-unknown or
+recovery-exhausted marker. Each of those blockers commits its own wake when it
+clears, and the state-derived predicate rediscovers the session as soon as it
+does. A paused turn whose projection still says `recovering` stays
+discoverable; its repair wake (`cancellation-wait` peek) runs the DB-only
+projection settlement that parks it idle, after which it leaves the inventory.
 
 Historical retirement is an explicit operator operation, never a reaper age
 heuristic. Supply `MigrationRuntimeOptions.interruptedTurnRetirement` or a private

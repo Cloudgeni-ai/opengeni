@@ -46,6 +46,23 @@ function invalid(message: string): never {
   throw new SandboxConfigError("docker", "Docker drain workspace authority: " + message);
 }
 
+/** Prove the SDK still owns this exact running container: its session
+ * identity label, workspace mount and mount-authority fingerprint. The SDK's
+ * reuse check also compares the container with the client's configured image
+ * and exposed ports, which answers a different question (would a new
+ * container look the same?). Ownership is a property of the container that
+ * exists, so it is checked against the image and ports it was created with.
+ * Otherwise a deployment that changes the sandbox image could neither serialize
+ * nor drain any container that was live during the upgrade. */
+async function provesLiveSdkOwnership(client: DockerSandboxClient, state: State) {
+  return await client.canReusePreservedOwnedSession(state, {
+    clientOptions: {
+      image: state.image,
+      exposedPorts: [...(state.configuredExposedPorts ?? [])],
+    },
+  });
+}
+
 function shape(state: State) {
   if (
     !ID.test(state.containerId) ||
@@ -215,7 +232,7 @@ export async function serializeDockerOwnership(
   if (!native?.running) invalid("live SDK ownership could not be verified");
   const mount = await ownedMount(native, state);
   const identity = await readHostWorkspaceRootIdentity(mount.root);
-  if (!(await client.canReusePreservedOwnedSession(state)))
+  if (!(await provesLiveSdkOwnership(client, state)))
     invalid("live SDK ownership could not be verified");
   await readHostWorkspaceRootIdentity(mount.root, identity);
   if ((await daemon(probe)) !== daemonId) invalid("native daemon identity changed");
@@ -350,7 +367,7 @@ export async function attachDockerWorkspaceForDrain(
     // Preserve its data and lease; neither NotFound nor siblings grant custody.
     if (!native?.running) invalid("legacy stopped/missing workspace has no owned-root receipt");
     await ownedMount(native, state);
-    if (!(await client.canReusePreservedOwnedSession(state)))
+    if (!(await provesLiveSdkOwnership(client, state)))
       invalid("live SDK ownership could not be verified");
     rememberOwnedDockerSdkState(state);
     await serializeDockerOwnership(client, state, probe);
