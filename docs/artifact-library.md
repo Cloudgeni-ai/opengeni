@@ -69,6 +69,12 @@ authoritative. Source-session links are exposed only when that session is
 readable. Content is loaded through the existing authenticated artifact APIs;
 catalog results contain no storage credentials or temporary download URLs.
 
+Editable catalog projection uses the optional application `readArtifacts` seam
+in windows of eight. Core still authorizes each item, then the PostgreSQL store
+reads their metadata in one tenant-scoped statement and checks each authorization
+revision. Stale items reauthorize through the ordinary single-read retry path.
+Embedding applications or stores without the batch seam retain single reads.
+
 Images and other files need `files:read`; Sites, documents, spreadsheets, and
 presentations need `artifacts:read`. A viewer holding only one of the two gets
 the other kinds silently omitted from the catalog, so the console names the

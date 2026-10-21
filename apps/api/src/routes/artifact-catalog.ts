@@ -14,6 +14,7 @@ import {
 import {
   editableArtifactId,
   editableArtifactScope,
+  EDITABLE_ARTIFACT_READ_BATCH_LIMIT,
   fileOwnerContextForAccess,
   grantHasAgentAttemptAuthority,
   hasPermission,
@@ -24,6 +25,7 @@ import {
   SessionAuthorizationUnavailableError,
   siteViewerForGrant,
   type ApiRouteDeps,
+  type EditableArtifact,
 } from "@opengeni/core";
 import {
   getFilesForSubject,
@@ -55,7 +57,7 @@ type Dependencies = ApiRouteDeps & EditableArtifactRouteDependencies;
 const editableKinds = new Set(["document", "spreadsheet", "presentation"]);
 const CANDIDATE_BATCH = 200;
 // Bound both the pool pressure and speculative work beyond the page frontier.
-const PROJECTION_BATCH = 8;
+const PROJECTION_BATCH = EDITABLE_ARTIFACT_READ_BATCH_LIMIT;
 const MAX_BATCHES = 10;
 const iso = (value: Date | string) => new Date(value).toISOString();
 const position = (row: ArtifactCatalogCandidate): ArtifactCatalogPosition => ({
@@ -285,12 +287,20 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           );
           offset += window.length;
           const fileProjection = loadCandidateFiles(deps, grant, window, fileSubject);
+          const editableProjection = loadCandidateEditableArtifacts(deps, grant, window);
           // Retain each application's live read/authorization boundary. Settling
           // in parallel must not reorder rows or surface an error after the first
           // eligible lookahead row, which belongs to the next page.
           const projected = await Promise.allSettled(
             window.map((candidate) =>
-              projectCandidate(deps, grant, candidate, fileSubject, fileProjection),
+              projectCandidate(
+                deps,
+                grant,
+                candidate,
+                fileSubject,
+                fileProjection,
+                editableProjection,
+              ),
             ),
           );
           const accepted: Array<{
@@ -349,6 +359,35 @@ type CandidateFiles = {
   generated: Map<string, GeneratedImageArtifact>;
 };
 
+function loadCandidateEditableArtifacts(
+  deps: Dependencies,
+  grant: AccessGrant,
+  candidates: readonly ArtifactCatalogCandidate[],
+): Promise<Map<string, PromiseSettledResult<EditableArtifact>>> | null {
+  const application = deps.editableArtifacts;
+  if (!application?.readArtifacts) return null;
+  const artifactIds = candidates
+    .filter((row) => editableKinds.has(row.kind))
+    .map((row) => editableArtifactId(row.id));
+  if (!artifactIds.length) return null;
+  return Promise.resolve()
+    .then(() =>
+      application.readArtifacts!({
+        scope: editableArtifactScope({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+        }),
+        actor: editableArtifactActorForGrant(grant, "0000000000000001"),
+        artifactIds,
+      }),
+    )
+    .then((results) => {
+      if (results.length !== artifactIds.length)
+        throw new Error("Artifact application returned mismatched batch results");
+      return new Map(artifactIds.map((id, index) => [id, results[index]!]));
+    });
+}
+
 async function loadCandidateFiles(
   deps: Dependencies,
   grant: AccessGrant,
@@ -389,6 +428,7 @@ async function projectCandidate(
   row: ArtifactCatalogCandidate,
   fileSubject: string | null,
   fileProjection: Promise<CandidateFiles>,
+  editableProjection: Promise<Map<string, PromiseSettledResult<EditableArtifact>>> | null,
 ): Promise<ArtifactCatalogItem | null> {
   const item: ArtifactCatalogItem = {
     id: row.id,
@@ -410,11 +450,18 @@ async function projectCandidate(
     try {
       // This is the HTTP application's read-only domain.getArtifact seam, NOT
       // EditableArtifactAgentApplication.read (which touches session links).
-      const artifact = await deps.editableArtifacts!.readArtifact({
-        scope,
-        actor: editableArtifactActorForGrant(grant, "0000000000000001"),
-        artifactId: editableArtifactId(row.id),
-      });
+      const batchResult = editableProjection ? (await editableProjection).get(row.id) : undefined;
+      if (batchResult?.status === "rejected") throw batchResult.reason;
+      if (editableProjection && !batchResult)
+        throw new Error("Artifact application omitted a batch result");
+      const artifact =
+        batchResult?.status === "fulfilled"
+          ? batchResult.value
+          : await deps.editableArtifacts!.readArtifact({
+              scope,
+              actor: editableArtifactActorForGrant(grant, "0000000000000001"),
+              artifactId: editableArtifactId(row.id),
+            });
       if (
         artifact.scope.accountId !== scope.accountId ||
         artifact.scope.workspaceId !== scope.workspaceId ||
