@@ -26,6 +26,7 @@ export type BrowserTextTarget = {
   title: string;
   url: string;
   selected?: boolean | undefined;
+  documentGeneration?: string | null | undefined;
 };
 
 export type BrowserTextObservation = {
@@ -237,20 +238,70 @@ export function browserObservationText(
   }
   if (view.sourceKind === "none") {
     lines.push("No accessibility view is available for this tab.");
+  } else if (view.sourceKind === "diff") {
+    lines.push(
+      nodes.length === 0 && !view.removedRefCount
+        ? "No element changed since your last reading of this page; its refs are still valid."
+        : "Changed elements since your last reading of this page; elements not listed are unchanged and keep their refs:",
+    );
+    for (const node of nodes) lines.push(browserNodeLine(node, allRefs, node.depth));
   } else {
-    if (view.sourceKind === "diff") lines.push("Changed elements:");
     const base = shallowestDepth(nodes);
     for (const node of nodes) lines.push(browserNodeLine(node, allRefs, base));
   }
   const notes = [
-    view.omittedNodeCount
+    view.omittedNodeCount && view.sourceKind !== "diff"
       ? `${plural(view.omittedNodeCount, "element")} not shown${omittedRegionText(view.omittedRegions)}`
       : null,
-    view.removedRefCount ? `${plural(view.removedRefCount, "earlier element")} removed` : null,
+    view.removedRefCount
+      ? `${plural(view.removedRefCount, "element")} from your last reading ${view.removedRefCount === 1 ? "is" : "are"} gone or no longer listed`
+      : null,
     view.clippedFieldCount ? `${plural(view.clippedFieldCount, "long field")} clipped` : null,
   ].filter((entry): entry is string => entry !== null);
   if (notes.length) lines.push(`(${notes.join("; ")})`);
   return lines.join("\n");
+}
+
+/**
+ * The part of a page reading that differs from the reading of the same page
+ * the model last saw, for the outline an action returns. A ref names the same
+ * element for as long as its document lives, so the model keeps acting on the
+ * refs it holds and reads only what the action changed: filling one field
+ * returns that field, not the whole form again, and an action that changed
+ * nothing says so. The whole outline is kept whenever a diff would not help
+ * or could mislead: another tab, page or document, a page without an outline,
+ * or a reading in which most of what the model saw changed.
+ */
+export function browserObservationDiff<Observation extends BrowserTextObservation>(
+  base: BrowserTextObservation,
+  next: Observation,
+): Observation | null {
+  if (
+    base.agentView.sourceKind !== "snapshot" ||
+    next.agentView.sourceKind !== "snapshot" ||
+    base.target.id !== next.target.id ||
+    base.target.url !== next.target.url ||
+    (base.target.documentGeneration ?? null) !== (next.target.documentGeneration ?? null)
+  )
+    return null;
+  // Indentation is relative to the view it was listed in, not the element.
+  const content = ({ depth: _depth, ...node }: BrowserTextNode) => JSON.stringify(node);
+  const earlier = new Map(base.agentView.nodes.map((node) => [node.ref, content(node)]));
+  const changed = next.agentView.nodes.filter((node) => earlier.get(node.ref) !== content(node));
+  const listed = new Set(next.agentView.nodes.map((node) => node.ref));
+  const gone = base.agentView.nodes.filter((node) => !listed.has(node.ref)).length;
+  const size = Math.max(base.agentView.nodes.length, next.agentView.nodes.length);
+  if ((changed.length + gone) * 2 > size) return null;
+  const { omittedRegions: _regions, ...view } = next.agentView;
+  return {
+    ...next,
+    agentView: {
+      ...view,
+      sourceKind: "diff",
+      nodes: changed.map((node) => ({ ...node, depth: 0 })),
+      ...(gone > 0 ? { removedRefCount: gone } : {}),
+    },
+  };
 }
 
 export type BrowserTextResolvedTarget = {
