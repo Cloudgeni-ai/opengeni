@@ -1172,7 +1172,7 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     if (action.type === "semantic") {
       const node = this.locateObserved(command.targetId, observed, action.locator);
-      if (!node.actions.includes(action.action))
+      if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action))
         throw unsupported(
           action.action === "focus"
             ? this.identity.platform === "macos"
@@ -1467,6 +1467,20 @@ export class CuaComputerBackend implements ComputerBackend {
 }
 
 const RECENT_OBSERVATIONS = 4;
+
+/** Roles chosen by pressing them: a radio button or a tab. */
+const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
+
+/** `select` is the natural verb for a radio button or tab, which the platform
+ * offers only as a press, so it presses one rather than being refused. */
+function selectsByPressing(
+  node: { readonly role: string; readonly actions: readonly string[] },
+  action: string,
+): boolean {
+  return (
+    action === "select" && node.actions.includes("invoke") && PRESS_TO_SELECT_ROLES.has(node.role)
+  );
+}
 /** The app name CUA's worker process lists its own overlay windows under. */
 const CUA_WORKER_APP = "cua-driver";
 

@@ -177,6 +177,55 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("select presses a radio button, and is still refused on a plain button", async () => {
+    class RadioFixture extends Fixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "get_window_state" || !response.structuredJson) return response;
+        const data = JSON.parse(response.structuredJson);
+        if (data.elements)
+          data.elements.push({
+            ...data.elements[0],
+            element_index: 2,
+            element_token: `s${this.snapshot}:2`,
+            role: "AXRadioButton",
+            label: "Landscape",
+          });
+        response.structuredJson = JSON.stringify(data);
+        return response;
+      }
+    }
+    const fixture = new RadioFixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const observation = await backend.observe(target.id);
+      const radio = observation.roots.find((node) => node.role === "radio")!;
+      expect(radio.actions).toEqual(["invoke", "focus"]);
+      await backend.dispatch({
+        ...command(observation),
+        action: { type: "semantic", action: "select", locator: { kind: "ref", ref: radio.ref } },
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: "s1:2",
+        button: "left",
+      });
+      const fresh = await backend.observe(target.id);
+      await expect(
+        backend.dispatch({
+          ...command(fresh),
+          action: { ...command(fresh).action, action: "select" } as never,
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+        message: "This element does not offer select; use one it offers: invoke, focus",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("revives idle owned sessions and retires expired viewer controls before input", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
