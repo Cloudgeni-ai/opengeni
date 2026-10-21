@@ -199,8 +199,12 @@ test.skipIf(!real)(
         now: now + 3,
       }),
     );
-    expect(unknown.windows[0]!.remainingPercent).toBeNull();
-    expect(unknown.windows[0]!.accounts[0]!.remainingPercent).toBeNull();
+    // The newest (unknown) reading blanks only its own account; the pool total
+    // covers the accounts that reported.
+    const pooled = unknown.windows[0]!.accounts;
+    expect(pooled.find((account) => account.id === ids[0])!.remainingPercent).toBeNull();
+    expect(pooled.find((account) => account.id !== ids[0])!.remainingPercent).toBe(75);
+    expect(unknown.windows[0]!.remainingPercent).toBe(75);
     expect(
       (
         await shared!
