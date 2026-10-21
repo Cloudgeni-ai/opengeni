@@ -17,6 +17,7 @@ import {
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
+  RETAINED_REPLY_MAX_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
   buildCompactionPromptInput,
@@ -84,6 +85,13 @@ function assistant(text: string): CompactionItem {
     status: "completed",
     content: [{ type: "output_text", text }],
   };
+}
+
+function messageText(item: CompactionItem): string {
+  const content = item.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => String((part as { text?: unknown }).text ?? "")).join("");
 }
 
 function call(id: string, name = "shell"): CompactionItem {
@@ -709,27 +717,121 @@ describe("codex-parity rebuild", () => {
     });
   });
 
-  test("replacement history keeps only real user messages plus one summary", () => {
+  test("replacement history keeps real user messages, finished replies and one summary", () => {
     const prior = buildSummaryItem("prior summary");
     const active = [
       user("first user"),
-      assistant("assistant dropped"),
+      assistant("assistant reply"),
       call("c1"),
       result("c1"),
       prior,
       user("second user"),
     ];
     const rebuilt = buildCompactionReplacementHistory(active, "new summary");
-    expect(rebuilt).toHaveLength(3);
+    expect(rebuilt).toHaveLength(4);
     expect(rebuilt[0]).toMatchObject(user("first user"));
-    expect(rebuilt[1]).toMatchObject(user("second user"));
-    expect(rebuilt[2]).toMatchObject({
+    expect(rebuilt[1]).toEqual({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "assistant reply" }],
+    });
+    expect(rebuilt[2]).toMatchObject(user("second user"));
+    expect(rebuilt[3]).toMatchObject({
       type: "message",
       role: "user",
       [COMPACTION_SUMMARY_MARKER]: true,
     });
     expect(rebuilt.some((item) => item === prior)).toBe(false);
     expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
+  });
+
+  describe("an answered request does not read as pending after compaction", () => {
+    const updates = (text: string): CompactionItem => ({
+      type: "message",
+      role: "system",
+      content: `[Opengeni internal updates]\n${text}`,
+    });
+    // A person asks, the turn answers, then only machine input arrives.
+    const history = (): CompactionItem[] => [
+      user("what did we decide about the cache key?"),
+      assistant("I'll look it up."),
+      call("c1"),
+      result("c1"),
+      {
+        ...assistant("We kept one key per session."),
+        id: "msg_provider_1",
+        phase: "final_answer",
+        providerData: { opaque: true },
+      },
+      updates("a worker finished"),
+      assistant("Noted."),
+      updates("ci is green"),
+      call("c2"),
+    ];
+    const rebuilds = (): Array<[string, CompactionItem[]]> => [
+      ["portable", buildCompactionReplacementHistory(history(), "summary")],
+      [
+        "remote v2",
+        buildRemoteV2ReplacementHistory(history(), { type: "compaction", encrypted_content: "b" }),
+      ],
+    ];
+
+    for (const [mode, rebuilt] of rebuilds()) {
+      test(`${mode}: the request is followed by its turn's last reply only`, () => {
+        const request = rebuilt.findIndex(
+          (item) => item.content === "what did we decide about the cache key?",
+        );
+        expect(request).toBeGreaterThanOrEqual(0);
+        expect(rebuilt[request + 1]).toEqual({
+          type: "message",
+          role: "assistant",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: "We kept one key per session." }],
+        });
+        const replies = rebuilt.filter((item) => item.role === "assistant");
+        expect(replies).toHaveLength(1);
+        expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
+        expect(sanitizeHistoryItemsForModel(rebuilt)).toEqual(rebuilt);
+      });
+    }
+
+    test("a turn still running keeps its request open", () => {
+      const rebuilt = buildCompactionReplacementHistory(
+        [user("old"), assistant("old answer"), user("current"), assistant("working on it")],
+        "summary",
+      );
+      expect(rebuilt.map((item) => messageText(item))).toEqual([
+        "old",
+        "old answer",
+        "current",
+        expect.stringContaining("summary"),
+      ]);
+    });
+
+    test("a reply is kept, truncated, even when the request filled the budget", () => {
+      const rebuilt = buildCompactionReplacementHistory(
+        [bigUser(25_000, "q"), assistant("r".repeat(40_000)), updates("later")],
+        "summary",
+      );
+      const reply = rebuilt.find((item) => item.role === "assistant")!;
+      expect(reply).toBeDefined();
+      const text = messageText(reply);
+      expect(text).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+      expect(estimateTextTokens(text)).toBeLessThanOrEqual(RETAINED_REPLY_MAX_TOKENS);
+    });
+
+    test("a long reply keeps only a bounded start and end when budget is plentiful", () => {
+      const long = `Outcome first. ${"detail ".repeat(5_000)}Closing line.`;
+      const rebuilt = buildCompactionReplacementHistory(
+        [user("short question"), assistant(long), updates("later")],
+        "summary",
+      );
+      const text = messageText(rebuilt.find((item) => item.role === "assistant")!);
+      expect(text.startsWith("Outcome first.")).toBe(true);
+      expect(text.endsWith("Closing line.")).toBe(true);
+      expect(text).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+      expect(estimateTextTokens(text)).toBeLessThanOrEqual(RETAINED_REPLY_MAX_TOKENS);
+    });
   });
 
   test("carries attachment ids from omitted messages in a compact catalog", () => {

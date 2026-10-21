@@ -45,6 +45,7 @@ import {
   createProductionAgentRuntime,
   EmptyCompactionSummaryError,
   SUMMARY_PREFIX,
+  USER_MESSAGE_TRUNCATION_MARKER,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import {
@@ -224,6 +225,17 @@ describe("standalone context compaction execution", () => {
         );
         expect(replacement.map((row) => row.item).slice(0, -1)).toEqual([
           original[0]!.item,
+          // The finished first turn keeps a bounded copy of its reply.
+          {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: expect.stringContaining(USER_MESSAGE_TRUNCATION_MARKER.trim()),
+              },
+            ],
+          },
           current!.item,
         ]);
         expect(await getSessionTurn(reopened.db, workspaceId, turn.id)).toEqual(frozenTurnBefore);
