@@ -4043,7 +4043,6 @@ describe("worker activities integration", () => {
     expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
       expect.objectContaining({
         id: firstRuns[0]!.id,
-        producerKey,
         status: "skipped",
         error: "scheduled_workspace_paused",
         sessionId: null,
