@@ -100,3 +100,15 @@ export function SubscriptionRotationSettingRows({
     </SettingRowGroup>
   );
 }
+
+/**
+ * Splits the one account list into subscriptions and pay-as-you-go keys, so
+ * gateways nobody uses never sit among (or above) the subscription pools.
+ */
+export function AccountGroupHeading({ children }: { children: string }) {
+  return (
+    <li className="col-span-full list-none px-3 pt-5 pb-1 first:pt-2">
+      <h3 className="m-0 text-xs font-medium tracking-wide text-fg-muted uppercase">{children}</h3>
+    </li>
+  );
+}

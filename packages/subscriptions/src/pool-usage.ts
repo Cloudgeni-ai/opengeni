@@ -14,6 +14,11 @@ export type SubscriptionUsagePoolInput = {
      * The same tier scale must be used for every account in this pool.
      */
     planWeight?: number;
+    /**
+     * The provider refuses this window until the given time (a usage-limit
+     * response), whatever its last percentage said: none of it is left.
+     */
+    blocked?: Partial<Record<SubscriptionUsagePoolWindowId, number>>;
     windows: Array<{
       id: SubscriptionUsagePoolWindowId;
       usedPercent: number | null;
@@ -107,7 +112,10 @@ function hourOfWeek(at: number): number {
 /**
  * Both windows and every supplied account stay visible, including missing windows.
  * Snapshots are authoritative for CURRENT remaining; historical readings never fill a
- * missing snapshot. A partial pool has no whole-pool number or reassuring forecast.
+ * missing snapshot. A reading stays current until its window resets: usage only grows
+ * within a window, so an older reading is still what the account list shows. The total
+ * and forecast cover the accounts with a current reading; accounts without one are
+ * listed with an unknown remaining so the caller can say they are left out.
  * Call units never set demand magnitude: stable percentage movements include usage
  * outside this application. Calibration is only a relative proxy for usable capacity.
  */
@@ -167,16 +175,23 @@ export function buildSubscriptionUsagePool(
         finite(snapshot?.observedAt) && snapshot.observedAt <= input.now
           ? snapshot.observedAt
           : null;
-      const resetsAt = finite(snapshot?.resetsAt) ? snapshot.resetsAt : null;
+      const observedReset = finite(snapshot?.resetsAt) ? snapshot.resetsAt : null;
+      const blockedUntil = account.blocked?.[id];
+      const blocked = finite(blockedUntil) && blockedUntil > input.now;
+      const resetsAt = blocked ? blockedUntil : observedReset;
       const current =
         observedAt !== null &&
-        input.now - observedAt <= FRESHNESS[id] &&
-        (resetsAt === null || (resetsAt > input.now && resetsAt <= observedAt + duration));
-      const remainingPercent =
-        current && snapshot && percent(snapshot.usedPercent) ? 100 - snapshot.usedPercent : null;
+        (observedReset === null
+          ? input.now - observedAt <= FRESHNESS[id]
+          : observedReset > input.now && observedReset <= observedAt + duration);
+      const remainingPercent = blocked
+        ? 0
+        : current && snapshot && percent(snapshot.usedPercent)
+          ? 100 - snapshot.usedPercent
+          : null;
       const readings = [...(readingsByAccount.get(account.id)?.get(id) ?? [])];
       if (snapshot && percent(snapshot.usedPercent) && observedAt !== null && observedAt >= since) {
-        readings.push({ usedPercent: snapshot.usedPercent, observedAt, resetsAt });
+        readings.push({ usedPercent: snapshot.usedPercent, observedAt, resetsAt: observedReset });
       }
       const segments = stableSegments(readings, callsByAccount.get(account.id) ?? [], duration);
       const planWeight =
@@ -218,12 +233,17 @@ export function buildSubscriptionUsagePool(
       weightBasis: row.calibrated === null ? "plan_estimate" : "observed",
       observedAt: row.observedAt,
     }));
-    const totalWeight = sum(accounts.map((account) => account.weight));
-    const complete =
-      accounts.length > 0 && accounts.every((account) => account.remainingPercent !== null);
+    // Accounts without a current reading are left out of the total and forecast
+    // (and stay listed as unknown), rather than hiding what the others report.
+    const knownIndexes = accounts.flatMap((account, index) =>
+      account.remainingPercent === null ? [] : [index],
+    );
+    const known = knownIndexes.map((index) => accounts[index]!);
+    const totalWeight = sum(known.map((account) => account.weight));
+    const complete = known.length > 0;
     const remainingPercent = complete
       ? clamp(
-          sum(accounts.map((account) => account.weight * account.remainingPercent!)) / totalWeight,
+          sum(known.map((account) => account.weight * account.remainingPercent!)) / totalWeight,
           0,
           100,
         )
@@ -234,7 +254,7 @@ export function buildSubscriptionUsagePool(
       input.now,
     );
     const historyDays = (input.now - Math.max(since, earliest)) / DAY;
-    const resets = accounts
+    const resets = known
       .map((account) => account.resetsAt)
       .filter((at): at is number => at !== null && at > input.now && at <= input.now + duration);
     const nextResetAt = resets.length ? Math.min(...resets) : null;
@@ -250,9 +270,7 @@ export function buildSubscriptionUsagePool(
     });
     let forecast: SubscriptionUsagePoolForecast;
     if (!complete) {
-      forecast = insufficient(
-        "Missing or stale account/window observations; whole-pool coverage is unknown.",
-      );
+      forecast = insufficient("No account has a current observation for this window.");
     } else if (remainingPercent === 0) {
       forecast = {
         kind: "runs_out",
@@ -264,13 +282,13 @@ export function buildSubscriptionUsagePool(
         lowestPercent: 0,
         historyDays,
       };
-    } else if (resets.length !== accounts.length) {
+    } else if (resets.length !== known.length) {
       forecast = insufficient(
         "A future reset is unknown; remaining limits are observed, not forecast.",
       );
     } else {
-      const paces = data.map((row, index) =>
-        buildPace(row.segments, accounts[index]!, duration, input.now),
+      const paces = knownIndexes.map((index) =>
+        buildPace(data[index]!.segments, accounts[index]!, duration, input.now),
       );
       if (paces.some((pace) => pace === null)) {
         forecast = insufficient(
@@ -295,7 +313,7 @@ export function buildSubscriptionUsagePool(
           ...(id === "five_hour" ? [`last-hour adjustment ${recent.toFixed(2)}x`] : []),
         ].join("; ");
         forecast = simulate(
-          accounts,
+          known,
           profile.map((rate) => rate * scale),
           input.now,
           duration,

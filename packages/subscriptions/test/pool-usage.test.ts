@@ -176,7 +176,9 @@ describe("subscription usage pool weights", () => {
         expect(pool.remainingPercent!).toBeLessThanOrEqual(100);
       }
       data.accounts[0]!.windows[0]!.usedPercent = null;
-      expect(result(data, window).remainingPercent).toBeNull();
+      // An unknown account is left out; the others still total exactly.
+      expect(result(data, window).accounts[0]!.remainingPercent).toBeNull();
+      expect(result(data, window).remainingPercent).toBe(0);
     }
   });
 
@@ -609,15 +611,14 @@ describe("unknown and stale coverage", () => {
     }
   });
 
-  test("one missing account makes the whole pool unknown, rather than dropping its capacity", () => {
+  test("one missing account is left out of the total and forecast, and stays listed as unknown", () => {
     const data = input();
     account(data, "known", "five_hour", 0, 3, 10);
     data.accounts.push({ id: "missing", label: "Missing", plan: null, windows: [] });
     const pool = result(data);
-    expect(pool.remainingPercent).toBeNull();
+    expect(pool.remainingPercent).toBe(100);
     expect(pool.accounts[0]!.remainingPercent).toBe(100);
     expect(pool.accounts[1]!.remainingPercent).toBeNull();
-    expect(pool.forecast.kind).toBe("insufficient_history");
   });
 
   test("a past or exact-now reset never fabricates a full account", () => {
@@ -630,7 +631,7 @@ describe("unknown and stale coverage", () => {
     }
   });
 
-  test("freshness is bounded by window policy; timestamps remain visible when stale", () => {
+  test("a reading stays current until its reset; without a reset, freshness is bounded by window policy", () => {
     for (const [window, ttl] of [
       ["five_hour", HOUR],
       ["weekly", DAY],
@@ -638,9 +639,25 @@ describe("unknown and stale coverage", () => {
       const data = input();
       account(data, "a", window, 20, 1);
       data.accounts[0]!.windows[0]!.observedAt = NOW - ttl - 1;
+      // Usage only grows within a window: the older reading is still what the list shows.
+      expect(result(data, window).remainingPercent).toBe(80);
+      data.accounts[0]!.windows[0]!.resetsAt = null;
       expect(result(data, window).remainingPercent).toBeNull();
       expect(result(data, window).accounts[0]!.observedAt).toBe(NOW - ttl - 1);
     }
+  });
+
+  test("a usage-limit block counts as nothing left until it ends, whatever the last percentage said", () => {
+    const data = input();
+    account(data, "open", "weekly", 40, 48, 1);
+    const blocked = account(data, "blocked", "weekly", 10, 48, 1);
+    blocked.blocked = { weekly: NOW + 30 * HOUR };
+    const pool = result(data, "weekly");
+    expect(pool.accounts[1]!.remainingPercent).toBe(0);
+    expect(pool.accounts[1]!.resetsAt).toBe(NOW + 30 * HOUR);
+    expect(pool.remainingPercent).toBe(30);
+    blocked.blocked = { weekly: NOW - 1 };
+    expect(result(data, "weekly").remainingPercent).toBe(75);
   });
 
   test("a newer explicit unknown does not resurrect historical remaining", () => {
