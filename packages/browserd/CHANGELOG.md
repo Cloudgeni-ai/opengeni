@@ -1,5 +1,58 @@
 # @opengeni/browserd
 
+## 0.3.0
+
+### Minor Changes
+
+- 49f2177: Agents can record a browser flow as a video. The new `browser_record` tool starts a recording of a managed or attached browser tab and stops it into an MP4 in the chat's workspace, with a log of when each action happened beside it, and publishes the MP4 so it plays in the chat. Frames are captured only when the page changes, so recording costs almost nothing while a page is still, and the video is encoded on the server, so browser hosts need no video encoder. The SDK adds `startBrowserRecording`, `getBrowserRecording` and `saveBrowserRecording`.
+
+### Patch Changes
+
+- 0d50963: A browser session in the user's own Chrome now recovers by itself when its event stream from the extension breaks, for example when a burst of page activity overflows the extension's event history, a poll times out or the local bridge connection drops. Before, every later call in that session failed as temporarily unavailable until a new session was opened. The stream is re-established and its tabs re-attach with fresh page state on their next use. A tab that had input in flight at that moment stays refused, as when Chrome detaches it, and a profile that reconnected to Opengeni now gets a clear, final instruction to open a new browser session.
+- d25fb3e: Downloading a file with the same name as an earlier download in a managed browser no longer loses the earlier one. Chrome saves both under the same name, so the later file used to replace the earlier one, which then could not be read or saved. Each completed download now keeps its own bytes, and the Downloads folder still shows the files under their real names.
+- 4aeaf11: Uploading a file through a button inside a cross-origin iframe now works. Before, the browser looked for the frame and its file chooser in the main page, which cannot see frames another site renders, so the upload failed with "upload control frame is unavailable". Upload dialogs embedded from another site, such as an office suite's add-in upload dialog, are common.
+- ed3a64c: On computers whose CUA driver supports it (macOS and Linux), a computer_act batch of semantic and keyboard actions now runs as one CUA operation checked against one observation, instead of one operation per action, which roughly halves the time of a long batch. Whether a computer session runs batches this way is fixed for the session's life, so every try of one batch, including tries on either side of an agent update, runs it the same way and never repeats its actions. CUA Driver is updated to 0.37.
+- 659c01a: Computer targets now mark a macOS window that is off screen (minimized, hidden, or on another Space or display), which can be neither captured nor read, so an agent sees it in the listing instead of finding out from a failed read. When any listed window is off screen, the listing adds one fixed note that a browser from browser_open runs off screen and can be shown on the computer by opening it with linkedComputerSessionId.
+- f183dfd: On macOS, computer targets no longer list windows a person never sees: a headless browser's page windows (including the browser from browser_open), and windows an app keeps ordered out such as closed popovers. A minimized window or a window of a hidden app is listed as readable, and reading it first brings it back on screen behind the person's front window, without activating its app or taking focus. Only a window on another Space, such as a full-screen app, stays marked off screen.
+- 46a2ef3: A computer or browser driver failure (`driver_failed`) now tells operators what failed. The controller sends the failing error class and function beside the unchanged error, and server logs record them with the driver message's code-written part, with window titles, page text, paths and free-text reasons redacted. The controller's own log line for a failed request is redacted the same way and now also covers known driver failures. What callers and agents are shown does not change.
+- b20c9b2: Retain bounded agent-update blocker categories/counts and show their report age
+  and elapsed holds in Machines and fleet, without disclosing private session IDs. Distinguish controller work
+  from native request admission without changing update safety, killing work or
+  adding command deadlines. Older agents that cannot identify a blocker remain
+  explicitly unspecified. These diagnostics do not establish the cause of an earlier
+  hold whose admission snapshot was not retained.
+- 16258f2: Idle managed browsers on a Linux desktop no longer burn CPU. A windowed managed browser held focus emulation on every tab, which keeps a page rendering as if it were being captured, and Linux has no window occlusion tracking, so every animated page in every idle browser kept drawing frames through software GL: on one shared desktop, 33 mostly idle browsers used about 10 CPU cores.
+
+  After a minute without any use and with no live view open, the controller now parks the browser: it switches focus emulation off and minimizes the browser's windows, so its pages become hidden and stop drawing (timers, network activity and screenshots keep working). The next observe, action, tab operation, screenshot or live view presents the browser again before it runs, so agents and people always act on a normally rendering page. A browser linked to a ComputerSession keeps its window, and macOS, Windows and offscreen browsers are unchanged. In a measured case, an animated page dropped from about 3 CPU cores to 0.02 while parked.
+
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [23fed2a]
+- Updated dependencies [e4915c1]
+- Updated dependencies [16781e5]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9976132]
+- Updated dependencies [724b529]
+- Updated dependencies [3915617]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/contracts@4.3.0
+  - @opengeni/interaction@4.3.0
+
 ## 0.2.26
 
 ### Patch Changes
