@@ -410,6 +410,9 @@ test.skipIf(!native)(
         cdpUrl: f.endpoint,
       });
       await replacement.terminate();
+      // The launcher still runs, so the stopped browser stays its zombie until
+      // the launcher reaps it; only its exit report allows the PID-absence check.
+      expect(await f.browserExited()).toEqual({ exitedBrowserPid: f.browserPid, exitCode: 0 });
       expect(() => process.kill(f.browserPid, 0)).toThrow();
     } finally {
       await f.close();
