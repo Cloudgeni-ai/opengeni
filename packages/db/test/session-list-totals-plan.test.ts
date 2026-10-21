@@ -37,6 +37,7 @@ afterAll(async () => {
 
 type PlanNode = {
   "Relation Name"?: string;
+  Alias?: string;
   "CTE Name"?: string;
   "Actual Rows": number;
   "Actual Loops": number;
@@ -130,11 +131,14 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
       const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode; "Execution Time": number }[];
       let cursorRows = 0;
       let sessionRows = 0;
+      let childRows = 0;
       function walk(node: PlanNode) {
         if (node["Relation Name"] === "session_event_cursors")
           cursorRows += node["Actual Rows"] * node["Actual Loops"];
         if (node["Relation Name"] === "sessions")
           sessionRows += node["Actual Rows"] * node["Actual Loops"];
+        if (node["Relation Name"] === "sessions" && node.Alias === "child")
+          childRows += node["Actual Rows"] * node["Actual Loops"];
         node.Plans?.forEach(walk);
       }
       walk(plans[0]!.Plan);
@@ -146,10 +150,14 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
           contributing,
           cursorRows,
           sessionRows,
+          childRows,
           executionMs: plans[0]!["Execution Time"],
         }),
       );
       expect(cursorRows).toBe(contributing);
+      // Root filtering must happen before materializing descendants. Archived
+      // trees cannot contribute, even though their children remain visible.
+      expect(childRows).toBe((roots - archivedRoots) * childrenPerRoot);
       expect(sessionRows).toBeLessThanOrEqual(roots * (childrenPerRoot + 1) + contributing);
     });
   }
