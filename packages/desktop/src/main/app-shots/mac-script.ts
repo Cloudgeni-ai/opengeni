@@ -6,9 +6,29 @@
 // The script reports the window first (one `window {...}` line on stderr), so
 // the screenshot can start while it reads the window's accessibility text,
 // then prints the text result as JSON on stdout.
+//
+// Each script defines `main(argv)` and calls it itself rather than relying on
+// osascript to call a JavaScript `run(argv)` handler: some macOS releases
+// (26.2 among them) run a script's top level but never call `run`, so every
+// helper silently did nothing. The arguments stay on the command line after
+// the script text; the script reads them from its own process arguments.
+// osascript prints the value of the script's last statement, as it printed
+// `run`'s return value.
+
+/** Appends the explicit entry point: `main` receives the arguments after `-e <script>`. */
+function withEntry(body: string): string {
+  return `${body}
+ObjC.import("Foundation");
+function scriptArguments() {
+  const all = ObjC.deepUnwrap($.NSProcessInfo.processInfo.arguments);
+  return all.slice(all.indexOf("-e") + 2);
+}
+main(scriptArguments());
+`;
+}
 
 /** Arguments: own process id (never captured), most characters, time budget in ms. */
-export const MAC_CAPTURE_SCRIPT = String.raw`
+export const MAC_CAPTURE_SCRIPT = withEntry(String.raw`
 ObjC.import("AppKit");
 ObjC.import("CoreGraphics");
 ObjC.import("ApplicationServices");
@@ -228,7 +248,7 @@ function readText(root, maxChars, deadline) {
   return { text, truncated: state.cut || !complete, url: state.url };
 }
 
-function run(argv) {
+function main(argv) {
   const ownPid = Number(argv[0]);
   const maxChars = Number(argv[1]);
   const deadline = Date.now() + Number(argv[2]);
@@ -254,17 +274,17 @@ function run(argv) {
   }
   return JSON.stringify(result);
 }
-`;
+`);
 
 /** Arguments: the two device-flag masks of the modifier pair. */
-export const MAC_MODIFIER_PAIR_SCRIPT = String.raw`
+export const MAC_MODIFIER_PAIR_SCRIPT = withEntry(String.raw`
 ObjC.import("AppKit");
 ObjC.import("CoreGraphics");
 ObjC.import("unistd");
 // The window-server query would otherwise register osascript as an app with
 // its own Dock tile; stay a background process.
 $.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyProhibited);
-function run(argv) {
+function main(argv) {
   const both = Number(argv[0]) | Number(argv[1]);
   let down = false;
   console.log("ready");
@@ -277,20 +297,20 @@ function run(argv) {
   }
   return "";
 }
-`;
+`);
 
 /**
  * Argument: `check`, `request-screen` or `request-accessibility`. Prints
  * whether each permission is allowed. Run as the app's child, so it reads the
  * app's own permissions, fresh, without restarting the app after a grant.
  */
-export const MAC_PERMISSIONS_SCRIPT = String.raw`
+export const MAC_PERMISSIONS_SCRIPT = withEntry(String.raw`
 ObjC.import("ApplicationServices");
 // The screen-capture access calls have no JXA bridge metadata; bind them.
 ObjC.bindFunction("CGPreflightScreenCaptureAccess", ["bool", []]);
 ObjC.bindFunction("CGRequestScreenCaptureAccess", ["bool", []]);
 ObjC.bindFunction("AXIsProcessTrustedWithOptions", ["bool", ["id"]]);
-function run(argv) {
+function main(argv) {
   if (argv[0] === "request-screen") $.CGRequestScreenCaptureAccess();
   if (argv[0] === "request-accessibility") {
     $.AXIsProcessTrustedWithOptions($({ AXTrustedCheckOptionPrompt: true }));
@@ -300,4 +320,4 @@ function run(argv) {
     accessibility: Boolean($.AXIsProcessTrusted()),
   });
 }
-`;
+`);
