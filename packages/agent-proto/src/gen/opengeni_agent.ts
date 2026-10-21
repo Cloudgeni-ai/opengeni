@@ -2815,10 +2815,10 @@ export const AgentError: MessageFns<AgentError> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentError>, I>>(base?: I): AgentError {
-    return AgentError.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentError>): AgentError {
+    return AgentError.fromPartial<DeepPartial<AgentError>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentError>, I>>(object: I): AgentError {
+  fromPartial(object: DeepPartial<AgentError>): AgentError {
     const message = createBaseAgentError();
     message.code = object.code ?? 0;
     message.message = object.message ?? "";
@@ -2901,10 +2901,10 @@ export const AgentError_DetailEntry: MessageFns<AgentError_DetailEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentError_DetailEntry>, I>>(base?: I): AgentError_DetailEntry {
-    return AgentError_DetailEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentError_DetailEntry>): AgentError_DetailEntry {
+    return AgentError_DetailEntry.fromPartial<DeepPartial<AgentError_DetailEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentError_DetailEntry>, I>>(object: I): AgentError_DetailEntry {
+  fromPartial(object: DeepPartial<AgentError_DetailEntry>): AgentError_DetailEntry {
     const message = createBaseAgentError_DetailEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -3216,10 +3216,10 @@ export const Hello: MessageFns<Hello> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<Hello>, I>>(base?: I): Hello {
-    return Hello.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<Hello>): Hello {
+    return Hello.fromPartial<DeepPartial<Hello>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<Hello>, I>>(object: I): Hello {
+  fromPartial(object: DeepPartial<Hello>): Hello {
     const message = createBaseHello();
     message.agentId = object.agentId ?? "";
     message.workspaceId = object.workspaceId ?? "";
@@ -3229,7 +3229,7 @@ export const Hello: MessageFns<Hello> = {
     message.machineName = object.machineName ?? "";
     message.workspaceRoot = object.workspaceRoot ?? "";
     message.capabilities = (object.capabilities !== undefined && object.capabilities !== null)
-      ? Capabilities.fromPartial(object.capabilities)
+      ? Capabilities.fromPartial<DeepPartial<Capabilities>>(object.capabilities)
       : undefined;
     message.updateChannel = object.updateChannel ?? "";
     message.resumeToken = object.resumeToken ?? "";
@@ -3653,10 +3653,10 @@ export const Capabilities: MessageFns<Capabilities> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<Capabilities>, I>>(base?: I): Capabilities {
-    return Capabilities.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<Capabilities>): Capabilities {
+    return Capabilities.fromPartial<DeepPartial<Capabilities>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<Capabilities>, I>>(object: I): Capabilities {
+  fromPartial(object: DeepPartial<Capabilities>): Capabilities {
     const message = createBaseCapabilities();
     message.exec = object.exec ?? false;
     message.filesystem = object.filesystem ?? false;
@@ -3666,7 +3666,7 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.consentedWholeMachine = object.consentedWholeMachine ?? false;
     message.consentedScreenControl = object.consentedScreenControl ?? false;
     message.display = (object.display !== undefined && object.display !== null)
-      ? Display.fromPartial(object.display)
+      ? Display.fromPartial<DeepPartial<Display>>(object.display)
       : undefined;
     message.desktopUnavailableReason = object.desktopUnavailableReason ?? "";
     message.opStream = object.opStream ?? false;
@@ -3676,7 +3676,7 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.transactionalFsWrite = object.transactionalFsWrite ?? false;
     message.credentialRenew = object.credentialRenew ?? false;
     message.macPermissions = (object.macPermissions !== undefined && object.macPermissions !== null)
-      ? MacDesktopPermissions.fromPartial(object.macPermissions)
+      ? MacDesktopPermissions.fromPartial<DeepPartial<MacDesktopPermissions>>(object.macPermissions)
       : undefined;
     message.browserControlHttp = object.browserControlHttp ?? false;
     message.transactionalFsWriteMachine = object.transactionalFsWriteMachine ?? false;
@@ -3774,10 +3774,10 @@ export const MacDesktopPermissions: MessageFns<MacDesktopPermissions> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<MacDesktopPermissions>, I>>(base?: I): MacDesktopPermissions {
-    return MacDesktopPermissions.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<MacDesktopPermissions>): MacDesktopPermissions {
+    return MacDesktopPermissions.fromPartial<DeepPartial<MacDesktopPermissions>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<MacDesktopPermissions>, I>>(object: I): MacDesktopPermissions {
+  fromPartial(object: DeepPartial<MacDesktopPermissions>): MacDesktopPermissions {
     const message = createBaseMacDesktopPermissions();
     message.screenRecording = object.screenRecording ?? false;
     message.accessibility = object.accessibility ?? false;
@@ -3994,14 +3994,12 @@ export const AttachedBrowserDeviceCapabilities: MessageFns<AttachedBrowserDevice
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AttachedBrowserDeviceCapabilities>, I>>(
-    base?: I,
-  ): AttachedBrowserDeviceCapabilities {
-    return AttachedBrowserDeviceCapabilities.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AttachedBrowserDeviceCapabilities>): AttachedBrowserDeviceCapabilities {
+    return AttachedBrowserDeviceCapabilities.fromPartial<DeepPartial<AttachedBrowserDeviceCapabilities>>(
+      base ?? ({} as any),
+    );
   },
-  fromPartial<I extends Exact<DeepPartial<AttachedBrowserDeviceCapabilities>, I>>(
-    object: I,
-  ): AttachedBrowserDeviceCapabilities {
+  fromPartial(object: DeepPartial<AttachedBrowserDeviceCapabilities>): AttachedBrowserDeviceCapabilities {
     const message = createBaseAttachedBrowserDeviceCapabilities();
     message.tabInventory = object.tabInventory ?? false;
     message.debuggerAttachment = object.debuggerAttachment ?? false;
@@ -4274,14 +4272,12 @@ export const AttachedBrowserDeviceAnnouncement: MessageFns<AttachedBrowserDevice
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AttachedBrowserDeviceAnnouncement>, I>>(
-    base?: I,
-  ): AttachedBrowserDeviceAnnouncement {
-    return AttachedBrowserDeviceAnnouncement.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AttachedBrowserDeviceAnnouncement>): AttachedBrowserDeviceAnnouncement {
+    return AttachedBrowserDeviceAnnouncement.fromPartial<DeepPartial<AttachedBrowserDeviceAnnouncement>>(
+      base ?? ({} as any),
+    );
   },
-  fromPartial<I extends Exact<DeepPartial<AttachedBrowserDeviceAnnouncement>, I>>(
-    object: I,
-  ): AttachedBrowserDeviceAnnouncement {
+  fromPartial(object: DeepPartial<AttachedBrowserDeviceAnnouncement>): AttachedBrowserDeviceAnnouncement {
     const message = createBaseAttachedBrowserDeviceAnnouncement();
     message.id = object.id ?? "";
     message.name = object.name ?? "";
@@ -4295,7 +4291,9 @@ export const AttachedBrowserDeviceAnnouncement: MessageFns<AttachedBrowserDevice
     message.inventoryRevision = object.inventoryRevision ?? "0";
     message.tabCount = object.tabCount ?? 0;
     message.capabilities = (object.capabilities !== undefined && object.capabilities !== null)
-      ? AttachedBrowserDeviceCapabilities.fromPartial(object.capabilities)
+      ? AttachedBrowserDeviceCapabilities.fromPartial<DeepPartial<AttachedBrowserDeviceCapabilities>>(
+        object.capabilities,
+      )
       : undefined;
     return message;
   },
@@ -4406,19 +4404,23 @@ export const AttachedBrowserInventorySnapshot: MessageFns<AttachedBrowserInvento
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AttachedBrowserInventorySnapshot>, I>>(
-    base?: I,
-  ): AttachedBrowserInventorySnapshot {
-    return AttachedBrowserInventorySnapshot.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AttachedBrowserInventorySnapshot>): AttachedBrowserInventorySnapshot {
+    return AttachedBrowserInventorySnapshot.fromPartial<DeepPartial<AttachedBrowserInventorySnapshot>>(
+      base ?? ({} as any),
+    );
   },
-  fromPartial<I extends Exact<DeepPartial<AttachedBrowserInventorySnapshot>, I>>(
-    object: I,
-  ): AttachedBrowserInventorySnapshot {
+  fromPartial(object: DeepPartial<AttachedBrowserInventorySnapshot>): AttachedBrowserInventorySnapshot {
     const message = createBaseAttachedBrowserInventorySnapshot();
     message.bridgeGeneration = object.bridgeGeneration ?? "";
     message.revision = object.revision ?? "0";
-    message.devices = object.devices?.map((e) => AttachedBrowserDeviceAnnouncement.fromPartial(e)) || [];
-    message.connectionEnds = object.connectionEnds?.map((e) => AttachedBrowserConnectionEnd.fromPartial(e)) || [];
+    message.devices =
+      object.devices?.map((e) =>
+        AttachedBrowserDeviceAnnouncement.fromPartial<DeepPartial<AttachedBrowserDeviceAnnouncement>>(e)
+      ) || [];
+    message.connectionEnds =
+      object.connectionEnds?.map((e) =>
+        AttachedBrowserConnectionEnd.fromPartial<DeepPartial<AttachedBrowserConnectionEnd>>(e)
+      ) || [];
     return message;
   },
 };
@@ -4564,10 +4566,10 @@ export const AttachedBrowserConnectionEnd: MessageFns<AttachedBrowserConnectionE
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AttachedBrowserConnectionEnd>, I>>(base?: I): AttachedBrowserConnectionEnd {
-    return AttachedBrowserConnectionEnd.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AttachedBrowserConnectionEnd>): AttachedBrowserConnectionEnd {
+    return AttachedBrowserConnectionEnd.fromPartial<DeepPartial<AttachedBrowserConnectionEnd>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AttachedBrowserConnectionEnd>, I>>(object: I): AttachedBrowserConnectionEnd {
+  fromPartial(object: DeepPartial<AttachedBrowserConnectionEnd>): AttachedBrowserConnectionEnd {
     const message = createBaseAttachedBrowserConnectionEnd();
     message.deviceId = object.deviceId ?? "";
     message.connectionGeneration = object.connectionGeneration ?? "";
@@ -4674,10 +4676,10 @@ export const Display: MessageFns<Display> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<Display>, I>>(base?: I): Display {
-    return Display.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<Display>): Display {
+    return Display.fromPartial<DeepPartial<Display>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<Display>, I>>(object: I): Display {
+  fromPartial(object: DeepPartial<Display>): Display {
     const message = createBaseDisplay();
     message.id = object.id ?? "";
     message.width = object.width ?? 0;
@@ -4809,10 +4811,10 @@ export const DeviceAuthStartRequest: MessageFns<DeviceAuthStartRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthStartRequest>, I>>(base?: I): DeviceAuthStartRequest {
-    return DeviceAuthStartRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DeviceAuthStartRequest>): DeviceAuthStartRequest {
+    return DeviceAuthStartRequest.fromPartial<DeepPartial<DeviceAuthStartRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthStartRequest>, I>>(object: I): DeviceAuthStartRequest {
+  fromPartial(object: DeepPartial<DeviceAuthStartRequest>): DeviceAuthStartRequest {
     const message = createBaseDeviceAuthStartRequest();
     message.installFingerprint = object.installFingerprint ?? "";
     message.os = object.os ?? 0;
@@ -4979,10 +4981,10 @@ export const DeviceAuthStartResponse: MessageFns<DeviceAuthStartResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthStartResponse>, I>>(base?: I): DeviceAuthStartResponse {
-    return DeviceAuthStartResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DeviceAuthStartResponse>): DeviceAuthStartResponse {
+    return DeviceAuthStartResponse.fromPartial<DeepPartial<DeviceAuthStartResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthStartResponse>, I>>(object: I): DeviceAuthStartResponse {
+  fromPartial(object: DeepPartial<DeviceAuthStartResponse>): DeviceAuthStartResponse {
     const message = createBaseDeviceAuthStartResponse();
     message.userCode = object.userCode ?? "";
     message.deviceCode = object.deviceCode ?? "";
@@ -5048,10 +5050,10 @@ export const DeviceAuthPollRequest: MessageFns<DeviceAuthPollRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthPollRequest>, I>>(base?: I): DeviceAuthPollRequest {
-    return DeviceAuthPollRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DeviceAuthPollRequest>): DeviceAuthPollRequest {
+    return DeviceAuthPollRequest.fromPartial<DeepPartial<DeviceAuthPollRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthPollRequest>, I>>(object: I): DeviceAuthPollRequest {
+  fromPartial(object: DeepPartial<DeviceAuthPollRequest>): DeviceAuthPollRequest {
     const message = createBaseDeviceAuthPollRequest();
     message.deviceCode = object.deviceCode ?? "";
     return message;
@@ -5123,14 +5125,14 @@ export const DeviceAuthPollResponse: MessageFns<DeviceAuthPollResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthPollResponse>, I>>(base?: I): DeviceAuthPollResponse {
-    return DeviceAuthPollResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DeviceAuthPollResponse>): DeviceAuthPollResponse {
+    return DeviceAuthPollResponse.fromPartial<DeepPartial<DeviceAuthPollResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthPollResponse>, I>>(object: I): DeviceAuthPollResponse {
+  fromPartial(object: DeepPartial<DeviceAuthPollResponse>): DeviceAuthPollResponse {
     const message = createBaseDeviceAuthPollResponse();
     message.state = object.state ?? 0;
     message.credentials = (object.credentials !== undefined && object.credentials !== null)
-      ? EnrollmentCredentials.fromPartial(object.credentials)
+      ? EnrollmentCredentials.fromPartial<DeepPartial<EnrollmentCredentials>>(object.credentials)
       : undefined;
     return message;
   },
@@ -5352,10 +5354,10 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<EnrollmentCredentials>, I>>(base?: I): EnrollmentCredentials {
-    return EnrollmentCredentials.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<EnrollmentCredentials>): EnrollmentCredentials {
+    return EnrollmentCredentials.fromPartial<DeepPartial<EnrollmentCredentials>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<EnrollmentCredentials>, I>>(object: I): EnrollmentCredentials {
+  fromPartial(object: DeepPartial<EnrollmentCredentials>): EnrollmentCredentials {
     const message = createBaseEnrollmentCredentials();
     message.agentId = object.agentId ?? "";
     message.workspaceId = object.workspaceId ?? "";
@@ -5462,10 +5464,10 @@ export const OperationResourcePolicy: MessageFns<OperationResourcePolicy> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OperationResourcePolicy>, I>>(base?: I): OperationResourcePolicy {
-    return OperationResourcePolicy.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OperationResourcePolicy>): OperationResourcePolicy {
+    return OperationResourcePolicy.fromPartial<DeepPartial<OperationResourcePolicy>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OperationResourcePolicy>, I>>(object: I): OperationResourcePolicy {
+  fromPartial(object: DeepPartial<OperationResourcePolicy>): OperationResourcePolicy {
     const message = createBaseOperationResourcePolicy();
     message.memoryMaxBytes = object.memoryMaxBytes ?? undefined;
     message.memoryHighBytes = object.memoryHighBytes ?? undefined;
@@ -5639,10 +5641,10 @@ export const ExecRequest: MessageFns<ExecRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ExecRequest>, I>>(base?: I): ExecRequest {
-    return ExecRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ExecRequest>): ExecRequest {
+    return ExecRequest.fromPartial<DeepPartial<ExecRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ExecRequest>, I>>(object: I): ExecRequest {
+  fromPartial(object: DeepPartial<ExecRequest>): ExecRequest {
     const message = createBaseExecRequest();
     message.command = object.command?.map((e) => e) || [];
     message.shell = object.shell ?? false;
@@ -5728,10 +5730,10 @@ export const ExecRequest_EnvEntry: MessageFns<ExecRequest_EnvEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ExecRequest_EnvEntry>, I>>(base?: I): ExecRequest_EnvEntry {
-    return ExecRequest_EnvEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ExecRequest_EnvEntry>): ExecRequest_EnvEntry {
+    return ExecRequest_EnvEntry.fromPartial<DeepPartial<ExecRequest_EnvEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ExecRequest_EnvEntry>, I>>(object: I): ExecRequest_EnvEntry {
+  fromPartial(object: DeepPartial<ExecRequest_EnvEntry>): ExecRequest_EnvEntry {
     const message = createBaseExecRequest_EnvEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -5887,10 +5889,10 @@ export const ExecResponse: MessageFns<ExecResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ExecResponse>, I>>(base?: I): ExecResponse {
-    return ExecResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ExecResponse>): ExecResponse {
+    return ExecResponse.fromPartial<DeepPartial<ExecResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ExecResponse>, I>>(object: I): ExecResponse {
+  fromPartial(object: DeepPartial<ExecResponse>): ExecResponse {
     const message = createBaseExecResponse();
     message.exitCode = object.exitCode ?? 0;
     message.stdout = object.stdout ?? new Uint8Array(0);
@@ -6001,10 +6003,10 @@ export const FsReadRequest: MessageFns<FsReadRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsReadRequest>, I>>(base?: I): FsReadRequest {
-    return FsReadRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsReadRequest>): FsReadRequest {
+    return FsReadRequest.fromPartial<DeepPartial<FsReadRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsReadRequest>, I>>(object: I): FsReadRequest {
+  fromPartial(object: DeepPartial<FsReadRequest>): FsReadRequest {
     const message = createBaseFsReadRequest();
     message.path = object.path ?? "";
     message.offset = object.offset ?? "0";
@@ -6083,10 +6085,10 @@ export const FsReadResponse: MessageFns<FsReadResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsReadResponse>, I>>(base?: I): FsReadResponse {
-    return FsReadResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsReadResponse>): FsReadResponse {
+    return FsReadResponse.fromPartial<DeepPartial<FsReadResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsReadResponse>, I>>(object: I): FsReadResponse {
+  fromPartial(object: DeepPartial<FsReadResponse>): FsReadResponse {
     const message = createBaseFsReadResponse();
     message.content = object.content ?? new Uint8Array(0);
     message.totalSize = object.totalSize ?? "0";
@@ -6227,10 +6229,10 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsWriteRequest>, I>>(base?: I): FsWriteRequest {
-    return FsWriteRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsWriteRequest>): FsWriteRequest {
+    return FsWriteRequest.fromPartial<DeepPartial<FsWriteRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsWriteRequest>, I>>(object: I): FsWriteRequest {
+  fromPartial(object: DeepPartial<FsWriteRequest>): FsWriteRequest {
     const message = createBaseFsWriteRequest();
     message.path = object.path ?? "";
     message.content = object.content ?? new Uint8Array(0);
@@ -6296,10 +6298,10 @@ export const FsWriteResponse: MessageFns<FsWriteResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsWriteResponse>, I>>(base?: I): FsWriteResponse {
-    return FsWriteResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsWriteResponse>): FsWriteResponse {
+    return FsWriteResponse.fromPartial<DeepPartial<FsWriteResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsWriteResponse>, I>>(object: I): FsWriteResponse {
+  fromPartial(object: DeepPartial<FsWriteResponse>): FsWriteResponse {
     const message = createBaseFsWriteResponse();
     message.bytesWritten = object.bytesWritten ?? "0";
     return message;
@@ -6390,10 +6392,10 @@ export const FsListRequest: MessageFns<FsListRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsListRequest>, I>>(base?: I): FsListRequest {
-    return FsListRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsListRequest>): FsListRequest {
+    return FsListRequest.fromPartial<DeepPartial<FsListRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsListRequest>, I>>(object: I): FsListRequest {
+  fromPartial(object: DeepPartial<FsListRequest>): FsListRequest {
     const message = createBaseFsListRequest();
     message.path = object.path ?? "";
     message.recursive = object.recursive ?? false;
@@ -6452,12 +6454,12 @@ export const FsListResponse: MessageFns<FsListResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsListResponse>, I>>(base?: I): FsListResponse {
-    return FsListResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsListResponse>): FsListResponse {
+    return FsListResponse.fromPartial<DeepPartial<FsListResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsListResponse>, I>>(object: I): FsListResponse {
+  fromPartial(object: DeepPartial<FsListResponse>): FsListResponse {
     const message = createBaseFsListResponse();
-    message.entries = object.entries?.map((e) => FsEntry.fromPartial(e)) || [];
+    message.entries = object.entries?.map((e) => FsEntry.fromPartial<DeepPartial<FsEntry>>(e)) || [];
     return message;
   },
 };
@@ -6591,10 +6593,10 @@ export const FsEntry: MessageFns<FsEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsEntry>, I>>(base?: I): FsEntry {
-    return FsEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsEntry>): FsEntry {
+    return FsEntry.fromPartial<DeepPartial<FsEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsEntry>, I>>(object: I): FsEntry {
+  fromPartial(object: DeepPartial<FsEntry>): FsEntry {
     const message = createBaseFsEntry();
     message.name = object.name ?? "";
     message.path = object.path ?? "";
@@ -6705,10 +6707,10 @@ export const FsMkdirRequest: MessageFns<FsMkdirRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsMkdirRequest>, I>>(base?: I): FsMkdirRequest {
-    return FsMkdirRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsMkdirRequest>): FsMkdirRequest {
+    return FsMkdirRequest.fromPartial<DeepPartial<FsMkdirRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsMkdirRequest>, I>>(object: I): FsMkdirRequest {
+  fromPartial(object: DeepPartial<FsMkdirRequest>): FsMkdirRequest {
     const message = createBaseFsMkdirRequest();
     message.path = object.path ?? "";
     message.parents = object.parents ?? false;
@@ -6752,10 +6754,10 @@ export const FsMkdirResponse: MessageFns<FsMkdirResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsMkdirResponse>, I>>(base?: I): FsMkdirResponse {
-    return FsMkdirResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsMkdirResponse>): FsMkdirResponse {
+    return FsMkdirResponse.fromPartial<DeepPartial<FsMkdirResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsMkdirResponse>, I>>(_: I): FsMkdirResponse {
+  fromPartial(_: DeepPartial<FsMkdirResponse>): FsMkdirResponse {
     const message = createBaseFsMkdirResponse();
     return message;
   },
@@ -6860,10 +6862,10 @@ export const FsMoveRequest: MessageFns<FsMoveRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsMoveRequest>, I>>(base?: I): FsMoveRequest {
-    return FsMoveRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsMoveRequest>): FsMoveRequest {
+    return FsMoveRequest.fromPartial<DeepPartial<FsMoveRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsMoveRequest>, I>>(object: I): FsMoveRequest {
+  fromPartial(object: DeepPartial<FsMoveRequest>): FsMoveRequest {
     const message = createBaseFsMoveRequest();
     message.from = object.from ?? "";
     message.to = object.to ?? "";
@@ -6907,10 +6909,10 @@ export const FsMoveResponse: MessageFns<FsMoveResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsMoveResponse>, I>>(base?: I): FsMoveResponse {
-    return FsMoveResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsMoveResponse>): FsMoveResponse {
+    return FsMoveResponse.fromPartial<DeepPartial<FsMoveResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsMoveResponse>, I>>(_: I): FsMoveResponse {
+  fromPartial(_: DeepPartial<FsMoveResponse>): FsMoveResponse {
     const message = createBaseFsMoveResponse();
     return message;
   },
@@ -6985,10 +6987,10 @@ export const FsStatRequest: MessageFns<FsStatRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsStatRequest>, I>>(base?: I): FsStatRequest {
-    return FsStatRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsStatRequest>): FsStatRequest {
+    return FsStatRequest.fromPartial<DeepPartial<FsStatRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsStatRequest>, I>>(object: I): FsStatRequest {
+  fromPartial(object: DeepPartial<FsStatRequest>): FsStatRequest {
     const message = createBaseFsStatRequest();
     message.path = object.path ?? "";
     message.runAs = object.runAs ?? "";
@@ -7061,14 +7063,14 @@ export const FsStatResponse: MessageFns<FsStatResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsStatResponse>, I>>(base?: I): FsStatResponse {
-    return FsStatResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsStatResponse>): FsStatResponse {
+    return FsStatResponse.fromPartial<DeepPartial<FsStatResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsStatResponse>, I>>(object: I): FsStatResponse {
+  fromPartial(object: DeepPartial<FsStatResponse>): FsStatResponse {
     const message = createBaseFsStatResponse();
     message.exists = object.exists ?? false;
     message.entry = (object.entry !== undefined && object.entry !== null)
-      ? FsEntry.fromPartial(object.entry)
+      ? FsEntry.fromPartial<DeepPartial<FsEntry>>(object.entry)
       : undefined;
     return message;
   },
@@ -7158,10 +7160,10 @@ export const FsRemoveRequest: MessageFns<FsRemoveRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsRemoveRequest>, I>>(base?: I): FsRemoveRequest {
-    return FsRemoveRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsRemoveRequest>): FsRemoveRequest {
+    return FsRemoveRequest.fromPartial<DeepPartial<FsRemoveRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsRemoveRequest>, I>>(object: I): FsRemoveRequest {
+  fromPartial(object: DeepPartial<FsRemoveRequest>): FsRemoveRequest {
     const message = createBaseFsRemoveRequest();
     message.path = object.path ?? "";
     message.recursive = object.recursive ?? false;
@@ -7204,10 +7206,10 @@ export const FsRemoveResponse: MessageFns<FsRemoveResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsRemoveResponse>, I>>(base?: I): FsRemoveResponse {
-    return FsRemoveResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsRemoveResponse>): FsRemoveResponse {
+    return FsRemoveResponse.fromPartial<DeepPartial<FsRemoveResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsRemoveResponse>, I>>(_: I): FsRemoveResponse {
+  fromPartial(_: DeepPartial<FsRemoveResponse>): FsRemoveResponse {
     const message = createBaseFsRemoveResponse();
     return message;
   },
@@ -7312,10 +7314,10 @@ export const GitRequest: MessageFns<GitRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<GitRequest>, I>>(base?: I): GitRequest {
-    return GitRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<GitRequest>): GitRequest {
+    return GitRequest.fromPartial<DeepPartial<GitRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<GitRequest>, I>>(object: I): GitRequest {
+  fromPartial(object: DeepPartial<GitRequest>): GitRequest {
     const message = createBaseGitRequest();
     message.op = object.op ?? 0;
     message.cwd = object.cwd ?? "";
@@ -7424,16 +7426,16 @@ export const GitResponse: MessageFns<GitResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<GitResponse>, I>>(base?: I): GitResponse {
-    return GitResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<GitResponse>): GitResponse {
+    return GitResponse.fromPartial<DeepPartial<GitResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<GitResponse>, I>>(object: I): GitResponse {
+  fromPartial(object: DeepPartial<GitResponse>): GitResponse {
     const message = createBaseGitResponse();
     message.exitCode = object.exitCode ?? 0;
     message.stdout = object.stdout ?? new Uint8Array(0);
     message.stderr = object.stderr ?? new Uint8Array(0);
     message.status = (object.status !== undefined && object.status !== null)
-      ? GitStatus.fromPartial(object.status)
+      ? GitStatus.fromPartial<DeepPartial<GitStatus>>(object.status)
       : undefined;
     return message;
   },
@@ -7564,16 +7566,16 @@ export const GitStatus: MessageFns<GitStatus> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<GitStatus>, I>>(base?: I): GitStatus {
-    return GitStatus.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<GitStatus>): GitStatus {
+    return GitStatus.fromPartial<DeepPartial<GitStatus>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<GitStatus>, I>>(object: I): GitStatus {
+  fromPartial(object: DeepPartial<GitStatus>): GitStatus {
     const message = createBaseGitStatus();
     message.branch = object.branch ?? "";
     message.upstream = object.upstream ?? "";
     message.ahead = object.ahead ?? 0;
     message.behind = object.behind ?? 0;
-    message.files = object.files?.map((e) => GitFileStatus.fromPartial(e)) || [];
+    message.files = object.files?.map((e) => GitFileStatus.fromPartial<DeepPartial<GitFileStatus>>(e)) || [];
     message.clean = object.clean ?? false;
     return message;
   },
@@ -7659,10 +7661,10 @@ export const GitFileStatus: MessageFns<GitFileStatus> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<GitFileStatus>, I>>(base?: I): GitFileStatus {
-    return GitFileStatus.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<GitFileStatus>): GitFileStatus {
+    return GitFileStatus.fromPartial<DeepPartial<GitFileStatus>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<GitFileStatus>, I>>(object: I): GitFileStatus {
+  fromPartial(object: DeepPartial<GitFileStatus>): GitFileStatus {
     const message = createBaseGitFileStatus();
     message.path = object.path ?? "";
     message.code = object.code ?? "";
@@ -7851,10 +7853,10 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyOpenRequest>, I>>(base?: I): PtyOpenRequest {
-    return PtyOpenRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyOpenRequest>): PtyOpenRequest {
+    return PtyOpenRequest.fromPartial<DeepPartial<PtyOpenRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyOpenRequest>, I>>(object: I): PtyOpenRequest {
+  fromPartial(object: DeepPartial<PtyOpenRequest>): PtyOpenRequest {
     const message = createBasePtyOpenRequest();
     message.command = object.command?.map((e) => e) || [];
     message.cwd = object.cwd ?? "";
@@ -7941,10 +7943,10 @@ export const PtyOpenRequest_EnvEntry: MessageFns<PtyOpenRequest_EnvEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyOpenRequest_EnvEntry>, I>>(base?: I): PtyOpenRequest_EnvEntry {
-    return PtyOpenRequest_EnvEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyOpenRequest_EnvEntry>): PtyOpenRequest_EnvEntry {
+    return PtyOpenRequest_EnvEntry.fromPartial<DeepPartial<PtyOpenRequest_EnvEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyOpenRequest_EnvEntry>, I>>(object: I): PtyOpenRequest_EnvEntry {
+  fromPartial(object: DeepPartial<PtyOpenRequest_EnvEntry>): PtyOpenRequest_EnvEntry {
     const message = createBasePtyOpenRequest_EnvEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -8021,14 +8023,14 @@ export const PtyOpenResponse: MessageFns<PtyOpenResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyOpenResponse>, I>>(base?: I): PtyOpenResponse {
-    return PtyOpenResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyOpenResponse>): PtyOpenResponse {
+    return PtyOpenResponse.fromPartial<DeepPartial<PtyOpenResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyOpenResponse>, I>>(object: I): PtyOpenResponse {
+  fromPartial(object: DeepPartial<PtyOpenResponse>): PtyOpenResponse {
     const message = createBasePtyOpenResponse();
     message.ptyId = object.ptyId ?? "";
     message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
+      ? StreamChannel.fromPartial<DeepPartial<StreamChannel>>(object.channel)
       : undefined;
     return message;
   },
@@ -8103,10 +8105,10 @@ export const PtyWriteRequest: MessageFns<PtyWriteRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyWriteRequest>, I>>(base?: I): PtyWriteRequest {
-    return PtyWriteRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyWriteRequest>): PtyWriteRequest {
+    return PtyWriteRequest.fromPartial<DeepPartial<PtyWriteRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyWriteRequest>, I>>(object: I): PtyWriteRequest {
+  fromPartial(object: DeepPartial<PtyWriteRequest>): PtyWriteRequest {
     const message = createBasePtyWriteRequest();
     message.ptyId = object.ptyId ?? "";
     message.data = object.data ?? new Uint8Array(0);
@@ -8168,10 +8170,10 @@ export const PtyWriteResponse: MessageFns<PtyWriteResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyWriteResponse>, I>>(base?: I): PtyWriteResponse {
-    return PtyWriteResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyWriteResponse>): PtyWriteResponse {
+    return PtyWriteResponse.fromPartial<DeepPartial<PtyWriteResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyWriteResponse>, I>>(object: I): PtyWriteResponse {
+  fromPartial(object: DeepPartial<PtyWriteResponse>): PtyWriteResponse {
     const message = createBasePtyWriteResponse();
     message.bytesWritten = object.bytesWritten ?? "0";
     return message;
@@ -8262,10 +8264,10 @@ export const PtyResizeRequest: MessageFns<PtyResizeRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyResizeRequest>, I>>(base?: I): PtyResizeRequest {
-    return PtyResizeRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyResizeRequest>): PtyResizeRequest {
+    return PtyResizeRequest.fromPartial<DeepPartial<PtyResizeRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyResizeRequest>, I>>(object: I): PtyResizeRequest {
+  fromPartial(object: DeepPartial<PtyResizeRequest>): PtyResizeRequest {
     const message = createBasePtyResizeRequest();
     message.ptyId = object.ptyId ?? "";
     message.cols = object.cols ?? 0;
@@ -8308,10 +8310,10 @@ export const PtyResizeResponse: MessageFns<PtyResizeResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyResizeResponse>, I>>(base?: I): PtyResizeResponse {
-    return PtyResizeResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyResizeResponse>): PtyResizeResponse {
+    return PtyResizeResponse.fromPartial<DeepPartial<PtyResizeResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyResizeResponse>, I>>(_: I): PtyResizeResponse {
+  fromPartial(_: DeepPartial<PtyResizeResponse>): PtyResizeResponse {
     const message = createBasePtyResizeResponse();
     return message;
   },
@@ -8371,10 +8373,10 @@ export const PtyCloseRequest: MessageFns<PtyCloseRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyCloseRequest>, I>>(base?: I): PtyCloseRequest {
-    return PtyCloseRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyCloseRequest>): PtyCloseRequest {
+    return PtyCloseRequest.fromPartial<DeepPartial<PtyCloseRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyCloseRequest>, I>>(object: I): PtyCloseRequest {
+  fromPartial(object: DeepPartial<PtyCloseRequest>): PtyCloseRequest {
     const message = createBasePtyCloseRequest();
     message.ptyId = object.ptyId ?? "";
     return message;
@@ -8435,10 +8437,10 @@ export const PtyCloseResponse: MessageFns<PtyCloseResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyCloseResponse>, I>>(base?: I): PtyCloseResponse {
-    return PtyCloseResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PtyCloseResponse>): PtyCloseResponse {
+    return PtyCloseResponse.fromPartial<DeepPartial<PtyCloseResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyCloseResponse>, I>>(object: I): PtyCloseResponse {
+  fromPartial(object: DeepPartial<PtyCloseResponse>): PtyCloseResponse {
     const message = createBasePtyCloseResponse();
     message.exitCode = object.exitCode ?? 0;
     return message;
@@ -8510,10 +8512,10 @@ export const DesktopEnsureRequest: MessageFns<DesktopEnsureRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopEnsureRequest>, I>>(base?: I): DesktopEnsureRequest {
-    return DesktopEnsureRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopEnsureRequest>): DesktopEnsureRequest {
+    return DesktopEnsureRequest.fromPartial<DeepPartial<DesktopEnsureRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopEnsureRequest>, I>>(object: I): DesktopEnsureRequest {
+  fromPartial(object: DeepPartial<DesktopEnsureRequest>): DesktopEnsureRequest {
     const message = createBaseDesktopEnsureRequest();
     message.width = object.width ?? 0;
     message.height = object.height ?? 0;
@@ -8586,16 +8588,16 @@ export const DesktopEnsureResponse: MessageFns<DesktopEnsureResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopEnsureResponse>, I>>(base?: I): DesktopEnsureResponse {
-    return DesktopEnsureResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopEnsureResponse>): DesktopEnsureResponse {
+    return DesktopEnsureResponse.fromPartial<DeepPartial<DesktopEnsureResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopEnsureResponse>, I>>(object: I): DesktopEnsureResponse {
+  fromPartial(object: DeepPartial<DesktopEnsureResponse>): DesktopEnsureResponse {
     const message = createBaseDesktopEnsureResponse();
     message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
+      ? StreamChannel.fromPartial<DeepPartial<StreamChannel>>(object.channel)
       : undefined;
     message.display = (object.display !== undefined && object.display !== null)
-      ? Display.fromPartial(object.display)
+      ? Display.fromPartial<DeepPartial<Display>>(object.display)
       : undefined;
     return message;
   },
@@ -8685,27 +8687,33 @@ export const DesktopInputRequest: MessageFns<DesktopInputRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(base?: I): DesktopInputRequest {
-    return DesktopInputRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopInputRequest>): DesktopInputRequest {
+    return DesktopInputRequest.fromPartial<DeepPartial<DesktopInputRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(object: I): DesktopInputRequest {
+  fromPartial(object: DeepPartial<DesktopInputRequest>): DesktopInputRequest {
     const message = createBaseDesktopInputRequest();
     switch (object.event?.$case) {
       case "pointer": {
         if (object.event?.pointer !== undefined && object.event?.pointer !== null) {
-          message.event = { $case: "pointer", pointer: PointerEvent.fromPartial(object.event.pointer) };
+          message.event = {
+            $case: "pointer",
+            pointer: PointerEvent.fromPartial<DeepPartial<PointerEvent>>(object.event.pointer),
+          };
         }
         break;
       }
       case "key": {
         if (object.event?.key !== undefined && object.event?.key !== null) {
-          message.event = { $case: "key", key: KeyEvent.fromPartial(object.event.key) };
+          message.event = { $case: "key", key: KeyEvent.fromPartial<DeepPartial<KeyEvent>>(object.event.key) };
         }
         break;
       }
       case "scroll": {
         if (object.event?.scroll !== undefined && object.event?.scroll !== null) {
-          message.event = { $case: "scroll", scroll: ScrollEvent.fromPartial(object.event.scroll) };
+          message.event = {
+            $case: "scroll",
+            scroll: ScrollEvent.fromPartial<DeepPartial<ScrollEvent>>(object.event.scroll),
+          };
         }
         break;
       }
@@ -8748,10 +8756,10 @@ export const DesktopInputResponse: MessageFns<DesktopInputResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopInputResponse>, I>>(base?: I): DesktopInputResponse {
-    return DesktopInputResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopInputResponse>): DesktopInputResponse {
+    return DesktopInputResponse.fromPartial<DeepPartial<DesktopInputResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopInputResponse>, I>>(_: I): DesktopInputResponse {
+  fromPartial(_: DeepPartial<DesktopInputResponse>): DesktopInputResponse {
     const message = createBaseDesktopInputResponse();
     return message;
   },
@@ -8791,10 +8799,10 @@ export const DesktopScreenshotRequest: MessageFns<DesktopScreenshotRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(base?: I): DesktopScreenshotRequest {
-    return DesktopScreenshotRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopScreenshotRequest>): DesktopScreenshotRequest {
+    return DesktopScreenshotRequest.fromPartial<DeepPartial<DesktopScreenshotRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(_: I): DesktopScreenshotRequest {
+  fromPartial(_: DeepPartial<DesktopScreenshotRequest>): DesktopScreenshotRequest {
     const message = createBaseDesktopScreenshotRequest();
     return message;
   },
@@ -8918,10 +8926,10 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(base?: I): DesktopScreenshotResponse {
-    return DesktopScreenshotResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopScreenshotResponse>): DesktopScreenshotResponse {
+    return DesktopScreenshotResponse.fromPartial<DeepPartial<DesktopScreenshotResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(object: I): DesktopScreenshotResponse {
+  fromPartial(object: DeepPartial<DesktopScreenshotResponse>): DesktopScreenshotResponse {
     const message = createBaseDesktopScreenshotResponse();
     message.png = object.png ?? new Uint8Array(0);
     message.width = object.width ?? 0;
@@ -9043,10 +9051,10 @@ export const BrowserControlEnsureRequest: MessageFns<BrowserControlEnsureRequest
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlEnsureRequest>, I>>(base?: I): BrowserControlEnsureRequest {
-    return BrowserControlEnsureRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlEnsureRequest>): BrowserControlEnsureRequest {
+    return BrowserControlEnsureRequest.fromPartial<DeepPartial<BrowserControlEnsureRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlEnsureRequest>, I>>(object: I): BrowserControlEnsureRequest {
+  fromPartial(object: DeepPartial<BrowserControlEnsureRequest>): BrowserControlEnsureRequest {
     const message = createBaseBrowserControlEnsureRequest();
     message.scopeId = object.scopeId ?? "";
     message.scopeGeneration = object.scopeGeneration ?? "";
@@ -9125,10 +9133,10 @@ export const BrowserControlEnsureResponse: MessageFns<BrowserControlEnsureRespon
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlEnsureResponse>, I>>(base?: I): BrowserControlEnsureResponse {
-    return BrowserControlEnsureResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlEnsureResponse>): BrowserControlEnsureResponse {
+    return BrowserControlEnsureResponse.fromPartial<DeepPartial<BrowserControlEnsureResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlEnsureResponse>, I>>(object: I): BrowserControlEnsureResponse {
+  fromPartial(object: DeepPartial<BrowserControlEnsureResponse>): BrowserControlEnsureResponse {
     const message = createBaseBrowserControlEnsureResponse();
     message.port = object.port ?? 0;
     message.sidecarGeneration = object.sidecarGeneration ?? "";
@@ -9340,10 +9348,10 @@ export const BrowserControlHttpRequest: MessageFns<BrowserControlHttpRequest> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlHttpRequest>, I>>(base?: I): BrowserControlHttpRequest {
-    return BrowserControlHttpRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlHttpRequest>): BrowserControlHttpRequest {
+    return BrowserControlHttpRequest.fromPartial<DeepPartial<BrowserControlHttpRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpRequest>, I>>(object: I): BrowserControlHttpRequest {
+  fromPartial(object: DeepPartial<BrowserControlHttpRequest>): BrowserControlHttpRequest {
     const message = createBaseBrowserControlHttpRequest();
     message.scopeId = object.scopeId ?? "";
     message.scopeGeneration = object.scopeGeneration ?? "";
@@ -9423,10 +9431,10 @@ export const BrowserControlHttpHeader: MessageFns<BrowserControlHttpHeader> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlHttpHeader>, I>>(base?: I): BrowserControlHttpHeader {
-    return BrowserControlHttpHeader.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlHttpHeader>): BrowserControlHttpHeader {
+    return BrowserControlHttpHeader.fromPartial<DeepPartial<BrowserControlHttpHeader>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpHeader>, I>>(object: I): BrowserControlHttpHeader {
+  fromPartial(object: DeepPartial<BrowserControlHttpHeader>): BrowserControlHttpHeader {
     const message = createBaseBrowserControlHttpHeader();
     message.name = object.name ?? "";
     message.value = object.value ?? "";
@@ -9554,13 +9562,14 @@ export const BrowserControlHttpResponse: MessageFns<BrowserControlHttpResponse> 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlHttpResponse>, I>>(base?: I): BrowserControlHttpResponse {
-    return BrowserControlHttpResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlHttpResponse>): BrowserControlHttpResponse {
+    return BrowserControlHttpResponse.fromPartial<DeepPartial<BrowserControlHttpResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpResponse>, I>>(object: I): BrowserControlHttpResponse {
+  fromPartial(object: DeepPartial<BrowserControlHttpResponse>): BrowserControlHttpResponse {
     const message = createBaseBrowserControlHttpResponse();
     message.status = object.status ?? 0;
-    message.headers = object.headers?.map((e) => BrowserControlHttpHeader.fromPartial(e)) || [];
+    message.headers =
+      object.headers?.map((e) => BrowserControlHttpHeader.fromPartial<DeepPartial<BrowserControlHttpHeader>>(e)) || [];
     message.body = object.body ?? new Uint8Array(0);
     message.totalBytes = object.totalBytes ?? "0";
     message.spoolId = object.spoolId ?? "";
@@ -9637,12 +9646,10 @@ export const BrowserControlHttpReadRequest: MessageFns<BrowserControlHttpReadReq
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlHttpReadRequest>, I>>(base?: I): BrowserControlHttpReadRequest {
-    return BrowserControlHttpReadRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlHttpReadRequest>): BrowserControlHttpReadRequest {
+    return BrowserControlHttpReadRequest.fromPartial<DeepPartial<BrowserControlHttpReadRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpReadRequest>, I>>(
-    object: I,
-  ): BrowserControlHttpReadRequest {
+  fromPartial(object: DeepPartial<BrowserControlHttpReadRequest>): BrowserControlHttpReadRequest {
     const message = createBaseBrowserControlHttpReadRequest();
     message.spoolId = object.spoolId ?? "";
     message.offset = object.offset ?? "0";
@@ -9715,12 +9722,10 @@ export const BrowserControlHttpReadResponse: MessageFns<BrowserControlHttpReadRe
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserControlHttpReadResponse>, I>>(base?: I): BrowserControlHttpReadResponse {
-    return BrowserControlHttpReadResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserControlHttpReadResponse>): BrowserControlHttpReadResponse {
+    return BrowserControlHttpReadResponse.fromPartial<DeepPartial<BrowserControlHttpReadResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserControlHttpReadResponse>, I>>(
-    object: I,
-  ): BrowserControlHttpReadResponse {
+  fromPartial(object: DeepPartial<BrowserControlHttpReadResponse>): BrowserControlHttpReadResponse {
     const message = createBaseBrowserControlHttpReadResponse();
     message.data = object.data ?? new Uint8Array(0);
     message.done = object.done ?? false;
@@ -9996,10 +10001,10 @@ export const BrowserFramesOpenRequest: MessageFns<BrowserFramesOpenRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserFramesOpenRequest>, I>>(base?: I): BrowserFramesOpenRequest {
-    return BrowserFramesOpenRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserFramesOpenRequest>): BrowserFramesOpenRequest {
+    return BrowserFramesOpenRequest.fromPartial<DeepPartial<BrowserFramesOpenRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserFramesOpenRequest>, I>>(object: I): BrowserFramesOpenRequest {
+  fromPartial(object: DeepPartial<BrowserFramesOpenRequest>): BrowserFramesOpenRequest {
     const message = createBaseBrowserFramesOpenRequest();
     message.scopeId = object.scopeId ?? "";
     message.scopeGeneration = object.scopeGeneration ?? "";
@@ -10065,13 +10070,13 @@ export const BrowserFramesOpenResponse: MessageFns<BrowserFramesOpenResponse> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<BrowserFramesOpenResponse>, I>>(base?: I): BrowserFramesOpenResponse {
-    return BrowserFramesOpenResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<BrowserFramesOpenResponse>): BrowserFramesOpenResponse {
+    return BrowserFramesOpenResponse.fromPartial<DeepPartial<BrowserFramesOpenResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<BrowserFramesOpenResponse>, I>>(object: I): BrowserFramesOpenResponse {
+  fromPartial(object: DeepPartial<BrowserFramesOpenResponse>): BrowserFramesOpenResponse {
     const message = createBaseBrowserFramesOpenResponse();
     message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
+      ? StreamChannel.fromPartial<DeepPartial<StreamChannel>>(object.channel)
       : undefined;
     return message;
   },
@@ -10345,10 +10350,10 @@ export const ComputerFramesOpenRequest: MessageFns<ComputerFramesOpenRequest> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ComputerFramesOpenRequest>, I>>(base?: I): ComputerFramesOpenRequest {
-    return ComputerFramesOpenRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ComputerFramesOpenRequest>): ComputerFramesOpenRequest {
+    return ComputerFramesOpenRequest.fromPartial<DeepPartial<ComputerFramesOpenRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ComputerFramesOpenRequest>, I>>(object: I): ComputerFramesOpenRequest {
+  fromPartial(object: DeepPartial<ComputerFramesOpenRequest>): ComputerFramesOpenRequest {
     const message = createBaseComputerFramesOpenRequest();
     message.scopeId = object.scopeId ?? "";
     message.scopeGeneration = object.scopeGeneration ?? "";
@@ -10414,13 +10419,13 @@ export const ComputerFramesOpenResponse: MessageFns<ComputerFramesOpenResponse> 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ComputerFramesOpenResponse>, I>>(base?: I): ComputerFramesOpenResponse {
-    return ComputerFramesOpenResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ComputerFramesOpenResponse>): ComputerFramesOpenResponse {
+    return ComputerFramesOpenResponse.fromPartial<DeepPartial<ComputerFramesOpenResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ComputerFramesOpenResponse>, I>>(object: I): ComputerFramesOpenResponse {
+  fromPartial(object: DeepPartial<ComputerFramesOpenResponse>): ComputerFramesOpenResponse {
     const message = createBaseComputerFramesOpenResponse();
     message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
+      ? StreamChannel.fromPartial<DeepPartial<StreamChannel>>(object.channel)
       : undefined;
     return message;
   },
@@ -10622,30 +10627,32 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<Heartbeat>, I>>(base?: I): Heartbeat {
-    return Heartbeat.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<Heartbeat>): Heartbeat {
+    return Heartbeat.fromPartial<DeepPartial<Heartbeat>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<Heartbeat>, I>>(object: I): Heartbeat {
+  fromPartial(object: DeepPartial<Heartbeat>): Heartbeat {
     const message = createBaseHeartbeat();
     message.seq = object.seq ?? "0";
     message.uptimeMs = object.uptimeMs ?? "0";
     message.activeSessions = object.activeSessions ?? 0;
     message.metrics = (object.metrics !== undefined && object.metrics !== null)
-      ? MetricsSample.fromPartial(object.metrics)
+      ? MetricsSample.fromPartial<DeepPartial<MetricsSample>>(object.metrics)
       : undefined;
     message.draining = object.draining ?? false;
     message.capacity = (object.capacity !== undefined && object.capacity !== null)
-      ? HostCapacitySample.fromPartial(object.capacity)
+      ? HostCapacitySample.fromPartial<DeepPartial<HostCapacitySample>>(object.capacity)
       : undefined;
     message.admission = (object.admission !== undefined && object.admission !== null)
-      ? AdmissionTelemetry.fromPartial(object.admission)
+      ? AdmissionTelemetry.fromPartial<DeepPartial<AdmissionTelemetry>>(object.admission)
       : undefined;
     message.attachedBrowserInventory =
       (object.attachedBrowserInventory !== undefined && object.attachedBrowserInventory !== null)
-        ? AttachedBrowserInventorySnapshot.fromPartial(object.attachedBrowserInventory)
+        ? AttachedBrowserInventorySnapshot.fromPartial<DeepPartial<AttachedBrowserInventorySnapshot>>(
+          object.attachedBrowserInventory,
+        )
         : undefined;
     message.desktopStatus = (object.desktopStatus !== undefined && object.desktopStatus !== null)
-      ? DesktopStatus.fromPartial(object.desktopStatus)
+      ? DesktopStatus.fromPartial<DeepPartial<DesktopStatus>>(object.desktopStatus)
       : undefined;
     return message;
   },
@@ -10739,15 +10746,15 @@ export const DesktopStatus: MessageFns<DesktopStatus> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopStatus>, I>>(base?: I): DesktopStatus {
-    return DesktopStatus.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopStatus>): DesktopStatus {
+    return DesktopStatus.fromPartial<DeepPartial<DesktopStatus>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopStatus>, I>>(object: I): DesktopStatus {
+  fromPartial(object: DeepPartial<DesktopStatus>): DesktopStatus {
     const message = createBaseDesktopStatus();
     message.available = object.available ?? false;
     message.unavailableReason = object.unavailableReason ?? "";
     message.macPermissions = (object.macPermissions !== undefined && object.macPermissions !== null)
-      ? MacDesktopPermissions.fromPartial(object.macPermissions)
+      ? MacDesktopPermissions.fromPartial<DeepPartial<MacDesktopPermissions>>(object.macPermissions)
       : undefined;
     return message;
   },
@@ -10879,10 +10886,10 @@ export const HostCapacitySample: MessageFns<HostCapacitySample> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<HostCapacitySample>, I>>(base?: I): HostCapacitySample {
-    return HostCapacitySample.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<HostCapacitySample>): HostCapacitySample {
+    return HostCapacitySample.fromPartial<DeepPartial<HostCapacitySample>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<HostCapacitySample>, I>>(object: I): HostCapacitySample {
+  fromPartial(object: DeepPartial<HostCapacitySample>): HostCapacitySample {
     const message = createBaseHostCapacitySample();
     message.memAvailableBytes = object.memAvailableBytes ?? "0";
     message.diskFreeBytes = object.diskFreeBytes ?? "0";
@@ -11069,10 +11076,10 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AdmissionTelemetry>, I>>(base?: I): AdmissionTelemetry {
-    return AdmissionTelemetry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AdmissionTelemetry>): AdmissionTelemetry {
+    return AdmissionTelemetry.fromPartial<DeepPartial<AdmissionTelemetry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AdmissionTelemetry>, I>>(object: I): AdmissionTelemetry {
+  fromPartial(object: DeepPartial<AdmissionTelemetry>): AdmissionTelemetry {
     const message = createBaseAdmissionTelemetry();
     message.lightRunning = object.lightRunning ?? "0";
     message.lightQueued = object.lightQueued ?? "0";
@@ -11158,10 +11165,10 @@ export const HeartbeatAck: MessageFns<HeartbeatAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<HeartbeatAck>, I>>(base?: I): HeartbeatAck {
-    return HeartbeatAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<HeartbeatAck>): HeartbeatAck {
+    return HeartbeatAck.fromPartial<DeepPartial<HeartbeatAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<HeartbeatAck>, I>>(object: I): HeartbeatAck {
+  fromPartial(object: DeepPartial<HeartbeatAck>): HeartbeatAck {
     const message = createBaseHeartbeatAck();
     message.nextIntervalMs = object.nextIntervalMs ?? 0;
     message.updateAvailable = object.updateAvailable ?? false;
@@ -11203,10 +11210,10 @@ export const MetricsRequest: MessageFns<MetricsRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<MetricsRequest>, I>>(base?: I): MetricsRequest {
-    return MetricsRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<MetricsRequest>): MetricsRequest {
+    return MetricsRequest.fromPartial<DeepPartial<MetricsRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<MetricsRequest>, I>>(_: I): MetricsRequest {
+  fromPartial(_: DeepPartial<MetricsRequest>): MetricsRequest {
     const message = createBaseMetricsRequest();
     return message;
   },
@@ -11454,10 +11461,10 @@ export const MetricsSample: MessageFns<MetricsSample> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<MetricsSample>, I>>(base?: I): MetricsSample {
-    return MetricsSample.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<MetricsSample>): MetricsSample {
+    return MetricsSample.fromPartial<DeepPartial<MetricsSample>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<MetricsSample>, I>>(object: I): MetricsSample {
+  fromPartial(object: DeepPartial<MetricsSample>): MetricsSample {
     const message = createBaseMetricsSample();
     message.sampledAtMs = object.sampledAtMs ?? "0";
     message.cpuPercent = object.cpuPercent ?? 0;
@@ -11469,7 +11476,7 @@ export const MetricsSample: MessageFns<MetricsSample> = {
     message.diskUsedBytes = object.diskUsedBytes ?? "0";
     message.diskTotalBytes = object.diskTotalBytes ?? "0";
     message.runQueue = object.runQueue ?? 0;
-    message.gpus = object.gpus?.map((e) => GpuSample.fromPartial(e)) || [];
+    message.gpus = object.gpus?.map((e) => GpuSample.fromPartial<DeepPartial<GpuSample>>(e)) || [];
     return message;
   },
 };
@@ -11581,10 +11588,10 @@ export const GpuSample: MessageFns<GpuSample> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<GpuSample>, I>>(base?: I): GpuSample {
-    return GpuSample.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<GpuSample>): GpuSample {
+    return GpuSample.fromPartial<DeepPartial<GpuSample>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<GpuSample>, I>>(object: I): GpuSample {
+  fromPartial(object: DeepPartial<GpuSample>): GpuSample {
     const message = createBaseGpuSample();
     message.name = object.name ?? "";
     message.utilPercent = object.utilPercent ?? 0;
@@ -11663,10 +11670,10 @@ export const PingRequest: MessageFns<PingRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PingRequest>, I>>(base?: I): PingRequest {
-    return PingRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PingRequest>): PingRequest {
+    return PingRequest.fromPartial<DeepPartial<PingRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PingRequest>, I>>(object: I): PingRequest {
+  fromPartial(object: DeepPartial<PingRequest>): PingRequest {
     const message = createBasePingRequest();
     message.nonce = object.nonce ?? "0";
     message.controlReplayWindowMs = object.controlReplayWindowMs ?? "0";
@@ -11762,10 +11769,10 @@ export const PingResponse: MessageFns<PingResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PingResponse>, I>>(base?: I): PingResponse {
-    return PingResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PingResponse>): PingResponse {
+    return PingResponse.fromPartial<DeepPartial<PingResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PingResponse>, I>>(object: I): PingResponse {
+  fromPartial(object: DeepPartial<PingResponse>): PingResponse {
     const message = createBasePingResponse();
     message.nonce = object.nonce ?? "0";
     message.agentMonotonicMs = object.agentMonotonicMs ?? "0";
@@ -11839,10 +11846,10 @@ export const GoingOffline: MessageFns<GoingOffline> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<GoingOffline>, I>>(base?: I): GoingOffline {
-    return GoingOffline.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<GoingOffline>): GoingOffline {
+    return GoingOffline.fromPartial<DeepPartial<GoingOffline>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<GoingOffline>, I>>(object: I): GoingOffline {
+  fromPartial(object: DeepPartial<GoingOffline>): GoingOffline {
     const message = createBaseGoingOffline();
     message.reason = object.reason ?? 0;
     message.message = object.message ?? "";
@@ -11942,10 +11949,10 @@ export const ResumeRequest: MessageFns<ResumeRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ResumeRequest>, I>>(base?: I): ResumeRequest {
-    return ResumeRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ResumeRequest>): ResumeRequest {
+    return ResumeRequest.fromPartial<DeepPartial<ResumeRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ResumeRequest>, I>>(object: I): ResumeRequest {
+  fromPartial(object: DeepPartial<ResumeRequest>): ResumeRequest {
     const message = createBaseResumeRequest();
     message.agentId = object.agentId ?? "";
     message.resumeToken = object.resumeToken ?? "";
@@ -12038,10 +12045,10 @@ export const ResumeResponse: MessageFns<ResumeResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ResumeResponse>, I>>(base?: I): ResumeResponse {
-    return ResumeResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ResumeResponse>): ResumeResponse {
+    return ResumeResponse.fromPartial<DeepPartial<ResumeResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ResumeResponse>, I>>(object: I): ResumeResponse {
+  fromPartial(object: DeepPartial<ResumeResponse>): ResumeResponse {
     const message = createBaseResumeResponse();
     message.accepted = object.accepted ?? false;
     message.epoch = object.epoch ?? 0;
@@ -12149,10 +12156,10 @@ export const UpdateCheckRequest: MessageFns<UpdateCheckRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateCheckRequest>, I>>(base?: I): UpdateCheckRequest {
-    return UpdateCheckRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<UpdateCheckRequest>): UpdateCheckRequest {
+    return UpdateCheckRequest.fromPartial<DeepPartial<UpdateCheckRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateCheckRequest>, I>>(object: I): UpdateCheckRequest {
+  fromPartial(object: DeepPartial<UpdateCheckRequest>): UpdateCheckRequest {
     const message = createBaseUpdateCheckRequest();
     message.currentVersion = object.currentVersion ?? "";
     message.channel = object.channel ?? "";
@@ -12231,14 +12238,14 @@ export const UpdateCheckResponse: MessageFns<UpdateCheckResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateCheckResponse>, I>>(base?: I): UpdateCheckResponse {
-    return UpdateCheckResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<UpdateCheckResponse>): UpdateCheckResponse {
+    return UpdateCheckResponse.fromPartial<DeepPartial<UpdateCheckResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateCheckResponse>, I>>(object: I): UpdateCheckResponse {
+  fromPartial(object: DeepPartial<UpdateCheckResponse>): UpdateCheckResponse {
     const message = createBaseUpdateCheckResponse();
     message.updateAvailable = object.updateAvailable ?? false;
     message.manifest = (object.manifest !== undefined && object.manifest !== null)
-      ? UpdateManifest.fromPartial(object.manifest)
+      ? UpdateManifest.fromPartial<DeepPartial<UpdateManifest>>(object.manifest)
       : undefined;
     return message;
   },
@@ -12446,17 +12453,17 @@ export const UpdateManifest: MessageFns<UpdateManifest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateManifest>, I>>(base?: I): UpdateManifest {
-    return UpdateManifest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<UpdateManifest>): UpdateManifest {
+    return UpdateManifest.fromPartial<DeepPartial<UpdateManifest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateManifest>, I>>(object: I): UpdateManifest {
+  fromPartial(object: DeepPartial<UpdateManifest>): UpdateManifest {
     const message = createBaseUpdateManifest();
     message.channel = object.channel ?? "";
     message.version = object.version ?? "";
     message.minSupported = object.minSupported ?? "";
     message.rolloutPercent = object.rolloutPercent ?? 0;
     message.cohortSalt = object.cohortSalt ?? "";
-    message.artifacts = object.artifacts?.map((e) => UpdateArtifact.fromPartial(e)) || [];
+    message.artifacts = object.artifacts?.map((e) => UpdateArtifact.fromPartial<DeepPartial<UpdateArtifact>>(e)) || [];
     message.notesUrl = object.notesUrl ?? "";
     message.signedAtMs = object.signedAtMs ?? "0";
     message.force = object.force ?? false;
@@ -12578,10 +12585,10 @@ export const UpdateArtifact: MessageFns<UpdateArtifact> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateArtifact>, I>>(base?: I): UpdateArtifact {
-    return UpdateArtifact.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<UpdateArtifact>): UpdateArtifact {
+    return UpdateArtifact.fromPartial<DeepPartial<UpdateArtifact>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateArtifact>, I>>(object: I): UpdateArtifact {
+  fromPartial(object: DeepPartial<UpdateArtifact>): UpdateArtifact {
     const message = createBaseUpdateArtifact();
     message.target = object.target ?? "";
     message.url = object.url ?? "";
@@ -12665,10 +12672,10 @@ export const UpdateMayProceedRequest: MessageFns<UpdateMayProceedRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateMayProceedRequest>, I>>(base?: I): UpdateMayProceedRequest {
-    return UpdateMayProceedRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<UpdateMayProceedRequest>): UpdateMayProceedRequest {
+    return UpdateMayProceedRequest.fromPartial<DeepPartial<UpdateMayProceedRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateMayProceedRequest>, I>>(object: I): UpdateMayProceedRequest {
+  fromPartial(object: DeepPartial<UpdateMayProceedRequest>): UpdateMayProceedRequest {
     const message = createBaseUpdateMayProceedRequest();
     message.agentId = object.agentId ?? "";
     message.targetVersion = object.targetVersion ?? "";
@@ -12749,10 +12756,10 @@ export const UpdateMayProceedResponse: MessageFns<UpdateMayProceedResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateMayProceedResponse>, I>>(base?: I): UpdateMayProceedResponse {
-    return UpdateMayProceedResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<UpdateMayProceedResponse>): UpdateMayProceedResponse {
+    return UpdateMayProceedResponse.fromPartial<DeepPartial<UpdateMayProceedResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateMayProceedResponse>, I>>(object: I): UpdateMayProceedResponse {
+  fromPartial(object: DeepPartial<UpdateMayProceedResponse>): UpdateMayProceedResponse {
     const message = createBaseUpdateMayProceedResponse();
     message.mayProceed = object.mayProceed ?? false;
     message.activeSessions = object.activeSessions ?? 0;
@@ -12912,10 +12919,10 @@ export const AgentUpdateApplyRequest: MessageFns<AgentUpdateApplyRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentUpdateApplyRequest>, I>>(base?: I): AgentUpdateApplyRequest {
-    return AgentUpdateApplyRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentUpdateApplyRequest>): AgentUpdateApplyRequest {
+    return AgentUpdateApplyRequest.fromPartial<DeepPartial<AgentUpdateApplyRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentUpdateApplyRequest>, I>>(object: I): AgentUpdateApplyRequest {
+  fromPartial(object: DeepPartial<AgentUpdateApplyRequest>): AgentUpdateApplyRequest {
     const message = createBaseAgentUpdateApplyRequest();
     message.operationId = object.operationId ?? "";
     message.targetVersion = object.targetVersion ?? "";
@@ -13053,10 +13060,10 @@ export const AgentUpdateApplyResponse: MessageFns<AgentUpdateApplyResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentUpdateApplyResponse>, I>>(base?: I): AgentUpdateApplyResponse {
-    return AgentUpdateApplyResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentUpdateApplyResponse>): AgentUpdateApplyResponse {
+    return AgentUpdateApplyResponse.fromPartial<DeepPartial<AgentUpdateApplyResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentUpdateApplyResponse>, I>>(object: I): AgentUpdateApplyResponse {
+  fromPartial(object: DeepPartial<AgentUpdateApplyResponse>): AgentUpdateApplyResponse {
     const message = createBaseAgentUpdateApplyResponse();
     message.accepted = object.accepted ?? false;
     message.operationId = object.operationId ?? "";
@@ -13101,10 +13108,10 @@ export const CredentialRenewRequest: MessageFns<CredentialRenewRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<CredentialRenewRequest>, I>>(base?: I): CredentialRenewRequest {
-    return CredentialRenewRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<CredentialRenewRequest>): CredentialRenewRequest {
+    return CredentialRenewRequest.fromPartial<DeepPartial<CredentialRenewRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<CredentialRenewRequest>, I>>(_: I): CredentialRenewRequest {
+  fromPartial(_: DeepPartial<CredentialRenewRequest>): CredentialRenewRequest {
     const message = createBaseCredentialRenewRequest();
     return message;
   },
@@ -13179,10 +13186,10 @@ export const CredentialRenewResponse: MessageFns<CredentialRenewResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<CredentialRenewResponse>, I>>(base?: I): CredentialRenewResponse {
-    return CredentialRenewResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<CredentialRenewResponse>): CredentialRenewResponse {
+    return CredentialRenewResponse.fromPartial<DeepPartial<CredentialRenewResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<CredentialRenewResponse>, I>>(object: I): CredentialRenewResponse {
+  fromPartial(object: DeepPartial<CredentialRenewResponse>): CredentialRenewResponse {
     const message = createBaseCredentialRenewResponse();
     message.renewed = object.renewed ?? false;
     message.consentedScreenControl = object.consentedScreenControl ?? false;
@@ -13376,10 +13383,10 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentUpdateProgress>, I>>(base?: I): AgentUpdateProgress {
-    return AgentUpdateProgress.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentUpdateProgress>): AgentUpdateProgress {
+    return AgentUpdateProgress.fromPartial<DeepPartial<AgentUpdateProgress>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentUpdateProgress>, I>>(object: I): AgentUpdateProgress {
+  fromPartial(object: DeepPartial<AgentUpdateProgress>): AgentUpdateProgress {
     const message = createBaseAgentUpdateProgress();
     message.operationId = object.operationId ?? "";
     message.targetVersion = object.targetVersion ?? "";
@@ -13388,7 +13395,8 @@ export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
     message.errorCode = object.errorCode ?? "";
     message.retryable = object.retryable ?? false;
     message.rolledBack = object.rolledBack ?? false;
-    message.blockers = object.blockers?.map((e) => AgentUpdateBlocker.fromPartial(e)) || [];
+    message.blockers =
+      object.blockers?.map((e) => AgentUpdateBlocker.fromPartial<DeepPartial<AgentUpdateBlocker>>(e)) || [];
     return message;
   },
 };
@@ -13477,10 +13485,10 @@ export const AgentUpdateBlocker: MessageFns<AgentUpdateBlocker> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentUpdateBlocker>, I>>(base?: I): AgentUpdateBlocker {
-    return AgentUpdateBlocker.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentUpdateBlocker>): AgentUpdateBlocker {
+    return AgentUpdateBlocker.fromPartial<DeepPartial<AgentUpdateBlocker>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentUpdateBlocker>, I>>(object: I): AgentUpdateBlocker {
+  fromPartial(object: DeepPartial<AgentUpdateBlocker>): AgentUpdateBlocker {
     const message = createBaseAgentUpdateBlocker();
     message.kind = object.kind ?? "";
     message.resourceId = object.resourceId ?? "";
@@ -13748,10 +13756,10 @@ export const OpExit: MessageFns<OpExit> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpExit>, I>>(base?: I): OpExit {
-    return OpExit.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpExit>): OpExit {
+    return OpExit.fromPartial<DeepPartial<OpExit>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpExit>, I>>(object: I): OpExit {
+  fromPartial(object: DeepPartial<OpExit>): OpExit {
     const message = createBaseOpExit();
     message.exitCode = object.exitCode ?? 0;
     message.timedOut = object.timedOut ?? false;
@@ -13855,10 +13863,10 @@ export const OpExit_DigestsEntry: MessageFns<OpExit_DigestsEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpExit_DigestsEntry>, I>>(base?: I): OpExit_DigestsEntry {
-    return OpExit_DigestsEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpExit_DigestsEntry>): OpExit_DigestsEntry {
+    return OpExit_DigestsEntry.fromPartial<DeepPartial<OpExit_DigestsEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpExit_DigestsEntry>, I>>(object: I): OpExit_DigestsEntry {
+  fromPartial(object: DeepPartial<OpExit_DigestsEntry>): OpExit_DigestsEntry {
     const message = createBaseOpExit_DigestsEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -13931,10 +13939,10 @@ export const OpExit_TotalsEntry: MessageFns<OpExit_TotalsEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpExit_TotalsEntry>, I>>(base?: I): OpExit_TotalsEntry {
-    return OpExit_TotalsEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpExit_TotalsEntry>): OpExit_TotalsEntry {
+    return OpExit_TotalsEntry.fromPartial<DeepPartial<OpExit_TotalsEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpExit_TotalsEntry>, I>>(object: I): OpExit_TotalsEntry {
+  fromPartial(object: DeepPartial<OpExit_TotalsEntry>): OpExit_TotalsEntry {
     const message = createBaseOpExit_TotalsEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "0";
@@ -14007,10 +14015,10 @@ export const OpExit_FailureDetailEntry: MessageFns<OpExit_FailureDetailEntry> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpExit_FailureDetailEntry>, I>>(base?: I): OpExit_FailureDetailEntry {
-    return OpExit_FailureDetailEntry.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpExit_FailureDetailEntry>): OpExit_FailureDetailEntry {
+    return OpExit_FailureDetailEntry.fromPartial<DeepPartial<OpExit_FailureDetailEntry>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpExit_FailureDetailEntry>, I>>(object: I): OpExit_FailureDetailEntry {
+  fromPartial(object: DeepPartial<OpExit_FailureDetailEntry>): OpExit_FailureDetailEntry {
     const message = createBaseOpExit_FailureDetailEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -14206,10 +14214,10 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<FsWriteBegin>, I>>(base?: I): FsWriteBegin {
-    return FsWriteBegin.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<FsWriteBegin>): FsWriteBegin {
+    return FsWriteBegin.fromPartial<DeepPartial<FsWriteBegin>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<FsWriteBegin>, I>>(object: I): FsWriteBegin {
+  fromPartial(object: DeepPartial<FsWriteBegin>): FsWriteBegin {
     const message = createBaseFsWriteBegin();
     message.path = object.path ?? "";
     message.createParents = object.createParents ?? false;
@@ -14387,27 +14395,33 @@ export const OpStart: MessageFns<OpStart> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpStart>, I>>(base?: I): OpStart {
-    return OpStart.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpStart>): OpStart {
+    return OpStart.fromPartial<DeepPartial<OpStart>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpStart>, I>>(object: I): OpStart {
+  fromPartial(object: DeepPartial<OpStart>): OpStart {
     const message = createBaseOpStart();
     switch (object.op?.$case) {
       case "exec": {
         if (object.op?.exec !== undefined && object.op?.exec !== null) {
-          message.op = { $case: "exec", exec: ExecRequest.fromPartial(object.op.exec) };
+          message.op = { $case: "exec", exec: ExecRequest.fromPartial<DeepPartial<ExecRequest>>(object.op.exec) };
         }
         break;
       }
       case "fsRead": {
         if (object.op?.fsRead !== undefined && object.op?.fsRead !== null) {
-          message.op = { $case: "fsRead", fsRead: FsReadRequest.fromPartial(object.op.fsRead) };
+          message.op = {
+            $case: "fsRead",
+            fsRead: FsReadRequest.fromPartial<DeepPartial<FsReadRequest>>(object.op.fsRead),
+          };
         }
         break;
       }
       case "fsWrite": {
         if (object.op?.fsWrite !== undefined && object.op?.fsWrite !== null) {
-          message.op = { $case: "fsWrite", fsWrite: FsWriteBegin.fromPartial(object.op.fsWrite) };
+          message.op = {
+            $case: "fsWrite",
+            fsWrite: FsWriteBegin.fromPartial<DeepPartial<FsWriteBegin>>(object.op.fsWrite),
+          };
         }
         break;
       }
@@ -14485,14 +14499,14 @@ export const OpStarted: MessageFns<OpStarted> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpStarted>, I>>(base?: I): OpStarted {
-    return OpStarted.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpStarted>): OpStarted {
+    return OpStarted.fromPartial<DeepPartial<OpStarted>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpStarted>, I>>(object: I): OpStarted {
+  fromPartial(object: DeepPartial<OpStarted>): OpStarted {
     const message = createBaseOpStarted();
     message.accepted = object.accepted ?? false;
     message.status = (object.status !== undefined && object.status !== null)
-      ? OpStatus.fromPartial(object.status)
+      ? OpStatus.fromPartial<DeepPartial<OpStatus>>(object.status)
       : undefined;
     return message;
   },
@@ -14552,10 +14566,10 @@ export const OpCancel: MessageFns<OpCancel> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpCancel>, I>>(base?: I): OpCancel {
-    return OpCancel.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpCancel>): OpCancel {
+    return OpCancel.fromPartial<DeepPartial<OpCancel>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpCancel>, I>>(object: I): OpCancel {
+  fromPartial(object: DeepPartial<OpCancel>): OpCancel {
     const message = createBaseOpCancel();
     message.opId = object.opId ?? "";
     return message;
@@ -14616,10 +14630,10 @@ export const OpQuery: MessageFns<OpQuery> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpQuery>, I>>(base?: I): OpQuery {
-    return OpQuery.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpQuery>): OpQuery {
+    return OpQuery.fromPartial<DeepPartial<OpQuery>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpQuery>, I>>(object: I): OpQuery {
+  fromPartial(object: DeepPartial<OpQuery>): OpQuery {
     const message = createBaseOpQuery();
     message.opId = object.opId ?? "";
     return message;
@@ -14737,10 +14751,10 @@ export const OpAttach: MessageFns<OpAttach> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpAttach>, I>>(base?: I): OpAttach {
-    return OpAttach.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpAttach>): OpAttach {
+    return OpAttach.fromPartial<DeepPartial<OpAttach>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpAttach>, I>>(object: I): OpAttach {
+  fromPartial(object: DeepPartial<OpAttach>): OpAttach {
     const message = createBaseOpAttach();
     message.opId = object.opId ?? "";
     message.fromSeq = object.fromSeq ?? "0";
@@ -14823,10 +14837,10 @@ export const OpRelease: MessageFns<OpRelease> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpRelease>, I>>(base?: I): OpRelease {
-    return OpRelease.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpRelease>): OpRelease {
+    return OpRelease.fromPartial<DeepPartial<OpRelease>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpRelease>, I>>(object: I): OpRelease {
+  fromPartial(object: DeepPartial<OpRelease>): OpRelease {
     const message = createBaseOpRelease();
     message.opId = object.opId ?? "";
     message.exitSeq = object.exitSeq ?? "0";
@@ -14975,15 +14989,17 @@ export const OpStatus: MessageFns<OpStatus> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpStatus>, I>>(base?: I): OpStatus {
-    return OpStatus.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpStatus>): OpStatus {
+    return OpStatus.fromPartial<DeepPartial<OpStatus>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpStatus>, I>>(object: I): OpStatus {
+  fromPartial(object: DeepPartial<OpStatus>): OpStatus {
     const message = createBaseOpStatus();
     message.opId = object.opId ?? "";
     message.state = object.state ?? 0;
     message.nextSeq = object.nextSeq ?? "0";
-    message.exit = (object.exit !== undefined && object.exit !== null) ? OpExit.fromPartial(object.exit) : undefined;
+    message.exit = (object.exit !== undefined && object.exit !== null)
+      ? OpExit.fromPartial<DeepPartial<OpExit>>(object.exit)
+      : undefined;
     message.lostReason = object.lostReason ?? 0;
     message.writeOffset = object.writeOffset ?? "0";
     return message;
@@ -15104,10 +15120,10 @@ export const WriteChunk: MessageFns<WriteChunk> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<WriteChunk>, I>>(base?: I): WriteChunk {
-    return WriteChunk.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<WriteChunk>): WriteChunk {
+    return WriteChunk.fromPartial<DeepPartial<WriteChunk>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<WriteChunk>, I>>(object: I): WriteChunk {
+  fromPartial(object: DeepPartial<WriteChunk>): WriteChunk {
     const message = createBaseWriteChunk();
     message.opId = object.opId ?? "";
     message.seq = object.seq ?? "0";
@@ -15166,10 +15182,10 @@ export const WriteChunkAck: MessageFns<WriteChunkAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<WriteChunkAck>, I>>(base?: I): WriteChunkAck {
-    return WriteChunkAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<WriteChunkAck>): WriteChunkAck {
+    return WriteChunkAck.fromPartial<DeepPartial<WriteChunkAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<WriteChunkAck>, I>>(object: I): WriteChunkAck {
+  fromPartial(object: DeepPartial<WriteChunkAck>): WriteChunkAck {
     const message = createBaseWriteChunkAck();
     message.seq = object.seq ?? "0";
     return message;
@@ -15294,29 +15310,32 @@ export const OpFrame: MessageFns<OpFrame> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpFrame>, I>>(base?: I): OpFrame {
-    return OpFrame.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpFrame>): OpFrame {
+    return OpFrame.fromPartial<DeepPartial<OpFrame>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpFrame>, I>>(object: I): OpFrame {
+  fromPartial(object: DeepPartial<OpFrame>): OpFrame {
     const message = createBaseOpFrame();
     message.opId = object.opId ?? "";
     message.seq = object.seq ?? "0";
     switch (object.body?.$case) {
       case "data": {
         if (object.body?.data !== undefined && object.body?.data !== null) {
-          message.body = { $case: "data", data: OpData.fromPartial(object.body.data) };
+          message.body = { $case: "data", data: OpData.fromPartial<DeepPartial<OpData>>(object.body.data) };
         }
         break;
       }
       case "progress": {
         if (object.body?.progress !== undefined && object.body?.progress !== null) {
-          message.body = { $case: "progress", progress: OpProgress.fromPartial(object.body.progress) };
+          message.body = {
+            $case: "progress",
+            progress: OpProgress.fromPartial<DeepPartial<OpProgress>>(object.body.progress),
+          };
         }
         break;
       }
       case "exit": {
         if (object.body?.exit !== undefined && object.body?.exit !== null) {
-          message.body = { $case: "exit", exit: OpExit.fromPartial(object.body.exit) };
+          message.body = { $case: "exit", exit: OpExit.fromPartial<DeepPartial<OpExit>>(object.body.exit) };
         }
         break;
       }
@@ -15390,10 +15409,10 @@ export const OpData: MessageFns<OpData> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpData>, I>>(base?: I): OpData {
-    return OpData.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpData>): OpData {
+    return OpData.fromPartial<DeepPartial<OpData>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpData>, I>>(object: I): OpData {
+  fromPartial(object: DeepPartial<OpData>): OpData {
     const message = createBaseOpData();
     message.channel = object.channel ?? 0;
     message.bytes = object.bytes ?? new Uint8Array(0);
@@ -15435,10 +15454,10 @@ export const OpProgress: MessageFns<OpProgress> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpProgress>, I>>(base?: I): OpProgress {
-    return OpProgress.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpProgress>): OpProgress {
+    return OpProgress.fromPartial<DeepPartial<OpProgress>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpProgress>, I>>(_: I): OpProgress {
+  fromPartial(_: DeepPartial<OpProgress>): OpProgress {
     const message = createBaseOpProgress();
     return message;
   },
@@ -15570,10 +15589,10 @@ export const OpAck: MessageFns<OpAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OpAck>, I>>(base?: I): OpAck {
-    return OpAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OpAck>): OpAck {
+    return OpAck.fromPartial<DeepPartial<OpAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OpAck>, I>>(object: I): OpAck {
+  fromPartial(object: DeepPartial<OpAck>): OpAck {
     const message = createBaseOpAck();
     message.opId = object.opId ?? "";
     message.ackedSeq = object.ackedSeq ?? "0";
@@ -16284,104 +16303,140 @@ export const ControlRequest: MessageFns<ControlRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ControlRequest>, I>>(base?: I): ControlRequest {
-    return ControlRequest.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ControlRequest>): ControlRequest {
+    return ControlRequest.fromPartial<DeepPartial<ControlRequest>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ControlRequest>, I>>(object: I): ControlRequest {
+  fromPartial(object: DeepPartial<ControlRequest>): ControlRequest {
     const message = createBaseControlRequest();
     message.requestId = object.requestId ?? "";
     message.epoch = object.epoch ?? 0;
     message.resourcePolicy = (object.resourcePolicy !== undefined && object.resourcePolicy !== null)
-      ? OperationResourcePolicy.fromPartial(object.resourcePolicy)
+      ? OperationResourcePolicy.fromPartial<DeepPartial<OperationResourcePolicy>>(object.resourcePolicy)
       : undefined;
     switch (object.op?.$case) {
       case "ping": {
         if (object.op?.ping !== undefined && object.op?.ping !== null) {
-          message.op = { $case: "ping", ping: PingRequest.fromPartial(object.op.ping) };
+          message.op = { $case: "ping", ping: PingRequest.fromPartial<DeepPartial<PingRequest>>(object.op.ping) };
         }
         break;
       }
       case "hello": {
         if (object.op?.hello !== undefined && object.op?.hello !== null) {
-          message.op = { $case: "hello", hello: Hello.fromPartial(object.op.hello) };
+          message.op = { $case: "hello", hello: Hello.fromPartial<DeepPartial<Hello>>(object.op.hello) };
         }
         break;
       }
       case "resume": {
         if (object.op?.resume !== undefined && object.op?.resume !== null) {
-          message.op = { $case: "resume", resume: ResumeRequest.fromPartial(object.op.resume) };
+          message.op = {
+            $case: "resume",
+            resume: ResumeRequest.fromPartial<DeepPartial<ResumeRequest>>(object.op.resume),
+          };
         }
         break;
       }
       case "fsRead": {
         if (object.op?.fsRead !== undefined && object.op?.fsRead !== null) {
-          message.op = { $case: "fsRead", fsRead: FsReadRequest.fromPartial(object.op.fsRead) };
+          message.op = {
+            $case: "fsRead",
+            fsRead: FsReadRequest.fromPartial<DeepPartial<FsReadRequest>>(object.op.fsRead),
+          };
         }
         break;
       }
       case "fsWrite": {
         if (object.op?.fsWrite !== undefined && object.op?.fsWrite !== null) {
-          message.op = { $case: "fsWrite", fsWrite: FsWriteRequest.fromPartial(object.op.fsWrite) };
+          message.op = {
+            $case: "fsWrite",
+            fsWrite: FsWriteRequest.fromPartial<DeepPartial<FsWriteRequest>>(object.op.fsWrite),
+          };
         }
         break;
       }
       case "fsList": {
         if (object.op?.fsList !== undefined && object.op?.fsList !== null) {
-          message.op = { $case: "fsList", fsList: FsListRequest.fromPartial(object.op.fsList) };
+          message.op = {
+            $case: "fsList",
+            fsList: FsListRequest.fromPartial<DeepPartial<FsListRequest>>(object.op.fsList),
+          };
         }
         break;
       }
       case "fsMkdir": {
         if (object.op?.fsMkdir !== undefined && object.op?.fsMkdir !== null) {
-          message.op = { $case: "fsMkdir", fsMkdir: FsMkdirRequest.fromPartial(object.op.fsMkdir) };
+          message.op = {
+            $case: "fsMkdir",
+            fsMkdir: FsMkdirRequest.fromPartial<DeepPartial<FsMkdirRequest>>(object.op.fsMkdir),
+          };
         }
         break;
       }
       case "fsMove": {
         if (object.op?.fsMove !== undefined && object.op?.fsMove !== null) {
-          message.op = { $case: "fsMove", fsMove: FsMoveRequest.fromPartial(object.op.fsMove) };
+          message.op = {
+            $case: "fsMove",
+            fsMove: FsMoveRequest.fromPartial<DeepPartial<FsMoveRequest>>(object.op.fsMove),
+          };
         }
         break;
       }
       case "fsStat": {
         if (object.op?.fsStat !== undefined && object.op?.fsStat !== null) {
-          message.op = { $case: "fsStat", fsStat: FsStatRequest.fromPartial(object.op.fsStat) };
+          message.op = {
+            $case: "fsStat",
+            fsStat: FsStatRequest.fromPartial<DeepPartial<FsStatRequest>>(object.op.fsStat),
+          };
         }
         break;
       }
       case "fsRemove": {
         if (object.op?.fsRemove !== undefined && object.op?.fsRemove !== null) {
-          message.op = { $case: "fsRemove", fsRemove: FsRemoveRequest.fromPartial(object.op.fsRemove) };
+          message.op = {
+            $case: "fsRemove",
+            fsRemove: FsRemoveRequest.fromPartial<DeepPartial<FsRemoveRequest>>(object.op.fsRemove),
+          };
         }
         break;
       }
       case "git": {
         if (object.op?.git !== undefined && object.op?.git !== null) {
-          message.op = { $case: "git", git: GitRequest.fromPartial(object.op.git) };
+          message.op = { $case: "git", git: GitRequest.fromPartial<DeepPartial<GitRequest>>(object.op.git) };
         }
         break;
       }
       case "ptyOpen": {
         if (object.op?.ptyOpen !== undefined && object.op?.ptyOpen !== null) {
-          message.op = { $case: "ptyOpen", ptyOpen: PtyOpenRequest.fromPartial(object.op.ptyOpen) };
+          message.op = {
+            $case: "ptyOpen",
+            ptyOpen: PtyOpenRequest.fromPartial<DeepPartial<PtyOpenRequest>>(object.op.ptyOpen),
+          };
         }
         break;
       }
       case "ptyWrite": {
         if (object.op?.ptyWrite !== undefined && object.op?.ptyWrite !== null) {
-          message.op = { $case: "ptyWrite", ptyWrite: PtyWriteRequest.fromPartial(object.op.ptyWrite) };
+          message.op = {
+            $case: "ptyWrite",
+            ptyWrite: PtyWriteRequest.fromPartial<DeepPartial<PtyWriteRequest>>(object.op.ptyWrite),
+          };
         }
         break;
       }
       case "ptyResize": {
         if (object.op?.ptyResize !== undefined && object.op?.ptyResize !== null) {
-          message.op = { $case: "ptyResize", ptyResize: PtyResizeRequest.fromPartial(object.op.ptyResize) };
+          message.op = {
+            $case: "ptyResize",
+            ptyResize: PtyResizeRequest.fromPartial<DeepPartial<PtyResizeRequest>>(object.op.ptyResize),
+          };
         }
         break;
       }
       case "ptyClose": {
         if (object.op?.ptyClose !== undefined && object.op?.ptyClose !== null) {
-          message.op = { $case: "ptyClose", ptyClose: PtyCloseRequest.fromPartial(object.op.ptyClose) };
+          message.op = {
+            $case: "ptyClose",
+            ptyClose: PtyCloseRequest.fromPartial<DeepPartial<PtyCloseRequest>>(object.op.ptyClose),
+          };
         }
         break;
       }
@@ -16389,14 +16444,17 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.desktopEnsure !== undefined && object.op?.desktopEnsure !== null) {
           message.op = {
             $case: "desktopEnsure",
-            desktopEnsure: DesktopEnsureRequest.fromPartial(object.op.desktopEnsure),
+            desktopEnsure: DesktopEnsureRequest.fromPartial<DeepPartial<DesktopEnsureRequest>>(object.op.desktopEnsure),
           };
         }
         break;
       }
       case "metrics": {
         if (object.op?.metrics !== undefined && object.op?.metrics !== null) {
-          message.op = { $case: "metrics", metrics: MetricsRequest.fromPartial(object.op.metrics) };
+          message.op = {
+            $case: "metrics",
+            metrics: MetricsRequest.fromPartial<DeepPartial<MetricsRequest>>(object.op.metrics),
+          };
         }
         break;
       }
@@ -16404,14 +16462,19 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.updateMayProceed !== undefined && object.op?.updateMayProceed !== null) {
           message.op = {
             $case: "updateMayProceed",
-            updateMayProceed: UpdateMayProceedRequest.fromPartial(object.op.updateMayProceed),
+            updateMayProceed: UpdateMayProceedRequest.fromPartial<DeepPartial<UpdateMayProceedRequest>>(
+              object.op.updateMayProceed,
+            ),
           };
         }
         break;
       }
       case "desktopInput": {
         if (object.op?.desktopInput !== undefined && object.op?.desktopInput !== null) {
-          message.op = { $case: "desktopInput", desktopInput: DesktopInputRequest.fromPartial(object.op.desktopInput) };
+          message.op = {
+            $case: "desktopInput",
+            desktopInput: DesktopInputRequest.fromPartial<DeepPartial<DesktopInputRequest>>(object.op.desktopInput),
+          };
         }
         break;
       }
@@ -16419,38 +16482,43 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.desktopScreenshot !== undefined && object.op?.desktopScreenshot !== null) {
           message.op = {
             $case: "desktopScreenshot",
-            desktopScreenshot: DesktopScreenshotRequest.fromPartial(object.op.desktopScreenshot),
+            desktopScreenshot: DesktopScreenshotRequest.fromPartial<DeepPartial<DesktopScreenshotRequest>>(
+              object.op.desktopScreenshot,
+            ),
           };
         }
         break;
       }
       case "opStart": {
         if (object.op?.opStart !== undefined && object.op?.opStart !== null) {
-          message.op = { $case: "opStart", opStart: OpStart.fromPartial(object.op.opStart) };
+          message.op = { $case: "opStart", opStart: OpStart.fromPartial<DeepPartial<OpStart>>(object.op.opStart) };
         }
         break;
       }
       case "opCancel": {
         if (object.op?.opCancel !== undefined && object.op?.opCancel !== null) {
-          message.op = { $case: "opCancel", opCancel: OpCancel.fromPartial(object.op.opCancel) };
+          message.op = { $case: "opCancel", opCancel: OpCancel.fromPartial<DeepPartial<OpCancel>>(object.op.opCancel) };
         }
         break;
       }
       case "opQuery": {
         if (object.op?.opQuery !== undefined && object.op?.opQuery !== null) {
-          message.op = { $case: "opQuery", opQuery: OpQuery.fromPartial(object.op.opQuery) };
+          message.op = { $case: "opQuery", opQuery: OpQuery.fromPartial<DeepPartial<OpQuery>>(object.op.opQuery) };
         }
         break;
       }
       case "opAttach": {
         if (object.op?.opAttach !== undefined && object.op?.opAttach !== null) {
-          message.op = { $case: "opAttach", opAttach: OpAttach.fromPartial(object.op.opAttach) };
+          message.op = { $case: "opAttach", opAttach: OpAttach.fromPartial<DeepPartial<OpAttach>>(object.op.opAttach) };
         }
         break;
       }
       case "writeChunk": {
         if (object.op?.writeChunk !== undefined && object.op?.writeChunk !== null) {
-          message.op = { $case: "writeChunk", writeChunk: WriteChunk.fromPartial(object.op.writeChunk) };
+          message.op = {
+            $case: "writeChunk",
+            writeChunk: WriteChunk.fromPartial<DeepPartial<WriteChunk>>(object.op.writeChunk),
+          };
         }
         break;
       }
@@ -16458,7 +16526,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.browserControlEnsure !== undefined && object.op?.browserControlEnsure !== null) {
           message.op = {
             $case: "browserControlEnsure",
-            browserControlEnsure: BrowserControlEnsureRequest.fromPartial(object.op.browserControlEnsure),
+            browserControlEnsure: BrowserControlEnsureRequest.fromPartial<DeepPartial<BrowserControlEnsureRequest>>(
+              object.op.browserControlEnsure,
+            ),
           };
         }
         break;
@@ -16467,7 +16537,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.browserFramesOpen !== undefined && object.op?.browserFramesOpen !== null) {
           message.op = {
             $case: "browserFramesOpen",
-            browserFramesOpen: BrowserFramesOpenRequest.fromPartial(object.op.browserFramesOpen),
+            browserFramesOpen: BrowserFramesOpenRequest.fromPartial<DeepPartial<BrowserFramesOpenRequest>>(
+              object.op.browserFramesOpen,
+            ),
           };
         }
         break;
@@ -16476,7 +16548,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.computerFramesOpen !== undefined && object.op?.computerFramesOpen !== null) {
           message.op = {
             $case: "computerFramesOpen",
-            computerFramesOpen: ComputerFramesOpenRequest.fromPartial(object.op.computerFramesOpen),
+            computerFramesOpen: ComputerFramesOpenRequest.fromPartial<DeepPartial<ComputerFramesOpenRequest>>(
+              object.op.computerFramesOpen,
+            ),
           };
         }
         break;
@@ -16485,7 +16559,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.agentUpdateApply !== undefined && object.op?.agentUpdateApply !== null) {
           message.op = {
             $case: "agentUpdateApply",
-            agentUpdateApply: AgentUpdateApplyRequest.fromPartial(object.op.agentUpdateApply),
+            agentUpdateApply: AgentUpdateApplyRequest.fromPartial<DeepPartial<AgentUpdateApplyRequest>>(
+              object.op.agentUpdateApply,
+            ),
           };
         }
         break;
@@ -16494,7 +16570,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.credentialRenew !== undefined && object.op?.credentialRenew !== null) {
           message.op = {
             $case: "credentialRenew",
-            credentialRenew: CredentialRenewRequest.fromPartial(object.op.credentialRenew),
+            credentialRenew: CredentialRenewRequest.fromPartial<DeepPartial<CredentialRenewRequest>>(
+              object.op.credentialRenew,
+            ),
           };
         }
         break;
@@ -16503,7 +16581,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.browserControlHttp !== undefined && object.op?.browserControlHttp !== null) {
           message.op = {
             $case: "browserControlHttp",
-            browserControlHttp: BrowserControlHttpRequest.fromPartial(object.op.browserControlHttp),
+            browserControlHttp: BrowserControlHttpRequest.fromPartial<DeepPartial<BrowserControlHttpRequest>>(
+              object.op.browserControlHttp,
+            ),
           };
         }
         break;
@@ -16512,14 +16592,19 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         if (object.op?.browserControlHttpRead !== undefined && object.op?.browserControlHttpRead !== null) {
           message.op = {
             $case: "browserControlHttpRead",
-            browserControlHttpRead: BrowserControlHttpReadRequest.fromPartial(object.op.browserControlHttpRead),
+            browserControlHttpRead: BrowserControlHttpReadRequest.fromPartial<
+              DeepPartial<BrowserControlHttpReadRequest>
+            >(object.op.browserControlHttpRead),
           };
         }
         break;
       }
       case "opRelease": {
         if (object.op?.opRelease !== undefined && object.op?.opRelease !== null) {
-          message.op = { $case: "opRelease", opRelease: OpRelease.fromPartial(object.op.opRelease) };
+          message.op = {
+            $case: "opRelease",
+            opRelease: OpRelease.fromPartial<DeepPartial<OpRelease>>(object.op.opRelease),
+          };
         }
         break;
       }
@@ -17170,103 +17255,142 @@ export const ControlResponse: MessageFns<ControlResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ControlResponse>, I>>(base?: I): ControlResponse {
-    return ControlResponse.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ControlResponse>): ControlResponse {
+    return ControlResponse.fromPartial<DeepPartial<ControlResponse>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ControlResponse>, I>>(object: I): ControlResponse {
+  fromPartial(object: DeepPartial<ControlResponse>): ControlResponse {
     const message = createBaseControlResponse();
     message.requestId = object.requestId ?? "";
     message.error = (object.error !== undefined && object.error !== null)
-      ? AgentError.fromPartial(object.error)
+      ? AgentError.fromPartial<DeepPartial<AgentError>>(object.error)
       : undefined;
     switch (object.result?.$case) {
       case "ping": {
         if (object.result?.ping !== undefined && object.result?.ping !== null) {
-          message.result = { $case: "ping", ping: PingResponse.fromPartial(object.result.ping) };
+          message.result = {
+            $case: "ping",
+            ping: PingResponse.fromPartial<DeepPartial<PingResponse>>(object.result.ping),
+          };
         }
         break;
       }
       case "hello": {
         if (object.result?.hello !== undefined && object.result?.hello !== null) {
-          message.result = { $case: "hello", hello: HelloAck.fromPartial(object.result.hello) };
+          message.result = { $case: "hello", hello: HelloAck.fromPartial<DeepPartial<HelloAck>>(object.result.hello) };
         }
         break;
       }
       case "resume": {
         if (object.result?.resume !== undefined && object.result?.resume !== null) {
-          message.result = { $case: "resume", resume: ResumeResponse.fromPartial(object.result.resume) };
+          message.result = {
+            $case: "resume",
+            resume: ResumeResponse.fromPartial<DeepPartial<ResumeResponse>>(object.result.resume),
+          };
         }
         break;
       }
       case "fsRead": {
         if (object.result?.fsRead !== undefined && object.result?.fsRead !== null) {
-          message.result = { $case: "fsRead", fsRead: FsReadResponse.fromPartial(object.result.fsRead) };
+          message.result = {
+            $case: "fsRead",
+            fsRead: FsReadResponse.fromPartial<DeepPartial<FsReadResponse>>(object.result.fsRead),
+          };
         }
         break;
       }
       case "fsWrite": {
         if (object.result?.fsWrite !== undefined && object.result?.fsWrite !== null) {
-          message.result = { $case: "fsWrite", fsWrite: FsWriteResponse.fromPartial(object.result.fsWrite) };
+          message.result = {
+            $case: "fsWrite",
+            fsWrite: FsWriteResponse.fromPartial<DeepPartial<FsWriteResponse>>(object.result.fsWrite),
+          };
         }
         break;
       }
       case "fsList": {
         if (object.result?.fsList !== undefined && object.result?.fsList !== null) {
-          message.result = { $case: "fsList", fsList: FsListResponse.fromPartial(object.result.fsList) };
+          message.result = {
+            $case: "fsList",
+            fsList: FsListResponse.fromPartial<DeepPartial<FsListResponse>>(object.result.fsList),
+          };
         }
         break;
       }
       case "fsMkdir": {
         if (object.result?.fsMkdir !== undefined && object.result?.fsMkdir !== null) {
-          message.result = { $case: "fsMkdir", fsMkdir: FsMkdirResponse.fromPartial(object.result.fsMkdir) };
+          message.result = {
+            $case: "fsMkdir",
+            fsMkdir: FsMkdirResponse.fromPartial<DeepPartial<FsMkdirResponse>>(object.result.fsMkdir),
+          };
         }
         break;
       }
       case "fsMove": {
         if (object.result?.fsMove !== undefined && object.result?.fsMove !== null) {
-          message.result = { $case: "fsMove", fsMove: FsMoveResponse.fromPartial(object.result.fsMove) };
+          message.result = {
+            $case: "fsMove",
+            fsMove: FsMoveResponse.fromPartial<DeepPartial<FsMoveResponse>>(object.result.fsMove),
+          };
         }
         break;
       }
       case "fsStat": {
         if (object.result?.fsStat !== undefined && object.result?.fsStat !== null) {
-          message.result = { $case: "fsStat", fsStat: FsStatResponse.fromPartial(object.result.fsStat) };
+          message.result = {
+            $case: "fsStat",
+            fsStat: FsStatResponse.fromPartial<DeepPartial<FsStatResponse>>(object.result.fsStat),
+          };
         }
         break;
       }
       case "fsRemove": {
         if (object.result?.fsRemove !== undefined && object.result?.fsRemove !== null) {
-          message.result = { $case: "fsRemove", fsRemove: FsRemoveResponse.fromPartial(object.result.fsRemove) };
+          message.result = {
+            $case: "fsRemove",
+            fsRemove: FsRemoveResponse.fromPartial<DeepPartial<FsRemoveResponse>>(object.result.fsRemove),
+          };
         }
         break;
       }
       case "git": {
         if (object.result?.git !== undefined && object.result?.git !== null) {
-          message.result = { $case: "git", git: GitResponse.fromPartial(object.result.git) };
+          message.result = { $case: "git", git: GitResponse.fromPartial<DeepPartial<GitResponse>>(object.result.git) };
         }
         break;
       }
       case "ptyOpen": {
         if (object.result?.ptyOpen !== undefined && object.result?.ptyOpen !== null) {
-          message.result = { $case: "ptyOpen", ptyOpen: PtyOpenResponse.fromPartial(object.result.ptyOpen) };
+          message.result = {
+            $case: "ptyOpen",
+            ptyOpen: PtyOpenResponse.fromPartial<DeepPartial<PtyOpenResponse>>(object.result.ptyOpen),
+          };
         }
         break;
       }
       case "ptyWrite": {
         if (object.result?.ptyWrite !== undefined && object.result?.ptyWrite !== null) {
-          message.result = { $case: "ptyWrite", ptyWrite: PtyWriteResponse.fromPartial(object.result.ptyWrite) };
+          message.result = {
+            $case: "ptyWrite",
+            ptyWrite: PtyWriteResponse.fromPartial<DeepPartial<PtyWriteResponse>>(object.result.ptyWrite),
+          };
         }
         break;
       }
       case "ptyResize": {
         if (object.result?.ptyResize !== undefined && object.result?.ptyResize !== null) {
-          message.result = { $case: "ptyResize", ptyResize: PtyResizeResponse.fromPartial(object.result.ptyResize) };
+          message.result = {
+            $case: "ptyResize",
+            ptyResize: PtyResizeResponse.fromPartial<DeepPartial<PtyResizeResponse>>(object.result.ptyResize),
+          };
         }
         break;
       }
       case "ptyClose": {
         if (object.result?.ptyClose !== undefined && object.result?.ptyClose !== null) {
-          message.result = { $case: "ptyClose", ptyClose: PtyCloseResponse.fromPartial(object.result.ptyClose) };
+          message.result = {
+            $case: "ptyClose",
+            ptyClose: PtyCloseResponse.fromPartial<DeepPartial<PtyCloseResponse>>(object.result.ptyClose),
+          };
         }
         break;
       }
@@ -17274,14 +17398,19 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.desktopEnsure !== undefined && object.result?.desktopEnsure !== null) {
           message.result = {
             $case: "desktopEnsure",
-            desktopEnsure: DesktopEnsureResponse.fromPartial(object.result.desktopEnsure),
+            desktopEnsure: DesktopEnsureResponse.fromPartial<DeepPartial<DesktopEnsureResponse>>(
+              object.result.desktopEnsure,
+            ),
           };
         }
         break;
       }
       case "metrics": {
         if (object.result?.metrics !== undefined && object.result?.metrics !== null) {
-          message.result = { $case: "metrics", metrics: MetricsSample.fromPartial(object.result.metrics) };
+          message.result = {
+            $case: "metrics",
+            metrics: MetricsSample.fromPartial<DeepPartial<MetricsSample>>(object.result.metrics),
+          };
         }
         break;
       }
@@ -17289,7 +17418,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.updateMayProceed !== undefined && object.result?.updateMayProceed !== null) {
           message.result = {
             $case: "updateMayProceed",
-            updateMayProceed: UpdateMayProceedResponse.fromPartial(object.result.updateMayProceed),
+            updateMayProceed: UpdateMayProceedResponse.fromPartial<DeepPartial<UpdateMayProceedResponse>>(
+              object.result.updateMayProceed,
+            ),
           };
         }
         break;
@@ -17298,7 +17429,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.desktopInput !== undefined && object.result?.desktopInput !== null) {
           message.result = {
             $case: "desktopInput",
-            desktopInput: DesktopInputResponse.fromPartial(object.result.desktopInput),
+            desktopInput: DesktopInputResponse.fromPartial<DeepPartial<DesktopInputResponse>>(
+              object.result.desktopInput,
+            ),
           };
         }
         break;
@@ -17307,26 +17440,37 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.desktopScreenshot !== undefined && object.result?.desktopScreenshot !== null) {
           message.result = {
             $case: "desktopScreenshot",
-            desktopScreenshot: DesktopScreenshotResponse.fromPartial(object.result.desktopScreenshot),
+            desktopScreenshot: DesktopScreenshotResponse.fromPartial<DeepPartial<DesktopScreenshotResponse>>(
+              object.result.desktopScreenshot,
+            ),
           };
         }
         break;
       }
       case "opStart": {
         if (object.result?.opStart !== undefined && object.result?.opStart !== null) {
-          message.result = { $case: "opStart", opStart: OpStarted.fromPartial(object.result.opStart) };
+          message.result = {
+            $case: "opStart",
+            opStart: OpStarted.fromPartial<DeepPartial<OpStarted>>(object.result.opStart),
+          };
         }
         break;
       }
       case "opStatus": {
         if (object.result?.opStatus !== undefined && object.result?.opStatus !== null) {
-          message.result = { $case: "opStatus", opStatus: OpStatus.fromPartial(object.result.opStatus) };
+          message.result = {
+            $case: "opStatus",
+            opStatus: OpStatus.fromPartial<DeepPartial<OpStatus>>(object.result.opStatus),
+          };
         }
         break;
       }
       case "writeChunk": {
         if (object.result?.writeChunk !== undefined && object.result?.writeChunk !== null) {
-          message.result = { $case: "writeChunk", writeChunk: WriteChunkAck.fromPartial(object.result.writeChunk) };
+          message.result = {
+            $case: "writeChunk",
+            writeChunk: WriteChunkAck.fromPartial<DeepPartial<WriteChunkAck>>(object.result.writeChunk),
+          };
         }
         break;
       }
@@ -17334,7 +17478,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.browserControlEnsure !== undefined && object.result?.browserControlEnsure !== null) {
           message.result = {
             $case: "browserControlEnsure",
-            browserControlEnsure: BrowserControlEnsureResponse.fromPartial(object.result.browserControlEnsure),
+            browserControlEnsure: BrowserControlEnsureResponse.fromPartial<DeepPartial<BrowserControlEnsureResponse>>(
+              object.result.browserControlEnsure,
+            ),
           };
         }
         break;
@@ -17343,7 +17489,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.browserFramesOpen !== undefined && object.result?.browserFramesOpen !== null) {
           message.result = {
             $case: "browserFramesOpen",
-            browserFramesOpen: BrowserFramesOpenResponse.fromPartial(object.result.browserFramesOpen),
+            browserFramesOpen: BrowserFramesOpenResponse.fromPartial<DeepPartial<BrowserFramesOpenResponse>>(
+              object.result.browserFramesOpen,
+            ),
           };
         }
         break;
@@ -17352,7 +17500,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.computerFramesOpen !== undefined && object.result?.computerFramesOpen !== null) {
           message.result = {
             $case: "computerFramesOpen",
-            computerFramesOpen: ComputerFramesOpenResponse.fromPartial(object.result.computerFramesOpen),
+            computerFramesOpen: ComputerFramesOpenResponse.fromPartial<DeepPartial<ComputerFramesOpenResponse>>(
+              object.result.computerFramesOpen,
+            ),
           };
         }
         break;
@@ -17361,7 +17511,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.agentUpdateApply !== undefined && object.result?.agentUpdateApply !== null) {
           message.result = {
             $case: "agentUpdateApply",
-            agentUpdateApply: AgentUpdateApplyResponse.fromPartial(object.result.agentUpdateApply),
+            agentUpdateApply: AgentUpdateApplyResponse.fromPartial<DeepPartial<AgentUpdateApplyResponse>>(
+              object.result.agentUpdateApply,
+            ),
           };
         }
         break;
@@ -17370,7 +17522,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.credentialRenew !== undefined && object.result?.credentialRenew !== null) {
           message.result = {
             $case: "credentialRenew",
-            credentialRenew: CredentialRenewResponse.fromPartial(object.result.credentialRenew),
+            credentialRenew: CredentialRenewResponse.fromPartial<DeepPartial<CredentialRenewResponse>>(
+              object.result.credentialRenew,
+            ),
           };
         }
         break;
@@ -17379,7 +17533,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.browserControlHttp !== undefined && object.result?.browserControlHttp !== null) {
           message.result = {
             $case: "browserControlHttp",
-            browserControlHttp: BrowserControlHttpResponse.fromPartial(object.result.browserControlHttp),
+            browserControlHttp: BrowserControlHttpResponse.fromPartial<DeepPartial<BrowserControlHttpResponse>>(
+              object.result.browserControlHttp,
+            ),
           };
         }
         break;
@@ -17388,7 +17544,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         if (object.result?.browserControlHttpRead !== undefined && object.result?.browserControlHttpRead !== null) {
           message.result = {
             $case: "browserControlHttpRead",
-            browserControlHttpRead: BrowserControlHttpReadResponse.fromPartial(object.result.browserControlHttpRead),
+            browserControlHttpRead: BrowserControlHttpReadResponse.fromPartial<
+              DeepPartial<BrowserControlHttpReadResponse>
+            >(object.result.browserControlHttpRead),
           };
         }
         break;
@@ -17486,10 +17644,10 @@ export const HelloAck: MessageFns<HelloAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<HelloAck>, I>>(base?: I): HelloAck {
-    return HelloAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<HelloAck>): HelloAck {
+    return HelloAck.fromPartial<DeepPartial<HelloAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<HelloAck>, I>>(object: I): HelloAck {
+  fromPartial(object: DeepPartial<HelloAck>): HelloAck {
     const message = createBaseHelloAck();
     message.epoch = object.epoch ?? 0;
     message.resumeToken = object.resumeToken ?? "";
@@ -17654,22 +17812,28 @@ export const AgentEvent: MessageFns<AgentEvent> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentEvent>, I>>(base?: I): AgentEvent {
-    return AgentEvent.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentEvent>): AgentEvent {
+    return AgentEvent.fromPartial<DeepPartial<AgentEvent>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentEvent>, I>>(object: I): AgentEvent {
+  fromPartial(object: DeepPartial<AgentEvent>): AgentEvent {
     const message = createBaseAgentEvent();
     message.agentId = object.agentId ?? "";
     switch (object.event?.$case) {
       case "heartbeat": {
         if (object.event?.heartbeat !== undefined && object.event?.heartbeat !== null) {
-          message.event = { $case: "heartbeat", heartbeat: Heartbeat.fromPartial(object.event.heartbeat) };
+          message.event = {
+            $case: "heartbeat",
+            heartbeat: Heartbeat.fromPartial<DeepPartial<Heartbeat>>(object.event.heartbeat),
+          };
         }
         break;
       }
       case "goingOffline": {
         if (object.event?.goingOffline !== undefined && object.event?.goingOffline !== null) {
-          message.event = { $case: "goingOffline", goingOffline: GoingOffline.fromPartial(object.event.goingOffline) };
+          message.event = {
+            $case: "goingOffline",
+            goingOffline: GoingOffline.fromPartial<DeepPartial<GoingOffline>>(object.event.goingOffline),
+          };
         }
         break;
       }
@@ -17677,7 +17841,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         if (object.event?.agentUpdateProgress !== undefined && object.event?.agentUpdateProgress !== null) {
           message.event = {
             $case: "agentUpdateProgress",
-            agentUpdateProgress: AgentUpdateProgress.fromPartial(object.event.agentUpdateProgress),
+            agentUpdateProgress: AgentUpdateProgress.fromPartial<DeepPartial<AgentUpdateProgress>>(
+              object.event.agentUpdateProgress,
+            ),
           };
         }
         break;
@@ -17686,7 +17852,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         if (object.event?.operationCompleted !== undefined && object.event?.operationCompleted !== null) {
           message.event = {
             $case: "operationCompleted",
-            operationCompleted: OperationCompleted.fromPartial(object.event.operationCompleted),
+            operationCompleted: OperationCompleted.fromPartial<DeepPartial<OperationCompleted>>(
+              object.event.operationCompleted,
+            ),
           };
         }
         break;
@@ -17695,7 +17863,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         if (object.event?.operationInventory !== undefined && object.event?.operationInventory !== null) {
           message.event = {
             $case: "operationInventory",
-            operationInventory: OperationInventory.fromPartial(object.event.operationInventory),
+            operationInventory: OperationInventory.fromPartial<DeepPartial<OperationInventory>>(
+              object.event.operationInventory,
+            ),
           };
         }
         break;
@@ -17774,13 +17944,15 @@ export const OperationCompleted: MessageFns<OperationCompleted> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OperationCompleted>, I>>(base?: I): OperationCompleted {
-    return OperationCompleted.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OperationCompleted>): OperationCompleted {
+    return OperationCompleted.fromPartial<DeepPartial<OperationCompleted>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OperationCompleted>, I>>(object: I): OperationCompleted {
+  fromPartial(object: DeepPartial<OperationCompleted>): OperationCompleted {
     const message = createBaseOperationCompleted();
     message.opId = object.opId ?? "";
-    message.exit = (object.exit !== undefined && object.exit !== null) ? OpExit.fromPartial(object.exit) : undefined;
+    message.exit = (object.exit !== undefined && object.exit !== null)
+      ? OpExit.fromPartial<DeepPartial<OpExit>>(object.exit)
+      : undefined;
     return message;
   },
 };
@@ -17886,15 +18058,16 @@ export const OperationInventory: MessageFns<OperationInventory> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OperationInventory>, I>>(base?: I): OperationInventory {
-    return OperationInventory.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OperationInventory>): OperationInventory {
+    return OperationInventory.fromPartial<DeepPartial<OperationInventory>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OperationInventory>, I>>(object: I): OperationInventory {
+  fromPartial(object: DeepPartial<OperationInventory>): OperationInventory {
     const message = createBaseOperationInventory();
     message.reportId = object.reportId ?? "0";
     message.page = object.page ?? 0;
     message.pages = object.pages ?? 0;
-    message.operations = object.operations?.map((e) => InventoryOperation.fromPartial(e)) || [];
+    message.operations =
+      object.operations?.map((e) => InventoryOperation.fromPartial<DeepPartial<InventoryOperation>>(e)) || [];
     return message;
   },
 };
@@ -17987,10 +18160,10 @@ export const InventoryOperation: MessageFns<InventoryOperation> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<InventoryOperation>, I>>(base?: I): InventoryOperation {
-    return InventoryOperation.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<InventoryOperation>): InventoryOperation {
+    return InventoryOperation.fromPartial<DeepPartial<InventoryOperation>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<InventoryOperation>, I>>(object: I): InventoryOperation {
+  fromPartial(object: DeepPartial<InventoryOperation>): InventoryOperation {
     const message = createBaseInventoryOperation();
     message.opId = object.opId ?? "";
     message.connectionGeneration = object.connectionGeneration ?? "0";
@@ -18099,15 +18272,18 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentEventAck>, I>>(base?: I): AgentEventAck {
-    return AgentEventAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<AgentEventAck>): AgentEventAck {
+    return AgentEventAck.fromPartial<DeepPartial<AgentEventAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentEventAck>, I>>(object: I): AgentEventAck {
+  fromPartial(object: DeepPartial<AgentEventAck>): AgentEventAck {
     const message = createBaseAgentEventAck();
     switch (object.ack?.$case) {
       case "heartbeat": {
         if (object.ack?.heartbeat !== undefined && object.ack?.heartbeat !== null) {
-          message.ack = { $case: "heartbeat", heartbeat: HeartbeatAck.fromPartial(object.ack.heartbeat) };
+          message.ack = {
+            $case: "heartbeat",
+            heartbeat: HeartbeatAck.fromPartial<DeepPartial<HeartbeatAck>>(object.ack.heartbeat),
+          };
         }
         break;
       }
@@ -18115,7 +18291,9 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         if (object.ack?.operationCompleted !== undefined && object.ack?.operationCompleted !== null) {
           message.ack = {
             $case: "operationCompleted",
-            operationCompleted: OperationCompletedAck.fromPartial(object.ack.operationCompleted),
+            operationCompleted: OperationCompletedAck.fromPartial<DeepPartial<OperationCompletedAck>>(
+              object.ack.operationCompleted,
+            ),
           };
         }
         break;
@@ -18124,7 +18302,9 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         if (object.ack?.operationInventory !== undefined && object.ack?.operationInventory !== null) {
           message.ack = {
             $case: "operationInventory",
-            operationInventory: OperationInventoryAck.fromPartial(object.ack.operationInventory),
+            operationInventory: OperationInventoryAck.fromPartial<DeepPartial<OperationInventoryAck>>(
+              object.ack.operationInventory,
+            ),
           };
         }
         break;
@@ -18222,10 +18402,10 @@ export const OperationInventoryAck: MessageFns<OperationInventoryAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OperationInventoryAck>, I>>(base?: I): OperationInventoryAck {
-    return OperationInventoryAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OperationInventoryAck>): OperationInventoryAck {
+    return OperationInventoryAck.fromPartial<DeepPartial<OperationInventoryAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OperationInventoryAck>, I>>(object: I): OperationInventoryAck {
+  fromPartial(object: DeepPartial<OperationInventoryAck>): OperationInventoryAck {
     const message = createBaseOperationInventoryAck();
     message.reportId = object.reportId ?? "0";
     message.page = object.page ?? 0;
@@ -18288,10 +18468,10 @@ export const OperationCompletedAck: MessageFns<OperationCompletedAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<OperationCompletedAck>, I>>(base?: I): OperationCompletedAck {
-    return OperationCompletedAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<OperationCompletedAck>): OperationCompletedAck {
+    return OperationCompletedAck.fromPartial<DeepPartial<OperationCompletedAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<OperationCompletedAck>, I>>(object: I): OperationCompletedAck {
+  fromPartial(object: DeepPartial<OperationCompletedAck>): OperationCompletedAck {
     const message = createBaseOperationCompletedAck();
     message.opId = object.opId ?? "";
     return message;
@@ -18439,10 +18619,10 @@ export const StreamChannel: MessageFns<StreamChannel> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<StreamChannel>, I>>(base?: I): StreamChannel {
-    return StreamChannel.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<StreamChannel>): StreamChannel {
+    return StreamChannel.fromPartial<DeepPartial<StreamChannel>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<StreamChannel>, I>>(object: I): StreamChannel {
+  fromPartial(object: DeepPartial<StreamChannel>): StreamChannel {
     const message = createBaseStreamChannel();
     message.channelId = object.channelId ?? "";
     message.workspaceId = object.workspaceId ?? "";
@@ -18553,13 +18733,13 @@ export const StreamOpen: MessageFns<StreamOpen> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<StreamOpen>, I>>(base?: I): StreamOpen {
-    return StreamOpen.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<StreamOpen>): StreamOpen {
+    return StreamOpen.fromPartial<DeepPartial<StreamOpen>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<StreamOpen>, I>>(object: I): StreamOpen {
+  fromPartial(object: DeepPartial<StreamOpen>): StreamOpen {
     const message = createBaseStreamOpen();
     message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
+      ? StreamChannel.fromPartial<DeepPartial<StreamChannel>>(object.channel)
       : undefined;
     message.token = object.token ?? "";
     message.role = object.role ?? 0;
@@ -18671,14 +18851,14 @@ export const StreamOpenAck: MessageFns<StreamOpenAck> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<StreamOpenAck>, I>>(base?: I): StreamOpenAck {
-    return StreamOpenAck.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<StreamOpenAck>): StreamOpenAck {
+    return StreamOpenAck.fromPartial<DeepPartial<StreamOpenAck>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<StreamOpenAck>, I>>(object: I): StreamOpenAck {
+  fromPartial(object: DeepPartial<StreamOpenAck>): StreamOpenAck {
     const message = createBaseStreamOpenAck();
     message.accepted = object.accepted ?? false;
     message.error = (object.error !== undefined && object.error !== null)
-      ? AgentError.fromPartial(object.error)
+      ? AgentError.fromPartial<DeepPartial<AgentError>>(object.error)
       : undefined;
     message.resumeFromSeq = object.resumeFromSeq ?? "0";
     message.relayRoute = object.relayRoute ?? undefined;
@@ -18789,10 +18969,10 @@ export const StreamFrame: MessageFns<StreamFrame> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<StreamFrame>, I>>(base?: I): StreamFrame {
-    return StreamFrame.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<StreamFrame>): StreamFrame {
+    return StreamFrame.fromPartial<DeepPartial<StreamFrame>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<StreamFrame>, I>>(object: I): StreamFrame {
+  fromPartial(object: DeepPartial<StreamFrame>): StreamFrame {
     const message = createBaseStreamFrame();
     message.channelId = object.channelId ?? "";
     message.seq = object.seq ?? "0";
@@ -18886,10 +19066,10 @@ export const StreamClose: MessageFns<StreamClose> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<StreamClose>, I>>(base?: I): StreamClose {
-    return StreamClose.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<StreamClose>): StreamClose {
+    return StreamClose.fromPartial<DeepPartial<StreamClose>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<StreamClose>, I>>(object: I): StreamClose {
+  fromPartial(object: DeepPartial<StreamClose>): StreamClose {
     const message = createBaseStreamClose();
     message.channelId = object.channelId ?? "";
     message.reason = object.reason ?? 0;
@@ -19001,28 +19181,34 @@ export const DesktopInput: MessageFns<DesktopInput> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopInput>, I>>(base?: I): DesktopInput {
-    return DesktopInput.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<DesktopInput>): DesktopInput {
+    return DesktopInput.fromPartial<DeepPartial<DesktopInput>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopInput>, I>>(object: I): DesktopInput {
+  fromPartial(object: DeepPartial<DesktopInput>): DesktopInput {
     const message = createBaseDesktopInput();
     message.channelId = object.channelId ?? "";
     switch (object.event?.$case) {
       case "pointer": {
         if (object.event?.pointer !== undefined && object.event?.pointer !== null) {
-          message.event = { $case: "pointer", pointer: PointerEvent.fromPartial(object.event.pointer) };
+          message.event = {
+            $case: "pointer",
+            pointer: PointerEvent.fromPartial<DeepPartial<PointerEvent>>(object.event.pointer),
+          };
         }
         break;
       }
       case "key": {
         if (object.event?.key !== undefined && object.event?.key !== null) {
-          message.event = { $case: "key", key: KeyEvent.fromPartial(object.event.key) };
+          message.event = { $case: "key", key: KeyEvent.fromPartial<DeepPartial<KeyEvent>>(object.event.key) };
         }
         break;
       }
       case "scroll": {
         if (object.event?.scroll !== undefined && object.event?.scroll !== null) {
-          message.event = { $case: "scroll", scroll: ScrollEvent.fromPartial(object.event.scroll) };
+          message.event = {
+            $case: "scroll",
+            scroll: ScrollEvent.fromPartial<DeepPartial<ScrollEvent>>(object.event.scroll),
+          };
         }
         break;
       }
@@ -19126,10 +19312,10 @@ export const PointerEvent: MessageFns<PointerEvent> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PointerEvent>, I>>(base?: I): PointerEvent {
-    return PointerEvent.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<PointerEvent>): PointerEvent {
+    return PointerEvent.fromPartial<DeepPartial<PointerEvent>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PointerEvent>, I>>(object: I): PointerEvent {
+  fromPartial(object: DeepPartial<PointerEvent>): PointerEvent {
     const message = createBasePointerEvent();
     message.x = object.x ?? 0;
     message.y = object.y ?? 0;
@@ -19223,10 +19409,10 @@ export const KeyEvent: MessageFns<KeyEvent> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<KeyEvent>, I>>(base?: I): KeyEvent {
-    return KeyEvent.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<KeyEvent>): KeyEvent {
+    return KeyEvent.fromPartial<DeepPartial<KeyEvent>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<KeyEvent>, I>>(object: I): KeyEvent {
+  fromPartial(object: DeepPartial<KeyEvent>): KeyEvent {
     const message = createBaseKeyEvent();
     message.key = object.key ?? "";
     message.isText = object.isText ?? false;
@@ -19338,10 +19524,10 @@ export const ScrollEvent: MessageFns<ScrollEvent> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<ScrollEvent>, I>>(base?: I): ScrollEvent {
-    return ScrollEvent.fromPartial(base ?? ({} as any));
+  create(base?: DeepPartial<ScrollEvent>): ScrollEvent {
+    return ScrollEvent.fromPartial<DeepPartial<ScrollEvent>>(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ScrollEvent>, I>>(object: I): ScrollEvent {
+  fromPartial(object: DeepPartial<ScrollEvent>): ScrollEvent {
     const message = createBaseScrollEvent();
     message.x = object.x ?? 0;
     message.y = object.y ?? 0;
@@ -19386,8 +19572,12 @@ export type DeepPartial<T> = T extends Builtin ? T
   : Partial<T>;
 
 type KeysOfUnion<T> = T extends T ? keyof T : never;
-export type Exact<P, I extends P> = P extends Builtin ? P
-  : P & { [K in keyof P]: Exact<P[K], I[K]> } & { [K in Exclude<keyof I, KeysOfUnion<P>>]: never };
+type ExactInput<P, I> = I extends P ? Exact<P, I> : never;
+export type Exact<P, I extends P> = ExactFields<P, I>;
+type ExactFields<P, I> = P extends Builtin ? P
+  : I extends P
+    ? P & { [K in keyof P]: ExactFields<P[K], I[K & keyof I]> } & { [K in Exclude<keyof I, KeysOfUnion<P>>]: never }
+  : never;
 
 function isObject(value: any): boolean {
   return typeof value === "object" && value !== null;
@@ -19402,6 +19592,6 @@ export interface MessageFns<T> {
   decode(input: BinaryReader | Uint8Array, length?: number): T;
   fromJSON(object: any): T;
   toJSON(message: T): unknown;
-  create<I extends Exact<DeepPartial<T>, I>>(base?: I): T;
-  fromPartial<I extends Exact<DeepPartial<T>, I>>(object: I): T;
+  create<I>(base?: I & NoInfer<ExactInput<DeepPartial<T>, I>>): T;
+  fromPartial<I>(object: I & NoInfer<ExactInput<DeepPartial<T>, I>>): T;
 }

@@ -197,7 +197,7 @@ jobs:
         run: |
           shellcheck --severity=warning compute/e2e/env.sh compute/e2e/stack/*.sh
           bun install --frozen-lockfile
-          bun node_modules/typescript/bin/tsc -p compute/e2e/suite
+          bun node_modules/tsrs/bin/tsrs -p compute/e2e/suite
 
   kvm:
     name: real Firecracker on KVM

@@ -141,13 +141,13 @@ function LiveSession(props: {
       },
       onCopy: (text) => void copyText(text),
       onOpenGeniLink: openLink,
-      ...createNativePreviewRenderers({
+      ...createNativePreviewRenderers(t, {
         client: props.client,
         workspaceId: props.workspaceId,
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, webBaseUrl]);
+  }, [props.client, props.workspaceId, webBaseUrl, t]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);

@@ -28,7 +28,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "codegen": "bash scripts/codegen.sh",
     "test": "bun test ./test",

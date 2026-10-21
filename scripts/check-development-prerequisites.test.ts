@@ -7,10 +7,12 @@ import {
   type PrerequisiteHost,
 } from "./check-development-prerequisites";
 import { resolve } from "node:path";
+import { canonicalBunVersion } from "./bun-version";
 
+const requiredBunVersion = await canonicalBunVersion();
 const ready = {
-  bunVersion: "1.4.0",
-  requiredBunVersion: "1.4.0",
+  bunVersion: requiredBunVersion,
+  requiredBunVersion,
   platform: "linux",
   which: (command: string) => `/usr/bin/${command}`,
 };
@@ -21,13 +23,13 @@ describe("development prerequisites", () => {
       expect(developmentPrerequisiteErrors({ ...ready, platform })).toEqual([]);
     }
     expect(developmentPrerequisiteErrors({ ...ready, bunVersion: "1.5.0" })).toEqual([
-      expect.stringContaining("pinned Bun 1.4.0"),
+      expect.stringContaining(`pinned Bun ${requiredBunVersion}`),
     ]);
   });
 
   test("reports an older Bun before the frozen install fails", () => {
     expect(developmentPrerequisiteErrors({ ...ready, bunVersion: "1.3.5" })).toEqual([
-      expect.stringContaining("pinned Bun 1.4.0"),
+      expect.stringContaining(`pinned Bun ${requiredBunVersion}`),
     ]);
   });
 

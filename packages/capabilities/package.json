@@ -31,7 +31,7 @@
   },
   "scripts": {
     "build": "bun ../../scripts/build-typescript-package.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

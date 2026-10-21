@@ -4,7 +4,8 @@ The fast path for contributors: what runs typecheck, lint, and format, and why.
 
 ## Package manager & runtime
 
-**Bun 1.4** end to end — install, run, test, and script execution. `.bun-version` is the
+**Bun 1.4.3** end to end — install, run, test, and script execution, including every native
+`Bun.build` bundler and `bun test` runner. `.bun-version` is the
 canonical exact pin; `bun run check:bun-version` verifies every package, workflow, container,
 and native-builder mirror. There is no `npm`/`pnpm`/`yarn` lockfile in this repo; use
 `bun install`, `bun run <script>`, and `bun test`.
@@ -27,14 +28,26 @@ provenance attestations, so the release workflow (`.github/workflows/release.yml
 and npm for that one boundary only. Do not replace the provenance-capable publish transport
 until Bun can emit equivalent registry attestations.
 
-## Typecheck: stable TypeScript 7
+## Typecheck: tsrs
 
-Typecheck runs on the exact pinned stable **TypeScript 7** `tsc`. `bun run typecheck` invokes
-`bun scripts/typecheck.ts`, which launches the Node-hosted compiler over every project's
-`tsconfig.json` with a bounded worker pool. The scheduler retains its established Node
-child-process boundary because Bun-native variants produced no repeatable performance benefit in
-the isolated migration benchmark. Per-package `typecheck` scripts invoke the same compiler.
-Preview compiler packages and executables are not part of the toolchain.
+Typecheck uses exact-pinned **tsrs 0.18.0-ts7.1.0-dev.20260929**, a Rust port of the
+TypeScript 7.1 checker. `bun run typecheck` invokes `bun scripts/typecheck.ts`, which launches
+the package's supported Node launcher over every project's `tsconfig.json` with the existing
+bounded worker pool. Per-package `typecheck` scripts invoke the same compiler. Its native
+prebuilt targets are Linux x64/arm64 (glibc and musl) and macOS arm64; there is no native
+Windows or Intel macOS prebuilt in this release. Use Linux/WSL or an available supported host
+for repository checks on those systems, rather than silently falling back to a different checker.
+
+Official stable TypeScript 7 remains installed for compiler APIs, declaration emission and editor
+workflows. Vue's standalone example retains `vue-tsc` because its single-file-component plugin
+is not provided by tsrs. These are deliberate boundaries, not alternative CI checkers.
+
+The checked-in `ts-proto` patch generates TypeScript 7.1-compatible exact partial constructors.
+Exact validation is kept on the public `MessageFns` interface, including nested oneof payloads;
+implementations take the already-validated partial shape. `NoInfer` prevents invalid inputs from
+being widened to the generic constraint. The generated codec's runtime is unchanged. A separate
+type-only `postcss-selector-parser` patch expresses its recursive child union by discriminant.
+Regenerate protocol sources with `packages/agent-proto/scripts/codegen.sh`, never by hand.
 
 Publishable packages use `scripts/build-typescript-package.ts`: `tsup` still creates JavaScript
 and source maps, then stable TypeScript 7 `tsc` emits declarations. This split is intentional;

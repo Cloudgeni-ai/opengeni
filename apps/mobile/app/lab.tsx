@@ -2,6 +2,7 @@
 // MessageTimeline, for side-by-side comparison with the web harness
 // (/dev/session-timeline). Deep link: opengeni://lab?scenario=working&scheme=dark&chrome=0
 import { labScenarios, type LabScenarioId } from "@opengeni/react/testing";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { MessageTimeline, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
@@ -27,6 +28,7 @@ export default function ReferenceLab() {
 }
 
 function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
   const scenarios = useMemo(() => labScenarios(), []);
@@ -36,9 +38,9 @@ function LabBody({ params, scheme }: { params: Params; scheme: "light" | "dark" 
     () =>
       createWebMarkdownRenderer({
         onCopy: (text) => void copyText(text),
-        ...createNativePreviewRenderers({ client, workspaceId: workspaceId ?? "lab-workspace" }),
+        ...createNativePreviewRenderers(t, { client, workspaceId: workspaceId ?? "lab-workspace" }),
       }),
-    [client, workspaceId],
+    [client, workspaceId, t],
   );
   const scenarioId = params.scenario ?? "working";
   const scenario = scenarios.find((entry) => entry.id === scenarioId) ?? scenarios[0]!;
