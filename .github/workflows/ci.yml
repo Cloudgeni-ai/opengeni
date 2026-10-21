@@ -5,14 +5,15 @@ on:
     branches:
       - main
       - production
-  # Ordinary main PRs use targeted local checks; post-merge CI remains enabled.
+  # Main PRs/merge groups use merge-queue.yml. Full CI is a separate,
+  # non-cancelling release-candidate lane.
   pull_request:
     branches:
       - production
   schedule:
-    # Weekly full-mode drift coverage complements impact-selected pull-request
-    # CI without rebuilding an unchanged source/image matrix every day.
-    - cron: "0 3 * * 1"
+    # Retry latest main after failures even when no new push arrives. These runs
+    # share the non-cancelling main lane; only pending work is coalesced.
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       automation_pr_number:
@@ -308,7 +309,8 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request" ]; then
             bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
-          elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          elif [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ] ||
+               { [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; }; then
             bun scripts/ci/impact.ts --full --output impact-plan.json
           else
             BEFORE="${{ github.event.before }}"
@@ -2576,3 +2578,64 @@ jobs:
           AUTOMATION_CHECK_CONCLUSION: ${{ needs.automation-admission.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
+
+      # GITHUB_TOKEN-created Version PRs do not emit pull_request workflows.
+      # Their authenticated full CI is stronger than the fast entry check.
+      # merge_group still tests their combined tree normally after enqueueing.
+      - name: Report queue entry check for the admitted Version PR
+        if: ${{ success() && needs.automation-admission.result == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.automation_head_sha }}
+          CONCLUSION: ${{ needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" \
+            -f name='Queue ready' -f head_sha="$HEAD_SHA" -f status=completed \
+            -f conclusion="$CONCLUSION" \
+            -f details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  merge-content:
+    name: Verify landed merge content
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Recompute landed merge trees from their parents
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: bun scripts/ci/verify-merge-content.ts "$BEFORE" "$GITHUB_SHA"
+
+  full-green:
+    name: Publish fully green main SHA
+    needs: [plan, test, deployment, images, merge-content]
+    if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Publish exact-SHA full CI evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" --arg url "$url" \
+            '{schemaVersion:1,sha:$sha,runId:$run,runAttempt:$attempt,url:$url,mode:"full"}' > full-green-main.json
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=success -f context='Full CI' -f target_url="$url" \
+            -f description='Full tests, contracts and workload images passed for this exact main SHA'
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: full-green-main-${{ github.sha }}
+          path: full-green-main.json
+          if-no-files-found: error

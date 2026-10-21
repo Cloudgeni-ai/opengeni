@@ -780,6 +780,28 @@ Supply fixture settings through the service environment, or use an explicit
 
 End-to-end agent runs require the full stack plus valid model and sandbox credentials.
 
+## Reviewed merges to main
+
+Follow [`docs/merge-queue.md`](docs/merge-queue.md). Run the full relevant suites
+on the VM (not only the fast queue checks), with bounded workers and isolated
+services. Obtain an independent agent review of the exact candidate head. Post
+one PR evidence comment containing that head SHA, commands/results, reviewer
+session and any limitations. Recheck the evidence after substantive head changes.
+
+Once the main queue is enabled, enqueue with `gh pr merge <PR> --auto` and observe
+the actual merge-group result and landed SHA; never use `--admin` or a direct
+merge API. Do not rebase merely because main advanced: the queue tests the combined
+tree. Before activation, use the repository's normal squash merge only after the
+same local-test and independent-review evidence. No agent may activate the prepared
+ruleset without the rollout owner's explicit go.
+
+Budget/threshold increases, newly skipped tests and reduced coverage must be
+explicit in the PR and evidence comment, independently confirmed by the reviewer,
+and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+The documented `hotfix/*` → `production` incident lane stays separate; ordinary
+main changes never bypass the queue. See the incident and rollback steps in the
+queue runbook before any exceptional main action.
+
 ## Deployment Work Notes
 
 When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.

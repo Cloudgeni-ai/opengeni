@@ -1,0 +1,24 @@
+name: Landed merge content
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+# Intentionally no concurrency cancellation: audit EVERY push, including the
+# intermediate pushes coalesced out of expensive full CI.
+jobs:
+  content:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Recompute landed merge content
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: bun scripts/ci/verify-merge-content.ts "$BEFORE" "$GITHUB_SHA"

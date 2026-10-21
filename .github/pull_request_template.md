@@ -5,7 +5,9 @@
 ## Testing
 
 - [ ] `bun run typecheck`
-- [ ] `bun test`
+- [ ] `bun run test:unit` (process-isolated; plus full relevant real-service/browser suites)
+- [ ] Independent agent review of the current head; reviewer session and command/results evidence posted in a PR comment.
+- [ ] Any budget/threshold/skip/coverage relaxation is explicit, reviewer-confirmed, and labelled `test-policy-change` (or none).
 
 ## External API impact
 
@@ -19,6 +21,7 @@ See `docs/design/api-compatibility-policy.md`. Pick one:
 
 - [ ] Candidate/version labels represent substantive source changes, not base-only refreshes.
 - [ ] If `main` advanced, I kept the candidate head frozen and verified mergeability/material compatibility, or documented the actual conflict/incompatibility that required a source change. Freeze-head source admission is required only for `hotfix/*` into `production`.
+- [ ] When the main merge queue is enabled, enqueue with `gh pr merge --auto`; do not bypass. See `docs/merge-queue.md`.
 
 ## Notes
 

@@ -1,0 +1,137 @@
+name: Merge queue
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never share a group with full main CI or another speculative queue head.
+concurrency:
+  group: queue-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENGENI_TEST_MAX_CONCURRENCY: "4"
+  OPENGENI_TYPECHECK_CONCURRENCY: "1"
+
+jobs:
+  plan:
+    name: Queue impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      unit_count: ${{ steps.plan.outputs.unit_count }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Plan the complete combined tree, not only the last PR
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="${BASE_SHA:-$(git merge-base origin/main HEAD)}"
+          bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output impact-plan.json
+          echo "unit_count=$(jq '.unitTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: queue-impact-plan
+          path: impact-plan.json
+          if-no-files-found: error
+
+  contracts:
+    name: Queue source contracts
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: queue-impact-plan
+      - name: Check impacted types
+        run: bun scripts/ci/run-typecheck-plan.ts --plan impact-plan.json
+      # These three output/service contracts stay mandatory in full CI, not in
+      # the fast queue. No unit files, static guards or thresholds are removed.
+      - name: Check impacted static contracts
+        run: >-
+          bun scripts/ci/run-guards-plan.ts --plan impact-plan.json
+          --exclude publish-closure --exclude sdk-compat --exclude example-builds
+
+  units:
+    name: Queue unit shard ${{ matrix.shard }}
+    needs: plan
+    if: ${{ needs.plan.outputs.unit_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: queue-impact-plan
+      - name: Run every impact-selected unit file with real database enforcement
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
+        run: >-
+          bun scripts/ci/profile-command.ts --name queue-unit-${{ matrix.shard }}
+          --output queue-unit.json --timeout-seconds 1200 --
+          bun scripts/ci/run-unit-shard.ts --plan impact-plan.json
+          --shard ${{ matrix.shard }} --shards 8
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: queue-unit-${{ matrix.shard }}
+          path: queue-unit.json
+          if-no-files-found: ignore
+
+  ready:
+    name: Queue ready
+    needs: [plan, contracts, units]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on failed, cancelled or unexpectedly skipped work
+        env:
+          PLAN: ${{ needs.plan.result }}
+          CONTRACTS: ${{ needs.contracts.result }}
+          UNITS: ${{ needs.units.result }}
+          UNIT_COUNT: ${{ needs.plan.outputs.unit_count }}
+        run: |
+          set -euo pipefail
+          test "$PLAN" = success
+          test "$CONTRACTS" = success
+          if [ "$UNIT_COUNT" = 0 ]; then test "$UNITS" = skipped;
+          else test "$UNITS" = success; fi
