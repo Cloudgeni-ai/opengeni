@@ -870,6 +870,27 @@ describe.skipIf(!realDb)("Codex operations on the shared core (M3 PR 2c)", () =>
     expect(await releaseSubscriptionCoreCodexOperationLease(client!.db, scope, lease)).toBe(true);
   });
 
+  test("under the automatic source, operations use the organization pool when the workspace pool cannot serve, as chat does", async () => {
+    const org = await organization();
+    await setCutover(org.accountId, true);
+    const organizationScoped = await sharedConnection(org, "ops-auto-org");
+    // The workspace's own pool holds one paused account, so the automatic
+    // source resolves to the workspace pool while chat still admits both.
+    const pausedHere = await sharedConnection(org, "ops-auto-here", {
+      scope: "workspaces",
+      workspaces: [org.sharedWorkspaceId],
+      pool: "workspace",
+    });
+    await shared!.admin`
+      update subscription_connections set allocator_enabled = false
+      where id = ${pausedHere}::uuid`;
+    expect(
+      (await listSubscriptionCoreCodexOperationCandidates(client!.db, workspaceScope(org))).map(
+        (candidate) => candidate.connectionId,
+      ),
+    ).toEqual([organizationScoped]);
+  });
+
   test("a sessionless completion holds its own lease and reserves each request in workspace scope", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
