@@ -413,9 +413,13 @@ export async function executeMigrationFile(
   }
   const batchedBackfill = parseBatchedBackfillMigration(file, sqlText);
   if (batchedBackfill) {
-    await sql`select set_config('lock_timeout', ${batchedBackfill.lockTimeout}, false)`;
-    await sql`select set_config('statement_timeout', ${batchedBackfill.statementTimeout}, false)`;
+    const [priorSettings] = await sql<{ lock_timeout: string; statement_timeout: string }[]>`
+      select current_setting('lock_timeout') as lock_timeout,
+        current_setting('statement_timeout') as statement_timeout
+    `;
     try {
+      await sql`select set_config('lock_timeout', ${batchedBackfill.lockTimeout}, false),
+        set_config('statement_timeout', ${batchedBackfill.statementTimeout}, false)`;
       for (;;) {
         const result = await sql.begin(async (transaction) => {
           const transactionLocalSetting = batchedBackfillTransactionLocalSetting(file);
@@ -438,8 +442,10 @@ export async function executeMigrationFile(
         if (result.length === 0) break;
       }
     } finally {
-      await sql`select set_config('statement_timeout', '0', false)`;
-      await sql`select set_config('lock_timeout', '0', false)`;
+      // These overrides belong only to this backfill. Preserve the operator's
+      // inherited deadline for later files, including concurrent index builds.
+      await sql`select set_config('statement_timeout', ${priorSettings!.statement_timeout}, false),
+        set_config('lock_timeout', ${priorSettings!.lock_timeout}, false)`;
     }
     return;
   }
