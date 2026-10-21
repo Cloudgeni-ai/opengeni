@@ -1,5 +1,13 @@
 # @opengeni/browser-extension
 
+## 0.1.6
+
+### Patch Changes
+
+- 13b9837: The popup now says why it cannot reach the computer's agent instead of a bare "Agent unavailable": the agent is not set up on this computer, it is too old for this extension, it is not running, or it stopped. The raw browser error stays available on hover.
+- 87b1e0e: When the extension and the computer's agent don't match, the popup now says plainly which side is outdated: "Update the Opengeni agent" (with the agent's version when it reports one) or "Update this extension". When the agent reports the extension as the older side, the extension checks for its own update right away and applies it, since nothing is attached while the agent refuses it. Current agents explain every refused connection (not running, older or newer bridge, or another error), so the popup no longer guesses between "not running" and "too old".
+- cbb55f3: The extension popup now keeps its connection state current while it is open. It used to show the state from the moment it opened, so opening it while the agent was still starting or the native host was still connecting left it saying the agent was unavailable even after the profile connected.
+
 ## 0.1.5
 
 ### Patch Changes
