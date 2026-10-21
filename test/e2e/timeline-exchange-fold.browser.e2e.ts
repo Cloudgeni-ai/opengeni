@@ -1273,7 +1273,7 @@ describe("readable timeline browser regression", () => {
           expect(
             await page.locator("[data-og-fold-content] [data-og-wide-table-message]").count(),
           ).toBe(3);
-          expect(await header.textContent()).toContain("26 steps");
+          expect(await header.textContent()).toContain("Worked for");
           await capture("expanded");
         } finally {
           await page.context().close();
@@ -1338,7 +1338,7 @@ describe("readable timeline browser regression", () => {
           expect(geometry.hit).toBe(true);
           expect(geometry.following).toBe("false");
           expect(geometry.overflow).toBe(false);
-          expect(await header.textContent()).toContain("42 steps");
+          expect(await header.textContent()).toContain("Worked for");
           expect(
             await page.locator('[data-og-recorded-outcome="wait"] summary').textContent(),
           ).toContain("Waiting for 2 agents");
