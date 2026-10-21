@@ -1,0 +1,211 @@
+import { createHash } from "node:crypto";
+
+export const SHA = /^[a-f0-9]{40}$/;
+export const ID = /^[a-f0-9]{64}$/;
+export const compareText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+export function assertSha(value: string): string {
+  if (!SHA.test(value)) throw new Error("Expected a full lowercase Git SHA");
+  return value;
+}
+export function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([a], [b]) => compareText(a, b))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
+      .join(",")}}`;
+  }
+  const result = JSON.stringify(value);
+  if (result === undefined) throw new Error("Non-JSON manifest value");
+  return result;
+}
+export const digest = (value: unknown): string =>
+  createHash("sha256").update(canonical(value)).digest("hex");
+export interface ReadyBinding {
+  eventId: string;
+  at: string;
+  source: "auto-merge" | "queue-ready";
+  evidenceId: string;
+  evidenceDigest: string;
+}
+export interface Pull {
+  number: number;
+  headSha: string;
+  headRef: string;
+  binding: ReadyBinding;
+}
+export interface BatchSpec {
+  schemaVersion: 1;
+  baseSha: string;
+  predecessor: string | null;
+  createdAt: string;
+  recoveryOf: string | null;
+  pulls: Pull[];
+}
+export interface Manifest extends Omit<BatchSpec, "pulls"> {
+  batchId: string;
+  tipSha: string;
+  pulls: (Pull & { mergeSha: string })[];
+}
+export type Outcome = "success" | "code_failure" | "infrastructure" | "cancelled" | "unknown";
+export interface Run {
+  id: number;
+  attempt: number;
+  headSha: string;
+  branch: string;
+  workflow: string;
+  status: "queued" | "in_progress" | "completed";
+  outcome: Outcome;
+  completedAt: string | null;
+  trusted: boolean;
+}
+export interface Candidate {
+  manifest: Manifest;
+  branch: string;
+  runs: Run[];
+  containedInBase: boolean;
+}
+export interface Ejection {
+  pull: Pull;
+  reason: string;
+  batchId: string;
+  announced: boolean;
+}
+export interface RetryIntent {
+  runId: number;
+  fromAttempt: number;
+  requestedAt: string;
+}
+export interface Ledger {
+  schemaVersion: 1;
+  epoch: number;
+  owner: string;
+  expiresAt: string;
+  landed: string[];
+  invalidated: string[];
+  ejected: Ejection[];
+  recovery: { batchId: string; pulls: Pull[] }[];
+  retries: Record<string, RetryIntent>;
+  codeFailures: Record<string, string[]>;
+}
+export const emptyLedger = (): Ledger => ({
+  schemaVersion: 1,
+  epoch: 0,
+  owner: "",
+  expiresAt: new Date(0).toISOString(),
+  landed: [],
+  invalidated: [],
+  ejected: [],
+  recovery: [],
+  retries: {},
+  codeFailures: {},
+});
+export interface Observation {
+  now: string;
+  baseSha: string;
+  ready: Pull[];
+  excluded: { number: number; reason: string }[];
+  candidates: Candidate[];
+  stateSha: string | null;
+  ledger: Ledger;
+}
+export interface Config {
+  repository: string;
+  baseBranch: string;
+  branchPrefix: string;
+  stateRef: string;
+  workflow: string;
+  mode: "shadow" | "active";
+  maxBatchSize: number;
+  maxInflight: number;
+  speculationDepth: number;
+  pollSeconds: number;
+  leaseSeconds: number;
+  gitDir: string;
+  outputDir: string;
+  port: number;
+}
+export function config(env: Record<string, string | undefined>): Config {
+  const integer = (key: string, fallback: number, max: number): number => {
+    const n = Number(env[key] ?? fallback);
+    if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new Error(`Invalid ${key}`);
+    return n;
+  };
+  const mode = env.BATCHER_MODE ?? "shadow";
+  if (mode !== "shadow" && mode !== "active") throw new Error("Invalid BATCHER_MODE");
+  const repository = env.BATCHER_REPOSITORY ?? "Cloudgeni-ai/opengeni";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid repository");
+  const baseBranch = env.BATCHER_BASE_BRANCH ?? "main";
+  const branchPrefix = env.BATCHER_BRANCH_PREFIX ?? "queue/";
+  for (const ref of [baseBranch, `${branchPrefix}test`]) {
+    if (!/^[\w/-]+$/.test(ref) || ref.includes("//") || ref.startsWith("-") || ref.endsWith("/"))
+      throw new Error("Invalid branch configuration");
+  }
+  if (!branchPrefix.endsWith("/") || baseBranch.startsWith(branchPrefix))
+    throw new Error("Queue namespace must be separate from base");
+  return {
+    repository,
+    baseBranch,
+    branchPrefix,
+    mode,
+    stateRef: "refs/heads/batcher-state",
+    workflow: ".github/workflows/batch-ci.yml",
+    maxBatchSize: integer("BATCHER_MAX_BATCH_SIZE", 16, 256),
+    maxInflight: integer("BATCHER_MAX_INFLIGHT", 1, 16),
+    speculationDepth: integer("BATCHER_SPECULATION_DEPTH", 2, 16),
+    pollSeconds: integer("BATCHER_POLL_SECONDS", 30, 3600),
+    leaseSeconds: integer("BATCHER_LEASE_SECONDS", 120, 3600),
+    gitDir: env.BATCHER_GIT_DIR ?? "/data/objects.git",
+    outputDir: env.BATCHER_OUTPUT_DIR ?? "/data/shadow",
+    port: integer("PORT", 8080, 65535),
+  };
+}
+export const bindingKey = (pull: Pull): string =>
+  digest({ number: pull.number, headSha: pull.headSha, binding: pull.binding });
+export const ejectionKey = (pull: Pull): string =>
+  digest({
+    number: pull.number,
+    headSha: pull.headSha,
+    eventId: pull.binding.eventId,
+    source: pull.binding.source,
+  });
+export function validateSpec(value: unknown): BatchSpec {
+  const spec = value as BatchSpec;
+  if (
+    !spec ||
+    spec.schemaVersion !== 1 ||
+    !SHA.test(spec.baseSha) ||
+    !Array.isArray(spec.pulls) ||
+    !spec.pulls.length ||
+    spec.pulls.length > 256 ||
+    !Number.isFinite(Date.parse(spec.createdAt))
+  )
+    throw new Error("Invalid batch manifest");
+  if (spec.predecessor !== null && !ID.test(spec.predecessor))
+    throw new Error("Invalid predecessor");
+  if (spec.recoveryOf !== null && !ID.test(spec.recoveryOf))
+    throw new Error("Invalid recovery parent");
+  const seen = new Set<number>();
+  for (const p of spec.pulls) {
+    if (
+      !p ||
+      !Number.isSafeInteger(p.number) ||
+      p.number < 1 ||
+      seen.has(p.number) ||
+      !SHA.test(p.headSha) ||
+      typeof p.headRef !== "string" ||
+      !p.binding ||
+      typeof p.binding.eventId !== "string" ||
+      !p.binding.eventId ||
+      !Number.isFinite(Date.parse(p.binding.at)) ||
+      !["auto-merge", "queue-ready"].includes(p.binding.source) ||
+      typeof p.binding.evidenceId !== "string" ||
+      !ID.test(p.binding.evidenceDigest)
+    )
+      throw new Error("Invalid batch member");
+    seen.add(p.number);
+  }
+  if (spec.pulls.length > 1 && spec.pulls.some((p) => p.headRef === "changeset-release/main"))
+    throw new Error("Version must be singleton");
+  return spec;
+}
