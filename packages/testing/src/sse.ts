@@ -14,11 +14,13 @@ export async function collectSse(
     signal?: AbortSignal;
   },
 ): Promise<SessionEvent[]> {
-  const { SessionEvent: SessionEventSchema } = await import("@opengeni/contracts");
   const abort = new AbortController();
+  const onAbort = () => abort.abort();
   const timeout = setTimeout(() => abort.abort(), options.timeoutMs ?? 20_000);
-  options.signal?.addEventListener("abort", () => abort.abort(), { once: true });
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.signal?.aborted) onAbort();
   try {
+    const { SessionEvent: SessionEventSchema } = await import("@opengeni/contracts");
     const response = await fetch(url, { signal: abort.signal });
     if (!response.ok || !response.body) {
       throw new Error(`SSE request failed: ${response.status}`);
@@ -50,6 +52,7 @@ export async function collectSse(
     return out;
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", onAbort);
   }
 }
 
