@@ -1,5 +1,57 @@
 # @opengeni/events
 
+## 4.3.1
+
+### Patch Changes
+
+- 2d1350b: Commit tool receipts with their timeline events and retire completed receipts with stable conversation history, removing duplicate attempt fences without changing model-visible history or parallel-result durability.
+- d8761a7: Use native Ed25519 for NATS authorization JWT signing and reuse the current signing seed's imported key. Preserve JWT bytes, seed validation, permissions, expiry, and key-rotation behavior while avoiding repeated pure-JavaScript key derivation and signing.
+- d0c8261: Distribute machine state ingestion across API replicas instead of repeating every heartbeat and Hello write in every replica. Renew the exact runner lease and return its accepted metadata in one database statement, preserving independent optional inventory and metrics processing.
+- Updated dependencies [2d1350b]
+- Updated dependencies [a363a8c]
+- Updated dependencies [cd3fdb2]
+- Updated dependencies [74f6ab1]
+- Updated dependencies [659c01a]
+- Updated dependencies [b7ee3dc]
+- Updated dependencies [b8aaefa]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [dc9a23b]
+- Updated dependencies [18030c8]
+- Updated dependencies [eeab39f]
+- Updated dependencies [8f66667]
+- Updated dependencies [ebdd6dc]
+- Updated dependencies [559eaa8]
+- Updated dependencies [00a0865]
+- Updated dependencies [1d62cf3]
+- Updated dependencies [6794bf2]
+- Updated dependencies [1e63001]
+- Updated dependencies [a00e4bb]
+- Updated dependencies [16781e5]
+- Updated dependencies [18030c8]
+- Updated dependencies [9976132]
+- Updated dependencies [b45d380]
+- Updated dependencies [bc64dbb]
+- Updated dependencies [3915617]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [1bc6fe5]
+- Updated dependencies [d0c8261]
+- Updated dependencies [a5d6f8a]
+- Updated dependencies [06b8b74]
+- Updated dependencies [b95784c]
+- Updated dependencies [67262de]
+  - @opengeni/db@4.3.0
+  - @opengeni/contracts@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes
