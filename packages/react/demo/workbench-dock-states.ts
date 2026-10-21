@@ -1060,7 +1060,13 @@ function seedTerminalHistory(bus: HistoryBus): void {
     cwd: "/workspace/api",
   });
   pty(`${PROMPT}tail -f logs/api.log\r\n`);
-  const routes = ["/v1/health", "/v1/orders", "/v1/orders/:id", "/v1/carts", "/v1/payments"];
+  const routes = [
+    "/v1/health",
+    "/v1/orders",
+    "/v1/orders/:id",
+    "/v1/carts",
+    "/v1/workspaces/:workspaceId/sessions",
+  ];
   for (let index = 0; index < 2000; index += 1) {
     const seconds = String(index % 60).padStart(2, "0");
     const minutes = String(12 + (Math.floor(index / 60) % 48)).padStart(2, "0");
