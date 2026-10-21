@@ -166,8 +166,8 @@ enabling it changes no session's backend.
    copy (ADR 18). `--checkpoint-every-s` (through
    `computeControl.extraArgs`) sets that target for the fleet; 0 takes
    none.
-10. **Metrics.** The service's own metrics are on by default
-   (`computeControl.metrics.port`); `observability.serviceMonitor` and
+10. **Metrics.** Set `computeControl.metrics.port` (for example 9464) to
+   serve the service's own metrics; `observability.serviceMonitor` and
    `observability.prometheusRule` add their ServiceMonitor and alerts. For
    the hosts' metrics, set `computeControl.metrics.hostsTo` to
    Prometheus's OTLP receiver and add `--otlp-metrics-to-control` to the
@@ -678,7 +678,7 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   hosts report to the Prometheus that Opengeni's chart already feeds
   (`deploy/observability`), with no collector or credentials on the hosts:
   - The control service serves `GET /metrics` on `--metrics-listen`
-    (`computeControl.metrics.port`, 9464), which the chart's
+    (`computeControl.metrics.port`, for example 9464), which the chart's
     ServiceMonitor scrapes. Every replica reports its API requests by route
     and outcome (`compute_control_requests_total`, with their latency),
     whether it leads, and the hosts' metrics it passed on; the leader alone
@@ -689,9 +689,17 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - Hosts run with `--otlp-metrics-to-control` (on GCP, in the Terraform
     module's `host_args`) and post their metrics every ten seconds
     to the control service over the same mutual TLS as their lease. The
-    service checks that every resource in an export names the host by its
-    own certificate (`host.name`, which the host sets to its name in the
-    fleet), and passes it on to `--host-metrics-to`
+    service refuses an export whose resource names another host than its
+    certificate does (`host.name`, which the host sets to its name in the
+    fleet), and passes on only the metrics hosts send (the list in
+    `compute-protocol`'s `host_metrics`): each with its kind, cumulative
+    counters, exactly its labels with their listed values, plain values
+    and the shared histogram bounds, under the host's own name and with
+    only the resource attributes that describe a host. A host cannot pass
+    off the control service's or the fleet's series, another host's, or
+    labels of its own. Data points left out are answered as an OTLP partial
+    success and counted in
+    `compute_control_host_metric_points_left_out_total`. It passes them on to `--host-metrics-to`
     (`computeControl.metrics.hostsTo`): Prometheus's OTLP receiver,
     `/api/v1/otlp/v1/metrics`, which `deploy/observability`'s
     `values.compute.yaml` turns on with `host.name` promoted to the

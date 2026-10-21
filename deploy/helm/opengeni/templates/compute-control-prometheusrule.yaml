@@ -61,7 +61,7 @@ spec:
             runbook_url: {{ printf "%s#the-control-service" $runbook }}
         - alert: OpenGeniComputeHostGivenUp
           expr: |
-            sum(increase(compute_control_hosts_given_up_total{ {{- $scope }}}[30m])) > 0
+            sum(increase(compute_control_hosts_given_up_total{ {{- $scope }},cause="lost"}[30m])) > 0
           labels:
             severity: warning
           annotations:
@@ -85,7 +85,7 @@ spec:
             runbook_url: {{ printf "%s#hosts" $runbook }}
         - alert: OpenGeniComputeHostRenewalsLate
           expr: |
-            max by (host_name) (max_over_time(compute_fleet_host_renewal_age_seconds{ {{- $scope }}}[10m])) > 7
+            max by (host_name) (max_over_time(compute_fleet_host_renewal_age_seconds{ {{- $scope }}}[5m])) > 7
           for: 10m
           labels:
             severity: warning

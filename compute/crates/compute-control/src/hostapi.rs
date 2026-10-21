@@ -34,6 +34,7 @@ use compute_protocol::fleet::{
     Registered, Renew, Renewed, Report, Ruling, Terms, Verdict,
 };
 use compute_protocol::host::Id;
+use compute_protocol::host_metrics::{self, Refused};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
@@ -528,53 +529,10 @@ pub fn router<S: Store>(
     })))
 }
 
-/// Whether every resource in `export`, an OTLP/HTTP metrics export in
-/// JSON, names its host (`host.name`) by one of `names`.
-fn names_only(export: &[u8], names: &[String]) -> Result<(), (StatusCode, String)> {
-    let export: serde_json::Value = serde_json::from_slice(export).map_err(|error| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("not an OTLP metrics export in JSON: {error}"),
-        )
-    })?;
-    let resources = export
-        .get("resourceMetrics")
-        .and_then(serde_json::Value::as_array)
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            "an OTLP metrics export lists resourceMetrics".to_owned(),
-        ))?;
-    for resource in resources {
-        let host = resource
-            .pointer("/resource/attributes")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|attributes| {
-                attributes.iter().find(|attribute| {
-                    attribute.get("key").and_then(serde_json::Value::as_str) == Some("host.name")
-                })
-            })
-            .and_then(|attribute| attribute.pointer("/value/stringValue"))
-            .and_then(serde_json::Value::as_str);
-        match host {
-            Some(host) if names.iter().any(|name| name == host) => {}
-            Some(host) => {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    format!("the certificate does not name {host}"),
-                ));
-            }
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "every resource names its host in host.name".to_owned(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Passes a host's metrics on to the metrics store, and its answer back.
+/// Passes a host's metrics on to the metrics store, and its answer back:
+/// only what [`host_metrics::check`] keeps, under the host's own name.
+/// Data points it leaves out are reported back as rejected, the way an
+/// OTLP collector reports a partial success, so the host counts them.
 async fn pass_metrics<S: Store>(
     State(api): State<HostApi<S>>,
     Peer(names): Peer,
@@ -583,15 +541,29 @@ async fn pass_metrics<S: Store>(
     let Some(to) = &api.0.host_metrics else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if let Err(refused) = names_only(&export, &names) {
-        to.metrics.passed(Passed::Refused);
-        return refused.into_response();
+    let checked = match host_metrics::check(&export, &names) {
+        Ok(checked) => checked,
+        Err(refused) => {
+            to.metrics.passed(Passed::Refused);
+            return match refused {
+                Refused::Malformed(why) => (StatusCode::BAD_REQUEST, why),
+                Refused::OtherHost(why) => (StatusCode::FORBIDDEN, why),
+            }
+            .into_response();
+        }
+    };
+    to.metrics.left_out(checked.rejected);
+    if checked.kept == 0 {
+        if checked.rejected > 0 {
+            to.metrics.passed(Passed::Refused);
+        }
+        return partial_success(checked.rejected, checked.problem.as_deref(), None);
     }
     let sent = to
         .client
         .post(&to.url)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(export)
+        .body(checked.export)
         .send()
         .await;
     let response = match sent {
@@ -609,6 +581,7 @@ async fn pass_metrics<S: Store>(
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let kind = response.headers().get(header::CONTENT_TYPE).cloned();
+    let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
     let answer = match response.bytes().await {
         Ok(answer) => answer,
         Err(error) => {
@@ -621,17 +594,53 @@ async fn pass_metrics<S: Store>(
                 .into_response();
         }
     };
-    if status.is_success() {
-        to.metrics.passed(Passed::Forwarded);
-    } else {
+    if !status.is_success() {
         to.metrics.passed(Passed::Failed);
         tracing::warn!(%status, "the metrics store refused a host's metrics");
+    } else if checked.rejected > 0 {
+        to.metrics.passed(Passed::Forwarded);
+        return partial_success(checked.rejected, checked.problem.as_deref(), Some(&answer));
+    } else {
+        to.metrics.passed(Passed::Forwarded);
     }
     let mut answered = (status, answer).into_response();
-    if let Some(kind) = kind {
-        answered.headers_mut().insert(header::CONTENT_TYPE, kind);
+    for (name, value) in [
+        (header::CONTENT_TYPE, kind),
+        (header::RETRY_AFTER, retry_after),
+    ] {
+        if let Some(value) = value {
+            answered.headers_mut().insert(name, value);
+        }
     }
     answered
+}
+
+/// A successful answer that says `rejected` data points were not taken,
+/// and why the first was, adding what the metrics store's own `answer`
+/// says it rejected.
+fn partial_success(
+    rejected: u64,
+    problem: Option<&str>,
+    answer: Option<&[u8]>,
+) -> axum::response::Response {
+    let store = answer
+        .and_then(|answer| serde_json::from_slice::<serde_json::Value>(answer).ok())
+        .and_then(|answer| {
+            let rejected = answer
+                .pointer("/partialSuccess/rejectedDataPoints")?
+                .clone();
+            rejected
+                .as_u64()
+                .or_else(|| rejected.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0);
+    let body = serde_json::json!({
+        "partialSuccess": {
+            "rejectedDataPoints": rejected.saturating_add(store).to_string(),
+            "errorMessage": problem.unwrap_or_default(),
+        }
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 /// Serves `router` on `listener` to clients `acceptor` verifies, each

@@ -189,3 +189,13 @@ fn label_values_are_escaped() {
     text.sample("x", &[("route", "a\"b\\c\nd")], 1);
     assert_eq!(text.0, "x{route=\"a\\\"b\\\\c\\nd\"} 1\n");
 }
+
+#[test]
+fn invented_methods_share_one_label() {
+    use axum::http::Method;
+    assert_eq!(method_label(&Method::POST), "POST");
+    for invented in ["BREW", "PROPFIND", "X-ANYTHING"] {
+        let method = Method::from_bytes(invented.as_bytes()).unwrap();
+        assert_eq!(method_label(&method), "OTHER", "{invented}");
+    }
+}

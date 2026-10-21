@@ -1476,9 +1476,10 @@ computeControl:
   metrics:
     # The service's metrics, GET /metrics in Prometheus's text format, on
     # this port of its pods and of the API Service (never the hosts
-    # Service). observability.serviceMonitor.enabled scrapes it, and
-    # networkPolicy.monitoring admits the scraper. null: no metrics.
-    port: 9464
+    # Service), for example 9464. observability.serviceMonitor.enabled
+    # scrapes it, and networkPolicy.monitoring admits the scraper. null (the
+    # default): no metrics.
+    port: null
     # Where the service passes its hosts' metrics on to: an OTLP/HTTP
     # metrics endpoint that takes JSON, such as Prometheus's OTLP receiver
     # (http://<prometheus>:9090/api/v1/otlp/v1/metrics, with the receiver

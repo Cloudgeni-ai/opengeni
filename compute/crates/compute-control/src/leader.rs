@@ -29,7 +29,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::group::{Fenced, GcpGroup, Member, Started};
-use crate::metrics::{GroupSeen, Metrics};
+use crate::metrics::{GaveUp, GroupSeen, Metrics};
 use crate::store::{self, Store};
 use crate::view::{GroupHost, View};
 
@@ -181,8 +181,8 @@ pub struct Leading<L> {
     group: Option<Arc<GcpGroup>>,
     prefix: Option<String>,
     fences: JoinSet<FenceResult>,
-    /// The host each fence under way is for.
-    fencing: HashMap<tokio::task::Id, HostId>,
+    /// The host each fence under way is for, and whether it was draining.
+    fencing: HashMap<tokio::task::Id, (HostId, bool)>,
     /// Hosts whose last fence failed, and when the next may start.
     again_at: HashMap<HostId, Instant>,
     metrics: Arc<Metrics>,
@@ -247,17 +247,18 @@ impl<L: Leases> Leading<L> {
         }
         let lapsed: Vec<_> = self.expiry.expired(now).collect();
         for (host, renewals) in lapsed {
+            let draining = view.draining(host);
             match self.lapse(host, view).await {
                 Lapse::GiveUp => {
                     let result = self.leases.give_up(host, renewals).await;
-                    self.given_up(host, result.map_err(|error| error.to_string()));
+                    self.given_up(host, draining, result.map_err(|error| error.to_string()));
                 }
                 Lapse::Fence(group, name) => {
                     let leases = Arc::clone(&self.leases);
                     let task = self
                         .fences
                         .spawn(fence_and_give_up(leases, group, host, name, renewals));
-                    self.fencing.insert(task.id(), host);
+                    self.fencing.insert(task.id(), (host, draining));
                 }
                 Lapse::Later => {}
             }
@@ -266,7 +267,7 @@ impl<L: Leases> Leading<L> {
 
     /// Whether `host` is fenced first, given up on now, or decided later.
     async fn lapse(&mut self, host: HostId, view: &View) -> Lapse {
-        if self.fencing.values().any(|fenced| *fenced == host)
+        if self.fencing.values().any(|(fenced, _)| *fenced == host)
             || self
                 .again_at
                 .get(&host)
@@ -311,14 +312,16 @@ impl<L: Leases> Leading<L> {
                 Ok((id, (_, result))) => (id, result),
                 Err(error) => (error.id(), Err(format!("the fence ended: {error}"))),
             };
-            if let Some(host) = self.fencing.remove(&id) {
-                self.given_up(host, result);
+            if let Some((host, draining)) = self.fencing.remove(&id) {
+                self.given_up(host, draining, result);
             }
         }
     }
 
-    /// Takes in how giving up on `host` went.
-    fn given_up(&mut self, host: HostId, result: Result<Option<usize>, String>) {
+    /// Takes in how giving up on `host`, `draining` or not, went. A
+    /// draining host given up on with no sandboxes left was removed as
+    /// planned; any other was lost.
+    fn given_up(&mut self, host: HostId, draining: bool, result: Result<Option<usize>, String>) {
         match result {
             Ok(given_up) => {
                 // Either way it starts afresh: a host that renewed is
@@ -326,9 +329,16 @@ impl<L: Leases> Leading<L> {
                 // up on is no longer listed.
                 self.expiry.forget(host);
                 self.again_at.remove(&host);
-                if let Some(sandboxes) = given_up {
-                    self.metrics.gave_up();
-                    tracing::warn!(host = host.0, sandboxes, "gave up on a host");
+                match given_up {
+                    Some(0) if draining => {
+                        self.metrics.gave_up(GaveUp::Removed);
+                        tracing::info!(host = host.0, "a drained host is gone");
+                    }
+                    Some(sandboxes) => {
+                        self.metrics.gave_up(GaveUp::Lost);
+                        tracing::warn!(host = host.0, sandboxes, "gave up on a host");
+                    }
+                    None => {}
                 }
             }
             Err(error) => {

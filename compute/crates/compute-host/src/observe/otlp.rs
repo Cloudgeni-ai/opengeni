@@ -5,13 +5,14 @@
 //! integers are decimal strings, enums are numbers, and trace and span ids
 //! are hex, as the OTLP specification's JSON mapping requires.
 
+use compute_protocol::host_metrics;
 use serde::{Serialize, Serializer};
 
 use super::event::{Event, Value};
 use super::metrics::{BOUNDS, HistogramReading, Metrics, Visitor};
 
 /// Cumulative aggregation, the only temporality sent.
-const CUMULATIVE: u8 = 2;
+const CUMULATIVE: u8 = host_metrics::CUMULATIVE;
 
 /// A 64-bit integer as OTLP's JSON mapping writes it: a decimal string.
 #[derive(Clone, Copy, Debug)]
@@ -288,40 +289,9 @@ fn labels(pairs: &[(&'static str, &'static str)]) -> Vec<Label> {
     pairs.iter().map(|(key, value)| Label(key, value)).collect()
 }
 
-/// A metric's unit and description, by name.
+/// A metric's unit and description, as the metrics hosts send are listed.
 fn describe(name: &str) -> (&'static str, &'static str) {
-    match name {
-        "compute.step.count" => ("{step}", "Steps finished, by kind, cause and outcome."),
-        "compute.step.duration" => ("s", "How long finished steps took."),
-        "compute.step.in_flight" => ("{step}", "Steps running now."),
-        "compute.step.oldest_age" => ("s", "How long the oldest unfinished step has run."),
-        "compute.request.count" => ("{request}", "Requests answered, by kind and result."),
-        "compute.request.duration" => ("s", "Time from a request to its reply."),
-        "compute.stream.opened" => ("{stream}", "Streams into sandboxes established."),
-        "compute.stream.closed" => ("{stream}", "Streams into sandboxes closed."),
-        "compute.stream.open" => ("{stream}", "Streams into sandboxes open now."),
-        "compute.stream.bytes" => ("By", "Bytes streams carried."),
-        "compute.alarm.count" => ("{occurrence}", "Things that must never happen."),
-        "compute.canary.count" => ("{run}", "Canary runs, by path and outcome."),
-        "compute.canary.duration" => ("s", "How long canary runs took."),
-        "compute.canary.last_run" => ("s", "When each canary path last ran, in Unix time."),
-        "compute.export.dropped" => ("{record}", "Records and data points never exported."),
-        "compute.sample.time" => ("s", "When the agent last sampled, in Unix time."),
-        "compute.sample.age" => ("s", "Time since the agent last sampled."),
-        "compute.sandbox.count" => ("{sandbox}", "Sandboxes per level."),
-        "compute.sandbox.memory" => ("By", "Host memory sandboxes hold, per level."),
-        "compute.sandbox.unhealthy" => ("{sandbox}", "Sandboxes broken, blocked or unsavable."),
-        "compute.host.memory.available" => ("By", "Host memory available for guests."),
-        "compute.host.zswap.stored" => ("By", "Compressed bytes zswap holds."),
-        "compute.host.zswap.original" => ("By", "Memory zswap holds, before compression."),
-        "compute.host.hugepages.free" => ("{page}", "Free pages in the huge-page pool."),
-        "compute.host.pressure.stall" => ("us", "Host pressure stall time."),
-        "compute.transfer.foreground" => ("{transfer}", "Object-storage transfers wakes wait on."),
-        "compute.transfer.background" => ("{transfer}", "Background object-storage transfers."),
-        "process.cpu.time" => ("s", "Processor time the agent used."),
-        "process.memory.usage" => ("By", "The agent's resident memory."),
-        _ => ("1", ""),
-    }
+    host_metrics::metric(name).map_or(("1", ""), |metric| (metric.unit, metric.description))
 }
 
 /// Collects data points into metrics, one metric per name, in the order
@@ -489,7 +459,7 @@ pub(crate) fn metrics(
         collect.gauge_seconds("compute.sample.age", &[], age);
     }
     if let Some(process) = process {
-        for (state, seconds) in ["user", "system"].iter().zip(process.cpu) {
+        for (state, seconds) in host_metrics::CPU_MODES.iter().zip(process.cpu) {
             let point = NumberPoint {
                 attributes: labels(&[("cpu.mode", state)]),
                 start_time_unix_nano: Some(Int(origin.started_unix_nanos)),

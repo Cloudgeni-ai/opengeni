@@ -32,6 +32,13 @@ describe("compute dashboard", () => {
     expect(board.tags).toEqual(expect.arrayContaining(["opengeni", "observability", "compute"]));
     const variables = board.templating.list.map((variable) => variable.name);
     expect(variables).toEqual(["datasource", "namespace", "release", "host"]);
+    // "All" lists the release's hosts, never a regex matching other releases'.
+    const host = board.templating.list.find((variable) => variable.name === "host") as {
+      includeAll?: boolean;
+      allValue?: string;
+    };
+    expect(host.includeAll).toBe(true);
+    expect(host.allValue).toBeUndefined();
     const single = board.templating.list.filter((variable) =>
       ["namespace", "release"].includes(variable.name),
     );
@@ -54,6 +61,28 @@ describe("compute dashboard", () => {
         expect(emitted.has(metric), `${metric} in ${expr}`).toBe(true);
       }
     }
+  });
+
+  test("finds metrics with matchers and bare ones, and nothing else", () => {
+    expect(selectedMetrics("compute_control_leader == 0")).toEqual(["compute_control_leader"]);
+    expect(
+      selectedMetrics(
+        'histogram_quantile(0.95, sum by (le, route) (rate(a_bucket{route="x"}[$__rate_interval]))) and on (host_name) b > bool 1e3',
+      ),
+    ).toEqual(["a_bucket", "b"]);
+    expect(selectedMetrics('label_replace(c offset 5m, "dst", "$1", "src", "(.*)")')).toEqual([
+      "c",
+    ]);
+  });
+
+  test("names histograms by their series and counters with _total", () => {
+    const emitted = computeMetricNames();
+    expect(emitted.has("compute_control_request_duration_seconds")).toBe(false);
+    expect(emitted.has("compute_control_request_duration_seconds_bucket")).toBe(true);
+    expect(emitted.has("compute_step_count_total")).toBe(true);
+    expect(emitted.has("compute_step_count")).toBe(false);
+    expect(emitted.has("compute_sandbox_count")).toBe(true);
+    expect(emitted.has("compute_sandbox_count_total")).toBe(false);
   });
 
   test("scopes every query to the selected deployment", async () => {

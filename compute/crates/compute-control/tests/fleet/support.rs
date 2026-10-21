@@ -589,8 +589,8 @@ impl FakeHost {
     }
 
     /// Posts `export` as its metrics, over its mutual TLS; answers the
-    /// status and body.
-    pub async fn post_metrics(&self, export: &Value) -> (u16, String) {
+    /// status, the `Retry-After` it was given, if any, and the body.
+    pub async fn post_metrics(&self, export: &Value) -> (u16, Option<String>, String) {
         let response = self
             .inner
             .http
@@ -600,7 +600,12 @@ impl FakeHost {
             .await
             .unwrap();
         let status = response.status().as_u16();
-        (status, response.text().await.unwrap())
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        (status, retry_after, response.text().await.unwrap())
     }
 
     /// Stops or resumes its renewals.

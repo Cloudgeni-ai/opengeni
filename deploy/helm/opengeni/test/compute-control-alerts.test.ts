@@ -35,6 +35,7 @@ const enabled = [
   "computeControl.hostsTls.secretName=compute-hosts-tls",
   "computeControl.hostUrl=https://compute-control.example.com:8443",
   "computeControl.archive=gs://example-archive/archive",
+  "computeControl.metrics.port=9464",
   "observability.serviceMonitor.enabled=true",
   "observability.prometheusRule.enabled=true",
 ];
@@ -138,7 +139,9 @@ describe("compute alerts", () => {
     expect(
       await render(enabled.filter((set) => !set.startsWith("observability.serviceMonitor"))),
     ).toEqual([]);
-    expect(await render([...enabled, "computeControl.metrics.port=null"])).toEqual([]);
+    expect(
+      await render(enabled.filter((set) => !set.startsWith("computeControl.metrics.port"))),
+    ).toEqual([]);
     expect(
       await render(enabled.filter((set) => !set.startsWith("observability.prometheusRule"))),
     ).toEqual([]);
@@ -235,6 +238,38 @@ describe("compute alerts", () => {
         alert: "OpenGeniComputeNoLeader",
         at: "6m",
         fires: [{}],
+      },
+      {
+        name: "a host lost",
+        series: [
+          {
+            series: `compute_control_hosts_given_up_total{${own},pod="a",cause="lost"}`,
+            values: "0x5 1x20",
+          },
+          {
+            series: `compute_control_hosts_given_up_total{${own},pod="a",cause="removed"}`,
+            values: "0x20",
+          },
+        ],
+        alert: "OpenGeniComputeHostGivenUp",
+        at: "5m",
+        fires: [{ value: 1 }],
+      },
+      {
+        name: "a drained host removed as planned",
+        series: [
+          {
+            series: `compute_control_hosts_given_up_total{${own},pod="a",cause="lost"}`,
+            values: "0x20",
+          },
+          {
+            series: `compute_control_hosts_given_up_total{${own},pod="a",cause="removed"}`,
+            values: "0x5 1x20",
+          },
+        ],
+        alert: "OpenGeniComputeHostGivenUp",
+        at: "5m",
+        fires: [],
       },
       {
         name: "an alarm on this release's host",
@@ -350,18 +385,28 @@ describe("compute alerts", () => {
         at: "20m",
         fires: [],
       },
-      {
-        name: "renewals late again and again",
+      // Late at 30s, then every four minutes until 16 minutes, then on time:
+      // pending from 30s, firing from 10.5 minutes, and resolved once no
+      // five-minute window holds a late renewal, at 21 minutes.
+      ...(
+        [
+          ["10m", false],
+          ["11m", true],
+          ["20m", true],
+          ["21m", false],
+        ] as const
+      ).map(([at, fires]) => ({
+        name: `renewals late every four minutes, then on time, at ${at}`,
         series: [
           {
             series: `compute_fleet_host_renewal_age_seconds{${own},pod="a",host_name="h1"}`,
-            values: "1 8 1 1 1 1 1 1" + " 8 1 1 1 1 1 1 1".repeat(10),
+            values: "1 8 1 1 1 1 1 1" + " 8 1 1 1 1 1 1 1".repeat(4) + " 1x40",
           },
         ],
         alert: "OpenGeniComputeHostRenewalsLate",
-        at: "30m",
-        fires: [{ labels: { host_name: "h1" }, value: 8 }],
-      },
+        at,
+        fires: fires ? [{ labels: { host_name: "h1" }, value: 8 }] : [],
+      })),
       {
         name: "disk almost full",
         series: [

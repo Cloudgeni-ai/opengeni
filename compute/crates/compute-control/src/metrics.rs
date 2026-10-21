@@ -53,7 +53,8 @@ pub struct Outcome(pub &'static str);
 pub enum Passed {
     /// The metrics store took them.
     Forwarded,
-    /// The host's request was refused: not metrics, or not its own.
+    /// The host's request was refused: not metrics, not its own, or
+    /// holding none of the metrics hosts send.
     Refused,
     /// The metrics store did not take them, or could not be reached.
     Failed,
@@ -67,6 +68,26 @@ impl Passed {
             Self::Forwarded => "forwarded",
             Self::Refused => "refused",
             Self::Failed => "failed",
+        }
+    }
+}
+
+/// Why the leader gave up on a host whose lease ran out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GaveUp {
+    /// It was live, or still had sandboxes: the host was lost.
+    Lost,
+    /// It was draining with no sandboxes left: removed as planned.
+    Removed,
+}
+
+impl GaveUp {
+    const ALL: [Self; 2] = [Self::Lost, Self::Removed];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Lost => "lost",
+            Self::Removed => "removed",
         }
     }
 }
@@ -104,9 +125,10 @@ pub struct Metrics {
     requests: Mutex<BTreeMap<(Route, &'static str), u64>>,
     latency: Mutex<BTreeMap<Route, Latency>>,
     passed: [AtomicU64; 3],
+    points_left_out: AtomicU64,
     leading: AtomicBool,
     led: Mutex<Led>,
-    given_up: AtomicU64,
+    given_up: [AtomicU64; 2],
     give_up_failures: AtomicU64,
     group_failures: AtomicU64,
 }
@@ -137,6 +159,12 @@ impl Metrics {
         self.passed[passed as usize].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Counts data points of hosts' metrics left out of what was passed
+    /// on: not among the metrics hosts send, or not as they send them.
+    pub fn left_out(&self, points: u64) {
+        self.points_left_out.fetch_add(points, Ordering::Relaxed);
+    }
+
     /// Notes whether this replica leads; one that stops forgets what it
     /// knew as the leader.
     pub fn leads(&self, leads: bool) {
@@ -151,9 +179,9 @@ impl Metrics {
         locked(&self.led).still = still.into_iter().collect();
     }
 
-    /// Notes a host given up on.
-    pub fn gave_up(&self) {
-        self.given_up.fetch_add(1, Ordering::Relaxed);
+    /// Notes a host given up on, and why.
+    pub fn gave_up(&self, why: GaveUp) {
+        self.given_up[why as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Notes a give-up that failed, in its fence or in the store.
@@ -188,6 +216,16 @@ impl Metrics {
                 self.passed[passed as usize].load(Ordering::Relaxed),
             );
         }
+        out.family(
+            "compute_control_host_metric_points_left_out_total",
+            "counter",
+            "Data points of host metric exports this replica left out of what it passed on: not among the metrics hosts send, or not as they send them.",
+        );
+        out.sample(
+            "compute_control_host_metric_points_left_out_total",
+            &[],
+            self.points_left_out.load(Ordering::Relaxed),
+        );
         let leading = self.leading.load(Ordering::Relaxed);
         out.family(
             "compute_control_leader",
@@ -195,12 +233,19 @@ impl Metrics {
             "1 while this replica leads: it alone reports the compute_fleet_ series.",
         );
         out.sample("compute_control_leader", &[], u64::from(leading));
-        for (name, help, value) in [
-            (
+        out.family(
+            "compute_control_hosts_given_up_total",
+            "counter",
+            "Hosts this replica gave up on while it led, their leases run out, by cause: lost (live, or still holding sandboxes) or removed (drained and empty, as planned).",
+        );
+        for why in GaveUp::ALL {
+            out.sample(
                 "compute_control_hosts_given_up_total",
-                "Hosts this replica gave up on while it led, their leases run out.",
-                &self.given_up,
-            ),
+                &[("cause", why.label())],
+                self.given_up[why as usize].load(Ordering::Relaxed),
+            );
+        }
+        for (name, help, value) in [
             (
                 "compute_control_give_up_failures_total",
                 "Give-ups of lapsed hosts that failed while this replica led, in their fence or in the store; each is tried again.",
@@ -488,7 +533,7 @@ impl Text {
 /// Counts each public API request it wraps: a route layer, so the route's
 /// template is known.
 pub async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: Next) -> Response {
-    let method = request.method().as_str().to_owned();
+    let method = method_label(request.method()).to_owned();
     let route = request
         .extensions()
         .get::<MatchedPath>()
@@ -508,6 +553,22 @@ pub async fn track(State(metrics): State<Arc<Metrics>>, request: Request, next: 
     );
     metrics.request(&method, &route, outcome, started.elapsed());
     response
+}
+
+/// A request's method as a label: the standard methods by name and any
+/// other as `OTHER`, so a caller cannot add series by inventing methods.
+fn method_label(method: &axum::http::Method) -> &'static str {
+    use axum::http::Method;
+    match *method {
+        Method::GET => "GET",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::PATCH => "PATCH",
+        Method::DELETE => "DELETE",
+        Method::HEAD => "HEAD",
+        Method::OPTIONS => "OPTIONS",
+        _ => "OTHER",
+    }
 }
 
 struct Scrape {

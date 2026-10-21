@@ -532,7 +532,7 @@ describe("computeControl", () => {
     const manifests = await render(
       {
         ...enabled,
-        computeControl: { ...enabled.computeControl, metrics: { hostsTo: store } },
+        computeControl: { ...enabled.computeControl, metrics: { port: 9464, hostsTo: store } },
         networkPolicy: { enabled: true, monitoring },
         observability: { serviceMonitor: { enabled: true } },
       },
@@ -566,13 +566,9 @@ describe("computeControl", () => {
     expect(scraped.from).toEqual([monitoring]);
   });
 
-  test("has no metrics listener or ServiceMonitor without a port, and passes no hosts' metrics by default", async () => {
+  test("has no metrics listener, ServiceMonitor or hosts' metrics unless a port is set", async () => {
     const manifests = await render(
-      {
-        ...enabled,
-        computeControl: { ...enabled.computeControl, metrics: { port: null } },
-        observability: { serviceMonitor: { enabled: true } },
-      },
+      { ...enabled, observability: { serviceMonitor: { enabled: true } } },
       ["--api-versions", "monitoring.coreos.com/v1"],
     );
     const container = find(manifests, "Deployment", "cc-opengeni-compute-control").spec.template
@@ -584,9 +580,15 @@ describe("computeControl", () => {
         (m) => m.kind === "ServiceMonitor" && m.metadata.name === "cc-opengeni-compute-control",
       ),
     ).toBe(false);
-    const byDefault = find(await render(enabled), "Deployment", "cc-opengeni-compute-control").spec
-      .template.spec.containers[0];
-    expect(byDefault.args).toContain("--metrics-listen=0.0.0.0:9464");
-    expect(byDefault.args.some((a: string) => a.startsWith("--host-metrics-to"))).toBe(false);
+    const withPort = find(
+      await render({
+        ...enabled,
+        computeControl: { ...enabled.computeControl, metrics: { port: 9464 } },
+      }),
+      "Deployment",
+      "cc-opengeni-compute-control",
+    ).spec.template.spec.containers[0];
+    expect(withPort.args).toContain("--metrics-listen=0.0.0.0:9464");
+    expect(withPort.args.some((a: string) => a.startsWith("--host-metrics-to"))).toBe(false);
   });
 });
