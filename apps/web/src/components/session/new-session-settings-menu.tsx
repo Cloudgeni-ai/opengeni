@@ -14,9 +14,9 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ComposerMenuHeader } from "@/components/ui/composer-menu";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { ComposerMenuHeader } from "@opengeni/react/ui/composer-menu";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import {
   RadioGroup,
   RadioRow,
@@ -24,14 +24,14 @@ import {
   type MenuBodyPresentation,
 } from "./composer-menu-radio";
 export type { MenuBodyPresentation } from "./composer-menu-radio";
-import { HelpTip } from "@/components/ui/inline-help";
-import { Input } from "@/components/ui/input";
-import { Notice } from "@/components/ui/notice";
+import { HelpTip } from "@opengeni/react/ui/inline-help";
+import { Input } from "@opengeni/react/ui/input";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   MENU_LABEL_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
-} from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/menu-styles";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import {
   rememberedMachineFolder,

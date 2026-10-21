@@ -14,7 +14,7 @@ import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.
 // Keep replacement dialog content inspectable without exercising its portal.
-mock.module("@/components/ui/form-dialog", () => ({
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   FormDialog: ({ open, title, children }: { open: boolean; title: string; children: ReactNode }) =>
     open ? (
       <div role="dialog">

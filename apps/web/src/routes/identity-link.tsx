@@ -8,7 +8,7 @@ import {
 import "@opengeni/react/connect.css";
 import { request } from "@/api";
 import { ProblemPanel } from "@/components/common";
-import { ContentPage } from "@/components/ui/content-layout";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { useAppContext } from "@/context";
 import { readIdentityLinkContinuation } from "@/lib/identity-link-continuation";
 

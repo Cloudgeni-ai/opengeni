@@ -5,7 +5,7 @@ import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from 
 import { toast } from "sonner";
 
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
 import {
   DropdownMenu,
   DropdownMenuCheck,
@@ -15,8 +15,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@/context";
 import {
   organizationLandingWorkspaceId,

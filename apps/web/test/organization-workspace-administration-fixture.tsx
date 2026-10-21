@@ -12,7 +12,7 @@ import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
 
-import { Button } from "../src/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { OrganizationDirectoryProvider } from "../src/components/organization/organization-directory";
 import { OrganizationPeoplePage } from "../src/components/organization/people-page";
 import { OrganizationWorkspacesPage } from "../src/components/organization/workspaces-page";

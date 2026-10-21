@@ -8,8 +8,8 @@ import { resolveWorkspaceAgentDefaults, type AgentCapabilities } from "@opengeni
 import { useMemo } from "react";
 
 import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
-import { Disclosure } from "@/components/ui/disclosure";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { useAppContext } from "@/context";
 import {
   capabilityAvailability,

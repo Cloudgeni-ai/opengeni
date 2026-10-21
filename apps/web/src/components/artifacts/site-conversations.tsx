@@ -5,16 +5,16 @@ import { toast } from "sonner";
 import type { SessionListResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Toolbar, ToolbarGroup, ToolbarSearch } from "@/components/ui/toolbar";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { Toolbar, ToolbarGroup, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { sessionStateLabel } from "@/lib/session-rail";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /**
  * The Site page's Conversations tab. Host-owned, so it works even when the

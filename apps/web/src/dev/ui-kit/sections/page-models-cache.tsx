@@ -9,9 +9,9 @@ import {
 import { ModelsRefreshControl } from "@/components/models/models-refresh-control";
 import { modelsScopeLabels } from "@/components/models/models-ui";
 import { OrganizationCodexDetailPrefetch } from "@/components/models/use-organization-codex-overview";
-import { Button } from "@/components/ui/button";
-import { RowList } from "@/components/ui/list-row";
-import { Section } from "@/components/ui/section";
+import { Button } from "@opengeni/react/ui/button";
+import { RowList } from "@opengeni/react/ui/list-row";
+import { Section } from "@opengeni/react/ui/section";
 import { useConsoleSharedQueries } from "@/lib/shared-query";
 import { currentWorkspace, organization } from "../fixtures";
 import { KitCanvas, KitSection } from "../kit";

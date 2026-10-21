@@ -17,8 +17,8 @@ import {
   customApiPreviewDiff,
   type CustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Badge } from "@opengeni/react/ui/badge";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -26,9 +26,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import { cn } from "@/lib/utils";
 import type { ConnectionMetadata } from "@/types";
 

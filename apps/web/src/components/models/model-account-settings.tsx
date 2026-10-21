@@ -13,18 +13,18 @@ import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
 import { invalidateSharedQueries, sharedQueryWriter, useSharedQuery } from "@/lib/shared-query";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, FieldStack } from "@/components/ui/field";
-import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section } from "@/components/ui/section";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField, FieldStack } from "@opengeni/react/ui/field";
+import { ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section } from "@opengeni/react/ui/section";
 import {
   SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowLink,
-} from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+} from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { FallbackOrderControl } from "./model-account-policy-controls";
 import { ModelsFormPage } from "./models-ui";
 

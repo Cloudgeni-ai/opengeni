@@ -1,8 +1,8 @@
 import { useId } from "react";
 import { cn } from "@/lib/utils";
 import type { ConnectionOwnership } from "@/types";
-import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@opengeni/react/ui/dialog";
+import { Button } from "@opengeni/react/ui/button";
 import { CapabilityDialogContent } from "./detail-dialog";
 
 export function OwnershipSelector({

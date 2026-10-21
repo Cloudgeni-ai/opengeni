@@ -1,6 +1,6 @@
 import type { ProductAccessMode } from "@opengeni/sdk";
 
-import { Notice } from "@/components/ui/notice";
+import { Notice } from "@opengeni/react/ui/notice";
 
 type BrowserSecurityEnvironment = {
   window?: { isSecureContext?: boolean | undefined } | undefined;

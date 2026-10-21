@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { KnowledgeOriginalFileDownload } from "@opengeni/sdk";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /** Download authority follows the selected Knowledge revision, including private originals. */
 export function KnowledgeOriginalFile(props: {

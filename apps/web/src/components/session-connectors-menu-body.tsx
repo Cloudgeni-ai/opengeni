@@ -13,19 +13,19 @@ import {
 } from "@/components/capabilities/connection-account-picker";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { ConnectorAction } from "@/components/ui/composer-menu-action";
+import { ConnectorAction } from "@opengeni/react/ui/composer-menu-action";
 import {
   ComposerMenuHeader,
   ComposerMenuSwitch,
   ComposerMenuSwitchIndicator,
   ComposerMenuRowsSkeleton,
-} from "@/components/ui/composer-menu";
+} from "@opengeni/react/ui/composer-menu";
 import {
   MENU_BACK_BUTTON_CLASS,
   MENU_CHECK_CLASS,
   MENU_LABEL_CLASS,
   MENU_NOTE_CLASS,
-} from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/menu-styles";
 import { cn } from "@/lib/utils";
 import type { SessionToolSelection } from "@/components/pickers";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";

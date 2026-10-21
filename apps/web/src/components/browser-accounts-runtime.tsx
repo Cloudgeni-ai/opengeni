@@ -17,12 +17,12 @@ import {
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
 } from "@/api";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import type { OnboardingDestination } from "@/components/onboarding/developer-setup-step";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
 import {
   browserAccountBridgeBlockersSnapshot,

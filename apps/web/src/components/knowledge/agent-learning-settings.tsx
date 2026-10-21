@@ -7,9 +7,9 @@ import type {
   AgentLearningOverrides,
 } from "@opengeni/sdk";
 import { useEffect, useId, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Select } from "@/components/ui/select";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Select } from "@opengeni/react/ui/select";
 import { useAppContext } from "@/context";
 import { LEARNING_MODE_LABEL } from "@/lib/agent-learning-vocabulary";
 import {
@@ -17,7 +17,7 @@ import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 
 export { LEARNING_MODE_LABEL };
 const UPDATE_PERMISSION_HELP =

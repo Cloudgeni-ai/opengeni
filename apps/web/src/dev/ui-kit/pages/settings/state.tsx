@@ -1,6 +1,6 @@
 import { createContext, useContext, type Dispatch, type SetStateAction } from "react";
 
-import type { AccessMember } from "@/components/ui/access-list";
+import type { AccessMember } from "@opengeni/react/ui/access-list";
 
 import type { AccessRequest, Person, WorkspaceRole } from "../../fixtures";
 import type { YesNo } from "./controls";

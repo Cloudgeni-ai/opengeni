@@ -9,9 +9,9 @@ import {
   SparklesIcon,
 } from "lucide-react";
 
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import airtableLogo from "../../../../../../data/catalog/logos/airtable-com-c6ce8ea28476.jpg";
 import frontLogo from "../../../../../../data/catalog/logos/front-com-96ac210c4196.jpg";

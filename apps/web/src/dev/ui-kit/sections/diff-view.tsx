@@ -1,11 +1,11 @@
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { DiffView, type DiffViewVariant } from "@/components/ui/diff-view";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { formatDate } from "@/components/ui/relative-time";
-import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
+import { DiffView, type DiffViewVariant } from "@opengeni/react/ui/diff-view";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { formatDate } from "@opengeni/react/ui/relative-time";
+import { RevisionHistory, type Revision } from "@opengeni/react/ui/revision-history";
 import { KIT_NOW, KIT_TIME_ZONE, reviewItems, workspaceInstructions } from "../fixtures";
 import { KitBlock, KitCanvas, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 

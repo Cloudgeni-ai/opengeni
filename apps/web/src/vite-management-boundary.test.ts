@@ -13,19 +13,18 @@ describe("web management chunk boundary", () => {
     expect(group?.[0]).toContain("entriesAwareMergeThreshold: 4 * 1024");
     const formTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
-      const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+      const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
       for (const module of [
-        "components/ui/dialog.tsx",
-        "components/ui/textarea.tsx",
-        "components/settings/organization-workspace-administration.tsx",
+        "packages/react/src/ui/dialog.tsx",
+        "packages/react/src/ui/textarea.tsx",
+        "apps/web/src/components/settings/organization-workspace-administration.tsx",
       ]) {
         expect(formTest.test(moduleId(module))).toBe(true);
       }
       for (const module of [
-        "routes/session.tsx",
-        "routes/workspace-settings.tsx",
-        "components/organization-api-keys-section.tsx",
+        "apps/web/src/routes/session.tsx",
+        "apps/web/src/routes/workspace-settings.tsx",
+        "apps/web/src/components/organization-api-keys-section.tsx",
       ]) {
         expect(formTest.test(moduleId(module))).toBe(false);
       }

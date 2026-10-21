@@ -1,5 +1,5 @@
 /**
- * Token-styled Radix tooltip — SDK counterpart to apps/web `components/ui/tooltip`.
+ * Token-styled Radix tooltip — counterpart to `src/ui/tooltip`.
  * Portals copy `--og-*` tokens so embeds keep the host theme outside `.og-root`.
  *
  * Background/foreground are applied as inline styles (not only Tailwind

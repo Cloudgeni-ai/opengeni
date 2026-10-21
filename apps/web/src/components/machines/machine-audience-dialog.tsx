@@ -15,14 +15,14 @@ import type {
   WorkspaceMember,
 } from "@opengeni/sdk";
 
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Disclosure } from "@/components/ui/disclosure";
-import { Field, FieldStack } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { Notice } from "@/components/ui/notice";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { isPermissionDenied, userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
 
 /** The slice of the SDK client this dialog uses. */
 export type MachineAudienceClient = {

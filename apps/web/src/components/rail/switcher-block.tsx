@@ -17,11 +17,11 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { OrgOption } from "@/lib/org";
 import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
 

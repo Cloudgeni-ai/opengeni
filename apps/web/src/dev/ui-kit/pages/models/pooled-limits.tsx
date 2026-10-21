@@ -5,9 +5,9 @@ import {
   SubscriptionAccountRow,
 } from "@/components/models/subscription-account-ui";
 import { ProviderTile } from "@/components/models/provider-mark";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { Section, SectionStack } from "@/components/ui/section";
-import { Select } from "@/components/ui/select";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { Select } from "@opengeni/react/ui/select";
 import { useState } from "react";
 
 export const POOL_PREVIEW_NOW = Date.parse("2026-10-20T09:30:00Z");

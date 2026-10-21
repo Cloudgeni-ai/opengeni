@@ -1,4 +1,4 @@
-import type { StatusTone } from "@/components/ui/status-dot";
+import type { StatusTone } from "@opengeni/react/ui/status-dot";
 import { rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
 import type { Rig } from "@/types";
 

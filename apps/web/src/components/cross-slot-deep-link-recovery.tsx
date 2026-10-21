@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   useOptionalBrowserAccountBridge,
   type BrowserAccountSafeSlot,

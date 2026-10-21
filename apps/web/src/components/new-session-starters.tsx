@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { Blocks, Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
 import slackLogo from "../../../../data/catalog/logos/slack-com-5a15dccc0dc0.jpg?url";
 import linearLogo from "../../../../data/catalog/logos/linear-app-4b4a9f349c60.png?url";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 // Plain editable prompts, not service identifiers or a connector resolver.
 export const NEW_SESSION_STARTERS = [

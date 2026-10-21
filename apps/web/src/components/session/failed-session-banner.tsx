@@ -1,11 +1,11 @@
 import { AlertTriangleIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, type ComponentProps } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
 import type { FreeCreditGap } from "@/lib/free-credit-gap";
-import { analyticsAction } from "@/lib/analytics-actions";
+import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
 import {
   noteTurnFailureAction,
   turnFailureClass,

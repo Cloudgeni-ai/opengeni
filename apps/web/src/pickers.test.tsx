@@ -16,7 +16,7 @@ import {
   type PickerModelRow,
   type SessionToolSelection,
 } from "@/components/pickers";
-import { DropdownMenu } from "@/components/ui/dropdown-menu";
+import { DropdownMenu } from "@opengeni/react/ui/dropdown-menu";
 import { BillingClassMark } from "@/components/billing-class-mark";
 
 beforeAll(() => {

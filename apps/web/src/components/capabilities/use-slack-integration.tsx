@@ -27,9 +27,9 @@ import { SlackChannelRoutingDialog } from "@/components/capabilities/slack-chann
 import { SlackReactionChannelsDialog } from "@/components/capabilities/slack-reaction-channels-dialog";
 import { useSlackInstallationDiscovery } from "@/components/capabilities/use-slack-installation-discovery";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {

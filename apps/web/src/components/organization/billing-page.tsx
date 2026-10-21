@@ -3,11 +3,11 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { useAppContext } from "@/context";
 import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
@@ -17,7 +17,7 @@ import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { entitlementEntries } from "@/lib/format";
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import {

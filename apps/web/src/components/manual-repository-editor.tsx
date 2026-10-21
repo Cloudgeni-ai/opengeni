@@ -2,10 +2,10 @@ import { CheckIcon, Loader2Icon, PencilIcon, Trash2Icon, XIcon } from "lucide-re
 import { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { RepositoryRefInput } from "@/components/repository-ref-input";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import type { RepoDraft } from "@/lib/session-tools";
 
 export type ManualRepositoryAttachResult = { warning?: string } | void;

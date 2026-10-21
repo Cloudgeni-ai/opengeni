@@ -3,8 +3,8 @@ import type { SessionEvent, SkillRecord } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SkillReviewReference } from "@opengeni/contracts";
 import type { AppContextValue } from "@/context";
-import { Button } from "@/components/ui/button";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { sessionSkillReviews } from "@/lib/session-skill-reviews";
 

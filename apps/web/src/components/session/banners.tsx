@@ -7,7 +7,7 @@ import {
 import { lazy, Suspense } from "react";
 
 import { MarkdownText } from "@/components/markdown";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { formatTimestamp } from "@/lib/format";
 import type { Session } from "@/types";
 import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";

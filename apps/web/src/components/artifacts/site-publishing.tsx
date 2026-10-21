@@ -24,25 +24,30 @@ import { toast } from "sonner";
 
 import { ModelPicker } from "@/components/pickers";
 import { payerShortLabel } from "@/components/models/models-ui";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { useCopyToClipboard } from "@/components/ui/copy-field";
+import { Button, buttonVariants } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { useCopyToClipboard } from "@opengeni/react/ui/copy-field";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmailChipsInput } from "@/components/ui/email-chips-input";
-import { Disclosure } from "@/components/ui/disclosure";
-import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormDialog, FormInline, FormPage, type FormFrameProps } from "@/components/ui/form-dialog";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section } from "@/components/ui/section";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { SettingRow } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { userErrorText } from "@/lib/api-error";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmailChipsInput } from "@opengeni/react/ui/email-chips-input";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import {
+  FormDialog,
+  FormInline,
+  FormPage,
+  type FormFrameProps,
+} from "@opengeni/react/ui/form-dialog";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section } from "@opengeni/react/ui/section";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   ACCESS_CHOICES,
   SPEND_PERIOD_OPTIONS,

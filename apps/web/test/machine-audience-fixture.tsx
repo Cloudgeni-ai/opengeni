@@ -20,7 +20,7 @@ import {
   MachineAudienceDialog,
   type MachineAudienceClient,
 } from "../src/components/machines/machine-audience-dialog";
-import { ContentPage } from "../src/components/ui/content-layout";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { Toaster } from "../src/components/ui/sonner";
 import { AppearanceProvider } from "../src/lib/appearance";
 import "../src/styles.css";

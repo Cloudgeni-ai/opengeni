@@ -6,7 +6,7 @@ import { Navigate } from "@tanstack/react-router";
 import { ScheduleDetailPage } from "@/components/schedules/schedule-detail-page";
 import { ScheduleFormPage, type ScheduleFormMode } from "@/components/schedules/schedule-form-page";
 import { SchedulesListPage } from "@/components/schedules/schedules-list-page";
-import { ContentPage } from "@/components/ui/content-layout";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 
 /** Detail and form pages draw their own 960px frame, back link and padding. */
 const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";

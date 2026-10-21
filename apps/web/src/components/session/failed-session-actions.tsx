@@ -3,7 +3,7 @@ import type { FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useRef, useState } from "react";
 import { RotateCcwIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 type RetryBlocker =
   | "draft"

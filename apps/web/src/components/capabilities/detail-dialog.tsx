@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react";
 
-import { DialogContent } from "@/components/ui/dialog";
+import { DialogContent } from "@opengeni/react/ui/dialog";
 import { cn } from "@/lib/utils";
 
 /** Shared content-sized detail surface for connections, plugins, and skills. */

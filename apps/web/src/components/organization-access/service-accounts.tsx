@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ModelsFormPage } from "@/components/models/models-ui";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import {
   DetailAside,
@@ -18,20 +18,20 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section } from "@/components/ui/section";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { apiErrorDetails, userErrorText } from "@/lib/api-error";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section } from "@opengeni/react/ui/section";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { apiErrorDetails, userErrorText } from "@opengeni/react/ui/api-error";
 import { policySummary } from "@/lib/organization-access";
 
 /* ----------------------------------------------------------------------------

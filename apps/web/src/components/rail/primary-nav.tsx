@@ -9,7 +9,7 @@ import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
 

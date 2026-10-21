@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import { DestructiveConfirmPanel, confirmTextMatches } from "./destructive-confirm";
+import { DestructiveConfirmPanel, confirmTextMatches } from "@/components/ui/destructive-confirm";
 
 /** Sets a value the way a keystroke would and runs React's change handler. */
 async function typeInto(input: HTMLInputElement, value: string) {

@@ -22,13 +22,13 @@ import {
   connectScopeFor,
   type ConnectMachineScope,
 } from "@/components/machines/connect-machine-dialog";
-import { Button } from "@/components/ui/button";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { useDesktopThisComputer } from "@/components/desktop/this-computer";
 import { moveChatToMachine } from "@/lib/move-chat-to-machine";

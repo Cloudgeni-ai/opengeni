@@ -3,11 +3,11 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { RowSelect } from "@/components/settings/row-select";
-import type { SelectOption } from "@/components/ui/select-menu";
-import { SettingRow, SettingRowLink } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import type { SelectOption } from "@opengeni/react/ui/select-menu";
+import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";
 const GROK_IMAGINE_VIDEO_1_5 = "xai/grok-imagine-video-1.5";

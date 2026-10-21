@@ -14,11 +14,11 @@ import { toast } from "sonner";
 
 import { useSiteAudience } from "@/components/artifacts/site-audience";
 import { SitePublishPage, useSitePublication } from "@/components/artifacts/site-publishing";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { useAppContext } from "@/context";
 import { invalidateArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";

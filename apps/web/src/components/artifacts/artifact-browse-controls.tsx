@@ -3,7 +3,7 @@ import { ArrowLeftIcon, ArrowRightIcon, LoaderCircleIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { useAppContext } from "@/context";
 import { artifactRoute, type ArtifactCatalogFilters } from "@/lib/artifact-catalog";
 import { artifactLibraryFilters, artifactLibrarySearch } from "@/lib/artifact-library-navigation";

@@ -3,11 +3,11 @@ import { BotIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { OrganizationAccessFields } from "@/components/organization-access/organization-access-fields";
-import { Field, FieldStack } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { userErrorText } from "@/lib/api-error";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   defaultPolicy,
   policyBlockedReason,

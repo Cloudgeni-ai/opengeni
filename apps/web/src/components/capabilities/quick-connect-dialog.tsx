@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { Button } from "@/components/ui/button";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   Dialog,
   DialogContent,
@@ -9,9 +9,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 
 /**
  * The two authKind cases that ever need a dialog. Connect otherwise branches

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem, Session } from "@opengeni/sdk";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { isWorkspacePermissionDenied } from "@/lib/permissions";
 import {
   isTransientServiceFailure,

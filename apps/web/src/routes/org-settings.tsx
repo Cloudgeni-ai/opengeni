@@ -27,11 +27,11 @@ import {
   organizationSettingsDescription,
   organizationSettingsLabel,
 } from "@/components/settings/organization-settings-pages";
-import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { PageHeader } from "@/components/ui/page-header";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import {

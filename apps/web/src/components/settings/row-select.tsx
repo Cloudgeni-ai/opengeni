@@ -1,5 +1,5 @@
-import { SelectMenu, type SelectMenuProps } from "@/components/ui/select-menu";
-import { useSettingRowField } from "@/components/ui/setting-row";
+import { SelectMenu, type SelectMenuProps } from "@opengeni/react/ui/select-menu";
+import { useSettingRowField } from "@opengeni/react/ui/setting-row";
 
 /**
  * A 32px menu select inside a SettingRow, named by the row's label and

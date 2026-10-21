@@ -1,6 +1,6 @@
 import { t } from "@/lib/console-text";
-import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
-import { SettingRow } from "@/components/ui/setting-row";
+import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
 import type { WorkspaceModelCatalogModel, ReasoningEffort, LatencyMode } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -8,7 +8,7 @@ import { directModelConnectionSpec, type CreateConnectionRequest } from "@openge
 import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { CreditRequiredPromptView } from "@/components/credit-required-prompt";
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";

@@ -5,7 +5,7 @@ import type { SessionAdminAccess } from "@opengeni/sdk";
 import { AgentAdminAccessRow } from "../src/components/organization/security-page";
 import { SessionHeader } from "../src/components/rail/session-header";
 import type { SessionAdminAccessControl } from "../src/components/session/session-admin-access";
-import { Section } from "../src/components/ui/section";
+import { Section } from "@opengeni/react/ui/section";
 import type { Session } from "../src/types";
 import "../src/styles.css";
 

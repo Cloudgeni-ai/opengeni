@@ -1,4 +1,4 @@
-import { CopyField } from "@/components/ui/copy-field";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 
 export function ClaudeTokenInstructions() {
   return (

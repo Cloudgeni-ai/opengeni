@@ -2,7 +2,7 @@ import { useRouterState } from "@tanstack/react-router";
 import { SmartphoneIcon } from "lucide-react";
 import { useState } from "react";
 
-import { Notice } from "@/components/ui/notice";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   currentPhoneAppPlatform,
   dismissOpenInAppBanner,

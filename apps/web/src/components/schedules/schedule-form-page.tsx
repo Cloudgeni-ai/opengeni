@@ -15,22 +15,22 @@ import { ConnectionAccountPicker } from "@/components/capabilities/connection-ac
 import { selectedConnectionAccounts } from "@/components/capabilities/session-connection-accounts";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
-import { Button } from "@/components/ui/button";
-import { CadencePicker } from "@/components/ui/cadence-picker";
-import { Disclosure } from "@/components/ui/disclosure";
+import { Button } from "@opengeni/react/ui/button";
+import { CadencePicker } from "@opengeni/react/ui/cadence-picker";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { useVaults } from "@opengeni/react";
 import {
   ScheduleSecretsField,
   scheduleSecretsSummary,
 } from "@/components/secrets/schedule-secrets-field";
 import { secretsCapabilityOff, secretsOffIn } from "@/components/secrets/vault-model";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, Field, FieldStack, TextInput, useField } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
-import { HelpLink } from "@/components/ui/inline-help";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField, Field, FieldStack, TextInput, useField } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { HelpLink } from "@opengeni/react/ui/inline-help";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl, type SegmentedControlProps } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { useAppContext } from "@/context";
 import {
   apiErrorAdvice,
@@ -39,7 +39,7 @@ import {
   isApiError,
   isPermissionDenied,
   userErrorText,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";

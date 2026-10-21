@@ -1,10 +1,10 @@
 import type { ComponentProps } from "react";
 import { ProviderTile } from "./models-ui";
-import { ListRow } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 
 /** The on/off words for an account's allocator, shared by its switch and read-only facts. */
 export const ACCOUNT_ENABLED_LABELS = { on: "Enabled", off: "Disabled" } as const;

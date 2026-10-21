@@ -112,7 +112,7 @@ mock.module("@opengeni/react/artifacts", () => ({
     ),
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: () => null,
   // The shared destructive confirmation imports this helper from the same module.
   destructiveActionFocusTarget: () => null,

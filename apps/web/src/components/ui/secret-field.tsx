@@ -2,10 +2,10 @@ import { forwardRef, useState, type ComponentProps, type ReactNode, type Ref } f
 import { variableSetVariableNameReservation } from "@opengeni/contracts";
 import { CircleAlertIcon, EyeIcon, EyeOffIcon, LockIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { TextArea, TextInput, useFieldControlProps } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { TextArea, TextInput, useFieldControlProps } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------

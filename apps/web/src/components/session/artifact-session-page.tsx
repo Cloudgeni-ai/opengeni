@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, XIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { useArtifactsBackLink } from "@/components/artifacts/artifact-page-chrome";
 import { ArtifactBrowseControls } from "@/components/artifacts/artifact-browse-controls";
 

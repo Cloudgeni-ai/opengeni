@@ -12,16 +12,16 @@ import type { SandboxBackend } from "@opengeni/sdk";
 import { LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { Popover } from "radix-ui";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
-import { ComposerMenuHeader } from "@/components/ui/composer-menu";
+import { ComposerMenuHeader } from "@opengeni/react/ui/composer-menu";
 import {
   MENU_LABEL_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
   MENU_SURFACE_CLASS,
-} from "@/components/ui/menu-styles";
-import { userErrorText } from "@/lib/api-error";
+} from "@opengeni/react/ui/menu-styles";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { cn } from "@/lib/utils";

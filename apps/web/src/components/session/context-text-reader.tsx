@@ -2,8 +2,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDownIcon, ArrowUpIcon, CopyIcon, SearchIcon, XIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
 
 // Internal layout blocks only. Readers see a single continuous document.
 export function textBlocks(text: string) {

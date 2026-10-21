@@ -3,11 +3,11 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { CopyField } from "@/components/ui/copy-field";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@opengeni/react/ui/api-error";
 
 /**
  * Data for one part of a page: loading, ready, refused for this viewer (a

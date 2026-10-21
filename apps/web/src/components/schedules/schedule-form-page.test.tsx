@@ -8,7 +8,7 @@ GlobalRegistrator.register();
   true;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const selectMenu = await import("@/components/ui/select-menu");
+const selectMenu = await import("@opengeni/react/ui/select-menu");
 
 const workspaceId = "workspace-example";
 let task: ScheduledTask;
@@ -129,7 +129,7 @@ mock.module("./schedule-composer", () => ({
     </>
   ),
 }));
-mock.module("@/components/ui/form-dialog", () => ({
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   FormPage: ({
     children,
     onSubmit,
@@ -150,7 +150,7 @@ mock.module("@/components/ui/form-dialog", () => ({
     </>
   ),
 }));
-mock.module("@/components/ui/select-menu", () => ({
+mock.module("@opengeni/react/ui/select-menu", () => ({
   ...selectMenu,
   SelectMenu: ({
     value,

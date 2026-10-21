@@ -10,10 +10,10 @@ import {
 import { MenuIcon, PanelLeftCloseIcon, PanelLeftOpenIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { NavGroup, NavItem } from "@/components/ui/settings-nav";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { NavGroup, NavItem } from "@opengeni/react/ui/settings-nav";
 import { cn } from "@/lib/utils";
 
 import { chats, organization, you } from "../../fixtures";

@@ -10,19 +10,19 @@ import type {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { BackLink, DetailMeta } from "@/components/ui/detail-page";
+import { Button } from "@opengeni/react/ui/button";
+import { BackLink, DetailMeta } from "@opengeni/react/ui/detail-page";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { UsageMeter } from "@/components/ui/usage-meter";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 import { formatBytes } from "@/lib/format";
 
 export type SiteDataClient = Pick<

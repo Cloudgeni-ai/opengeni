@@ -8,13 +8,13 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { Field, FieldStack } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { Input } from "@/components/ui/input";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import {
   invalidateModelSettingsQueries,
   MODEL_SETTINGS_STALE_TIME_MS,

@@ -22,12 +22,12 @@ import {
 import { createPortal } from "react-dom";
 import { MenuIcon, XIcon } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
-import { firstFormField } from "@/components/ui/form-dialog";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { NavGroup, NavItem, type NavItemSize } from "@/components/ui/settings-nav";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { firstFormField } from "@opengeni/react/ui/form-dialog";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { NavGroup, NavItem, type NavItemSize } from "@opengeni/react/ui/settings-nav";
 import { cn } from "@/lib/utils";
 
 import { chats, currentWorkspace, organization, you } from "../../fixtures";

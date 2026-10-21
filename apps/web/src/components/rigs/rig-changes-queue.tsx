@@ -8,13 +8,13 @@ import { toast } from "sonner";
 
 import { SetupScript } from "@/components/rigs/rig-versions-timeline";
 import { VerificationLog } from "@/components/rigs/verification-log";
-import { Button } from "@/components/ui/button";
-import { DetailInline, DetailSection } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailInline, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import {
   changeIsPromotable,
   rigActorLabel,

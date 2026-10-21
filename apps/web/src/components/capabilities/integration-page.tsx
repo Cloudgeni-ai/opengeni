@@ -17,15 +17,15 @@ import {
   type IntegrationOption,
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Disclosure } from "@/components/ui/disclosure";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Select } from "@opengeni/react/ui/select";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import { useState } from "react";
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import { SubscriptionAccountMenu } from "@/components/session/subscription-account-menu";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 
 // Canonical value: @opengeni/codex CODEX_MODEL_ID_PREFIX. Inlined to avoid a new
 // web dependency on the server-only codex package.

@@ -19,7 +19,7 @@ import { subscriptionAccountName } from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { invalidateSharedQueries } from "@/lib/shared-query";
 import { organizationReachLabel } from "./models-ui";
 import {

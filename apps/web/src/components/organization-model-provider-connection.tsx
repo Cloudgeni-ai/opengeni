@@ -18,7 +18,7 @@ import { toast } from "sonner";
 
 import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
 import { useClaudeUsage } from "@/components/models/claude-usage";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import {
   invalidateSharedQueries,
   peekSharedQuery,

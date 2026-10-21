@@ -35,33 +35,33 @@ import {
 } from "@/components/models/models-ui";
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { copyText } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { copyText } from "@opengeni/react/ui/copy-field";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSection, DetailSkeleton } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { FieldStack } from "@/components/ui/field";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { formatAbsoluteTime, RelativeTime } from "@/components/ui/relative-time";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { FieldStack } from "@opengeni/react/ui/field";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { formatAbsoluteTime, RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import {
   SettingDangerRow,
   SettingNavRow,
   SettingRow,
   SettingRowGroup,
-} from "@/components/ui/setting-row";
-import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup, UsageReadout, usageResets } from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/setting-row";
+import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageMeterGroup, UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
    Codex on Settings > Models: the provider group (header with the pool-wide

@@ -1,9 +1,9 @@
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useId, useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { TextInput } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { TextInput } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
 import { useAppContext } from "@/context";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import {
