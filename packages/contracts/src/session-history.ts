@@ -41,9 +41,11 @@ export const SESSION_EVENT_STEP_TYPES = [
 /**
  * The conversation-filter behavior a server applies to a read that sends
  * `presentedToolCalls=include`, announced in the `X-OpenGeni-Conversation-Filter`
- * response header. Version 2 keeps presented tool calls, turnless rows and the
- * bookkeeping rows described by {@link SESSION_EVENT_BOOKKEEPING_STEP_TYPES}.
- * A server without the header may ignore `presentedToolCalls` entirely.
+ * response header. Version 2 keeps presented tool calls and the bookkeeping
+ * rows described by {@link SESSION_EVENT_BOOKKEEPING_STEP_TYPES}; excluded
+ * turnless output (PTY and command output) stays out, for the sandbox dock to
+ * read itself. A server without the header may ignore `presentedToolCalls`
+ * entirely.
  */
 export const SESSION_EVENT_CONVERSATION_FILTER_VERSION = 2;
 export const SESSION_EVENT_CONVERSATION_FILTER_HEADER = "X-OpenGeni-Conversation-Filter";
