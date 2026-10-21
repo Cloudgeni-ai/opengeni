@@ -3,8 +3,10 @@ import {
   SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_STEP_TYPES,
+  streamSessionEvents,
   type SessionEvent,
   type SessionEventListOptions,
+  type SessionEventStreamTransport,
 } from "@opengeni/sdk";
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -18,6 +20,7 @@ import {
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { useSession } from "../src/hooks/use-session";
+import { PAGE_WAKE_GAP_MS } from "../src/hooks/page-wake";
 import { useSandboxTerminal } from "../src/hooks/use-sandbox-terminal";
 import {
   buildTimeline,
@@ -222,6 +225,8 @@ function historyClient(input: {
   pageGate?: (options: SessionEventListOptions) => Promise<void> | undefined;
   /** Pause the live stream after this many events until `liveGate` resolves. */
   liveGate?: { after: number; open: Promise<void> };
+  /** Serve the live stream with the SDK's own reconnecting stream instead. */
+  sdkTransport?: SessionEventStreamTransport;
 }) {
   const reads: SessionEventListOptions[] = [];
   const streamCalls: number[] = [];
@@ -258,6 +263,14 @@ function historyClient(input: {
     streamEvents: (_workspaceId, _sessionId, options = {}) => {
       const after = options.after ?? 0;
       streamCalls.push(after);
+      if (input.sdkTransport) {
+        return streamSessionEvents(input.sdkTransport, {
+          ...options,
+          reconnectDelayMs: 1,
+          maxReconnectDelayMs: 2,
+          reconnectJitterRatio: 0,
+        });
+      }
       return (async function* () {
         options.onOpen?.();
         let yielded = 0;
@@ -2354,5 +2367,283 @@ describe("turn bookkeeping in conversation history", () => {
     expect(
       isConversationHistoryEvent(at(7, "agent.model.usage", {}, null), presented, new Set()),
     ).toBe(true);
+  });
+});
+
+/**
+ * A scripted SSE endpoint: each connection replays every durable row after
+ * its cursor, then stays open for live rows until dropped or aborted.
+ */
+function sseServer(store: () => readonly SessionEvent[]) {
+  const encoder = new TextEncoder();
+  const frame = (event: SessionEvent) =>
+    `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  const opened: number[] = [];
+  const replayed: number[] = [];
+  const signals: AbortSignal[] = [];
+  let current: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const transport: SessionEventStreamTransport = {
+    openStream: async (after, signal) => {
+      opened.push(after);
+      if (signal) signals.push(signal);
+      const backlog = store().filter((event) => event.sequence > after);
+      replayed.push(backlog.length);
+      return new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          current = controller;
+          if (backlog.length > 0) controller.enqueue(encoder.encode(backlog.map(frame).join("")));
+          signal?.addEventListener(
+            "abort",
+            () => {
+              try {
+                controller.error(new DOMException("aborted", "AbortError"));
+              } catch {
+                // Already closed.
+              }
+            },
+            { once: true },
+          );
+        },
+      });
+    },
+    listEvents: async (after, limit) =>
+      store()
+        .filter((event) => event.sequence > after)
+        .slice(0, limit),
+  };
+  return {
+    transport,
+    opened,
+    replayed,
+    signals,
+    push(events: readonly SessionEvent[]) {
+      current?.enqueue(encoder.encode(events.map(frame).join("")));
+    },
+    /** The network goes away under the open connection. */
+    drop() {
+      const controller = current;
+      current = null;
+      controller?.error(new TypeError("network connection lost"));
+    },
+  };
+}
+
+/** `count` more tool calls of a working turn, from `start`. */
+function lateCalls(start: number, count: number, turnId = "T1"): SessionEvent[] {
+  const events: SessionEvent[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const sequence = start + index * 2;
+    const id = `${turnId}-late-${index}`;
+    events.push(
+      at(sequence, "agent.toolCall.created", { id, name: "exec_command" }, turnId),
+      at(sequence + 1, "agent.toolCall.output", { id, output: "ok" }, turnId),
+    );
+  }
+  return events;
+}
+
+describe("rejoining the live tip after a reconnect or a sleep", () => {
+  /** A chat on a working turn whose 100 calls are already written. */
+  async function openWorkingChat(options: { replay?: "full" } = {}) {
+    const store: SessionEvent[] = longTurn({ start: 1, turnId: "T1", steps: 100, settled: false });
+    const server = sseServer(() => store);
+    const history = historyClient({
+      store: () => store,
+      withPages: true,
+      head: () => ({ lastSequence: store.at(-1)!.sequence, activeTurnId: "T1" }),
+      sdkTransport: server.transport,
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client: history.client,
+          workspaceId: WORKSPACE_ID,
+          ...options,
+        }),
+      undefined,
+    );
+    await settle(60);
+    return { store, server, history, hook };
+  }
+
+  test("an SDK reconnect after a long gap reads the newest steps instead of replaying them", async () => {
+    const { store, server, history, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      expect(server.opened).toEqual([202]);
+      expect(stepEvents(hook.result.current.events)).toHaveLength(200);
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const headReads = history.headReads();
+
+      // 2,000 calls are written while the connection is dead.
+      store.push(...lateCalls(203, 2_000));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+
+      // The reconnect asked the head, then resumed AT it: nothing replayed.
+      expect(history.headReads()).toBe(headReads + 1);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      // The open working turn shows its newest page of steps, re-read.
+      expect(history.reads.at(-1)).toMatchObject({
+        includeTypes: [...TURN_STEP_READ_TYPES],
+        before: 4_203,
+      });
+      let steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(SESSION_TURN_STEP_PAGE_SIZE);
+      expect(steps.at(-1)!.sequence).toBe(4_202);
+      expect(hook.result.current.connectionState).toBe("live");
+
+      // The stream keeps delivering live rows after the skip.
+      const next = lateCalls(4_203, 1, "T1").map((event, index) => ({
+        ...event,
+        id: `evt-live-${index}`,
+        payload: { ...(event.payload as object), id: "T1-live" },
+      }));
+      store.push(...next);
+      await actRun(() => server.push(next));
+      await settle(30);
+      steps = stepEvents(hook.result.current.events);
+      expect(steps.at(-1)!.sequence).toBe(4_204);
+      expect(hook.result.current.lastSequence).toBe(4_204);
+    } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("an SDK reconnect after a short gap replays it once, without loss or duplicates", async () => {
+    const { store, server, history, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      const reads = history.reads.length;
+      store.push(...lateCalls(203, 3));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(server.opened).toEqual([202, 202]);
+      expect(server.replayed).toEqual([0, 6]);
+      // No history read: the short gap came over the stream.
+      expect(history.reads).toHaveLength(reads);
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(206);
+      const sequences = steps.map((event) => event.sequence);
+      expect(new Set(sequences).size).toBe(sequences.length);
+      expect(sequences.at(-1)).toBe(208);
+      expect(stepMarkers(hook.result.current.timeline)[0]!.state).toBe("complete");
+    } finally {
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test("a wake rejoins a silently dead stream at once, without the heartbeat or a replay", async () => {
+    const realNow = Date.now;
+    const { store, server, hook } = await openWorkingChat();
+    let unretain: (() => void) | undefined;
+    try {
+      unretain = stepMarkers(hook.result.current.timeline)[0]!.retain();
+      // The lid closed: 2,000 calls were written and the connection died
+      // without an error the page could see; no visibility change either.
+      store.push(...lateCalls(203, 2_000));
+      const sleptFor = PAGE_WAKE_GAP_MS * 4;
+      Date.now = () => realNow() + sleptFor;
+      // The page notices the clock jump as soon as it is shown again.
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await settleUntil(() => server.opened.length === 2);
+      await settle(60);
+      expect(server.signals[0]!.aborted).toBe(true);
+      expect(server.opened).toEqual([202, 4_202]);
+      expect(server.replayed).toEqual([0, 0]);
+      const steps = stepEvents(hook.result.current.events);
+      expect(steps).toHaveLength(SESSION_TURN_STEP_PAGE_SIZE);
+      expect(steps.at(-1)!.sequence).toBe(4_202);
+      expect(hook.result.current.connectionState).toBe("live");
+    } finally {
+      Date.now = realNow;
+      unretain?.();
+      await hook.unmount();
+    }
+  });
+
+  test(
+    "an SDK reconnect after a long conversation shows the newest window, keeping the old one until it is ready",
+    async () => {
+      // Ten finished exchanges, then 600 more (2,400 conversation rows) while
+      // disconnected: too many to append, so the newest window is loaded.
+      const store: SessionEvent[] = [];
+      const exchange = (index: number) =>
+        longTurn({ start: index * 4 + 1, turnId: `T${index}`, steps: 0 });
+      for (let index = 0; index < 10; index += 1) store.push(...exchange(index));
+      const server = sseServer(() => store);
+      let gate: Promise<void> | undefined;
+      let openGate = () => {};
+      const history = historyClient({
+        store: () => store,
+        withPages: true,
+        sdkTransport: server.transport,
+        pageGate: (options) => (options.before === Number.MAX_SAFE_INTEGER ? gate : undefined),
+      });
+      const hook = await renderHook(
+        () => useSessionEvents(SESSION_ID, { client: history.client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      try {
+        await settle(60);
+        expect(server.opened).toEqual([40]);
+        expect(hook.result.current.events.at(-1)!.sequence).toBe(40);
+
+        for (let index = 10; index < 610; index += 1) store.push(...exchange(index));
+        gate = new Promise<void>((resolve) => {
+          openGate = resolve;
+        });
+        server.drop();
+        await settleUntil(() =>
+          history.reads.some(
+            (read) => read.before === Number.MAX_SAFE_INTEGER && history.reads.indexOf(read) > 0,
+          ),
+        );
+        await settle(30);
+        // The replacement is in flight: the reader still sees the old window.
+        expect(hook.result.current.events[0]!.sequence).toBe(1);
+        expect(hook.result.current.events.at(-1)!.sequence).toBe(40);
+        expect(server.opened).toEqual([40]);
+
+        openGate();
+        await settleUntil(() => server.opened.length === 2);
+        await settle(60);
+        expect(server.opened).toEqual([40, 2_440]);
+        expect(server.replayed).toEqual([0, 0]);
+        const events = hook.result.current.events;
+        expect(events.at(-1)!.sequence).toBe(2_440);
+        expect(events[0]!.sequence).toBeGreaterThan(40);
+        expect(hook.result.current.hasOlder).toBe(true);
+        expect(hook.result.current.connectionState).toBe("live");
+      } finally {
+        openGate();
+        await hook.unmount();
+      }
+    },
+    HEAVY_TEST_TIMEOUT_MS,
+  );
+
+  test("full replay keeps the SDK's exactly-once reconnect", async () => {
+    const { store, server, hook } = await openWorkingChat({ replay: "full" });
+    try {
+      expect(server.opened).toEqual([0]);
+      expect(hook.result.current.events).toHaveLength(202);
+      store.push(...lateCalls(203, 100));
+      server.drop();
+      await settleUntil(() => server.opened.length === 2);
+      await settleUntil(() => hook.result.current.events.length === 402);
+      expect(server.opened).toEqual([0, 202]);
+      expect(server.replayed).toEqual([202, 200]);
+      const sequences = hook.result.current.events.map((event) => event.sequence);
+      expect(sequences).toEqual(Array.from({ length: 402 }, (_, index) => index + 1));
+    } finally {
+      await hook.unmount();
+    }
   });
 });

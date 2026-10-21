@@ -475,4 +475,155 @@ describe("streamSessionEvents", () => {
     }
     expect(states).toEqual(["connecting", "reconnecting", "live"]);
   });
+
+  describe("beforeReconnect", () => {
+    const range = (from: number, to: number) =>
+      Array.from({ length: to - from + 1 }, (_, index) => makeEvent(from + index));
+
+    test("without it, a reconnect replays every missed event exactly once", async () => {
+      const controller = new AbortController();
+      // The second connection replays an overlap and a 2,000-event backlog.
+      const transport = scriptedTransport([
+        { events: range(1, 3) },
+        { events: range(2, 2_003), hang: true },
+      ]);
+      const seen: SessionEvent[] = [];
+      for await (const event of streamSessionEvents(transport, {
+        ...FAST,
+        signal: controller.signal,
+      })) {
+        seen.push(event);
+        if (event.sequence === 2_003) controller.abort();
+      }
+      expect(sequences(seen)).toEqual(sequences(range(1, 2_003)));
+      expect(transport.openedAfter).toEqual([0, 3]);
+    });
+
+    test("never runs before the first connection and may move a reconnect forward", async () => {
+      const controller = new AbortController();
+      const transport = scriptedTransport([
+        { events: range(1, 3) },
+        // A server would replay from the requested cursor; anything at or
+        // below it is suppressed even if it arrives.
+        { events: range(2_000, 2_003), hang: true },
+      ]);
+      const asked: number[] = [];
+      const seen: SessionEvent[] = [];
+      for await (const event of streamSessionEvents(transport, {
+        ...FAST,
+        signal: controller.signal,
+        beforeReconnect: async (cursor) => {
+          asked.push(cursor);
+          return 2_001;
+        },
+      })) {
+        seen.push(event);
+        if (event.sequence === 2_003) controller.abort();
+      }
+      expect(asked).toEqual([3]);
+      expect(transport.openedAfter).toEqual([0, 2_001]);
+      expect(sequences(seen)).toEqual([1, 2, 3, 2_002, 2_003]);
+    });
+
+    test("resolving nothing or an older sequence replays exactly once from the cursor", async () => {
+      for (const answer of [undefined, 1, Number.NaN]) {
+        const controller = new AbortController();
+        const transport = scriptedTransport([
+          { events: range(1, 3) },
+          { events: range(2, 6), hang: true },
+        ]);
+        const seen: SessionEvent[] = [];
+        for await (const event of streamSessionEvents(transport, {
+          ...FAST,
+          signal: controller.signal,
+          beforeReconnect: () => answer,
+        })) {
+          seen.push(event);
+          if (event.sequence === 6) controller.abort();
+        }
+        expect(sequences(seen)).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(transport.openedAfter).toEqual([0, 3]);
+      }
+    });
+
+    test("runs before a retry after the first connection failed", async () => {
+      const controller = new AbortController();
+      const transport = scriptedTransport([
+        { error: new TypeError("fetch failed") },
+        { events: range(41, 42), hang: true },
+      ]);
+      const asked: number[] = [];
+      const seen: SessionEvent[] = [];
+      for await (const event of streamSessionEvents(transport, {
+        ...FAST,
+        signal: controller.signal,
+        beforeReconnect: (cursor) => {
+          asked.push(cursor);
+          return 40;
+        },
+      })) {
+        seen.push(event);
+        if (event.sequence === 42) controller.abort();
+      }
+      expect(asked).toEqual([0]);
+      expect(transport.openedAfter).toEqual([0, 40]);
+      expect(sequences(seen)).toEqual([41, 42]);
+    });
+
+    test("a retryable rejection backs off and asks again; others end the stream", async () => {
+      const controller = new AbortController();
+      const transport = scriptedTransport([
+        { events: range(1, 2) },
+        { events: range(3, 4), hang: true },
+      ]);
+      const states: StreamConnectionState[] = [];
+      let calls = 0;
+      const seen: SessionEvent[] = [];
+      for await (const event of streamSessionEvents(transport, {
+        ...FAST,
+        signal: controller.signal,
+        onStateChange: (state) => states.push(state),
+        beforeReconnect: () => {
+          calls += 1;
+          if (calls === 1) throw new TypeError("head read failed");
+        },
+      })) {
+        seen.push(event);
+        if (event.sequence === 4) controller.abort();
+      }
+      expect(calls).toBe(2);
+      // The failed check opened nothing.
+      expect(transport.openedAfter).toEqual([0, 2]);
+      expect(sequences(seen)).toEqual([1, 2, 3, 4]);
+      expect(states).toEqual(["connecting", "live", "reconnecting", "reconnecting", "live"]);
+
+      const fatal = scriptedTransport([{ events: range(1, 2) }]);
+      const iterator = streamSessionEvents(fatal, {
+        ...FAST,
+        beforeReconnect: () => {
+          throw new OpenGeniApiError(404, "session gone");
+        },
+      });
+      await expect(collect(iterator)).rejects.toMatchObject({ status: 404 });
+      expect(fatal.openedAfter).toEqual([0]);
+    });
+
+    test("an abort while it runs ends the stream without reconnecting", async () => {
+      const controller = new AbortController();
+      const transport = scriptedTransport([{ events: range(1, 2) }, { events: range(3, 4) }]);
+      const seen: SessionEvent[] = [];
+      for await (const event of streamSessionEvents(transport, {
+        ...FAST,
+        signal: controller.signal,
+        beforeReconnect: () => {
+          controller.abort();
+          return 10;
+        },
+      })) {
+        seen.push(event);
+      }
+      expect(sequences(seen)).toEqual([1, 2]);
+      expect(transport.openedAfter).toEqual([0]);
+    });
+  });
 });

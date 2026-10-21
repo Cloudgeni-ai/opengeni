@@ -1,5 +1,6 @@
 import {
   isPresentedSessionToolName,
+  isRetryableStreamError,
   isSessionModelResponsePhase,
   SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
@@ -22,6 +23,7 @@ import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { joinSessionDetailRead, sessionDetailReadMark } from "../lib/session-detail-read";
 import { usePageLiveActivity } from "./internal";
+import { subscribePageWake } from "./page-wake";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
@@ -130,10 +132,11 @@ const BOUNDARY_PAGE_CAP = 1;
 // The first window keeps the plain caps, so opening a chat stays one read.
 const FILTERED_PAGE_CAP = 32;
 // Rejoining the live tip (first open of a working turn, a return to a hidden
-// tab, catching up from history) replays a tiny raw gap over SSE. A larger gap
-// catches up the conversation only and reads the working turn's latest steps,
-// instead of replaying every step since the last conversation event. Only a
-// gap of more than this many pages of conversation reloads the latest window.
+// tab or from a sleep, any stream reconnect, catching up from history)
+// replays a tiny raw gap over SSE. A larger gap catches up the conversation
+// only and reads the working turn's latest steps, instead of replaying every
+// step since the last conversation event. Only a gap of more than this many
+// pages of conversation reloads the latest window.
 const DIRECT_REPLAY_MAX_SEQUENCES = 16;
 const CATCHUP_MAX_PAGES = 2;
 const EMPTY_EVENTS: SessionEvent[] = [];
@@ -827,9 +830,9 @@ export function useSessionEvents(
      * append (the caller then loads the latest window).
      */
     // The durable head: the conversation's fresh detail read when one started
-    // since this stream began loading (the session view's own), else a new one.
-    const readSessionHead = async () => {
-      const joined = joinSessionDetailRead(client, workspaceId, sessionId, detailReadMark);
+    // since `mark` (the session view's own), else a new one.
+    const readSessionHead = async (mark: number) => {
+      const joined = joinSessionDetailRead(client, workspaceId, sessionId, mark);
       if (joined) {
         try {
           return await joined;
@@ -842,18 +845,25 @@ export function useSessionEvents(
         signal: controller.signal,
       });
     };
-    const rejoinLive = async (force: boolean): Promise<"joined" | "reload"> => {
+    // `strict` (a stream reconnect) fails on a transient read failure, so the
+    // stream backs off and retries the whole check instead of replaying a
+    // backlog it could not size; any other failed read replays the gap.
+    const rejoinLive = async (
+      force: boolean,
+      strict = false,
+      mark = detailReadMark,
+    ): Promise<"joined" | "reload"> => {
       const activeTurn = activeConversationTurn(eventWindowRef.current.events);
       if (!force && !activeTurn) return "joined";
       const cursor = streamResumeSequenceRef.current;
       let head: number;
       let sessionActiveTurn: string | null = null;
       try {
-        const session = await readSessionHead();
+        const session = await readSessionHead(mark);
         head = session.lastSequence;
         sessionActiveTurn = session.activeTurnId;
       } catch (cause) {
-        if (controller.signal.aborted) throw cause;
+        if (controller.signal.aborted || (strict && isRetryableStreamError(cause))) throw cause;
         // An optimization read: replay from the exact cursor instead.
         return "joined";
       }
@@ -869,7 +879,7 @@ export function useSessionEvents(
           isCurrent,
         });
       } catch (cause) {
-        if (!isCurrent()) throw cause;
+        if (!isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
         return "joined";
       }
       if (!isCurrent()) throw abortError();
@@ -887,6 +897,99 @@ export function useSessionEvents(
         skippedStepsThroughRef.current = null;
       }
       return "joined";
+    };
+
+    // Replace the browser window with the newest conversation window. The
+    // previous window stays on screen until the replacement is installed.
+    const loadLatestWindow = async (): Promise<boolean> => {
+      // First paint is ONE compact fetch of the conversation — the newest
+      // window, revealed at the bottom in a few hundred ms. Deeper history
+      // loads only when the reader scrolls up (the sentinel drives
+      // loadOlder); a turn's steps load when the reader opens it.
+      const window = await loadEventWindow(t, client, workspaceId, sessionId, {
+        before: Number.MAX_SAFE_INTEGER,
+        pageSize: SESSION_HISTORY_PAGE_SIZE,
+        targetGroups: Number.POSITIVE_INFINITY,
+        maxFetches: INITIAL_FETCH_CAP,
+        boundaryPageCap: BOUNDARY_PAGE_CAP,
+        signal: controller.signal,
+        filter: CONVERSATION_FILTER,
+      });
+      if (!isCurrent()) {
+        return false;
+      }
+      const status = observeSessionStatus(window.events, sessionStatusRef);
+      const retained = boundBrowserSessionEventWindow(window.events);
+      // A replacement tail retires requests against the discarded window.
+      // Ordinary SSE reconnects preserve navigation, but splicing an old
+      // page into this new tail could leave an inaccessible history gap.
+      navigationGenerationRef.current += 1;
+      loadingOlderRef.current = false;
+      loadingNewerRef.current = false;
+      loadingOldestRef.current = false;
+      setLoadingOlder(false);
+      setLoadingNewer(false);
+      setLoadingOldest(false);
+      const previous = eventWindowRef.current.events;
+      eventWindowRef.current = retained;
+      pruneStepStores(retained.events, previous);
+      oldestSequenceRef.current =
+        retained.events[0]?.sequence ?? window.oldestSequence ?? window.scanCursor;
+      newestSequenceRef.current = maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
+      hasOlderRef.current = window.hasOlder || retained.truncated;
+      hasNewerRef.current = false;
+      lastSequenceRef.current = Math.max(lastSequenceRef.current, window.newestSequence);
+      streamResumeSequenceRef.current = window.newestSequence;
+      skippedStepsThroughRef.current =
+        retained.events.length === 0 && window.newestSequence > 0 ? window.newestSequence : null;
+      initialWindowLoadedRef.current = true;
+      setInitialHistoryReady(true);
+      setError(null);
+      if (status !== undefined) {
+        setSessionStatusProjection(status);
+      }
+      setEventWindow(retained);
+      setHasOlder(window.hasOlder || retained.truncated);
+      setHasNewer(false);
+      setInitialLoading(false);
+      return true;
+    };
+
+    // The stream starts past what it last delivered: a window load,
+    // catch-up, page or jump moved the cursor with conversation reads, which
+    // carry no terminal output, so the sandbox terminal reads it again.
+    const noteStreamResume = () => {
+      if (!fullReplay && streamResumeSequenceRef.current > liveThroughRef.current) {
+        markTurnlessOutputGap(workspaceId, sessionId);
+      }
+      liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
+    };
+
+    // Every reconnect after the stream first opened (a dropped connection, a
+    // heartbeat timeout, a sleep) joins the tip like a hidden-tab return: a
+    // short gap replays over SSE, a long one is caught up or reloaded instead
+    // of being poured through the live stream.
+    const beforeReconnect = async (cursor: number): Promise<number> => {
+      // Deliver what the broken connection already yielded first.
+      flush();
+      if (!isCurrent()) throw abortError();
+      const mark = sessionDetailReadMark();
+      if ((await rejoinLive(true, true, mark)) === "reload") {
+        let loaded: boolean;
+        try {
+          loaded = await loadLatestWindow();
+        } catch (cause) {
+          if (!isCurrent() || isRetryableStreamError(cause)) throw cause;
+          // A window that cannot be read at all: replay exactly instead.
+          return cursor;
+        }
+        if (!loaded) throw abortError();
+        // The fresh window's own gap is short: join its head the same way.
+        await rejoinLive(true, true, mark);
+      }
+      if (!isCurrent()) throw abortError();
+      noteStreamResume();
+      return Math.max(cursor, streamResumeSequenceRef.current);
     };
 
     void (async () => {
@@ -917,59 +1020,9 @@ export function useSessionEvents(
           attempt += 1
         ) {
           setConnectionState("connecting");
-          // First paint is ONE compact fetch of the conversation — the newest
-          // window, revealed at the bottom in a few hundred ms. Deeper history
-          // loads only when the reader scrolls up (the sentinel drives
-          // loadOlder); a turn's steps load when the reader opens it.
-          const window = await loadEventWindow(t, client, workspaceId, sessionId, {
-            before: Number.MAX_SAFE_INTEGER,
-            pageSize: SESSION_HISTORY_PAGE_SIZE,
-            targetGroups: Number.POSITIVE_INFINITY,
-            maxFetches: INITIAL_FETCH_CAP,
-            boundaryPageCap: BOUNDARY_PAGE_CAP,
-            signal: controller.signal,
-            filter: CONVERSATION_FILTER,
-          });
-          if (!isCurrent()) {
+          if (!(await loadLatestWindow())) {
             return;
           }
-          const status = observeSessionStatus(window.events, sessionStatusRef);
-          const retained = boundBrowserSessionEventWindow(window.events);
-          // A replacement tail retires requests against the discarded window.
-          // Ordinary SSE reconnects preserve navigation, but splicing an old
-          // page into this new tail could leave an inaccessible history gap.
-          navigationGenerationRef.current += 1;
-          loadingOlderRef.current = false;
-          loadingNewerRef.current = false;
-          loadingOldestRef.current = false;
-          setLoadingOlder(false);
-          setLoadingNewer(false);
-          setLoadingOldest(false);
-          const previous = eventWindowRef.current.events;
-          eventWindowRef.current = retained;
-          pruneStepStores(retained.events, previous);
-          oldestSequenceRef.current =
-            retained.events[0]?.sequence ?? window.oldestSequence ?? window.scanCursor;
-          newestSequenceRef.current =
-            maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
-          hasOlderRef.current = window.hasOlder || retained.truncated;
-          hasNewerRef.current = false;
-          lastSequenceRef.current = Math.max(lastSequenceRef.current, window.newestSequence);
-          streamResumeSequenceRef.current = window.newestSequence;
-          skippedStepsThroughRef.current =
-            retained.events.length === 0 && window.newestSequence > 0
-              ? window.newestSequence
-              : null;
-          initialWindowLoadedRef.current = true;
-          setInitialHistoryReady(true);
-          setError(null);
-          if (status !== undefined) {
-            setSessionStatusProjection(status);
-          }
-          setEventWindow(retained);
-          setHasOlder(window.hasOlder || retained.truncated);
-          setHasNewer(false);
-          setInitialLoading(false);
           // Join at the durable head rather than replaying every row since the
           // window's last conversation event: a working turn's steps (its
           // latest are read), or terminal output written after the last turn,
@@ -981,16 +1034,12 @@ export function useSessionEvents(
         if (fullReplay) {
           setInitialLoading(false);
         }
-        // The stream starts past what it last delivered: a window load,
-        // catch-up, page or jump moved the cursor with conversation reads, which
-        // carry no terminal output, so the sandbox terminal reads it again.
-        if (!fullReplay && streamResumeSequenceRef.current > liveThroughRef.current) {
-          markTurnlessOutputGap(workspaceId, sessionId);
-        }
-        liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
+        noteStreamResume();
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
+          // Full replay keeps the SDK's exactly-once reconnects.
+          ...(fullReplay ? {} : { beforeReconnect }),
           onOpen: () => {
             // The first open after this mount's initial tail: every read hook
             // read its projection alongside that tail, and the shared feed
@@ -1087,6 +1136,22 @@ export function useSessionEvents(
     presentedCallIds,
     startupTurns,
   ]);
+
+  // A sleep, frozen tab or lost network usually killed the stream without the
+  // page ever going hidden. Rejoin at once, like a hidden-tab return, instead
+  // of waiting for the heartbeat timeout and then replaying the backlog.
+  useEffect(() => {
+    if (!sessionId || !streamEnabled) return;
+    return subscribePageWake(() => {
+      const stream = streamAbortRef.current;
+      // History views and paused streams have no live connection to restore.
+      if (!stream || stream.signal.aborted || viewModeRef.current !== "live") return;
+      if (!fullReplay && initialWindowLoadedRef.current) {
+        reconcileAfterPageResumeRef.current = true;
+      }
+      setStreamEpoch((epoch) => epoch + 1);
+    });
+  }, [sessionId, streamEnabled, fullReplay]);
 
   const navigationBusy = (): boolean =>
     loadingTargetRef.current ||

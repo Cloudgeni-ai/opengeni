@@ -53,6 +53,18 @@ export type StreamSessionEventsOptions = {
   /** Maximum time without any SSE bytes before reconnecting. Defaults to 45s. */
   heartbeatTimeoutMs?: number;
   onStateChange?: (state: StreamConnectionState) => void;
+  /**
+   * Session event streams only; opt-in. Runs before every reconnect (never
+   * before the first connection) with the sequence the stream would resume
+   * after. Resolve a larger sequence to resume after it instead: the events
+   * in between are then NOT delivered, so the caller must already hold an
+   * equivalent view (for example, it re-read a bounded newest window after a
+   * long disconnect). Resolve nothing, or a sequence at or below the cursor,
+   * to replay exactly once from the cursor. A rejection counts as a failed
+   * reconnect attempt: retryable errors back off and call this again, others
+   * end the stream. Without it, reconnects keep exactly-once replay.
+   */
+  beforeReconnect?: ((cursor: number) => number | void | Promise<number | void>) | undefined;
 };
 
 /**
@@ -61,8 +73,9 @@ export type StreamSessionEventsOptions = {
  * Guarantees, anchored on the per-session contiguous `sequence`:
  * - **No duplicates**: events at or below the cursor are dropped, so server
  *   replay overlap and reconnect overlap never re-yield.
- * - **No gaps**: each reconnect resumes from the last seen sequence, and a
- *   gap observed inside one connection is backfilled from the durable replay
+ * - **No gaps**: each reconnect resumes from the last seen sequence (unless
+ *   an opt-in `beforeReconnect` deliberately moves it forward), and a gap
+ *   observed inside one connection is backfilled from the durable replay
  *   endpoint before the newer event is yielded (events are durable before
  *   they are published live, so the backfill always finds them).
  * - **Ordered**: sequences are yielded strictly ascending.
@@ -86,12 +99,22 @@ export async function* streamSessionEvents(
   let failedAttempts = 0;
   let delayMs = baseDelayMs;
   let everConnected = false;
+  let attempted = false;
 
   while (true) {
     if (signal?.aborted) break;
     options.onStateChange?.(everConnected || failedAttempts > 0 ? "reconnecting" : "connecting");
-    const cursorAtOpen = cursor;
+    let cursorAtOpen = cursor;
     try {
+      if (attempted && options.beforeReconnect) {
+        const resumeAfter = await options.beforeReconnect(cursor);
+        if (signal?.aborted) return;
+        if (typeof resumeAfter === "number" && Number.isSafeInteger(resumeAfter)) {
+          cursor = Math.max(cursor, resumeAfter);
+        }
+        cursorAtOpen = cursor;
+      }
+      attempted = true;
       const body = await transport.openStream(cursor, signal);
       everConnected = true;
       failedAttempts = 0;

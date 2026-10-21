@@ -2517,6 +2517,12 @@ archives locally, never in deployed images.
 
 Timeline history: `packages/react`. `use-session-events.ts` fences navigation by
 session/client lifetime, independently of SSE reconnects; Web supplies events/session keys.
+Every return to the live tip (first open, hidden-tab return, a wake that
+`hooks/page-wake.ts` detects from a wall-clock jump or `online`/`resume`, and each
+SDK reconnect through the opt-in `streamSessionEvents` `beforeReconnect`) reads the
+durable head: at most 16 missed events replay over SSE; more catch up the
+conversation in at most two pages and re-read the working turn's newest steps, or
+load the newest window. SDK callers without `beforeReconnect` keep exactly-once replay.
 Overlap uses retained event identity; prepends may change partial-message row IDs.
 `timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx` corrects
 residual browser-anchor movement without resuming tip-follow. Upward input loads

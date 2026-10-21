@@ -156,7 +156,9 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/hooks/tool-output-reads.ts"))).toBe(true);
     // The live stream's head read joins the conversation's fresh detail read.
     expect(reactSources.some((id) => id.endsWith("/src/lib/session-detail-read.ts"))).toBe(true);
-    expect(reactSources.length).toBe(45);
+    // Dependency-free wake detection: the live stream rejoins after a sleep.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/page-wake.ts"))).toBe(true);
+    expect(reactSources.length).toBe(46);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
