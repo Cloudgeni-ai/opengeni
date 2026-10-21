@@ -3969,7 +3969,7 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {
+  test("scheduled dispatch and its retry skip without a chat while the workspace is paused", async () => {
     const grant = await testGrant(dbClient.db);
     await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
@@ -4015,6 +4015,7 @@ describe("worker activities integration", () => {
       }),
     });
     const producerKey = `paused-fire:${crypto.randomUUID()}`;
+    const sessionsBefore = await listSessions(dbClient.db, grant.workspaceId);
 
     const first = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
@@ -4029,23 +4030,20 @@ describe("worker activities integration", () => {
       producerKey,
     });
 
-    expect(first.workflowWakeRevision).toBeNull();
-    expect(retry).toMatchObject({
-      sessionId: first.sessionId,
-      workflowWakeRevision: null,
-    });
+    // A workspace Pause skips a new-chat run before any chat exists, and the
+    // retry of the same fire settles on that skipped run.
+    const skipped = { action: "blocked", reason: "scheduled_run_terminal" };
+    expect(first).toEqual(skipped);
+    expect(retry).toEqual(skipped);
     expect(workflowWakes).toHaveLength(0);
-    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
-      status: "queued",
-      effectiveControl: { state: "paused" },
-    });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
-    // session.created carries the public "queued" status directly; there is no
-    // separate session.status.changed event before the (withheld) wake.
-    expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
-      status: "queued",
-    });
-    expect(events.filter((event) => event.type === "session.status.changed")).toHaveLength(0);
+    expect(await listSessions(dbClient.db, grant.workspaceId)).toHaveLength(sessionsBefore.length);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({
+        status: "skipped",
+        error: "scheduled_workspace_paused",
+        sessionId: null,
+      }),
+    ]);
   });
 
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {

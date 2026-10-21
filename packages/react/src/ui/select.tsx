@@ -11,7 +11,7 @@ const Select = React.forwardRef<
     <select
       ref={ref}
       className={cn(
-        "peer h-9 w-full appearance-none rounded-md border border-border bg-bg px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+        "peer h-9 w-full appearance-none rounded-md border border-border bg-bg px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus-visible:border-ring focus-visible:outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
         className,
         displayValue !== undefined && "text-transparent [&_option]:text-fg [&_optgroup]:text-fg",
       )}

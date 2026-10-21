@@ -4555,6 +4555,14 @@
       outline-offset: 2px;
     }
   }
+:where(.og-root).outline-hidden\!,:where(.og-root) .outline-hidden\! {
+    --tw-outline-style: none !important;
+    outline-style: none !important;
+    @media (forced-colors: active) {
+      outline: 2px solid transparent !important;
+      outline-offset: 2px !important;
+    }
+  }
 :where(.og-root).outline,:where(.og-root) .outline {
     outline-style: var(--tw-outline-style);
     outline-width: 1px;
@@ -4737,14 +4745,6 @@
 :where(.og-root).ease-out,:where(.og-root) .ease-out {
     --tw-ease: var(--ease-out);
     transition-timing-function: var(--ease-out);
-  }
-:where(.og-root).outline-none,:where(.og-root) .outline-none {
-    --tw-outline-style: none;
-    outline-style: none;
-  }
-:where(.og-root).outline-none\!,:where(.og-root) .outline-none\! {
-    --tw-outline-style: none !important;
-    outline-style: none !important;
   }
 :where(.og-root).select-all,:where(.og-root) .select-all {
     -webkit-user-select: all;
@@ -6679,12 +6679,6 @@
       @supports (color: color-mix(in lab, red, red)) {
         outline-color: color-mix(in oklab, var(--color-brand) 55%, transparent);
       }
-    }
-  }
-:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
-    &:focus-visible {
-      --tw-outline-style: none;
-      outline-style: none;
     }
   }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {
@@ -9317,6 +9311,66 @@
       padding-top: calc(var(--spacing) * 6);
     }
   }
+:where(.og-root).\[\&\:is\(a\)\]\:hover\:bg-accent,:where(.og-root) .\[\&\:is\(a\)\]\:hover\:bg-accent {
+    &:is(a) {
+      &:hover {
+        @media (hover: hover) {
+          background-color: var(--color-surface-2);
+        }
+      }
+    }
+  }
+:where(.og-root).\[\&\:is\(a\)\]\:hover\:bg-destructive-filled\/90,:where(.og-root) .\[\&\:is\(a\)\]\:hover\:bg-destructive-filled\/90 {
+    &:is(a) {
+      &:hover {
+        @media (hover: hover) {
+          background-color: var(--og-color-danger-fill);
+          @supports (color: color-mix(in lab, red, red)) {
+            background-color: color-mix(in oklab, var(--og-color-danger-fill) 90%, transparent);
+          }
+        }
+      }
+    }
+  }
+:where(.og-root).\[\&\:is\(a\)\]\:hover\:bg-primary-hover,:where(.og-root) .\[\&\:is\(a\)\]\:hover\:bg-primary-hover {
+    &:is(a) {
+      &:hover {
+        @media (hover: hover) {
+          background-color: var(--_og-color-primary-hover);
+        }
+      }
+    }
+  }
+:where(.og-root).\[\&\:is\(a\)\]\:hover\:bg-secondary\/90,:where(.og-root) .\[\&\:is\(a\)\]\:hover\:bg-secondary\/90 {
+    &:is(a) {
+      &:hover {
+        @media (hover: hover) {
+          background-color: var(--og-color-selection);
+          @supports (color: color-mix(in lab, red, red)) {
+            background-color: color-mix(in oklab, var(--og-color-selection) 90%, transparent);
+          }
+        }
+      }
+    }
+  }
+:where(.og-root).\[\&\:is\(a\)\]\:hover\:text-accent-foreground,:where(.og-root) .\[\&\:is\(a\)\]\:hover\:text-accent-foreground {
+    &:is(a) {
+      &:hover {
+        @media (hover: hover) {
+          color: var(--color-fg);
+        }
+      }
+    }
+  }
+:where(.og-root).\[\&\:is\(a\)\]\:hover\:underline,:where(.og-root) .\[\&\:is\(a\)\]\:hover\:underline {
+    &:is(a) {
+      &:hover {
+        @media (hover: hover) {
+          text-decoration-line: underline;
+        }
+      }
+    }
+  }
 :where(.og-root).data-\[variant\=destructive\]\:\*\:\[svg\]\:text-danger\!,:where(.og-root) .data-\[variant\=destructive\]\:\*\:\[svg\]\:text-danger\! {
     &[data-variant="destructive"] {
       :is(& > *) {
@@ -9680,66 +9734,6 @@
 :where(.og-root).\[\@media\(pointer\:coarse\)\]\:min-w-11,:where(.og-root) .\[\@media\(pointer\:coarse\)\]\:min-w-11 {
     @media (pointer:coarse) {
       min-width: calc(var(--spacing) * 11);
-    }
-  }
-:where(.og-root).\[a\&\]\:hover\:bg-accent,:where(.og-root) .\[a\&\]\:hover\:bg-accent {
-    a& {
-      &:hover {
-        @media (hover: hover) {
-          background-color: var(--color-surface-2);
-        }
-      }
-    }
-  }
-:where(.og-root).\[a\&\]\:hover\:bg-destructive-filled\/90,:where(.og-root) .\[a\&\]\:hover\:bg-destructive-filled\/90 {
-    a& {
-      &:hover {
-        @media (hover: hover) {
-          background-color: var(--og-color-danger-fill);
-          @supports (color: color-mix(in lab, red, red)) {
-            background-color: color-mix(in oklab, var(--og-color-danger-fill) 90%, transparent);
-          }
-        }
-      }
-    }
-  }
-:where(.og-root).\[a\&\]\:hover\:bg-primary-hover,:where(.og-root) .\[a\&\]\:hover\:bg-primary-hover {
-    a& {
-      &:hover {
-        @media (hover: hover) {
-          background-color: var(--_og-color-primary-hover);
-        }
-      }
-    }
-  }
-:where(.og-root).\[a\&\]\:hover\:bg-secondary\/90,:where(.og-root) .\[a\&\]\:hover\:bg-secondary\/90 {
-    a& {
-      &:hover {
-        @media (hover: hover) {
-          background-color: var(--og-color-selection);
-          @supports (color: color-mix(in lab, red, red)) {
-            background-color: color-mix(in oklab, var(--og-color-selection) 90%, transparent);
-          }
-        }
-      }
-    }
-  }
-:where(.og-root).\[a\&\]\:hover\:text-accent-foreground,:where(.og-root) .\[a\&\]\:hover\:text-accent-foreground {
-    a& {
-      &:hover {
-        @media (hover: hover) {
-          color: var(--color-fg);
-        }
-      }
-    }
-  }
-:where(.og-root).\[a\&\]\:hover\:underline,:where(.og-root) .\[a\&\]\:hover\:underline {
-    a& {
-      &:hover {
-        @media (hover: hover) {
-          text-decoration-line: underline;
-        }
-      }
     }
   }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */

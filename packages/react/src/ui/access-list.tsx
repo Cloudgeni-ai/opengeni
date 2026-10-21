@@ -299,7 +299,7 @@ function RowMenu({
         <button
           type="button"
           aria-label={`More actions for ${member.name}`}
-          className="grid size-8 shrink-0 place-items-center rounded-[10px] text-fg-subtle transition-colors duration-[120ms] outline-none hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 data-[state=open]:bg-surface-3 data-[state=open]:text-fg pointer-coarse:size-11"
+          className="grid size-8 shrink-0 place-items-center rounded-[10px] text-fg-subtle transition-colors duration-[120ms] outline-hidden hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55 data-[state=open]:bg-surface-3 data-[state=open]:text-fg pointer-coarse:size-11"
         >
           <MoreHorizontalIcon aria-hidden="true" className="size-4" />
         </button>
@@ -497,7 +497,7 @@ function TextRow({ member, props }: RowProps) {
           type="button"
           onClick={() => onOpen(member)}
           aria-label={`${member.name}, ${roleLabel(roles, member.role, { noAccessLabel })}`}
-          className="flex min-h-14 w-full min-w-0 items-center gap-3 px-3 py-3 text-left transition-colors duration-[120ms] outline-none hover:bg-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
+          className="flex min-h-14 w-full min-w-0 items-center gap-3 px-3 py-3 text-left transition-colors duration-[120ms] outline-hidden hover:bg-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
         >
           {content}
         </button>

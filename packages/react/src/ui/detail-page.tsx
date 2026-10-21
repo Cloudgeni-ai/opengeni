@@ -98,7 +98,7 @@ export function DetailPageHeader({
               <h1
                 tabIndex={-1}
                 data-slot="detail-page-title"
-                className="min-w-0 text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg outline-none"
+                className="min-w-0 text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg outline-hidden"
               >
                 {title}
               </h1>
