@@ -20,7 +20,9 @@ use compute_fleet::{
     Demand, HostId, LeaseTerms, Next, Op, Outcome, OwnerEpoch, Ownership, Prefer, SandboxId,
     answered,
 };
-use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request, SandboxConfig, SleepConfig};
+use compute_protocol::host::{
+    ErrorCode, Id, ImageId, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
+};
 use compute_storage::store::ChunkStore;
 
 use crate::hosts::{Answered, Hosts};
@@ -350,8 +352,8 @@ impl<S: Store> Service<S> {
     }
 
     /// Creates a sandbox for `team`: places it, records it with its first
-    /// owner, and has that host create it, trying another host when one
-    /// refuses.
+    /// owner, and has that host create it and run it, trying another host
+    /// when one refuses the create or is too full to run it.
     pub async fn create(
         &self,
         team: &str,
@@ -398,7 +400,8 @@ impl<S: Store> Service<S> {
                 }
             };
             row.ownership = if inserted {
-                // The host before it refused outright and holds nothing.
+                // The host before it refused outright or removed it, and
+                // holds nothing.
                 row.ownership.give(target.host).set
             } else {
                 Ownership::created(target.host)
@@ -450,7 +453,13 @@ impl<S: Store> Service<S> {
             let (next, now) = self.settle(id, asked, &answered, tries).await?;
             row = now.ok_or(Failure::NotFound)?;
             match next {
-                _ if answered.outcome() == Outcome::Done => return Ok(row),
+                _ if answered.outcome() == Outcome::Done => {
+                    let Some(full) = self.run_created(&row, &target).await? else {
+                        return Ok(row);
+                    };
+                    exclude.push(target.host);
+                    refused = Some(full);
+                }
                 Next::PlaceElsewhere => {
                     exclude.push(target.host);
                     refused = Some(answered);
@@ -463,6 +472,60 @@ impl<S: Store> Service<S> {
         }
         self.forget_if_refused(&row, refused.as_ref()).await?;
         Err(Failure::NoCapacity)
+    }
+
+    /// Has `target`, which just created `row`'s sandbox, run it, so that a
+    /// create answers with its sandbox running. Hosts admit a create
+    /// against all their memory but a wake against what is free, and
+    /// placement counts what it sent a host only until the host reports,
+    /// so a burst of creates can land on a host that cannot run them all.
+    /// A host too full to run one removes it, since a new sandbox holds
+    /// nothing a host must keep, and its refusal is returned, for the
+    /// create to go elsewhere. `None` once the sandbox runs, or when its
+    /// wake failed otherwise, which the next wake tries again.
+    async fn run_created(
+        &self,
+        row: &SandboxRow,
+        target: &Target,
+    ) -> Result<Option<Answered>, Failure> {
+        let epoch = row.ownership.epoch;
+        let request = Request::Wake {
+            id: row.id,
+            generation: None,
+            priority: PriorityName::Interactive,
+        };
+        let Ok(woke) = self
+            .hosts
+            .call(target, Some(epoch), &request, reach::WAKE_WAIT)
+            .await
+        else {
+            return Ok(None);
+        };
+        if woke.code() != Some(ErrorCode::HostFull) {
+            return Ok(None);
+        }
+        let remove = Request::Remove {
+            id: row.id,
+            generation: None,
+        };
+        let removed = self
+            .hosts
+            .call(target, Some(epoch), &remove, REMOVE_WAIT)
+            .await
+            .map_err(|error| Failure::Unknown {
+                id: row.id,
+                why: format!("its host is too full to run it, and removing it failed: {error}"),
+            })?;
+        if removed.outcome() != Outcome::Done {
+            return Err(Failure::Unknown {
+                id: row.id,
+                why: format!(
+                    "its host is too full to run it, and did not remove it: {}",
+                    host_failure(&removed)
+                ),
+            });
+        }
+        Ok(Some(woke))
     }
 
     /// A new sandbox's row, not yet placed, and what it asks of a host.

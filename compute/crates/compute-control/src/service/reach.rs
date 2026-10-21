@@ -12,7 +12,7 @@ use crate::store::{SandboxRow, Store, Write, replace};
 use crate::view::Target;
 
 /// How long a host may take to wake a sandbox and answer.
-const WAKE_WAIT: Duration = Duration::from_secs(60);
+pub(super) const WAKE_WAIT: Duration = Duration::from_secs(60);
 /// How long a host may take to adopt a sandbox.
 const ADOPT_WAIT: Duration = Duration::from_secs(30);
 /// How long to wait before asking again after an answer that may change

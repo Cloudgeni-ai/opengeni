@@ -11,7 +11,9 @@
 //! steers: removes are not taken off it, and a host's report can repeat
 //! the one before it, so it can run ahead of the host. When it leaves no
 //! host, a host whose own report fits is asked anyway, and the host's
-//! answer decides.
+//! answer decides: a create is answered only once its host runs the
+//! sandbox, and a host too full to run it removes it, so the create goes
+//! to the next host.
 //!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,

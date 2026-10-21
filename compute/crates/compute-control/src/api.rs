@@ -385,8 +385,17 @@ async fn create<S: Store>(
         }
         _ => service.create(&team, spec, body.metadata).await?,
     };
-    if let Some(init) = &init {
-        crate::init::give(service, &team, row.id, &init.guest()).await?;
+    if let Some(init) = &init
+        && let Err(error) = crate::init::give(service, &team, row.id, &init.guest()).await
+    {
+        // A create that fails leaves no sandbox behind, unless its request
+        // id lets the caller ask again, which gives the init again.
+        if body.request_id.is_none()
+            && let Err(failure) = service.delete(&team, row.id).await
+        {
+            tracing::warn!(sandbox = %row.id, %failure, "removing a sandbox whose init failed");
+        }
+        return Err(error.into());
     }
     Ok((StatusCode::CREATED, Json(SandboxView::of(service, row))))
 }
