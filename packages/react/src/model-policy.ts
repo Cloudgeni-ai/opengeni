@@ -60,7 +60,9 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   if (
     model.provider === "organization-gateway" ||
     model.provider === "organization-openrouter" ||
-    model.provider === "organization-opper"
+    model.provider === "organization-opper" ||
+    model.provider === "organization-openai" ||
+    model.provider === "organization-azure-openai"
   ) {
     return "organization_byok";
   }
@@ -296,6 +298,12 @@ function organizationProviderPayerSummary(t: OpenGeniText, model: ClientModel): 
   }
   if (model.provider === "organization-opper") {
     return t("modelPolicy.billedToTheOrganizationOpper");
+  }
+  if (model.provider === "organization-openai") {
+    return t("modelPolicy.billedToTheOrganizationOpenai");
+  }
+  if (model.provider === "organization-azure-openai") {
+    return t("modelPolicy.billedToTheOrganizationAzureOpenai");
   }
   if (model.provider === "organization-gateway") {
     return t("modelPolicy.billedToTheOrganizationVercel");

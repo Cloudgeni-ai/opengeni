@@ -6,6 +6,7 @@ export * from "./workspace-control-event";
 import { defineSchema } from "./define-schema";
 export * from "./session-target";
 export * from "./turn-serving-policy";
+import { AzureOpenAIEndpoint } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
@@ -3533,6 +3534,8 @@ export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
     "claude_subscription",
     "opper",
     "elevenlabs",
+    "openai",
+    "azure_openai",
   ]),
 );
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
@@ -3541,6 +3544,11 @@ export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defin
     providerKind: OrganizationModelProviderKind,
     status: z.enum(["active", "revoked"]),
     version: z.number().int().positive(),
+    /**
+     * Azure OpenAI only: the non-secret resource endpoint, normalized to
+     * `https://<resource>.openai.azure.com/openai/v1`. Absent for other kinds.
+     */
+    endpoint: z.string().url().optional(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   }),
@@ -3554,6 +3562,12 @@ export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ 
       operationId: z.string().uuid(),
       expectedVersion: z.number().int().nonnegative().optional(),
       apiKey: z.string().trim().min(1).max(8192),
+      /**
+       * Required for `azure_openai` and refused for every other kind: the
+       * official `https://<resource>.openai.azure.com` resource endpoint (or
+       * its `/openai/v1` URL). Arbitrary proxy endpoints are refused.
+       */
+      endpoint: AzureOpenAIEndpoint.optional(),
       claudeIdentity: z
         .object({
           accountUuid: z.string().uuid(),

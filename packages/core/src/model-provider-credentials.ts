@@ -21,6 +21,9 @@ import {
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   ORGANIZATION_OPPER_MODEL_ID_PREFIX,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
+  organizationDirectModelIdPrefix,
+  withOrganizationDirectCatalogProvider,
+  withOrganizationDirectCredential,
   withOrganizationOpperCatalogProvider,
   withOrganizationOpperCredential,
   withWorkspaceOpperCatalogProvider,
@@ -40,6 +43,8 @@ import {
   listOrganizationModelProviderCustomModelsForWorkspace,
   getOrganizationModelProviderCustomModelForExecution,
   loadOrganizationModelProviderApiKey,
+  loadOrganizationModelProviderCredential,
+  getOrganizationModelProviderCatalogForWorkspace,
   listWorkspaceProviderCustomModels,
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
@@ -250,7 +255,14 @@ export async function settingsWithOrganizationProviderCredentials(
     throw new Error("Prepared provider catalog does not match subscription settings");
   }
   const buildModels = async (
-    providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper",
+    providerKind:
+      | "vercel_gateway"
+      | "openrouter"
+      | "anthropic"
+      | "claude_subscription"
+      | "opper"
+      | "openai"
+      | "azure_openai",
     prefix: string,
   ) => {
     const active =
@@ -314,9 +326,43 @@ export async function settingsWithOrganizationProviderCredentials(
     },
     prepared,
   );
-  let result = opperKey
+  const opperSettings = opperKey
     ? withOrganizationOpperCredential(openRouterSettings, opperKey, opperModels)
     : withOrganizationOpperCatalogProvider(openRouterSettings, opperModels);
+  // Organization OpenAI and Azure OpenAI: the decrypted key (and Azure's
+  // endpoint) come from the same active row; without one the catalog keeps
+  // Azure's non-secret endpoint of the last connection and the turn fails
+  // closed in the runtime. Never a deployment credential.
+  let result = opperSettings;
+  for (const provider of ["openai", "azure_openai"] as const) {
+    const models = await buildModels(provider, organizationDirectModelIdPrefix(provider));
+    const credential = await loadOrganizationModelProviderCredential(
+      db,
+      settings,
+      { accountId, workspaceId, providerKind: provider },
+      prepared,
+    );
+    if (credential && (provider === "openai" || credential.endpoint)) {
+      result = withOrganizationDirectCredential(result, provider, credential.apiKey, {
+        endpoint: credential.endpoint,
+        models,
+      });
+      continue;
+    }
+    result = withOrganizationDirectCatalogProvider(result, provider, {
+      endpoint:
+        provider === "openai" || models.length === 0
+          ? null
+          : (
+              await getOrganizationModelProviderCatalogForWorkspace(db, {
+                accountId,
+                workspaceId,
+                providerKinds: ["azure_openai"],
+              })
+            ).azure_openai.endpoint,
+      models,
+    });
+  }
   for (const kind of CLAUDE_CONNECTION_KINDS) {
     if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");

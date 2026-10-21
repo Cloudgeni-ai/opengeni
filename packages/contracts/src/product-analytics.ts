@@ -84,6 +84,8 @@ export const ANALYTICS_MODEL_PROVIDERS = [
   "opper",
   "workspace-opper",
   "organization-opper",
+  "organization-openai",
+  "organization-azure-openai",
   "registry",
 ] as const;
 export const AnalyticsModelProvider = /* @__PURE__ */ defineSchema(() =>

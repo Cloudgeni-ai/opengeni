@@ -60,3 +60,41 @@ export async function verifyDirectModelAccess(
     });
   }
 }
+
+/**
+ * Check that an organization OpenAI model or Azure OpenAI deployment answers
+ * with the organization's own key (and Azure endpoint) before it is saved as a
+ * curated model. Same short Responses call and safe errors as the workspace
+ * direct-connection setup check; nothing upstream is reflected or persisted.
+ */
+export async function verifyOrganizationDirectModel(
+  input:
+    | { provider: "openai"; model: string }
+    | { provider: "azure_openai"; model: string; endpoint: string },
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const config = DirectModelProviderMetadata.safeParse(input);
+  if (!config.success) {
+    throw new HTTPException(422, {
+      message:
+        input.provider === "openai"
+          ? "Enter the exact OpenAI model ID."
+          : "Enter the exact Azure OpenAI deployment name.",
+    });
+  }
+  await verifyDirectModelAccess(config.data, apiKey, fetchImpl);
+}
+
+/** The organization Azure OpenAI form of {@link verifyOrganizationDirectModel}. */
+export async function verifyOrganizationAzureOpenAIDeployment(
+  input: { endpoint: string; deployment: string },
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  await verifyOrganizationDirectModel(
+    { provider: "azure_openai", model: input.deployment, endpoint: input.endpoint },
+    apiKey,
+    fetchImpl,
+  );
+}
