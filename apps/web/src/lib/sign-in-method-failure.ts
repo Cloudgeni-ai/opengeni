@@ -1,4 +1,5 @@
 import { ApiError } from "@/api";
+import { SIGN_IN_METHOD_ORIGIN_MESSAGE } from "./sign-in-method-origin";
 
 export function signInMethodFailure(error: unknown): {
   kind: "identity_changed" | "reauth" | "rejected" | "unknown";
@@ -10,6 +11,9 @@ export function signInMethodFailure(error: unknown): {
       message:
         "The result of this change is unknown. Cancel any open dialog, then retry the same request or refresh to check your methods. Don't submit a new change yet.",
     };
+  }
+  if (error.details?.code === "SIGN_IN_METHOD_SAME_ORIGIN_REQUIRED") {
+    return { kind: "rejected", message: SIGN_IN_METHOD_ORIGIN_MESSAGE };
   }
   const code = error.code?.toUpperCase().replace(/^SIGN_IN_METHOD_/, "");
   if (code === "IDENTITY_CHANGED")

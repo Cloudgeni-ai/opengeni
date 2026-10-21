@@ -24,3 +24,14 @@ test("unknown transport and explicit outcome uncertainty never become definitive
     "rejected",
   );
 });
+
+test("origin refusal identifies deployment configuration rather than suggesting another sign-in", () => {
+  const error = new ApiError(403, "", {
+    code: "forbidden",
+    details: { code: "SIGN_IN_METHOD_SAME_ORIGIN_REQUIRED" },
+  });
+  const result = signInMethodFailure(error);
+  expect(result.kind).toBe("rejected");
+  expect(result.message).toContain("same origin");
+  expect(result.message).toContain("administrator");
+});
