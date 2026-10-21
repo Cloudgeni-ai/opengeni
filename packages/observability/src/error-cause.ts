@@ -1,3 +1,10 @@
+import {
+  interactionDriverErrorClass,
+  interactionDriverFrame,
+  parseInteractionDriverDiagnostic,
+  redactInteractionDriverMessage,
+} from "@opengeni/contracts";
+
 /**
  * Bounded classification of the error underneath an operational failure, so a
  * 500 says which component refused it (the browser controller, the connected
@@ -7,6 +14,12 @@
  * name, a closed interaction-controller error code, a connected-machine error
  * enum number, an HTTP status and a SQLSTATE. Never messages, stacks, paths,
  * identifiers or arbitrary `code` properties.
+ *
+ * One reviewed exception: an interaction controller's `driver_failed` adds the
+ * driver's error class and failing function (code names) and its own
+ * code-written message with every variable part (window titles, page text,
+ * paths, free-text reasons) redacted, so an operator can tell driver failures
+ * apart. The message is redacted again at the log boundary.
  */
 
 /** Reviewed error classes whose names carry no data. Wrappers that only
@@ -77,6 +90,9 @@ const SQLSTATE = /^[0-9A-Z]{5}$/;
 export type ErrorCauseAttributes = {
   causeName?: string;
   causeCode?: string;
+  causeDriverClass?: string;
+  causeDriverFrame?: string;
+  causeDriverMessage?: string;
   causeAgentCode?: number;
   causeStatus?: number;
   causeSqlState?: string;
@@ -101,6 +117,19 @@ export function projectErrorCauseAttributes(
   attributes: Record<string, unknown>,
 ): ErrorCauseAttributes {
   const { causeName, causeCode, causeAgentCode, causeStatus, causeSqlState } = attributes;
+  const driverFailed = causeName === "BrowserControlRequestError" && causeCode === "driver_failed";
+  const causeDriverClass = driverFailed
+    ? interactionDriverErrorClass(attributes.causeDriverClass)
+    : null;
+  const causeDriverFrame = driverFailed
+    ? interactionDriverFrame(attributes.causeDriverFrame)
+    : null;
+  const causeDriverMessage =
+    driverFailed &&
+    typeof attributes.causeDriverMessage === "string" &&
+    attributes.causeDriverMessage.length <= 4_096
+      ? redactInteractionDriverMessage(attributes.causeDriverMessage)
+      : null;
   return {
     ...(typeof causeName === "string" && PUBLIC_ERROR_CAUSE_NAMES.has(causeName)
       ? { causeName }
@@ -108,6 +137,9 @@ export function projectErrorCauseAttributes(
     ...(typeof causeCode === "string" && PUBLIC_INTERACTION_ERROR_CODES.has(causeCode)
       ? { causeCode }
       : {}),
+    ...(causeDriverClass ? { causeDriverClass } : {}),
+    ...(causeDriverFrame ? { causeDriverFrame } : {}),
+    ...(causeDriverMessage ? { causeDriverMessage } : {}),
     ...(typeof causeAgentCode === "number" &&
     Number.isInteger(causeAgentCode) &&
     causeAgentCode >= 0 &&
@@ -132,9 +164,21 @@ function classify(error: object, name: string | null): ErrorCauseAttributes {
     result.causeStatus = status;
   }
   if (name === "BrowserControlRequestError") {
-    const code = ownValue(ownValue(error, "error"), "code");
+    const interactionError = ownValue(error, "error");
+    const code = ownValue(interactionError, "code");
     if (typeof code === "string" && PUBLIC_INTERACTION_ERROR_CODES.has(code)) {
       result.causeCode = code;
+    }
+    if (code === "driver_failed") {
+      const diagnostic = parseInteractionDriverDiagnostic(ownValue(error, "diagnostic"));
+      if (diagnostic) {
+        result.causeDriverClass = diagnostic.errorClass;
+        if (diagnostic.frame) result.causeDriverFrame = diagnostic.frame;
+      }
+      const message = ownValue(interactionError, "message");
+      if (typeof message === "string" && message.length > 0 && message.length <= 8_192) {
+        result.causeDriverMessage = redactInteractionDriverMessage(message);
+      }
     }
   }
   if (name === "SelfhostedControlError") {
