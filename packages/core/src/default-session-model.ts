@@ -285,6 +285,8 @@ export async function resolveDefaultSessionModelForSelections(
     selections: readonly WorkspaceModelSelection[];
     /** Already-read organization defaults; read here when omitted. */
     organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
+    /** Request-local ledger snapshot, shared with the catalog's funding projection. */
+    creditBalance?: BillingBalance;
   },
 ): Promise<DefaultModelSelection> {
   const workspaceDefaults = resolveWorkspaceSessionDefaults(input.workspaceSettings);
@@ -308,7 +310,7 @@ export async function resolveDefaultSessionModelForSelections(
   ) {
     return withoutCredits;
   }
-  const creditBalance = await getBillingBalance(db, input.accountId);
+  const creditBalance = input.creditBalance ?? (await getBillingBalance(db, input.accountId));
   return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
 }
 
