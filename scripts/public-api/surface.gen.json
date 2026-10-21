@@ -13817,6 +13817,7 @@
         "$.focused": "boolean!",
         "$.id": "string!",
         "$.kind": "enum!=[\"\\\"app\\\"\",\"\\\"screen\\\"\",\"\\\"window\\\"\"]",
+        "$.offScreen": "const?=[\"true\"]",
         "$.processId": "integer! null",
         "$.targetGeneration": "string!",
         "$.title": "string!"
@@ -35808,6 +35809,618 @@
     },
     "@opengeni/react/tokens.css": {
       "default": "value"
+    },
+    "@opengeni/react/ui/access-list": {
+      "AccessList": "value",
+      "AccessListProps": "type",
+      "AccessListVariant": "type",
+      "AccessMember": "type",
+      "AccessMemberStatus": "type",
+      "AccessScope": "type",
+      "groupAccessMembers": "value",
+      "removeBlockedReason": "value"
+    },
+    "@opengeni/react/ui/analytics-actions": {
+      "ANALYTICS_ACTIONS": "value",
+      "analyticsAction": "value",
+      "AnalyticsAction": "type",
+      "isAnalyticsAction": "value"
+    },
+    "@opengeni/react/ui/api-error": {
+      "apiErrorAdvice": "value",
+      "apiErrorDetails": "value",
+      "apiErrorFacts": "value",
+      "ApiErrorFacts": "type",
+      "apiErrorTechnicalFacts": "value",
+      "isApiError": "value",
+      "isPermissionDenied": "value",
+      "userErrorText": "value",
+      "userErrorTextWithoutReference": "value",
+      "userFacingError": "value"
+    },
+    "@opengeni/react/ui/avatar": {
+      "Avatar": "value",
+      "AvatarBadge": "value",
+      "AvatarFallback": "value",
+      "AvatarGroup": "value",
+      "AvatarGroupCount": "value",
+      "AvatarImage": "value"
+    },
+    "@opengeni/react/ui/badge": {
+      "Badge": "value",
+      "badgeVariants": "value"
+    },
+    "@opengeni/react/ui/button": {
+      "Button": "value",
+      "buttonVariants": "value"
+    },
+    "@opengeni/react/ui/cadence-picker": {
+      "ApiWeekday": "type",
+      "CadenceDescribeOptions": "type",
+      "CadenceDescription": "type",
+      "CadenceField": "type",
+      "CadenceFrequency": "type",
+      "cadenceFromScheduleSpec": "value",
+      "CadenceIssue": "type",
+      "CadenceParseResult": "type",
+      "cadencePhrase": "value",
+      "CadencePicker": "value",
+      "CadencePickerProps": "type",
+      "CadencePickerVariant": "type",
+      "CadencePreview": "value",
+      "CadenceRule": "type",
+      "CadenceScheduleSpec": "type",
+      "CadenceTimeZoneOption": "type",
+      "CadenceValue": "type",
+      "DEFAULT_CADENCE_TIME": "value",
+      "describeCadence": "value",
+      "describeNextRuns": "value",
+      "formatLocalDate": "value",
+      "formatRunTime": "value",
+      "IntervalUnit": "type",
+      "LocalDate": "type",
+      "NextRunOptions": "type",
+      "nextRuns": "value",
+      "normalizeCadenceRule": "value",
+      "normalizeTime": "value",
+      "parseCadence": "value",
+      "parseLocalDate": "value",
+      "parseTime": "value",
+      "RunFormatOptions": "type",
+      "stepTime": "value",
+      "switchFrequency": "value",
+      "TimeField": "value",
+      "timeZoneLabels": "value",
+      "TimeZonePicker": "value",
+      "TimeZoneSearch": "value",
+      "toScheduleSpec": "value",
+      "validateCadence": "value",
+      "Weekday": "type",
+      "WEEKDAYS": "value",
+      "zonedParts": "value",
+      "zonedTimeToUtc": "value"
+    },
+    "@opengeni/react/ui/card": {
+      "Card": "value",
+      "CardAction": "value",
+      "CardContent": "value",
+      "CardDescription": "value",
+      "CardFooter": "value",
+      "CardHeader": "value",
+      "CardTitle": "value"
+    },
+    "@opengeni/react/ui/choice-cards": {
+      "ChoiceCard": "value",
+      "ChoiceCardProps": "type",
+      "ChoiceCards": "value",
+      "ChoiceCardsProps": "type",
+      "ChoiceCardsSkeleton": "value",
+      "ChoiceCardsVariant": "type",
+      "SELECTABLE_SURFACE_CLASS": "value",
+      "selectableSurface": "value",
+      "SELECTED_SURFACE_CLASS": "value",
+      "SelectedCheck": "value"
+    },
+    "@opengeni/react/ui/collapsible": {
+      "Collapsible": "value",
+      "CollapsibleContent": "value",
+      "CollapsibleTrigger": "value"
+    },
+    "@opengeni/react/ui/composer-menu": {
+      "COMPOSER_MENU_PANEL_CLASS": "value",
+      "ComposerMenuHeader": "value",
+      "ComposerMenuRowsSkeleton": "value",
+      "ComposerMenuSwitch": "value",
+      "ComposerMenuSwitchIndicator": "value",
+      "lazyComposerPanel": "value",
+      "MenuBackButton": "value",
+      "preloadComposerMenuPanels": "value",
+      "registerComposerMenuPreload": "value"
+    },
+    "@opengeni/react/ui/composer-menu-action": {
+      "ConnectorAction": "value"
+    },
+    "@opengeni/react/ui/confirm-dialog": {
+      "ConfirmDialog": "value",
+      "destructiveActionFocusTarget": "value"
+    },
+    "@opengeni/react/ui/content-layout": {
+      "ContentPage": "value",
+      "ContentSurface": "value",
+      "ContentSurfaceHeader": "value",
+      "DataScroller": "value",
+      "FormField": "value",
+      "FormGrid": "value"
+    },
+    "@opengeni/react/ui/context-menu": {
+      "ContextMenu": "value",
+      "ContextMenuContent": "value",
+      "ContextMenuItem": "value",
+      "ContextMenuLabel": "value",
+      "ContextMenuSeparator": "value",
+      "ContextMenuTrigger": "value"
+    },
+    "@opengeni/react/ui/copy-field": {
+      "CopyField": "value",
+      "CopyState": "type",
+      "copyText": "value",
+      "truncateMiddle": "value",
+      "useCopyToClipboard": "value"
+    },
+    "@opengeni/react/ui/detail-page": {
+      "BackLink": "value",
+      "DetailAside": "value",
+      "DetailAsideItem": "value",
+      "DetailBackLink": "type",
+      "DetailMeta": "value",
+      "DetailPage": "value",
+      "DetailPageBody": "value",
+      "DetailPageHeader": "value",
+      "DetailPageHeaderProps": "type"
+    },
+    "@opengeni/react/ui/detail-sheet": {
+      "BackLink": "value",
+      "DetailBackLink": "type",
+      "DetailBody": "value",
+      "DetailFact": "value",
+      "DetailFacts": "value",
+      "DetailFooter": "value",
+      "DetailFooterConfirm": "value",
+      "DetailFooterConfirmProps": "type",
+      "DetailHeader": "value",
+      "DetailHeaderProps": "type",
+      "DetailInline": "value",
+      "DetailPage": "value",
+      "DetailPresentation": "type",
+      "DetailSection": "value",
+      "DetailSectionProps": "type",
+      "DetailSheet": "value",
+      "DetailSheetContent": "value",
+      "DetailSheetContentProps": "type",
+      "DetailSheetPreview": "value",
+      "DetailSheetTrigger": "value",
+      "DetailSkeleton": "value",
+      "useDetailPresentation": "value"
+    },
+    "@opengeni/react/ui/dialog": {
+      "Dialog": "value",
+      "DialogClose": "value",
+      "DialogContent": "value",
+      "DialogDescription": "value",
+      "DialogFooter": "value",
+      "DialogHeader": "value",
+      "DialogOverlay": "value",
+      "DialogPortal": "value",
+      "DialogTitle": "value",
+      "DialogTrigger": "value"
+    },
+    "@opengeni/react/ui/diff-view": {
+      "buildDiffRows": "value",
+      "DiffFormat": "type",
+      "DiffLine": "type",
+      "DiffLineKind": "type",
+      "diffLines": "value",
+      "DiffRow": "type",
+      "DiffSegment": "type",
+      "diffStats": "value",
+      "DiffView": "value",
+      "DiffViewProps": "type",
+      "DiffViewVariant": "type",
+      "diffWords": "value",
+      "FailedLoad": "type",
+      "failedLoadParts": "value"
+    },
+    "@opengeni/react/ui/disabled-reason": {
+      "DisabledReason": "value",
+      "DisabledReasonProps": "type",
+      "ReasonTooltip": "value",
+      "ReasonTooltipProps": "type"
+    },
+    "@opengeni/react/ui/disclosure": {
+      "Disclosure": "value",
+      "DisclosureProps": "type",
+      "DisclosureVariant": "type"
+    },
+    "@opengeni/react/ui/dropdown-menu": {
+      "DropdownMenu": "value",
+      "DropdownMenuCheck": "value",
+      "DropdownMenuCheckboxItem": "value",
+      "DropdownMenuContent": "value",
+      "DropdownMenuGroup": "value",
+      "DropdownMenuItem": "value",
+      "DropdownMenuLabel": "value",
+      "DropdownMenuMeta": "value",
+      "DropdownMenuNote": "value",
+      "DropdownMenuPortal": "value",
+      "DropdownMenuRadioGroup": "value",
+      "DropdownMenuRadioItem": "value",
+      "DropdownMenuSeparator": "value",
+      "DropdownMenuShortcut": "value",
+      "DropdownMenuSub": "value",
+      "DropdownMenuSubContent": "value",
+      "DropdownMenuSubTrigger": "value",
+      "DropdownMenuTrigger": "value"
+    },
+    "@opengeni/react/ui/email-chips-input": {
+      "EmailChip": "type",
+      "EmailChipsInput": "value"
+    },
+    "@opengeni/react/ui/empty-state": {
+      "EmptyState": "value",
+      "EmptyStateLink": "value",
+      "EmptyStateTemplate": "value",
+      "EmptyStateTemplates": "value",
+      "EmptyStateVariant": "type"
+    },
+    "@opengeni/react/ui/error-message": {
+      "ErrorDetail": "type",
+      "ErrorMessage": "value",
+      "ErrorMessageProps": "type",
+      "TechnicalDetails": "value"
+    },
+    "@opengeni/react/ui/field": {
+      "Checkbox": "value",
+      "CheckboxField": "value",
+      "Field": "value",
+      "FieldStack": "value",
+      "TextArea": "value",
+      "TextInput": "value",
+      "useField": "value",
+      "useFieldControlProps": "value"
+    },
+    "@opengeni/react/ui/flush-form-page": {
+      "FLUSH_DETAIL_PAGE_CLASS": "value",
+      "FLUSH_FORM_PAGE_CLASS": "value",
+      "FlushFormPage": "value"
+    },
+    "@opengeni/react/ui/form-dialog": {
+      "firstFormField": "value",
+      "FormDialog": "value",
+      "FormDialogChromeProvider": "value",
+      "FormDialogSize": "type",
+      "FormFrame": "value",
+      "FormFrameProps": "type",
+      "FormInline": "value",
+      "FormOverlayProps": "type",
+      "FormPage": "value",
+      "FormVariant": "type",
+      "useFormOverlay": "value"
+    },
+    "@opengeni/react/ui/form-disclosure": {
+      "FormDisclosure": "value"
+    },
+    "@opengeni/react/ui/hover-card": {
+      "HoverCard": "value",
+      "HoverCardContent": "value",
+      "HoverCardTrigger": "value"
+    },
+    "@opengeni/react/ui/in-app-click": {
+      "inAppClick": "value"
+    },
+    "@opengeni/react/ui/inline-help": {
+      "HelpLink": "value",
+      "HelpTip": "value",
+      "InlineHelp": "value"
+    },
+    "@opengeni/react/ui/input": {
+      "Input": "value"
+    },
+    "@opengeni/react/ui/label": {
+      "Label": "value"
+    },
+    "@opengeni/react/ui/line-tabs": {
+      "LineTabCount": "value",
+      "LineTabs": "value",
+      "LineTabsContent": "value",
+      "LineTabsCountTone": "type",
+      "LineTabsLink": "value",
+      "LineTabsLinkProps": "type",
+      "LineTabsList": "value",
+      "LineTabsListProps": "type",
+      "LineTabsNav": "value",
+      "LineTabsNavProps": "type",
+      "LineTabsTrigger": "value",
+      "LineTabsTriggerProps": "type",
+      "LineTabsVariant": "type",
+      "lineTabVariants": "value"
+    },
+    "@opengeni/react/ui/list-row": {
+      "ListRow": "value",
+      "ListRowProps": "type",
+      "ListRowSkeleton": "value",
+      "RowIndicator": "value",
+      "RowIndicatorKind": "type",
+      "RowIndicatorProps": "type",
+      "RowList": "value",
+      "RowListColumn": "type",
+      "RowListProps": "type",
+      "RowListSort": "type",
+      "RowListVariant": "type",
+      "useRowListVariant": "value"
+    },
+    "@opengeni/react/ui/load-failure": {
+      "LoadFailure": "value"
+    },
+    "@opengeni/react/ui/logo-tile": {
+      "logoMonogram": "value",
+      "LogoTile": "value",
+      "LogoTileProps": "type",
+      "LogoTileSize": "type",
+      "LogoTileSizeProvider": "value",
+      "LogoTileTone": "type",
+      "useLogoTileSize": "value"
+    },
+    "@opengeni/react/ui/menu-styles": {
+      "MENU_BACK_BUTTON_CLASS": "value",
+      "MENU_BACK_HEADER_CLASS": "value",
+      "MENU_BUTTON_CLASS": "value",
+      "MENU_BUTTON_STATE_CLASS": "value",
+      "MENU_CHECK_CLASS": "value",
+      "MENU_CHECK_SLOT_CLASS": "value",
+      "MENU_CHEVRON_CLASS": "value",
+      "MENU_ITEM_BASE_CLASS": "value",
+      "MENU_ITEM_CLASS": "value",
+      "MENU_ITEM_STATE_CLASS": "value",
+      "MENU_LABEL_CLASS": "value",
+      "MENU_META_CLASS": "value",
+      "MENU_NOTE_CLASS": "value",
+      "MENU_SEPARATOR_CLASS": "value",
+      "MENU_SURFACE_CLASS": "value"
+    },
+    "@opengeni/react/ui/meta-chip": {
+      "MetaChip": "value",
+      "MetaChipVariant": "type"
+    },
+    "@opengeni/react/ui/notice": {
+      "Notice": "value",
+      "NoticeTone": "type"
+    },
+    "@opengeni/react/ui/page-actions": {
+      "MoreMenu": "value",
+      "RowButton": "value"
+    },
+    "@opengeni/react/ui/page-header": {
+      "PageHeader": "value",
+      "PageHeaderIconMode": "type",
+      "PageHeaderProps": "type",
+      "PageHeaderStyleProvider": "value",
+      "PageHeaderVariant": "type",
+      "usePageHeaderStyle": "value"
+    },
+    "@opengeni/react/ui/relative-time": {
+      "DateInput": "type",
+      "formatAbsoluteTime": "value",
+      "formatDate": "value",
+      "formatExactTime": "value",
+      "formatRelativeTime": "value",
+      "formatShortTime": "value",
+      "inSentence": "value",
+      "RelativeTime": "value",
+      "RelativeTimeDefaultsContext": "value",
+      "RelativeTimeFormat": "type",
+      "RelativeTimeProps": "type",
+      "TimeFormatOptions": "type",
+      "timeZoneLabel": "value",
+      "toDate": "value",
+      "useMinuteNow": "value"
+    },
+    "@opengeni/react/ui/revision-history": {
+      "previousContent": "value",
+      "Revision": "type",
+      "RevisionHistory": "value",
+      "RevisionHistoryLayout": "type",
+      "RevisionHistoryProps": "type"
+    },
+    "@opengeni/react/ui/role-select": {
+      "CUSTOM_ROLE_LABEL": "value",
+      "needsEscalationConfirm": "value",
+      "roleLabel": "value",
+      "RoleOption": "type",
+      "RoleSelect": "value",
+      "RoleSelectProps": "type",
+      "RoleSelectVariant": "type",
+      "RoleValue": "type"
+    },
+    "@opengeni/react/ui/scope-switcher-trigger": {
+      "ScopeSwitcherTrigger": "value",
+      "SETTINGS_SWITCHER_CLASS": "value"
+    },
+    "@opengeni/react/ui/scroll-area": {
+      "ScrollArea": "value",
+      "ScrollBar": "value"
+    },
+    "@opengeni/react/ui/section": {
+      "Section": "value",
+      "SECTION_TITLE_CLASS": "value",
+      "SectionProps": "type",
+      "SectionStack": "value",
+      "SectionStackProps": "type",
+      "SectionVariant": "type",
+      "SectionVariantProvider": "value",
+      "useSectionListFrame": "value"
+    },
+    "@opengeni/react/ui/section-variant": {
+      "SectionCardContext": "value",
+      "SectionFrameReset": "value",
+      "SectionVariant": "type",
+      "SectionVariantContext": "value",
+      "SectionVariantProvider": "value",
+      "useSectionListFrame": "value"
+    },
+    "@opengeni/react/ui/segmented-control": {
+      "SegmentedControl": "value",
+      "SegmentedControlOption": "type",
+      "SegmentedControlProps": "type",
+      "SegmentedControlSize": "type",
+      "SegmentedControlVariant": "type"
+    },
+    "@opengeni/react/ui/select": {
+      "Select": "value"
+    },
+    "@opengeni/react/ui/select-menu": {
+      "ComboboxPanelPreview": "value",
+      "ComboboxSelect": "value",
+      "filterSelectOptions": "value",
+      "InlineDisabledReason": "value",
+      "MenuSelect": "value",
+      "nativeOptionText": "value",
+      "NativeSelect": "value",
+      "nextEnabledIndex": "value",
+      "SelectError": "value",
+      "SelectMenu": "value",
+      "SelectMenuPanel": "value",
+      "SelectMenuPanelProps": "type",
+      "SelectMenuProps": "type",
+      "SelectMenuVariant": "type",
+      "SelectOption": "type",
+      "typeaheadIndex": "value"
+    },
+    "@opengeni/react/ui/separator": {
+      "Separator": "value"
+    },
+    "@opengeni/react/ui/setting-row": {
+      "DisabledReasonTooltip": "value",
+      "joinIds": "value",
+      "SettingDangerRow": "value",
+      "SettingNavRow": "value",
+      "SettingRow": "value",
+      "SettingRowControlWidth": "type",
+      "SettingRowField": "type",
+      "SettingRowGroup": "value",
+      "SettingRowLink": "value",
+      "SettingRowProps": "type",
+      "SettingRowSkeleton": "value",
+      "SettingRowVariant": "type",
+      "useSettingRowControl": "value",
+      "useSettingRowField": "value"
+    },
+    "@opengeni/react/ui/settings-nav": {
+      "NavGroup": "value",
+      "NavItem": "value",
+      "NavItemProps": "type",
+      "NavItemSize": "type",
+      "NavItemSkeleton": "value",
+      "SettingsNav": "value",
+      "SettingsNavProps": "type",
+      "SettingsNavVariant": "type"
+    },
+    "@opengeni/react/ui/sheet": {
+      "Sheet": "value",
+      "SheetClose": "value",
+      "SheetContent": "value",
+      "SheetDescription": "value",
+      "SheetFooter": "value",
+      "SheetHeader": "value",
+      "SheetTitle": "value",
+      "SheetTrigger": "value"
+    },
+    "@opengeni/react/ui/skeleton": {
+      "Skeleton": "value"
+    },
+    "@opengeni/react/ui/stat-tile": {
+      "sparklinePoints": "value",
+      "StatDelta": "type",
+      "StatGroup": "value",
+      "StatSentiment": "type",
+      "StatTile": "value",
+      "StatTileProps": "type",
+      "StatTrend": "type"
+    },
+    "@opengeni/react/ui/status-badge": {
+      "PRODUCT_STATUS_KEYS": "value",
+      "PRODUCT_STATUSES": "value",
+      "ProductStatus": "type",
+      "resolveStatus": "value",
+      "StatusBadge": "value",
+      "StatusBadgeProps": "type",
+      "StatusBadgeSkeleton": "value",
+      "StatusBadgeVariant": "type"
+    },
+    "@opengeni/react/ui/status-dot": {
+      "LIFECYCLE_TO_SEMANTIC": "value",
+      "SEMANTIC_TONE_META": "value",
+      "SEMANTIC_TONES": "value",
+      "SemanticTone": "type",
+      "STATUS_META": "value",
+      "StatusDot": "value",
+      "StatusTone": "type"
+    },
+    "@opengeni/react/ui/switch": {
+      "Switch": "value",
+      "SwitchProps": "type",
+      "SwitchSize": "type",
+      "SwitchVariant": "type"
+    },
+    "@opengeni/react/ui/tabs": {
+      "Tabs": "value",
+      "TabsContent": "value",
+      "TabsList": "value",
+      "tabsListVariants": "value",
+      "TabsTrigger": "value"
+    },
+    "@opengeni/react/ui/textarea": {
+      "Textarea": "value"
+    },
+    "@opengeni/react/ui/toolbar": {
+      "countActiveFilters": "value",
+      "toggleFilter": "value",
+      "Toolbar": "value",
+      "ToolbarFilterChips": "value",
+      "ToolbarFilterGroup": "type",
+      "ToolbarFilterMenu": "value",
+      "ToolbarFilterMenuProps": "type",
+      "ToolbarFilterOption": "type",
+      "ToolbarFilterValue": "type",
+      "ToolbarGroup": "value",
+      "ToolbarSearch": "value",
+      "ToolbarSearchProps": "type",
+      "ToolbarSearchSize": "type",
+      "ToolbarSummary": "value"
+    },
+    "@opengeni/react/ui/tooltip": {
+      "Tooltip": "value",
+      "TooltipContent": "value",
+      "TooltipProvider": "value",
+      "TooltipTrigger": "value"
+    },
+    "@opengeni/react/ui/usage-meter": {
+      "clampPercent": "value",
+      "resetPhrase": "value",
+      "USAGE_LOW_THRESHOLD": "value",
+      "usageAccessibleText": "value",
+      "usageLevel": "value",
+      "UsageLevel": "type",
+      "UsageMeter": "value",
+      "UsageMeterDensity": "type",
+      "UsageMeterGroup": "value",
+      "UsageMeterGroupProps": "type",
+      "UsageMeterProps": "type",
+      "UsageMeterVariant": "type",
+      "UsageReadout": "value",
+      "UsageReset": "type",
+      "usageResets": "value",
+      "usageValueText": "value",
+      "UsageWindowReading": "type"
     },
     "@opengeni/react/usage": {
       "allowanceLabels": "value",
