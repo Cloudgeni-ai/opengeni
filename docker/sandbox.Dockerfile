@@ -72,7 +72,15 @@ RUN set -eux; \
       native/terminal-ready/terminal-ready.c -o /out/opengeni-terminal-ready.so; \
     xx-verify /out/opengeni-terminal-ready.so
 
-FROM oven/bun:${BUN_VERSION} AS bun-runtime
+# Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
+# the compromised emSign roots there once, natively on the build machine, for the
+# target architecture's Bun (never executed here); every stage that runs or
+# ships Bun copies this binary (see docker/distrust-embedded-roots.ts).
+FROM oven/bun:${BUN_VERSION} AS bun-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-runtime
+COPY --from=bun-target /usr/local/bin/bun /out/bun
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
 
@@ -214,6 +222,7 @@ RUN set -eux; \
 RUN cd packages/ogtool && bun run build
 
 FROM oven/bun:${BUN_VERSION} AS browserd-build
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
 WORKDIR /src
 COPY --from=browserd-source-build /src /src
@@ -249,6 +258,11 @@ RUN set -eux; \
       printf '%s  %s\n' 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef /usr/local/share/licenses/lightpanda/LICENSE; \
     } > /out/SHA256SUMS
 
+# The compiled controller embeds this stage's (already distrusted) Bun; prove it.
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts --check \
+  /opt/opengeni-docker/distrusted-roots.pem /out/opengeni-browserd
+
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
 COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
@@ -269,9 +283,16 @@ RUN printf '%s  %s\n' \
       /usr/local/bin/opengeni-agent \
       >> /out/SHA256SUMS
 
-FROM node:22.22.0-bookworm-slim AS node-runtime
+# Node also trusts roots compiled into its binary (as PEM). Distrust them the same
+# way, natively, for the target architecture's Node (never executed here).
+FROM node:22.22.0-bookworm-slim AS node-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS node-runtime
+COPY --from=node-target /usr/local/bin/node /out/node
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/node
 
 FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
 ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
@@ -297,7 +318,7 @@ ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 
 WORKDIR /src
 COPY . .
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /out/node /usr/local/bin/node
 RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
     set -eux; \
     case "$TARGETARCH" in \
@@ -401,8 +422,8 @@ RUN set -eux; \
 
 # ogtool requires a supported Node runtime. Ordinary typed Codemode programs
 # use the exact Bun binary from the already-pinned build image.
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 RUN test "$(node --version)" = "v22.22.0"
 
 # Pinned native document-to-Markdown parser. The lock contains the registry

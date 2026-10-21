@@ -55,7 +55,18 @@ COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
+# Bun trusts roots compiled into its own binary, apart from the OS store. Distrust
+# the compromised emSign roots there once, natively on the build machine, for the
+# target architecture's Bun (never executed here); every stage that runs or
+# ships Bun copies this binary (see docker/distrust-embedded-roots.ts).
+FROM oven/bun:${BUN_VERSION} AS bun-target
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS bun-distrusted
+COPY --from=bun-target /usr/local/bin/bun /out/bun
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/bun
+
 FROM oven/bun:${BUN_VERSION} AS source-base
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -103,6 +114,7 @@ RUN bun scripts/build-runtime-processes.ts worker \
   && bun scripts/assemble-server-runtime.ts worker
 
 FROM oven/bun:${BUN_VERSION}-slim AS worker
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -174,6 +186,7 @@ RUN bun scripts/build-runtime-processes.ts api \
   && bun scripts/assemble-server-runtime.ts api
 
 FROM oven/bun:${BUN_VERSION}-slim AS api
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -222,6 +235,7 @@ RUN bun scripts/build-runtime-processes.ts artifact-outbox
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
 FROM oven/bun:${BUN_VERSION}-slim AS artifact-outbox-dispatcher
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -241,6 +255,10 @@ RUN install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun
 RUN bun build --compile packages/artifact-tool/src/materializer-cli-entry.ts \
   --outfile /opt/opengeni/bin/opengeni-artifact-materializer
+# The compiled program embeds this stage's (already distrusted) Bun; prove it.
+RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
+  bun /opt/opengeni-docker/distrust-embedded-roots.ts --check /opt/opengeni-docker/distrusted-roots.pem \
+  /opt/opengeni/bin/opengeni-artifact-materializer
 USER root
 RUN chown root:root /opt/opengeni/bin/opengeni-artifact-materializer \
   && chmod 0555 /opt/opengeni/bin/opengeni-artifact-materializer
@@ -250,6 +268,7 @@ RUN bun scripts/build-runtime-processes.ts artifact-materializer
 # The runtime installation includes its own exact file closure. Preserve its
 # root-owned/read-only permissions and recheck its native ABI in the slim image.
 FROM oven/bun:${BUN_VERSION}-slim AS artifact-materializer
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
@@ -294,6 +313,7 @@ RUN bun run --cwd apps/web build \
 
 # No target-architecture RUN steps or copied native build dependencies.
 FROM oven/bun:${BUN_VERSION} AS web
+COPY --from=bun-distrusted /out/bun /usr/local/bin/bun
 WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
