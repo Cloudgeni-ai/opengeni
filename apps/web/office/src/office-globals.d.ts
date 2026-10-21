@@ -17,6 +17,7 @@ declare namespace Office {
     DialogMessageReceived: string;
     DialogEventReceived: string;
     OfficeThemeChanged?: string;
+    DocumentSelectionChanged?: string;
   };
   function onReady(): Promise<{ host: string | null; platform: string | null }>;
   const context: {

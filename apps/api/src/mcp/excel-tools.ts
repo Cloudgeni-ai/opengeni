@@ -30,15 +30,27 @@ function listed(workbooks: OfficeWorkbook[]): string {
   return workbooks.map((each) => `"${each.name}" (id ${each.id}, ${each.app})`).join("; ");
 }
 
+/** Where this deployment's web app shows how to add the Excel add-in. */
+export function excelAddinInstallUrl(webBaseUrl: string | null | undefined): string | null {
+  return webBaseUrl ? `${webBaseUrl.replace(/\/+$/u, "")}/excel` : null;
+}
+
 /** The workbook `wanted` names (id, or a unique name), or why there is none. */
 export function chooseWorkbook(
   workbooks: OfficeWorkbook[],
   wanted: string | undefined,
+  installUrl?: string | null,
 ): { workbook: OfficeWorkbook } | { error: string } {
   if (workbooks.length === 0) {
     return {
-      error:
+      error: [
         "No Excel workbook is connected. Ask the person to open the workbook in Excel and open the Opengeni add-in (Home > Add-ins > Opengeni), then try again.",
+        installUrl
+          ? `If they haven't added Opengeni to Excel yet, give them this link, which shows how for Excel on the web, Mac, Windows or their whole organization: ${installUrl}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
     };
   }
   const name = wanted?.trim();
@@ -108,7 +120,11 @@ export function registerExcelTools(input: {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const person = attempt.initiatingHumanSubjectId ?? grant.subjectId;
       const relay = officeWorkbookRelayFor(deps);
-      const chosen = chooseWorkbook(await relay.list(person), wanted);
+      const chosen = chooseWorkbook(
+        await relay.list(person),
+        wanted,
+        excelAddinInstallUrl(deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl),
+      );
       if ("error" in chosen) return textResult(chosen.error, true);
       const { workbook } = chosen;
       const outcome = await relay.run(person, workbook.id, code, OFFICE_RUN_DEFAULT_TIMEOUT_MS);

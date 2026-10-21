@@ -1,5 +1,5 @@
 import { AppearanceSubmenu } from "@/components/appearance-menu";
-import { DesktopAppSubmenu } from "@/components/desktop-app-menu";
+import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { HelpMenu } from "@/components/help-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
@@ -289,6 +289,7 @@ export function BrowserAccountMenu({
             onSendFeedback={onSendFeedback}
           />
           <DesktopAppSubmenu />
+          <ExcelAddinMenuItem />
           <DropdownMenuSeparator />
           <DropdownMenuItem
             className="forced-colors:text-[CanvasText]!"

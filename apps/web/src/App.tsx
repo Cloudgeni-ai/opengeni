@@ -51,6 +51,7 @@ import {
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
@@ -156,6 +157,10 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazyExcelAddinRoute = lazyRouteComponent(
+  () => import("@/routes/excel-addin"),
+  "ExcelAddinRoute",
 );
 const LazyDesktopReturnRoute = lazyRouteComponent(
   () => import("@/routes/desktop-return"),
@@ -338,6 +343,13 @@ const resetPasswordRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { token?: string } =>
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
+});
+// How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
+// colleagues send this link to people who may not be signed in.
+const excelAddinRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: EXCEL_ADDIN_PATH.slice(1),
+  component: LazyExcelAddinRoute,
 });
 // Where a sign-in started in the desktop app lands in the person's browser:
 // hand them back to the app. PUBLIC, like `/reset-password`.
@@ -856,6 +868,7 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   connectAgentRoute,
   resetPasswordRoute,
+  excelAddinRoute,
   desktopReturnRoute,
   identityLinkRoute,
   setupAccountRoute,

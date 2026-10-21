@@ -105,7 +105,10 @@ import "@opengeni/react/compiled.css";
   consoleUrl="https://app.example.com"
   workspaceId={workspaceId}
   features={{ dock: true }}
-  messageContext={() => "The person is on the billing page of Acme."}
+  messageContext={[
+    { id: "page", text: "The person is on the billing page of Acme." },
+    { id: "invoice", label: "Invoice #1042", text: "They have invoice #1042 open: …" },
+  ]}
   onUnauthorized={() => refreshToken()}
 />;
 ```
@@ -138,7 +141,12 @@ hides; it never grants. `slots` adds host sections to the shell (a workspace
 picker or account row under the chat list, banners above the canvas),
 `theme` follows the host application (the embed sets its own `data-og-theme`
 and never touches the host page's `<html>`), and `messageContext` adds
-per-message model context (never instructions) to every new chat and message.
+per-message model context (never instructions) to every new chat and message:
+text, one item or a list of items. An item with a `label` shows as a pill above
+the composer (its `detail` in the tooltip), and the person can leave it out of
+their messages; a new label brings it back. Pass a new value whenever the
+context changes (the Excel add-in passes the current selection). A function is
+also accepted; it is read when each message is sent and shows no pill.
 With the dock off, entries that only open a dock panel hide with it.
 
 The dock's heavier pieces are opt-in so a page that does not show them never

@@ -7,7 +7,7 @@ import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceSubmenu } from "@/components/appearance-menu";
-import { DesktopAppSubmenu } from "@/components/desktop-app-menu";
+import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
 import {
@@ -154,6 +154,7 @@ export function RailFooter() {
                   onSendFeedback={onSendFeedback}
                 />
                 <DesktopAppSubmenu />
+                <ExcelAddinMenuItem />
                 {hasDesktopAccounts() ? (
                   <>
                     <DropdownMenuSeparator />

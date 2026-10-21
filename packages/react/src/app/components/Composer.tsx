@@ -14,6 +14,7 @@ import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { useRef, type ReactNode } from "react";
 import { useAppContext } from "../app-context";
 import { useAppShotTarget } from "./desktop/app-shots";
+import { MessageContextPills } from "./message-context-pills";
 import { ComposerUsageNotice } from "./usage/usage-entry";
 
 export function useDraftAttachments(
@@ -85,6 +86,7 @@ export function ConsoleComposer(props: {
               refreshKey={props.usageRefreshKey}
             />
             {props.header}
+            <MessageContextPills />
           </>
         }
         // The actions menu owns attachments when supplied.
