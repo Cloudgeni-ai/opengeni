@@ -24,7 +24,8 @@ artifact link, not a restatement of the document. Ordinary chat answers, brief
 progress updates, internal worker findings, code navigation and explicitly requested local-file
 work are not report deliverables.
 
-Read [references/api.md](references/api.md) before editing.
+Read [references/api.md](references/api.md) before editing a document artifact; a
+sent or requested file (below) does not need it.
 When using `skill_read`, request that relative path from this Skill; reading
 does not materialize a local folder. Use an existing local copy only when the
 Skill was installed or explicitly checked out to the filesystem.
@@ -55,8 +56,10 @@ or does not list that format, the file itself is the deliverable:
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content.
-4. Publish the file and reply with a short summary and its link. Do not also
-   build a native artifact of the same content.
+4. Publish the file with `sandbox_file_publish` and reply with a short summary
+   and its link. If that tool is not loaded yet, load it with `tool_search` in
+   the same batch as your first command. Do not also build a native artifact of
+   the same content.
 
 ## Edit and verify
 
