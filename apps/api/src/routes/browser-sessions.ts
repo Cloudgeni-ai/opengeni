@@ -552,33 +552,36 @@ export function registerBrowserSessionRoutes(
                 tokenGeneration: record.tokenGeneration,
               });
               try {
-                await withBrowserCreationController(
+                // The heartbeat covers everything after dispatch, including
+                // provisioning the controller, so a slow machine never lets the
+                // transition expire while this request is still working on it.
+                await withInteractionHolderHeartbeat(
                   deps,
-                  grant,
-                  workspaceId,
-                  placement,
-                  adminToken,
-                  origin,
-                  async (client) => {
-                    const linkedComputer = await ensureLinkedComputerController(
+                  {
+                    grant,
+                    workspaceId,
+                    sandboxGroupId: placement.controllerHostSandboxGroupId,
+                    holderId: interactionHolderId(preparedSession.id),
+                    operationId: request.operationId,
+                    resourceId: preparedSession.id,
+                    controllerGeneration,
+                  },
+                  async () =>
+                    await withBrowserCreationController(
                       deps,
                       grant,
-                      preparedSession,
+                      workspaceId,
                       placement,
-                      client,
-                    );
-                    return await withInteractionHolderHeartbeat(
-                      deps,
-                      {
-                        grant,
-                        workspaceId,
-                        sandboxGroupId: placement.controllerHostSandboxGroupId,
-                        holderId: interactionHolderId(preparedSession.id),
-                        operationId: request.operationId,
-                        resourceId: preparedSession.id,
-                        controllerGeneration,
-                      },
-                      async () => {
+                      adminToken,
+                      origin,
+                      async (client) => {
+                        const linkedComputer = await ensureLinkedComputerController(
+                          deps,
+                          grant,
+                          preparedSession,
+                          placement,
+                          client,
+                        );
                         stages.mark("provision");
                         await ensureHeadedBrowserDisplayStack(
                           placement.session,
@@ -605,8 +608,7 @@ export function registerBrowserSessionRoutes(
                         });
                         return launch.result;
                       },
-                    );
-                  },
+                    ),
                 );
                 stages.mark("launch");
                 await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
@@ -2492,19 +2494,10 @@ export function registerBrowserSessionRoutes(
                 controllerGeneration,
                 tokenGeneration: record.tokenGeneration,
               });
-              const { client } = await provisionBrowserControlClient(placement.session, {
-                adminToken,
-                nativeAuthority: nativeBrowserControllerAuthority(workspaceId, placement),
-                ...(origin ? { allowedOrigins: [origin] } : {}),
-              });
+              let client: BrowserControlClient | undefined;
               try {
-                const linkedComputer = await ensureLinkedComputerController(
-                  deps,
-                  grant,
-                  prepared.session,
-                  placement,
-                  client,
-                );
+                // The heartbeat covers everything after dispatch, including
+                // provisioning the controller.
                 await withInteractionHolderHeartbeat(
                   deps,
                   {
@@ -2517,6 +2510,18 @@ export function registerBrowserSessionRoutes(
                     controllerGeneration,
                   },
                   async () => {
+                    ({ client } = await provisionBrowserControlClient(placement.session, {
+                      adminToken,
+                      nativeAuthority: nativeBrowserControllerAuthority(workspaceId, placement),
+                      ...(origin ? { allowedOrigins: [origin] } : {}),
+                    }));
+                    const linkedComputer = await ensureLinkedComputerController(
+                      deps,
+                      grant,
+                      prepared.session,
+                      placement,
+                      client,
+                    );
                     await ensureHeadedBrowserDisplayStack(
                       placement.session,
                       prepared.session.headless,
@@ -2536,6 +2541,9 @@ export function registerBrowserSessionRoutes(
                   },
                 );
               } catch (error) {
+                // A provisioning failure propagates unchanged: no controller
+                // was reached, so there is nothing to clean up.
+                if (!client) throw error;
                 if (capacitySuspendAllowed && browserControllerCapacityExhausted(error)) {
                   capacitySuspendAllowed = false;
                   throw new BrowserControllerFull(
@@ -3108,32 +3116,35 @@ export function registerBrowserSessionRoutes(
               browserSessionId,
               controllerGeneration: binding.controllerGeneration,
             });
-            const client = await provisionController(deps, grant, record, placement, origin);
-            try {
-              await withInteractionHolderHeartbeat(
-                deps,
-                {
-                  grant,
-                  workspaceId,
-                  sandboxGroupId: placement.controllerHostSandboxGroupId,
-                  holderId: interactionHolderId(browserSessionId),
-                  operationId: request.operationId,
-                  resourceId: browserSessionId,
-                  controllerGeneration: binding.controllerGeneration,
-                },
-                async () =>
+            // The heartbeat covers everything after dispatch, including
+            // provisioning the controller.
+            await withInteractionHolderHeartbeat(
+              deps,
+              {
+                grant,
+                workspaceId,
+                sandboxGroupId: placement.controllerHostSandboxGroupId,
+                holderId: interactionHolderId(browserSessionId),
+                operationId: request.operationId,
+                resourceId: browserSessionId,
+                controllerGeneration: binding.controllerGeneration,
+              },
+              async () => {
+                const client = await provisionController(deps, grant, record, placement, origin);
+                try {
                   await endBrowserDiscardingLostRuntime(client, {
                     browserSessionId,
                     controllerGeneration: binding.controllerGeneration,
-                  }),
-              );
-            } catch (error) {
-              // Physical absence already satisfies an exact end. A stale live
-              // generation is 409 and transport uncertainty remains retryable.
-              if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
-                throw error;
-              }
-            }
+                  });
+                } catch (error) {
+                  // Physical absence already satisfies an exact end. A stale live
+                  // generation is 409 and transport uncertainty remains retryable.
+                  if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
+                    throw error;
+                  }
+                }
+              },
+            );
             const completed = await completeBrowserSessionEnd(deps.db, {
               accountId: grant.accountId,
               workspaceId,

@@ -413,28 +413,31 @@ export function registerComputerSessionRoutes(
           });
           let physical;
           try {
-            physical = await withComputerCreationController(
-              grant,
-              workspaceId,
-              placement,
-              adminToken,
-              origin,
-              async (client) =>
-                await withInteractionHolderHeartbeat(
-                  deps,
-                  {
-                    grant,
-                    workspaceId,
-                    sandboxGroupId:
-                      placement.placement.kind === "sandbox_group"
-                        ? placement.placement.sandboxGroupId
-                        : null,
-                    holderId: interactionHolderId(preparedSession.id),
-                    operationId: request.operationId,
-                    resourceId: preparedSession.id,
-                    controllerGeneration,
-                  },
-                  async () =>
+            // The heartbeat covers everything after dispatch, including
+            // provisioning the controller, so a slow machine never lets the
+            // transition expire while this request is still working on it.
+            physical = await withInteractionHolderHeartbeat(
+              deps,
+              {
+                grant,
+                workspaceId,
+                sandboxGroupId:
+                  placement.placement.kind === "sandbox_group"
+                    ? placement.placement.sandboxGroupId
+                    : null,
+                holderId: interactionHolderId(preparedSession.id),
+                operationId: request.operationId,
+                resourceId: preparedSession.id,
+                controllerGeneration,
+              },
+              async () =>
+                await withComputerCreationController(
+                  grant,
+                  workspaceId,
+                  placement,
+                  adminToken,
+                  origin,
+                  async (client) =>
                     await client.createComputerSession({
                       computerSessionId: preparedSession.id,
                       controllerGeneration,
@@ -1140,36 +1143,39 @@ export function registerComputerSessionRoutes(
               computerSessionId,
               controllerGeneration: binding.controllerGeneration,
             });
-            const client = await provisionController(grant, record, placement, origin);
-            try {
-              await withInteractionHolderHeartbeat(
-                deps,
-                {
-                  grant,
-                  workspaceId,
-                  sandboxGroupId:
-                    placement.placement.kind === "sandbox_group"
-                      ? placement.placement.sandboxGroupId
-                      : null,
-                  holderId: interactionHolderId(computerSessionId),
-                  operationId: request.operationId,
-                  resourceId: computerSessionId,
-                  controllerGeneration: binding.controllerGeneration,
-                },
-                async () =>
+            // The heartbeat covers everything after dispatch, including
+            // provisioning the controller.
+            await withInteractionHolderHeartbeat(
+              deps,
+              {
+                grant,
+                workspaceId,
+                sandboxGroupId:
+                  placement.placement.kind === "sandbox_group"
+                    ? placement.placement.sandboxGroupId
+                    : null,
+                holderId: interactionHolderId(computerSessionId),
+                operationId: request.operationId,
+                resourceId: computerSessionId,
+                controllerGeneration: binding.controllerGeneration,
+              },
+              async () => {
+                const client = await provisionController(grant, record, placement, origin);
+                try {
                   await client.endComputerSession(
                     {
                       computerSessionId,
                       controllerGeneration: binding.controllerGeneration,
                     },
                     { removeState: true },
-                  ),
-              );
-            } catch (error) {
-              if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
-                throw error;
-              }
-            }
+                  );
+                } catch (error) {
+                  if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
+                    throw error;
+                  }
+                }
+              },
+            );
             const completed = await completeComputerSessionEnd(deps.db, {
               accountId: grant.accountId,
               workspaceId,
