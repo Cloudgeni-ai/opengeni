@@ -143,7 +143,7 @@ export function DataScroller({ className, ...props }: ComponentProps<"div">) {
       tabIndex={0}
       role="region"
       className={cn(
-        "max-w-full min-w-0 overflow-x-auto overscroll-x-contain rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "max-w-full min-w-0 overflow-x-auto overscroll-x-contain rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
       {...props}

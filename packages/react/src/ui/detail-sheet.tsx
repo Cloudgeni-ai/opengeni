@@ -120,7 +120,7 @@ export function DetailSheetContent({
         }}
         className={cn(
           SHEET_PANEL,
-          "fixed inset-y-0 right-0 z-50 h-full w-full border-border outline-none sm:w-[520px] sm:max-w-[calc(100vw-2rem)] sm:border-l",
+          "fixed inset-y-0 right-0 z-50 h-full w-full border-border outline-hidden sm:w-[520px] sm:max-w-[calc(100vw-2rem)] sm:border-l",
           "transition-transform duration-200 ease-out starting:translate-x-full",
           className,
         )}

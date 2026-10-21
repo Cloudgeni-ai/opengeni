@@ -141,7 +141,7 @@ export function ToolbarSearch({
         autoComplete="off"
         spellCheck={false}
         className={cn(
-          "h-full w-full min-w-0 appearance-none border-0 bg-transparent text-sm text-ellipsis text-fg outline-none! placeholder:text-fg-subtle disabled:cursor-not-allowed [&::-webkit-search-cancel-button]:appearance-none",
+          "h-full w-full min-w-0 appearance-none border-0 bg-transparent text-sm text-ellipsis text-fg outline-hidden! placeholder:text-fg-subtle disabled:cursor-not-allowed [&::-webkit-search-cancel-button]:appearance-none",
           // Room for the clear button only while there is something to clear,
           // so long placeholders keep their words on narrow screens.
           large ? "pl-11" : "pl-9",

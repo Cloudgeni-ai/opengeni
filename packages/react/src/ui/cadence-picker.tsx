@@ -1132,7 +1132,7 @@ const inputBase = cn(
 );
 
 // Popovers are the one menu surface (menu-styles.ts); their bodies set the inset.
-const popoverPanel = cn(MENU_SURFACE_CLASS, "z-50 overflow-hidden p-0 outline-none");
+const popoverPanel = cn(MENU_SURFACE_CLASS, "z-50 overflow-hidden p-0 outline-hidden");
 
 const menuContent = cn(
   popoverPanel,
@@ -1140,7 +1140,7 @@ const menuContent = cn(
 );
 
 const menuItem =
-  "relative flex min-h-8 cursor-pointer items-start gap-2.5 rounded-[10px] py-1.5 pr-9 pl-2.5 text-sm text-fg outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:text-fg-muted data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
+  "relative flex min-h-8 cursor-pointer items-start gap-2.5 rounded-[10px] py-1.5 pr-9 pl-2.5 text-sm text-fg outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:text-fg-muted data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
 
 const connector = "text-sm text-fg-muted";
 
@@ -1572,7 +1572,7 @@ export function TimeZoneSearch({
               setActive(0);
             }}
             onKeyDown={onKeyDown}
-            className="h-full min-w-0 flex-1 bg-transparent text-sm text-fg outline-none! placeholder:text-fg-subtle pointer-coarse:text-base"
+            className="h-full min-w-0 flex-1 bg-transparent text-sm text-fg outline-hidden! placeholder:text-fg-subtle pointer-coarse:text-base"
           />
         </div>
       }
@@ -2372,7 +2372,7 @@ function TextVariant({
           value={text}
           placeholder='For example "every weekday at 8"'
           onChange={(event) => read(event.target.value)}
-          className="h-full min-w-0 flex-1 bg-transparent px-1.5 text-sm text-fg outline-none! placeholder:text-fg-subtle disabled:cursor-not-allowed disabled:text-fg-muted pointer-coarse:text-base"
+          className="h-full min-w-0 flex-1 bg-transparent px-1.5 text-sm text-fg outline-hidden! placeholder:text-fg-subtle disabled:cursor-not-allowed disabled:text-fg-muted pointer-coarse:text-base"
         />
         <TimeZonePicker
           value={value.timeZone}

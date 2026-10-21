@@ -57,7 +57,7 @@ function DialogContent({
           // near-full-width bottom sheet that scrolls internally; from `sm` up it
           // is the centered modal (max-sm/sm scope the two presentations so they
           // never fight — one change every Dialog consumer inherits, D9.5).
-          "fixed z-50 grid gap-4 border bg-background shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
+          "fixed z-50 grid gap-4 border bg-background shadow-lg duration-200 outline-hidden data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
           // Phone: bottom sheet.
           "inset-x-0 bottom-0 max-h-[90dvh] overflow-y-auto rounded-t-lg border-b-0 p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]",
           "max-sm:data-[state=closed]:slide-out-to-bottom max-sm:data-[state=open]:slide-in-from-bottom",

@@ -118,7 +118,7 @@ export function EmailChipsInput({
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         onBlur={() => commit(draft)}
-        className="h-6 min-w-40 flex-1 border-0 bg-transparent px-1 text-sm text-fg outline-none! placeholder:text-fg-subtle pointer-coarse:text-base"
+        className="h-6 min-w-40 flex-1 border-0 bg-transparent px-1 text-sm text-fg outline-hidden! placeholder:text-fg-subtle pointer-coarse:text-base"
       />
     </div>
   );
