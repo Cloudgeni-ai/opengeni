@@ -419,6 +419,8 @@ export type WorkspaceRealtimeModelCatalogItem = {
   voiceDefaults?: RealtimeVoiceSettings | undefined;
   /** The workspace's saved voice settings for this model. */
   workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** The organization's default voice settings for this model, used while the workspace has none. */
+  organizationVoiceSettings?: RealtimeVoiceSettings | undefined;
 };
 
 /** How readily a realtime voice model decides the speaker is done and answers. */
@@ -4372,7 +4374,15 @@ export type OrganizationModelProviderKind =
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  /** The organization's ElevenLabs key, for Eleven Realtime voices. */
+  | "elevenlabs";
+
+/** Organization providers whose key runs models, with custom models to choose. */
+export type OrganizationModelCatalogProviderKind = Exclude<
+  OrganizationModelProviderKind,
+  "elevenlabs"
+>;
 
 export type ClaudeUsageWindow = {
   id:
@@ -4470,10 +4480,15 @@ export type OrganizationModelDefaults = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
   modelCompactionThresholds: Record<string, number>;
+  /** Voice settings by realtime model id, for workspaces without their own. */
+  realtimeVoice: Record<string, RealtimeVoiceSettings>;
   updatedAt: string | null;
 };
 
-/** Field-by-field update; compaction merges by model id and null resets one model. */
+/**
+ * Field-by-field update; compaction and voice settings merge by model id and
+ * null resets one model.
+ */
 export type UpdateOrganizationModelDefaultsRequest = {
   sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
   modelPolicy?:
@@ -4481,6 +4496,7 @@ export type UpdateOrganizationModelDefaultsRequest = {
     | null
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
+  realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
 };
 
 /** A model-account setting an organization sets, and may lock for every workspace. */

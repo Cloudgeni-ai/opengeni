@@ -22,7 +22,8 @@ const context = {
 };
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
-const { RealtimeVoiceSettingsRows } = await import("./realtime-voice-settings");
+const { OrganizationRealtimeVoiceSettingsRows, RealtimeVoiceSettingsRows } =
+  await import("./realtime-voice-settings");
 
 function catalogModel(
   overrides: Partial<WorkspaceRealtimeModelCatalogItem> &
@@ -144,4 +145,95 @@ test("shows the settings read-only to people who cannot change them", async () =
   expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Edit")).toBe(
     false,
   );
+});
+
+test("a workspace without its own settings shows and starts from the organization's default", async () => {
+  models = [
+    catalogModel({
+      id: ELEVEN,
+      label: "Eleven Realtime v1 max",
+      voices: [
+        { id: "brian", label: "Brian" },
+        { id: "lily", label: "Lily" },
+      ],
+      voiceDefaults: { voice: "brian" },
+      organizationVoiceSettings: { voice: "lily" },
+    }),
+  ];
+  await act(async () =>
+    root.render(
+      <RealtimeVoiceSettingsRows
+        workspaceId={`${WORKSPACE_ID}-3`}
+        canManage
+        organizationName="Acme"
+      />,
+    ),
+  );
+  await settle();
+  expect(container.textContent).toContain("Voice: Lily · Acme's default");
+  // Nothing of its own to reset yet.
+  expect(container.querySelector('[aria-label="More actions for Eleven Realtime v1 max"]')).toBe(
+    null,
+  );
+  const edit = [...container.querySelectorAll("button")].find((b) => b.textContent === "Edit")!;
+  await act(async () => edit.click());
+  await settle();
+  const save = [...document.querySelectorAll("button")].find((b) => b.textContent === "Save")!;
+  await act(async () => save.click());
+  await settle();
+  // Saving keeps what it showed, now as the workspace's own.
+  expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
+    `${WORKSPACE_ID}-3`,
+    { realtimeVoice: { [ELEVEN]: { voice: "lily" } } },
+  ]);
+});
+
+test("the organization's defaults save through the organization, not a workspace", async () => {
+  models = [
+    catalogModel({
+      id: ELEVEN,
+      label: "Eleven Realtime v1 max",
+      languages: ["en", "no"],
+      voiceDefaults: { voice: "brian" },
+    }),
+  ];
+  const update = mock(async (_request: unknown) => ({}) as never);
+  const defaults = {
+    defaults: {
+      sessionDefaults: null,
+      allowedProviders: null,
+      allowedModels: null,
+      modelCompactionThresholds: {},
+      realtimeVoice: { [ELEVEN]: { language: "no" } },
+      updatedAt: null,
+    },
+    loading: false,
+    error: null,
+    reload: async () => undefined,
+    update,
+  };
+  await act(async () =>
+    root.render(
+      <OrganizationRealtimeVoiceSettingsRows
+        anchorWorkspaceId={`${WORKSPACE_ID}-4`}
+        defaults={defaults}
+      />,
+    ),
+  );
+  await settle();
+  expect(container.textContent).toContain("Norwegian");
+  expect(container.textContent).not.toContain("default ·");
+  const more = container.querySelector<HTMLButtonElement>(
+    '[aria-label="More actions for Eleven Realtime v1 max"]',
+  );
+  expect(more).not.toBeNull();
+  const edit = [...container.querySelectorAll("button")].find((b) => b.textContent === "Edit")!;
+  await act(async () => edit.click());
+  await settle();
+  expect(document.body.textContent).toContain("every workspace that hasn't chosen its own");
+  const save = [...document.querySelectorAll("button")].find((b) => b.textContent === "Save")!;
+  await act(async () => save.click());
+  await settle();
+  expect(update.mock.calls[0]).toEqual([{ realtimeVoice: { [ELEVEN]: { language: "no" } } }]);
+  expect(updateWorkspaceSettings).not.toHaveBeenCalled();
 });

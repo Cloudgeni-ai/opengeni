@@ -905,6 +905,7 @@ export type {
   WorkspaceOpperCustomModelsResponse,
   CreateWorkspaceOpperCustomModelRequest,
   DeleteWorkspaceOpperCustomModelRequest,
+  OrganizationModelCatalogProviderKind,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
   SubscriptionUsagePool,

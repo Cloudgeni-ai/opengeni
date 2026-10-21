@@ -2,7 +2,9 @@ import {
   EMPTY_ORGANIZATION_MODEL_DEFAULTS,
   ModelCompactionTokenThreshold,
   type OrganizationModelDefaults,
+  RealtimeVoiceSettings,
   WorkspaceModelCompactionThresholdsPatch,
+  WorkspaceRealtimeVoicePatch,
   WorkspaceSessionDefaults,
 } from "@opengeni/contracts";
 import { eq, sql } from "drizzle-orm";
@@ -24,11 +26,22 @@ function mapRow(row: Row | undefined): OrganizationModelDefaults {
       if (parsed.success) thresholds[modelId] = parsed.data;
     }
   }
+  const realtimeVoice: Record<string, RealtimeVoiceSettings> = {};
+  const voices = row.realtimeVoice;
+  if (voices && typeof voices === "object" && !Array.isArray(voices)) {
+    for (const [modelId, value] of Object.entries(voices)) {
+      const parsed = RealtimeVoiceSettings.safeParse(value);
+      if (parsed.success && Object.keys(parsed.data).length > 0) {
+        realtimeVoice[modelId] = parsed.data;
+      }
+    }
+  }
   return {
     sessionDefaults: sessionDefaults.success ? sessionDefaults.data : null,
     allowedProviders: row.allowedProviders ?? null,
     allowedModels: row.allowedModels ?? null,
     modelCompactionThresholds: thresholds,
+    realtimeVoice,
     updatedAt: row.updatedAt.toISOString(),
   };
 }
@@ -101,6 +114,8 @@ export type OrganizationModelDefaultsPatch = {
     | undefined;
   /** Merged by exact model id; null resets just that model. */
   modelCompactionThresholds?: unknown;
+  /** Voice settings merged by realtime model id; null or `{}` resets just that model. */
+  realtimeVoice?: unknown;
 };
 
 /**
@@ -120,6 +135,10 @@ export async function updateOrganizationModelDefaults(
     input.patch.modelCompactionThresholds === undefined
       ? undefined
       : WorkspaceModelCompactionThresholdsPatch.parse(input.patch.modelCompactionThresholds);
+  const voicePatch =
+    input.patch.realtimeVoice === undefined
+      ? undefined
+      : WorkspaceRealtimeVoicePatch.parse(input.patch.realtimeVoice);
   return await withOrganizationAdministrator(db, input, async (scopedDb) => {
     await scopedDb
       .insert(schema.organizationModelDefaults)
@@ -133,6 +152,14 @@ export async function updateOrganizationModelDefaults(
     }
     if (Object.keys(thresholds).length > 512) {
       throw new RangeError("At most 512 model compaction preferences per organization");
+    }
+    const realtimeVoice = { ...current.realtimeVoice };
+    for (const [modelId, value] of Object.entries(voicePatch ?? {})) {
+      if (value === null || Object.keys(value).length === 0) delete realtimeVoice[modelId];
+      else realtimeVoice[modelId] = value;
+    }
+    if (Object.keys(realtimeVoice).length > 64) {
+      throw new RangeError("At most 64 voice models per organization");
     }
     const policy =
       input.patch.modelPolicy === undefined
@@ -151,6 +178,7 @@ export async function updateOrganizationModelDefaults(
         allowedProviders: policy.allowedProviders,
         allowedModels: policy.allowedModels,
         modelCompactionThresholds: thresholds,
+        realtimeVoice,
         updatedBySubjectId: input.actorSubjectId,
         updatedAt: new Date(),
       })

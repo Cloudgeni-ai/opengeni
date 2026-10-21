@@ -1,3 +1,6 @@
+import { possessive } from "./possessive";
+import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
+import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
 import {
   AccountGroupHeading,
   SubscriptionAccountRow,
@@ -668,6 +671,22 @@ export function OrganizationModelsList({
         />
       ) : null}
 
+      {organizationDefaults && organizationId ? (
+        <Section
+          title="Voice"
+          description="Connect ElevenLabs once for every workspace, and choose how each voice model sounds and listens. A workspace can choose its own."
+        >
+          <OrganizationElevenLabsVoiceConnection
+            organizationId={organizationId}
+            organizationName={organizationName}
+          />
+          <OrganizationRealtimeVoiceSettingsRows
+            anchorWorkspaceId={anchorWorkspaceId}
+            defaults={organizationDefaults}
+          />
+        </Section>
+      ) : null}
+
       {accountRules ? (
         <OrganizationAccountRulesSection
           organizationName={organizationName}
@@ -829,10 +848,7 @@ export function OrganizationDefaultsSection({
   );
 }
 
-/** "Acme's", "Acme Robotics'". */
-export function possessive(name: string): string {
-  return /s$/i.test(name) ? `${name}'` : `${name}'s`;
-}
+export { possessive };
 
 /** Cached weekly usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {

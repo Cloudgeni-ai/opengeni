@@ -12,7 +12,7 @@ import {
 import {
   mapOrganizationModelProviderCustomModel,
   type OrganizationModelProviderCustomModel,
-  type OrganizationModelProviderKind,
+  type OrganizationModelCatalogProviderKind,
 } from "./organization-model-providers";
 import * as schema from "./schema";
 
@@ -21,9 +21,12 @@ export type ModelProviderExecutionInputs = {
   claudeSubscriptionEnabled: boolean;
   loadOrganizationCredentials: boolean;
   workspaceModels: Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]>;
-  organizationModels: Record<OrganizationModelProviderKind, OrganizationModelProviderCustomModel[]>;
+  organizationModels: Record<
+    OrganizationModelCatalogProviderKind,
+    OrganizationModelProviderCustomModel[]
+  >;
   workspaceConnections: ConnectionMetadataWithVerification[];
-  encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+  encryptedCredentials: Partial<Record<OrganizationModelCatalogProviderKind, string>>;
 };
 
 /**
@@ -97,7 +100,11 @@ export async function loadModelProviderExecutionInputs(
             ]),
           ),
         );
-      for (const row of rows) encryptedCredentials[row.providerKind] = row.credentialEncrypted;
+      for (const row of rows) {
+        if (row.providerKind !== "elevenlabs") {
+          encryptedCredentials[row.providerKind] = row.credentialEncrypted;
+        }
+      }
     }
     return {
       claudeSubscriptionEnabled: input.claudeSubscriptionEnabled,

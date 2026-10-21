@@ -50,8 +50,15 @@ function providerKind(value: string) {
   return parsed.data;
 }
 
+/** Providers whose organization key runs models the organization can add by ID. */
+function modelProviderKind(value: string) {
+  const kind = providerKind(value);
+  if (kind === "elevenlabs") throw new HTTPException(404, { message: "model provider not found" });
+  return kind;
+}
+
 function connectionJson(connection: {
-  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper";
+  providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
   version: number;
   createdAt: Date;
@@ -228,7 +235,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       const models = await listOrganizationModelProviderCustomModels(deps.db, {
         organizationId,
         actorSubjectId: human.subjectId,
-        providerKind: providerKind(c.req.param("providerKind")),
+        providerKind: modelProviderKind(c.req.param("providerKind")),
       });
       return c.json(
         OrganizationProviderCustomModelsResponse.parse({ models: models.map(modelJson) }),
@@ -248,7 +255,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         CreateOrganizationProviderCustomModelRequest,
         "invalid organization custom model",
       );
-      const kind = providerKind(c.req.param("providerKind"));
+      const kind = modelProviderKind(c.req.param("providerKind"));
       if (
         (kind === "anthropic" || kind === "claude_subscription") &&
         `${claudeProviderId(kind)}/${payload.upstreamModelId}`.length > 256
@@ -258,7 +265,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         const model = await createOrganizationModelProviderCustomModel(deps.db, {
           organizationId,
           actorSubjectId: human.subjectId,
-          providerKind: providerKind(c.req.param("providerKind")),
+          providerKind: modelProviderKind(c.req.param("providerKind")),
           operationId: payload.operationId,
           upstreamModelId: payload.upstreamModelId,
           ...(payload.label === undefined ? {} : { label: payload.label }),
@@ -290,7 +297,7 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         const model = await retireOrganizationModelProviderCustomModel(deps.db, {
           organizationId,
           actorSubjectId: human.subjectId,
-          providerKind: providerKind(c.req.param("providerKind")),
+          providerKind: modelProviderKind(c.req.param("providerKind")),
           customModelId: customModelId.data,
           ...payload,
         });
