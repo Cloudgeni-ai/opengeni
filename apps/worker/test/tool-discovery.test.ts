@@ -1,46 +1,35 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import type { OpenGeniRuntime } from "@opengeni/runtime";
+import type { DecisionUsage } from "@opengeni/decisions";
+import { createToolSelector } from "@opengeni/runtime";
 import { configuredToolDecisionModel } from "../src/activities/agent-turn/tool-discovery";
+import { configuredDecisionModel } from "../src/activities/agent-turn/decision-model";
 
-describe("configured discovery decision provider", () => {
-  test("unset configuration makes no provider lookup", () => {
-    const model = configuredToolDecisionModel({
-      settings: testSettings(),
-      runtime: {
-        resolveTurnModel: () => {
-          throw new Error("must not resolve");
-        },
-      },
-      recordUsage: async () => {},
-      onUnavailable: () => {
-        throw new Error("not unavailable");
-      },
-    });
-    expect(model).toBeUndefined();
-  });
-  test("missing routes do not prevent compact discovery", () => {
-    let unavailable = 0;
-    const model = configuredToolDecisionModel({
-      settings: testSettings({ toolSearchDecisionModelId: "test/decision" }),
-      runtime: { resolveTurnModel: () => null },
-      recordUsage: async () => {},
-      onUnavailable: () => {
-        unavailable++;
-      },
-    });
-    expect(model).toBeUndefined();
-    expect(unavailable).toBe(1);
-  });
-  test("a customer-owned route is not silently charged for internal inference", () => {
-    const route = {
-      provider: { credentialSource: { kind: "workspace_connection", mechanism: "api_key" } },
-    } as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>;
-    let unavailable = 0;
+describe("shared deployment decision category", () => {
+  test("unset configuration makes no request", () => {
     expect(
       configuredToolDecisionModel({
-        settings: testSettings({ toolSearchDecisionModelId: "test/decision" }),
-        runtime: { resolveTurnModel: () => route },
+        settings: testSettings(),
+        recordUsage: async () => {},
+        onUnavailable: () => {
+          throw new Error("not configured");
+        },
+        fetch: (async () => {
+          throw new Error("must not fetch");
+        }) as typeof fetch,
+      }),
+    ).toBeUndefined();
+  });
+  test("partial explicit configuration cannot borrow a legacy or customer credential", () => {
+    let unavailable = 0;
+    const settings = testSettings({
+      decisionModelProvider: "openrouter",
+      decisionModelId: "openai/gpt-6-luna-decisions",
+      jevApiKey: "legacy-test-key",
+    });
+    expect(
+      configuredToolDecisionModel({
+        settings,
         recordUsage: async () => {},
         onUnavailable: () => {
           unavailable++;
@@ -48,62 +37,58 @@ describe("configured discovery decision provider", () => {
       }),
     ).toBeUndefined();
     expect(unavailable).toBe(1);
+    expect(configuredDecisionModel(settings, { allowLegacyCodeSearch: true })).toBeUndefined();
   });
-  test("uses the ordinary provider's upstream model, minimal effort and usage hook", async () => {
+  test("legacy Jev code-search configuration never silently enables paid tool search", () => {
+    const settings = testSettings({ jevApiKey: "legacy-test-key" });
+    expect(configuredDecisionModel(settings)).toBeUndefined();
+    expect(configuredDecisionModel(settings, { allowLegacyCodeSearch: true })?.id).toBe(
+      "jev/jev-latest",
+    );
+  });
+  test("uses the typed endpoint, model and usage hook rather than chat completions", async () => {
     const bodies: Array<Record<string, unknown>> = [];
-    const route = {
-      provider: {
-        id: "test",
-        api: "chat",
-        kind: "api-key",
-        credentialSource: { kind: "deployment", mechanism: "api_key" },
-      },
-      client: {
-        chat: {
-          completions: {
-            create: async (body: Record<string, unknown>) => {
-              bodies.push(body);
-              return {
-                id: "decision-response",
-                model: "small-model",
-                choices: [
-                  { finish_reason: "stop", message: { role: "assistant", content: '{"ids":[0]}' } },
-                ],
-                usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
-              };
-            },
-          },
-        },
-      },
-      configured: {
-        id: "test/decision",
-        upstreamModelId: "small-model",
-        capabilities: {
-          reasoning: { runnable: true, efforts: ["high", "none"], defaultEffort: "high" },
-        },
-      },
-    } as unknown as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>;
-    const usage: Array<{ id: string; responseId: string | undefined }> = [];
+    const usage: DecisionUsage[] = [];
     const choose = configuredToolDecisionModel({
-      settings: testSettings({ toolSearchDecisionModelId: "test/decision" }),
-      runtime: { resolveTurnModel: () => route },
-      recordUsage: async (id, event) => {
-        usage.push({ id, responseId: event.responseId });
+      settings: testSettings({
+        decisionModelProvider: "openrouter",
+        decisionModelId: "openai/gpt-6-luna-decisions",
+        decisionModelApiKey: "test-key-configured",
+      }),
+      fetch: (async (url, init) => {
+        expect(String(url)).toBe("https://openrouter.ai/api/alpha/decisions");
+        const body = JSON.parse(String(init?.body));
+        bodies.push(body);
+        return Response.json({
+          id: "decision-response",
+          model: "actual-model-version",
+          provider: "OpenAI",
+          answers: { 0: { type: "noul", noul: 0.9 } },
+          usage: { input_tokens: 100, output_tokens: 0, cost: 0.00001 },
+        });
+      }) as typeof fetch,
+      recordUsage: async (_id, event) => {
+        usage.push(event);
       },
       onUnavailable: () => {
         throw new Error("available");
       },
     })!;
     expect(
-      await choose({
+      await createToolSelector(choose)({
         query: "read task",
         candidates: [{ name: "tasks__read", description: "Read task", inputFields: ["id"] }],
       }),
     ).toEqual(["tasks__read"]);
     expect(bodies).toHaveLength(1);
-    expect(bodies[0]!.model).toBe("small-model");
-    expect(bodies[0]!.reasoning_effort).toBe("none");
+    expect(bodies[0]!.model).toBe("openai/gpt-6-luna-decisions");
+    expect(bodies[0]!.messages).toBeUndefined();
     expect(bodies[0]!.tools).toBeUndefined();
-    expect(usage).toEqual([{ id: "test/decision", responseId: "decision-response" }]);
+    expect(usage[0]).toMatchObject({
+      model: "actual-model-version",
+      provider: "OpenAI",
+      inputTokens: 100,
+      costSource: "provider-reported",
+    });
   });
 });

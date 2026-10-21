@@ -19,6 +19,7 @@
       "@opengeni/contracts",
       "@opengeni/core",
       "@opengeni/db",
+      "@opengeni/decisions",
       "@opengeni/documents",
       "@opengeni/events",
       "@opengeni/github",

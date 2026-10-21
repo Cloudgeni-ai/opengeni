@@ -22,7 +22,7 @@ import {
   toolsNamedInQuery,
 } from "./codex-tool-search";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
-import { decisionCandidate, type ToolDecisionModel } from "./tool-discovery-decision";
+import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
 import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
@@ -247,7 +247,7 @@ export class LazyToolRuntime {
      * (its harness control tools and the session's ToolRef.eager list).
      */
     private readonly firstRequestMcpToolNames: () => ReadonlySet<string> = () => new Set(),
-    private readonly decisionModel?: ToolDecisionModel,
+    private readonly decisionModel?: ToolSelector,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -943,7 +943,7 @@ export function installLazyToolRuntime(
   startToolPreparation?: () => void,
   pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
   firstRequestMcpToolNames?: () => ReadonlySet<string>,
-  decisionModel?: ToolDecisionModel,
+  decisionModel?: ToolSelector,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,

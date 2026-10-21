@@ -12,18 +12,17 @@ import type { Tool } from "@openai/agents";
 import { ToolSearchIndex } from "../packages/runtime/src/tool-discovery-ranking";
 import { LazyToolRuntime } from "../packages/runtime/src/lazy-tool-transport";
 import {
-  TOOL_DECISION_INSTRUCTIONS,
   decisionCandidate,
+  createToolSelector,
+  TOOL_SELECTION_PROTOCOL,
+} from "../packages/runtime/src/tool-discovery-decision";
+import {
+  TOOL_DECISION_INSTRUCTIONS,
   toolDecisionRequest,
   parseToolDecision,
-} from "../packages/runtime/src/tool-discovery-decision";
-import { JevClient } from "../packages/jev/src/client";
-import {
-  createJevDecisionModel,
-  jevEvalConfiguration,
-  JEV_SELECTION_PROTOCOL,
-  type JevDecisionReceipt,
-} from "./tool-discovery-eval/jev-decision";
+} from "./tool-discovery-eval/chat-comparison";
+import { configuredEvalDecisionModel } from "./tool-discovery-eval/decision-backend";
+import type { DecisionResult, DecisionUsage } from "../packages/decisions/src";
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -34,16 +33,15 @@ const catalogPath = option("catalog"),
   model = option("model");
 if (!catalogPath || !outputPath || !model)
   throw new Error("Required: --catalog, --out and --model");
-const backend = option("backend") ?? "openai-compatible";
-if (!["openai-compatible", "jev"].includes(backend)) throw new Error("Unsupported backend");
-const jevConfig = backend === "jev" ? jevEvalConfiguration(model) : undefined;
-const apiKey = jevConfig?.apiKey ?? process.env.DECISION_MODEL_API_KEY;
-if (!apiKey) throw new Error("DECISION_MODEL_API_KEY is not configured");
-const baseUrl = jevConfig?.baseUrl ?? process.env.DECISION_MODEL_BASE_URL;
-if (!baseUrl) throw new Error("DECISION_MODEL_BASE_URL is not configured");
-if (backend === "jev" && (option("provider") || option("reasoning")))
-  throw new Error("Jev uses typed judgments, not provider-routing or reasoning flags");
-const jev = jevConfig ? new JevClient(jevConfig) : undefined;
+const backend = option("backend") ?? "openrouter";
+const typed =
+  backend === "openai-compatible" ? undefined : configuredEvalDecisionModel(backend, model);
+const apiKey = process.env.DECISION_MODEL_API_KEY;
+const baseUrl = process.env.DECISION_MODEL_BASE_URL;
+if (!typed && (!apiKey || !baseUrl))
+  throw new Error("Comparison account key and base URL must be configured");
+if (typed && (option("provider") || option("reasoning")))
+  throw new Error("Typed judgments do not use chat routing or reasoning flags");
 const text = await Bun.file(catalogPath).text();
 const parsed = JSON.parse(text);
 const entries = (Array.isArray(parsed) ? parsed : parsed.tools) as Array<{
@@ -93,17 +91,17 @@ const instruction = TOOL_DECISION_INSTRUCTIONS;
 const provider = option("provider");
 const effort = option("reasoning") ?? "none";
 const metadata = {
-  requestVersion: 3,
+  requestVersion: 4,
   backend,
-  baseUrl,
+  endpoint: typed?.metadata ?? { baseUrl },
   catalogSha256: createHash("sha256").update(text).digest("hex"),
   deferredTools: pool.length,
   candidates: candidateCount,
   querySha256: createHash("sha256").update(JSON.stringify(cases)).digest("hex"),
   model,
-  instruction: jev ? JEV_SELECTION_PROTOCOL : instruction,
+  instruction: typed ? TOOL_SELECTION_PROTOCOL : instruction,
   provider: provider ?? null,
-  effort: jev ? null : effort,
+  effort: typed ? null : effort,
 };
 const existing = (await Bun.file(outputPath).exists())
   ? await Bun.file(outputPath).json()
@@ -130,7 +128,7 @@ for (const c of cases) {
   let selected: readonly string[] = [],
     invalid = false;
   let measurement: Record<string, unknown>;
-  if (jev && !input.candidates.length) {
+  if (typed && !input.candidates.length) {
     measurement = {
       inputTokens: 0,
       outputTokens: 0,
@@ -141,30 +139,30 @@ for (const c of cases) {
       requests: 0,
       candidateScores: [],
     };
-  } else if (jev) {
-    let receipt: JevDecisionReceipt | undefined;
+  } else if (typed) {
+    let usage: DecisionUsage | undefined;
+    let receipt: DecisionResult | undefined;
     try {
-      selected = await createJevDecisionModel(jev, (result) => {
-        receipt = result;
+      selected = await createToolSelector(typed.model, {
+        onUsage: (event) => {
+          usage = event;
+        },
+        onResult: (result) => {
+          receipt = result;
+        },
       })(input);
     } catch (error) {
       // Without a receipt, usage is unknown: stop and resume rather than invent a
       // zero-cost failed result. Invalid scored responses retain their usage.
-      if (!receipt) throw error;
+      if (!usage) throw error;
       invalid = true;
     }
-    if (!receipt) throw new Error("Decision model returned no measurement receipt");
+    if (!usage) throw new Error("Decision model returned no usage receipt");
     measurement = {
-      inputTokens: receipt.usage.inputTokens,
-      outputTokens: null,
-      costUsd: receipt.costUsd,
-      costSource: JEV_SELECTION_PROTOCOL.costSource,
-      model: receipt.model,
-      provider: "typesafe",
-      requests: receipt.requests,
+      ...usage,
       candidateScores: input.candidates.map((candidate, id) => ({
         name: candidate.name,
-        probability: receipt!.answers[String(id)]?.probability ?? null,
+        answer: receipt?.answers[String(id)] ?? null,
       })),
     };
   } else {
@@ -174,7 +172,7 @@ for (const c of cases) {
       schema: Record<string, unknown>;
       strict: boolean;
     };
-    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    const response = await fetch(`${baseUrl!.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
@@ -256,7 +254,7 @@ console.log(
       meanWronglyIncluded: mean("wronglyIncluded"),
       meanMs: mean("ms"),
       p95Ms: sortedLatency[Math.ceil(rows.length * 0.95) - 1],
-      costSource: jev ? JEV_SELECTION_PROTOCOL.costSource : "provider-reported",
+      costSources: [...new Set(rows.map((row) => row.costSource))],
       meanCostUsd: rows.every((r) => typeof r.costUsd === "number") ? mean("costUsd") : null,
       totalCostUsd: rows.every((r) => typeof r.costUsd === "number")
         ? rows.reduce((s, r) => s + Number(r.costUsd), 0)

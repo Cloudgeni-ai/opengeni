@@ -5,10 +5,16 @@ import type { Tool } from "@openai/agents";
 import { JevClient, jevCostUsd, type JevFetch } from "../../packages/jev/src/client";
 import { LazyToolRuntime } from "../../packages/runtime/src/lazy-tool-transport";
 import {
-  createJevDecisionModel,
-  JEV_SELECTION_PROTOCOL,
-  type JevDecisionReceipt,
-} from "./jev-decision";
+  createToolSelector,
+  TOOL_SELECTION_PROTOCOL,
+} from "../../packages/runtime/src/tool-discovery-decision";
+import { createJevDecisionModel as jevBackend } from "../../packages/jev/src/decision-model";
+import type { DecisionUsage } from "../../packages/decisions/src";
+
+const createJevDecisionModel = (
+  providerClient: JevClient,
+  onUsage?: (usage: DecisionUsage) => void,
+) => createToolSelector(jevBackend(providerClient), onUsage ? { onUsage } : {});
 
 const candidates = [
   { name: "tasks__get", description: "Get task", inputFields: ["id"] },
@@ -37,7 +43,7 @@ function response(probabilities: unknown[]) {
 
 describe("Jev decision eval adapter", () => {
   test("uses the existing client, typed questions and exact candidate identities", async () => {
-    let receipt: JevDecisionReceipt | undefined;
+    let receipt: DecisionUsage | undefined;
     const choose = createJevDecisionModel(
       client(async (url, init) => {
         expect(url).toBe("https://api.typesafe.ai/v1/systemone");
@@ -61,7 +67,7 @@ describe("Jev decision eval adapter", () => {
       "tasks__get",
     ]);
     expect(receipt?.model).toBe("jev-test-version");
-    expect(receipt?.usage.inputTokens).toBe(1000);
+    expect(receipt?.inputTokens).toBe(1000);
     expect(receipt?.requests).toBe(1);
     expect(receipt?.costUsd).toBe(jevCostUsd(1000));
   });
@@ -84,17 +90,15 @@ describe("Jev decision eval adapter", () => {
   test.each([-0.1, 1.1, "not-a-probability"])(
     "rejects the whole selection for invalid score %s but retains usage",
     async (invalid) => {
-      let receipt: JevDecisionReceipt | undefined;
+      let receipt: DecisionUsage | undefined;
       const choose = createJevDecisionModel(
         client(async () => response([0.9, invalid, 0])),
         (r) => {
           receipt = r;
         },
       );
-      await expect(choose({ query: "task", candidates })).rejects.toThrow(
-        "invalid candidate probabilities",
-      );
-      expect(receipt?.usage.inputTokens).toBe(1000);
+      await expect(choose({ query: "task", candidates })).rejects.toThrow("invalid typed answers");
+      expect(receipt?.inputTokens).toBe(1000);
     },
   );
 
@@ -277,13 +281,13 @@ describe("Jev eval command wiring (local mock endpoints, no paid calls)", () => 
       ];
       await run("tool-discovery-decision-eval.ts", decisionArgs);
       const decision = await Bun.file(paths.decision).json();
-      expect(decision.metadata.instruction).toEqual(JEV_SELECTION_PROTOCOL);
+      expect(decision.metadata.instruction).toEqual(TOOL_SELECTION_PROTOCOL);
       expect(decision.rows[0]).toMatchObject({
         top1: true,
         selected: ["tasks__get"],
         outputTokens: null,
         model: "jev-test-version",
-        costSource: "client-input-token-estimate",
+        costSource: "estimate",
         requests: 1,
       });
       await run("tool-discovery-decision-eval.ts", decisionArgs);
@@ -323,7 +327,7 @@ describe("Jev eval command wiring (local mock endpoints, no paid calls)", () => 
         decisionHttpChunks: 1,
         decisionOutputTokens: null,
         decisionModels: ["jev-test-version"],
-        decisionCostSource: "client-input-token-estimate",
+        decisionCostSources: ["estimate"],
         decisionModelCostUsd: jevCostUsd(1000),
       });
       await run("tool-discovery-agent-eval.ts", agentArgs);

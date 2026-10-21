@@ -208,6 +208,7 @@ import {
   restoreDirectDeferredCallArgumentTypes,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { createToolSelector } from "./tool-discovery-decision";
 import {
   HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   HARNESS_CONTROL_MCP_SERVER_ID,
@@ -2145,7 +2146,7 @@ const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
-  toolSearchDecisionModel?: import("./tool-discovery-decision").ToolDecisionModel | undefined;
+  toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -3546,7 +3547,9 @@ function maybeInstallLazyToolTransport(
       }
       return names;
     },
-    options.toolSearchDecisionModel,
+    options.toolSearchDecisionModel
+      ? createToolSelector(options.toolSearchDecisionModel)
+      : undefined,
   );
 }
 
@@ -10258,9 +10261,9 @@ function runScopedRunner(
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
-export { createToolDecisionModel } from "./tool-discovery-decision";
+export { createToolSelector } from "./tool-discovery-decision";
 export type {
-  ToolDecisionModel,
+  ToolSelector,
   ToolDecisionInput,
   ToolDecisionCandidate,
 } from "./tool-discovery-decision";

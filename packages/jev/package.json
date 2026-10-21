@@ -33,6 +33,9 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
+  "dependencies": {
+    "@opengeni/decisions": "workspace:*"
+  },
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "7.0.2"

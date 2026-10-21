@@ -155,6 +155,10 @@ empty literal-prefix listings may suggest authorized names but never restore
 disabled tools or grant execution outside the current catalog.
 
 - Public clients talk only to the API.
+- Typed decision models are separate from conversational models. Tool discovery
+  and code-search judgments share `@opengeni/decisions`; provider adapters must not
+  silently fall back to chat completions or borrow a customer's credential. See
+  `docs/decision-models.md` for configuration and verified provider boundaries.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
   authority hierarchy: `managed_accounts.id` remains the physical organization
   id, organization membership is distinct from ordinary workspace membership,

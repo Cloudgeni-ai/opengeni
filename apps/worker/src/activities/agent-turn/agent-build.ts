@@ -804,15 +804,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         lazyToolTransport,
         toolSearchDecisionModel: configuredToolDecisionModel({
           settings: runSettings,
-          runtime,
           onUnavailable: () =>
             observability.warn(
-              "Configured tool decision model is unavailable; using compact lexical discovery",
+              "Configured decision model is unavailable; using lexical tool discovery",
             ),
           recordUsage: (modelId, usage, requestId) =>
             recordToolDecisionUsage({
               db,
-              settings: runSettings,
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,

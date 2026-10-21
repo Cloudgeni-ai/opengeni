@@ -10,21 +10,118 @@ Improve the existing search/list/invoke path, not a second discovery API:
 - An explicitly configured **decision model** handles ambiguous searches from the first 40 candidates. Strong lexical matches skip inference. The bypass requires resource coverage of at least 0.5 and a score at least 1.25 times the runner-up for every explicit clause. These are transparent heuristics, **not calibrated confidence probabilities**; the no-model default does not pretend its best-ranked choice is certain.
 - `tool_list({view:"groups"})` is an on-demand directory; pass a returned `group` to browse it. Opaque connections stay together under compact display keys with a representative tool, rather than exposing long identity hashes or hundreds of tiny groups.
 - Schemas are not shortened or inferred. Selected definitions are frozen on the search call and disclosed after its result. They never enter a changing earlier prompt or top-level tools block.
-- There is no default paid model, embedding index, extra credential, new inference timeout or concurrency quota. Unconfigured/unavailable selection uses the same best-match-first lexical path. Only selected schemas are loaded; alternatives remain compact.
+- No paid model, embedding index or credential is required for the default path. Optional typed inference needs explicit deployment configuration. There is no new inference timeout or concurrency quota. Unconfigured/unavailable selection uses best-match-first lexical recovery. Only selected schemas are loaded; alternatives remain compact.
 
-**Recommendation (updated October 21):** retain best-match-first without a paid model as the default and preserve existing native routing. **Jev is the intended decision-model candidate**, using the existing `packages/jev` client behind the generic selection interface. Its eval arm is ready, but no authorized Jev key was available for this evaluation: accuracy, latency and cost results are **pending**, not inferred from other models. Do not recommend or configure GPT-OSS/Cerebras or nano as substitutes; their measurements below are comparison points only. Jev activation is not implemented or justified by this eval-preparation amendment. Its measured accuracy and whole-discovery time on both catalogs must inform that follow-up in this same draft.
+**Recommendation (October 21):** keep no-model best-match-first as the free default;
+for optional paid selection, use **Jev behind the shared decision-model interface**.
+The tested route is OpenRouter's typed Decisions API, model `typesafe/jev-1.13`.
+It is faster end to end than both the old path and the no-model path on both current
+task sets, with 40/40 correct first tools. This is a small development sample, not
+a production speed or perfect-accuracy guarantee. GPT-OSS/Cerebras and nano remain
+historical comparison points only, not shipped production backends or defaults.
 
-The no-model default was faster than the old path on both task sets in both repeats on the **generic Chat Completions path tested live**. This is a small development sample, not a production latency guarantee. Native routes have offline selection and SDK/wire regression evidence, **not a live native latency comparison**. All rows labeled “conditional fast”, “fast selection”, nano or Cerebras below refer to the earlier comparison experiments, **not Jev results or a recommended/default model**.
+The abstraction now lives in `@opengeni/decisions` and is used by both tool discovery
+and `code_search`. It returns typed predicates, choices and scores, not prose.
+The existing Jev client supplies the direct adapter; OpenAI and OpenRouter have
+distinct real Decisions adapters, **not chat-completions fallbacks**. See
+[configuration, accounting and verified provider boundaries](../../docs/decision-models.md).
+No production configuration was changed by this evaluation.
 
-### Jev arm: prepared, not yet measured
+## Current typed-model results — October 21, 2026
 
-`jev-decision.ts` implements the existing `ToolDecisionModel` callback without changing runtime controls or model-facing names. One common state contains the query and the same compact candidate shortlist as the other arms; one typed yes/no (`noul`) question asks whether each candidate belongs in the smallest directly requested set, rather than merely being related. The frozen experimental threshold is **strictly above 0.5**, with selected tools ordered by descending probability and stable candidate order on ties. This is not calibrated confidence or a promise of one tool per action: independent judgments may include alternatives, omit tools, or reorder multiple requested actions. Those errors remain visible in the ordinary accuracy/off-label measurements; raw scores are retained for audit, not silently used to tune the threshold.
+Both typed arms use the same 40 lexical candidates, common state and one predicate
+per candidate. The frozen threshold is **strictly above 0.5**, descending probability,
+stable candidate-order ties. Independent predicates may include alternatives or
+miss/reorder actions; these are not calibrated confidence scores. Refusals or invalid
+answers reject the selection, rather than loading a convenient partial set.
 
-The adapter uses the existing client's chunking, retries and cancellation without new limits, timeouts or warm-up calls. Invalid probabilities reject the whole selection; generic runtime failure falls back to lexical selection. Exact names and strong matches still bypass inference. Retrieval records actual returned model version, input tokens, chunk count, scores and wall time; runtime replay and live **generic** trajectories use the same callback. Native selection can be replayed offline, but this does not add a live native-provider test.
+All 240 all-query requests succeeded with valid answers. Returned models were
+`typesafe/jev-1.13-20260917` and `openai/gpt-6-luna-decisions-20261006`; both used
+`https://openrouter.ai/api/alpha/decisions`. Costs below are **provider-reported**,
+not advertised rates or the direct Jev client's estimates.
 
-Jev `costUsd` is the existing client's **input-token estimate**, not a provider-reported charge. The rate is frozen in experiment metadata (currently `$0.042 / million input tokens` in the repository client, not independently revalidated here). Output tokens are unknown/null rather than invented. Live trajectories distinguish attempted decisions, failures and successful chunks; if a call fails before returning usage, its cost is unknown/null. The retrieval script stops resumably on such a failure instead of fabricating a free result. The client may retry, and its chunk count is not a count of HTTP retry attempts. Missing usage in a successful response inherits the existing client's zero-token behavior; such estimates must not be treated as billing proof.
+### All-query selector (no lexical bypass)
 
-No production model configuration is changed by these scripts. The standalone retrieval arm needs only `OPENGENI_JEV_API_KEY`; the main agent in the live trajectory arm still needs its separately configured OpenAI-compatible account. Neither script executes a domain tool. Local mock tests cover the real client request, scoring, invalid output, cancellation, fallback, command wiring, offline native/generic replay and resume without making a paid call. A no-network preflight of all 120 real query shortlists passed the existing client's request planning: one chunk per query, maximum request bodies 65,340 / 40,641 bytes for A / B. This verifies request construction only, not provider acceptance or model quality.
+| Method | A top-1 / top-3 | B top-1 / top-3 | Off-label tools/search A / B | Mean / p95 ms A; B | USD/search A / B |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Before BM25 | 60.0% / 76.7% | 51.7% / 70.0% | 6.92 / 6.95 | — | $0 / $0 |
+| Field-aware lexical | 78.3% / 88.3% | 66.7% / 83.3% | 6.83 / 6.87 candidates | ~6 ms p95 | $0 / $0 |
+| Lexical + BGE-small RRF | 76.7% / 90.0% | 68.3% / 90.0% | See historical experiment | 16 / 59 ms mean | Local inference |
+| Jev typed | 98.3% / 98.3% | 98.3% / 98.3% | 0.017 / 0.067 | 381 / 465; 311 / 402 | $0.000593 / $0.000387 |
+| Luna Decisions | 88.3% / 88.3% | 86.7% / 86.7% | 0 / 0.033 | 541 / 821; 522 / 755 | $0.001652 / $0.001203 |
+
+Lexical candidate counts do not mean all those schemas are loaded. Neither pure
+selector row is the conditional runtime's accuracy: strong matches bypass inference.
+The fixed shortlist, same rubric and labels are used for both typed models. This is
+not a claim that the rubric is optimal for every provider.
+
+### Conditional runtime replay, including lexical bypass and schema budgets
+
+| Generic output | A top-1 / top-3 | B top-1 / top-3 | Complete mean tokens A / B | Off-label loaded/search A / B |
+| --- | ---: | ---: | ---: | ---: |
+| Before | 60.0% / 76.7% | 51.7% / 70.0% | 6,671 / 5,913 | 6.92 / 6.95 |
+| Default, no model | 78.3% / 88.3% | 66.7% / 83.3% | 1,221 / 718 | 0.25 / 0.35 |
+| Jev conditional | 90.0% / 96.7% | 95.0% / 98.3% | 1,369 / 781 | 0.117 / 0.050 |
+| Luna conditional | 88.3% / 95.0% | 91.7% / 95.0% | 1,360 / 791 | 0.117 / 0.067 |
+
+Top-3 includes compact alternatives; complete tokens include their receipt **and**
+loaded schema JSON, not just the small receipt. Default p95 tokens are 4,042 / 1,341;
+Jev 8,478 / 1,584; Luna 8,478 / 1,932, versus 18,098 / 23,287 before.
+A genuinely needed large schema remains large. Strong-match bypass loses accuracy
+against judging every query, especially on A; its heuristic is not a probability.
+
+Native outputs contain selected definitions only. They preserve hosted search and
+direct function loading; these are offline executor results, **not live native latency**:
+
+| Native output | A top-1 / top-3 | B top-1 / top-3 | Mean schema tokens A / B |
+| --- | ---: | ---: | ---: |
+| Before | 60.0% / 76.7% | 51.7% / 70.0% | 6,671 / 5,913 |
+| Default | 76.7% / 76.7% | 66.7% / 66.7% | 831 / 435 |
+| Jev conditional | 90.0% / 90.0% | 95.0% / 95.0% | 1,106 / 631 |
+| Luna conditional | 88.3% / 88.3% | 91.7% / 91.7% | 1,098 / 641 |
+
+The native default's B top-3 drops 70.0% → 66.7% because fewer schemas are loaded;
+this can cost recovery calls. Native agents can browse compact candidates with
+`tool_list`. Do not hide that tradeoff behind ranked-candidate or generic top-3.
+
+### Whole-discovery trajectories with current main agent Luna
+
+`openai/gpt-6-luna` ran every third frozen query: 20 distinct cases per catalog.
+Before/default were freshly interleaved; typed arms reuse that same baseline and
+were run afterwards, concurrently across catalogs/typed arms. This is one current
+repeat, not a randomized timing trial. Both arms use **generic dispatch over Chat
+Completions**. The harness stops at the first domain call, before execution, so it
+measures discovery rather than completed-task success or native Responses search.
+
+| Catalog / path | Correct first tool | Discovery calls | Mean whole-discovery time | Received discovery tokens |
+| --- | ---: | ---: | ---: | ---: |
+| A before | 95% | 1.35 | 4.407 s | 6,368 |
+| A default | 90% | 1.55 | 3.807 s | 1,855 |
+| A Jev | 100% | 1.00 | 3.257 s | 1,318 |
+| A Luna Decisions | 95% | 1.55 | 4.270 s | 1,756 |
+| B before | 100% | 1.50 | 4.698 s | 8,382 |
+| B default | 100% | 1.45 | 3.553 s | 1,520 |
+| B Jev | 100% | 1.10 | 3.368 s | 861 |
+| B Luna Decisions | 100% | 1.25 | 3.685 s | 978 |
+
+**The no-model A path has more calls and one fewer correct first tool than before**,
+despite lower mean elapsed time; an outlier takes seven discovery calls. Jev avoids
+that case in this run and beats before/default time on both sets. Luna is slower than
+the no-model default, and its A improvement over before is only 137 ms. All rows
+include errors/recovery; no favorable subset was selected.
+
+| Mean USD per task | Before A / B | Default A / B | Jev A / B | Luna A / B |
+| --- | ---: | ---: | ---: | ---: |
+| Selector only | $0 / $0 | $0 / $0 | $0.000310 / $0.000275 | $0.001045 / $0.000792 |
+| Main agent + selector | $0.000976 / $0.001255 | $0.000448 / $0.000394 | $0.000656 / $0.000570 | $0.001477 / $0.001108 |
+
+All current typed trajectories recorded provider cost receipts; no failed selector
+calls occurred. Outage, invalid-answer, refusal, cancellation and fallback behavior
+is exercised by mocks, not claimed as live outage evidence. Direct TypeSafe and
+direct OpenAI Platform success remain untested without their own keys. The real
+Codex-login probe reached ordinary Luna Responses, not the fast typed endpoint:
+Platform Decisions returned 401, correctly headed Codex Decisions returned JSON404.
+See [exact probe scope](../../docs/decision-models.md#verified-boundaries-october-21-2026).
 
 ## Dataset and method (October 20, 2026)
 
@@ -43,7 +140,14 @@ Queries were frozen before scoring each catalog. A later label audit corrected s
 
 Token counts use `gpt-tokenizer@4.1.0`, `o200k_base` BPE of serialized JSON. They are comparable payload sizes, not provider-billed tokens. Full selected payload counts include the compact receipt **and** selected schema JSON, excluding provider declaration wrappers. Latencies are observed wall-clock samples, not isolated throughput benchmarks or confidence intervals. Models and providers are nondeterministic. Eval-only `gpt-tokenizer` and `openai` are root devDependencies; OpenAI remains the same 6.47.0 already resolved by the runtime, with no runtime version change.
 
-## Retrieval results
+## Historical comparisons — October 20 (not recommended/default models)
+
+The following sections retain the earlier GPT-5.4/nano/GPT-OSS experiments as
+comparison evidence, not current recommendations or supported production decision
+backends. “Conditional fast” below always means GPT-OSS, **not Jev**. Current results
+and the shared typed implementation above supersede their configuration advice.
+
+### Historical retrieval results
 
 Each cell is top-1 / top-3 over 60 queries. First, the current **generic** runtime paths, including unloaded alternatives:
 
@@ -77,13 +181,13 @@ For comparison, isolated ranking and selection on **every query**, without the r
 | Lexical 40 → GPT-OSS-120B, low, Cerebras | 95.0% / 95.0% | 98.3% / 98.3% |
 | Whole compact catalog → GPT-5.4 nano | 83.3% / 93.3% | 85.0% / 90.0% |
 
-The measured OpenAI-compatible decision request uses candidate integer IDs, smallest-set instructions, and catalog-before-query messages. Exact ID validation rejects malformed/duplicate/out-of-range IDs. The full-catalog arm costs more and does not improve accuracy. The tested hybrid helps top-3, especially on B, but does not justify shipping an embedding runtime/index for this improvement. This does not rule out other embedding models or rerankers. The prepared Jev arm uses typed candidate judgments instead; no Jev numbers are included in these tables.
+The historical OpenAI-compatible request uses candidate integer IDs, smallest-set instructions, and catalog-before-query messages. It remains eval-only comparison code. Exact ID validation rejects malformed/duplicate/out-of-range IDs. The full-catalog arm costs more and does not improve accuracy. The tested hybrid helps top-3, especially on B, but does not justify shipping an embedding runtime/index. This does not rule out other embedding models or rerankers. These historical tables contain no Jev measurements; current typed results are above.
 
 Exploratory trials are not substituted for final numbers: an early name-output trial produced invalid names; an earlier GPT-5.4 nano prompt scored 95.0/98.3% on A; an earlier Haiku trial on B returned many unnecessary tools (6.93 off-label tools/search). Those trials used different prompts/output formats. The table reports the final prompt, not the best observed run.
 
 Original-label B sensitivity (top-1/top-3): baseline 46.7/68.3%, lexical 60.0/78.3%, dense 45.0/73.3%, hybrid 61.7/88.3%, final nano 90.0/90.0%, Cerebras 93.3/95.0%, whole-catalog nano 83.3/88.3%.
 
-## Payload, selection latency and cost
+### Historical payload, selection latency and cost
 
 | Result path | A mean tokens | B mean tokens | A/B off-label tools per search |
 | --- | ---: | ---: | ---: |
@@ -102,11 +206,11 @@ Before p95 payloads are 18,098 / 23,287 tokens; default p95 is 4,042 / 1,341; co
 | GPT-OSS-120B low, OpenRouter pinned to Cerebras | 661 / 1,215 ms | 556 / 931 ms | $0.002522 / $0.001069 |
 | Nano, whole compact catalog | 1,389 / 1,949 ms | 1,128 / 1,631 ms | $0.002104 / $0.001874 |
 
-Costs are the provider's reported request cost, not advertised starting prices. The Cerebras experiment explicitly pinned `cerebras/fp16` with provider fallback disabled; all 120 responses identify Cerebras. The ordinary runtime does not add a provider-pinning API. Configure an admitted provider/model through the existing registry. The `:nitro` trajectory experiment below uses ordinary provider routing and must not be presented as a pinned-Cerebras measurement.
+Costs are the provider's reported request cost, not advertised starting prices. The Cerebras experiment explicitly pinned `cerebras/fp16` with provider fallback disabled; all 120 responses identify Cerebras. This is an eval-only historical experiment, not a shipped decision backend. The `:nitro` trajectory experiment below used ordinary provider routing, not a pinned-Cerebras route.
 
 Lexical retrieval p95 was about 6 ms. The optional embedding probe used Transformers.js 4.3.1 and `Xenova/bge-small-en-v1.5` q8, normalized CLS vectors, the model's query prefix, and RRF k=10. Index construction took 23.1 / 14.1 seconds; mean query embedding/ranking took 16 / 59 ms. The two probes ran concurrently, so those CPU timings are exploratory, not comparative capacity results. No embedding package is a production dependency.
 
-## Live generic discovery trajectories
+### Historical live generic discovery trajectories
 
 GPT-5.4 mini ran every third frozen query: 20 cases per catalog, using generic dispatch over Chat Completions for both arms. This **does not measure the hosted Responses search used by native GPT/Codex sessions**, nor justify migrating those sessions to generic dispatch; that proposed migration was removed during review. The agent could search/list/load and request the first domain tool, but the harness intercepted that call **before execution**, with empty task arguments. These are live discovery-only simulations, not completed user tasks or production rollout results. Time includes main-agent and selector network/inference time through the first requested domain call. Calls count discovery operations before that call. Repeating an identical discovery request ends a stalled case rather than an unbounded loop.
 
@@ -165,7 +269,7 @@ This supersedes #2650's request-local directory insertion. Rebuilding a director
 
 New search receipts freeze selection once. Replaying completed results never calls the decision model or consults today's catalog. Legacy full-schema search markers and native interrupted calls remain replayable. Compact hits do not count as schema disclosure. Native routes still declare hosted client search and load real functions through `tool_search_output`; generic routes use ordinary search/list/invoke and appended declarations. There is **no native-to-generic protocol migration**. Existing native history is replayed unchanged, and a tool loaded by an old search can be called on the next turn without another search. Real SDK tests cover both native routes, including normal approval checks; serialization tests inspect the actual Responses request body, retain hosted search, keep old output schemas and verify prefix equality. They are not live endpoint acceptance tests.
 
-**The static prompt and control-schema changes invalidate the old cached prefix once per existing session at upgrade.** This PR does not promise zero cache misses on deployment. After upgrade, no result/catalog changes earlier items or grows the top-level block. Native search remains declared, so the rejected draft's risk of replaying native history with the hosted tool removed no longer applies. No direct OpenAI/Azure or Codex live probe was run: no direct OpenAI credential was available to the evaluator, and an OpenRouter probe would not establish compatibility with those endpoints. A production GPT check after an approved deployment remains useful, but no rollout is included here.
+**The static prompt and control-schema changes invalidate the old cached prefix once per existing session at upgrade.** This PR does not promise zero cache misses on deployment. After upgrade, no result/catalog changes earlier items or grows the top-level block. Native search remains declared, so the rejected draft's risk of replaying native history with the hosted tool removed no longer applies. No live native-tool-search compatibility matrix was run. The October21 Codex probe checked Decisions entitlement and ordinary Responses only, not native tool-search replay. A production GPT check after an approved deployment remains useful; no rollout is included here.
 
 ## Failure behavior and remaining risks
 
@@ -173,7 +277,7 @@ New search receipts freeze selection once. Replaying completed results never cal
 - Selection is probabilistic and can omit a needed tool or include an unwanted one. The first 40 lexical candidates are a recall constraint. A selector cannot rescue a missing candidate.
 - Tool descriptions and query text are untrusted classification data. Only exact candidate IDs can resolve, and selection never grants authorization or executes tools. This is not a claim of prompt-injection immunity.
 - Existing original SDK tool objects, validation and approvals remain authoritative. A valid invocation is rewritten before normal dispatch; it is not executed inside a router tool.
-- Usage is recorded through the ordinary deployment provider and `tool_discovery.*` events, including malformed responses. The worker refuses to silently borrow a customer-owned key/subscription. **These events do not debit customer credits.** `recordUsageEvent` in `packages/db/src/index.ts` writes telemetry; customer model charges require the explicit `settleModelUsage` / `applyCreditDebitUpToBalance` path in `packages/core/src/billing/model-usage-settlement.ts`, which discovery never calls. The usage-event debit trigger in migration `0552_usage_allowances.sql` applies only to `knowledge_query` / `document.query_embedding_cost`; the host export trigger exports telemetry, not a debit. External hosts can apply their own policy. Accounting persistence, cancellation and interrupted-run recovery deserve normal release scrutiny.
+- Usage is recorded through the shared deployment decision provider and `tool_discovery.*` / `code_search.decision_*` events. HTTP adapters retain received usage before rejecting malformed answers; direct Jev uses the existing client estimate and can fail before an aggregate receipt exists. Unknown failed-call cost is not zero. The worker never borrows a customer-owned key/subscription. **These events do not debit customer credits.** `recordUsageEvent` writes telemetry; customer model charges require explicit `settleModelUsage` / `applyCreditDebitUpToBalance`, which these consumers never call. The debit trigger in migration `0552_usage_allowances.sql` applies only to knowledge-query embedding events; host export is telemetry. External hosts may apply their own policy. Code-search telemetry names change from `jev` to `decision`; external dashboards need updates.
 - The paid selector is opt-in, and each transport's static model-facing descriptions are identical with or without it. The changed descriptions/list schema, optional config field and frozen-selection receipts are model-facing changes and require review before merge.
 
 ## Reproduce
@@ -183,22 +287,35 @@ Install with `bun install --frozen-lockfile`. Export a real authorized catalog a
 ```sh
 bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json > ranking.json
 
-# Intended candidate: existing Jev client, with OPENGENI_JEV_API_KEY in the environment.
+# Current typed endpoints: set DECISION_MODEL_API_KEY in the environment.
+bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
+  --backend openrouter --model typesafe/jev-1.13 --candidates 40 --out jev-typed.json
+bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
+  --backend openrouter --model openai/gpt-6-luna-decisions --candidates 40 --out luna-typed.json
+bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json \
+  --decision-results jev-typed.json > jev-runtime.json
+# Main agent uses DECISION_MODEL_BASE_URL=https://openrouter.ai/api/v1;
+# typed decisions use their own endpoint, never that chat-completions base.
+bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries queries.json \
+  --out jev-trajectories.json --model openai/gpt-6-luna --decision-backend openrouter \
+  --decision-model typesafe/jev-1.13 --implementation YOUR_REVISION
+
+# Direct TypeSafe: existing Jev client, OPENGENI_JEV_API_KEY in the environment.
 # Optional OPENGENI_JEV_BASE_URL; use an explicit model ID for reproducibility.
 bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
   --backend jev --model jev-latest --candidates 40 --out jev-decision.json
 bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json \
-  --decision-results jev-decision.json > jev-runtime.json
+  --decision-results jev-decision.json > jev-direct-runtime.json
 # Live generic trajectories: DECISION_MODEL_API_KEY / DECISION_MODEL_BASE_URL
 # are for the main agent; the selector uses its separate OPENGENI_JEV_* settings.
 bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries queries.json \
-  --out jev-trajectories.json --model YOUR_AGENT_MODEL --decision-backend jev \
+  --out jev-direct-trajectories.json --model YOUR_AGENT_MODEL --decision-backend jev \
   --decision-model jev-latest --implementation YOUR_REVISION
 
 # Comparison only: explicitly configured OpenAI-compatible selector account.
 # Set DECISION_MODEL_API_KEY and DECISION_MODEL_BASE_URL in your environment.
 bun scripts/tool-discovery-decision-eval.ts --catalog catalog.json --queries queries.json \
-  --out decision.json --model YOUR_MODEL --candidates 40 --reasoning none
+  --backend openai-compatible --out decision.json --model YOUR_MODEL --candidates 40 --reasoning none
 # OpenRouter-only optional routing experiment: --provider cerebras/fp16 --reasoning low
 # Replay those selections through the actual conditional runtime, including bypass:
 bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json \
@@ -206,7 +323,7 @@ bun scripts/tool-discovery-eval.ts --catalog catalog.json --queries queries.json
 
 bun scripts/tool-discovery-agent-eval.ts --catalog catalog.json --queries queries.json \
   --out trajectories.json --model YOUR_AGENT_MODEL --decision-model YOUR_DECISION_MODEL \
-  --decision-reasoning none --implementation YOUR_REVISION
+  --decision-backend openai-compatible --decision-reasoning none --implementation YOUR_REVISION
 # --decision-model none evaluates best-match-first + compact alternatives.
 # --reuse-baseline prior.json requires the same main model, case IDs and query text.
 
@@ -220,11 +337,19 @@ bun test scripts/tool-discovery-eval/jev-decision.test.ts
 bunx --no-install tsc -p scripts/tool-discovery-eval/tsconfig.json
 ```
 
-The decision script validates catalog/query hashes, backend, endpoint and model/request metadata before resuming an output. The trajectory script validates the same experiment metadata and supports explicitly reusing baseline cases. The Jev protocol/threshold/cost-rate version is included; it does not reuse older OpenAI-compatible experiment outputs as Jev results. Use new output paths for this version of the scripts. For paired timing claims, run a fresh interleaved baseline and repeat rather than relying only on old baseline timings. Record provider, returned model version and cost source; never combine a client estimate and a reported charge without labeling the difference. API-backed scripts spend on the accounts explicitly supplied; they execute no domain tools.
+The decision script validates catalog/query hashes, backend, endpoint and request
+metadata before resuming. The trajectory script also validates its experiment and
+supports explicitly reusing matching baseline cases. Shared predicate protocol and
+direct-Jev estimate-rate metadata are recorded; old chat results are not relabeled
+as typed decisions. Use new output paths after a protocol change. Record actual
+model/provider and cost source; do not combine estimates and charges silently.
+Direct OpenAI uses `--backend openai --model gpt-6-luna` with its own Platform key.
+API-backed scripts spend on supplied accounts but execute no domain tools.
 
 ## Research
 
 - [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search): deferred loading and namespaces; preserve stable prefixes instead of resending the whole catalog.
 - [Codex's tool-search implementation](https://github.com/openai/codex/blob/main/codex-rs/core/src/tools/handlers/tool_search.rs): a lexical search baseline, not evidence that flat lexical ranking is sufficient for every catalog.
 - [Anthropic tool search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool): BM25/regex or custom selection returning references. Provider-native deferred-reference requirements differ; the portable path here uses the existing invocation machinery.
+- [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions) and [OpenRouter typed Decisions contract](https://openrouter.ai/docs/client-sdks/typescript/sdks/decisions/README.md): distinct typed APIs, not prose calls on fast chat models.
 - [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection) and [Cerebras GPT-OSS-120B](https://inference-docs.cerebras.ai/models/openai-oss): explicit fast-provider experiment, not a hard-coded application dependency.

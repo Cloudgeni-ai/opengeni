@@ -1606,6 +1606,11 @@ delivery: [`secrets.md`](secrets.md).
 
 Configured agents retain discovery; `media` gates image/video guidance.
 Discovery uses field-aware retrieval and optional generic decision-model selection.
+The shared typed predicate/choice/score interface is `@opengeni/decisions`, used by
+both discovery and the code-search judge. Deployment-owned Jev, OpenAI Decisions
+or OpenRouter Decisions credentials are explicit, separate from conversational
+models. See [`decision-models.md`](decision-models.md) for configuration, usage and
+verified provider boundaries; no ordinary-chat inference fallback is implied.
 Native Responses routes retain hosted search and native function loading; generic
 routes return compact alternatives and append selected schemas after the result.
 Catalog changes never rewrite prior items or the first-request tool block.
@@ -1812,7 +1817,8 @@ behind a generic 500, so its session lookups run through
 | `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
-| `packages/jev` | `@opengeni/jev` | Jev client and `code_search` engine |
+| `packages/decisions` | `@opengeni/decisions` | Provider-neutral predicate/choice/score model interface and OpenAI/OpenRouter typed Decisions transports; no conversational fallback |
+| `packages/jev` | `@opengeni/jev` | Existing Jev client, adapter to the shared decision-model interface, and provider-neutral `code_search` engine |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |

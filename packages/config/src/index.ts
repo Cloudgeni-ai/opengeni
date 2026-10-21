@@ -1049,10 +1049,12 @@ const SettingsSchema = z.object({
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
   // OPENGENI_LAZY_TOOL_SEARCH_ENABLED
   lazyToolSearchEnabled: EnvBoolean.default(true),
-  // Optional deployment-owned model for selecting tools from compact candidates.
-  // Uses the ordinary provider registry; no separate provider credential or SDK.
-  // Unset/unavailable keeps compact lexical discovery and exact schema loading.
-  toolSearchDecisionModelId: z.string().min(1).optional(),
+  // Typed decision-model category, separate from conversational models. Explicit
+  // configuration is shared by tool discovery and code search; no account fallback.
+  decisionModelProvider: z.enum(["jev", "openai", "openrouter"]).optional(),
+  decisionModelId: z.string().trim().min(1).optional(),
+  decisionModelApiKey: z.string().optional(),
+  decisionModelBaseUrl: z.string().url().optional(),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -2273,6 +2275,44 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
   return usableDeploymentSecret(settings.jevApiKey);
 }
 
+export type DecisionModelSettings = Pick<
+  Settings,
+  "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
+>;
+/** Explicit deployment credentials only. Compatibility is code-search-only. */
+export function decisionModelConfiguration(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch = false,
+):
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | undefined {
+  const explicit =
+    settings.decisionModelProvider !== undefined ||
+    settings.decisionModelId !== undefined ||
+    settings.decisionModelApiKey !== undefined ||
+    settings.decisionModelBaseUrl !== undefined;
+  if (explicit) {
+    const apiKey = usableDeploymentSecret(settings.decisionModelApiKey);
+    if (!settings.decisionModelProvider || !settings.decisionModelId || !apiKey) return undefined;
+    return {
+      provider: settings.decisionModelProvider,
+      model: settings.decisionModelId,
+      apiKey,
+      ...(settings.decisionModelBaseUrl ? { baseUrl: settings.decisionModelBaseUrl } : {}),
+    };
+  }
+  const apiKey = allowLegacyCodeSearch ? usableJevApiKey(settings) : undefined;
+  return apiKey
+    ? {
+        provider: "jev",
+        model: settings.jevModel ?? "jev-latest",
+        apiKey,
+        ...(settings.jevBaseUrl ? { baseUrl: settings.jevBaseUrl } : {}),
+      }
+    : undefined;
+}
+
 /** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
   settings: FirstPartyMcpToolPolicySettings & Pick<Settings, "webSearchEnabled">,
@@ -2285,14 +2325,15 @@ export function agentConfigDeploymentPolicy(
 
 /**
  * Deployment half of the `code_search` decision. `available` is false when
- * the mode is off or no usable Jev key is configured; workspaces then cannot
+ * the mode is off or no usable decision model is configured; workspaces then cannot
  * turn it on. `workspaceDefault` applies to workspaces without their own
  * setting.
  */
 export function codeSearchDeploymentPolicy(
-  settings: Pick<Settings, "codeSearchMode" | "jevApiKey">,
+  settings: Pick<Settings, "codeSearchMode" | "jevApiKey"> & DecisionModelSettings,
 ): CodeSearchDeploymentPolicy {
-  const available = settings.codeSearchMode !== "off" && usableJevApiKey(settings) !== undefined;
+  const available =
+    settings.codeSearchMode !== "off" && decisionModelConfiguration(settings, true) !== undefined;
   if (!available) return { available: false, workspaceDefault: "off" };
   const workspaceDefault =
     settings.codeSearchMode === "default_on"
@@ -5193,7 +5234,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
     openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
-    toolSearchDecisionModelId: optional("OPENGENI_TOOL_SEARCH_DECISION_MODEL_ID"),
+    decisionModelProvider: optional("OPENGENI_DECISION_MODEL_PROVIDER"),
+    decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
+    decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
+    decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(

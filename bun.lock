@@ -68,7 +68,7 @@
     },
     "apps/api": {
       "name": "@opengeni/api-router",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@1password/sdk": "0.5.0",
         "@aws-sdk/client-s3": "^3.1044.0",
@@ -146,7 +146,7 @@
     },
     "apps/site-gateway": {
       "name": "@opengeni/site-gateway",
-      "version": "0.1.5",
+      "version": "0.1.9",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/sdk": "workspace:*",
@@ -219,7 +219,7 @@
     },
     "apps/worker": {
       "name": "@opengeni/worker-bundle",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "bin": {
         "opengeni-artifact-materializer-worker": "./src/artifact-materializer-entry.ts",
         "opengeni-artifact-outbox-dispatcher": "./src/artifact-outbox-entry.ts",
@@ -273,7 +273,7 @@
     },
     "examples/chat-quickstart": {
       "name": "@opengeni/example-chat-quickstart",
-      "version": "0.0.39",
+      "version": "0.0.43",
       "dependencies": {
         "@opengeni/sdk": "workspace:*",
       },
@@ -283,7 +283,7 @@
     },
     "examples/embedded-product": {
       "name": "@opengeni/example-embedded-product",
-      "version": "0.0.41",
+      "version": "0.0.45",
       "dependencies": {
         "@opengeni/connect": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -303,7 +303,7 @@
     },
     "examples/northstar-support": {
       "name": "@opengeni/example-northstar-support",
-      "version": "0.0.182",
+      "version": "0.0.186",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/react": "workspace:*",
@@ -349,7 +349,7 @@
     },
     "packages/agent-host": {
       "name": "@opengeni/agent-host",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@noble/hashes": "1.8.0",
         "@opengeni/sdk": "workspace:*",
@@ -361,7 +361,7 @@
     },
     "packages/agent-proto": {
       "name": "@opengeni/agent-proto",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@bufbuild/protobuf": "^2.2.0",
       },
@@ -373,19 +373,19 @@
     },
     "packages/artifact-kernel-wasm-document": {
       "name": "@opengeni/artifact-kernel-wasm-document",
-      "version": "3.4.0",
+      "version": "4.2.0",
     },
     "packages/artifact-kernel-wasm-presentation": {
       "name": "@opengeni/artifact-kernel-wasm-presentation",
-      "version": "3.4.0",
+      "version": "4.2.0",
     },
     "packages/artifact-kernel-wasm-spreadsheet": {
       "name": "@opengeni/artifact-kernel-wasm-spreadsheet",
-      "version": "3.4.0",
+      "version": "4.2.0",
     },
     "packages/artifact-tool": {
       "name": "@opengeni/artifact-tool",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "bin": {
         "opengeni-artifact-materializer": "./src/materializer-cli-entry.ts",
         "opengeni-artifact-runtime": "./src/runtime-cli-entry.ts",
@@ -407,7 +407,7 @@
     },
     "packages/browserd": {
       "name": "@opengeni/browserd",
-      "version": "0.2.22",
+      "version": "0.2.26",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/interaction": "workspace:*",
@@ -421,7 +421,7 @@
     },
     "packages/capabilities": {
       "name": "@opengeni/capabilities",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@openai/agents": "0.14.3",
         "@opengeni/contracts": "workspace:*",
@@ -437,7 +437,7 @@
     },
     "packages/codemode": {
       "name": "@opengeni/codemode",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/sdk": "workspace:*",
@@ -450,7 +450,7 @@
     },
     "packages/codex": {
       "name": "@opengeni/codex",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/network": "workspace:*",
@@ -463,7 +463,7 @@
     },
     "packages/config": {
       "name": "@opengeni/config",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -477,7 +477,7 @@
     },
     "packages/connect": {
       "name": "@opengeni/connect",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "devDependencies": {
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
@@ -485,7 +485,7 @@
     },
     "packages/contracts": {
       "name": "@opengeni/contracts",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
         "yaml": "2.9.0",
@@ -498,7 +498,7 @@
     },
     "packages/core": {
       "name": "@opengeni/core",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@modelcontextprotocol/client": "2.3.1",
         "@modelcontextprotocol/sdk": "^1.29.0",
@@ -525,7 +525,7 @@
     },
     "packages/db": {
       "name": "@opengeni/db",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/codemode": "workspace:*",
         "@opengeni/codex": "workspace:*",
@@ -546,6 +546,14 @@
         "typescript": "7.0.2",
       },
     },
+    "packages/decisions": {
+      "name": "@opengeni/decisions",
+      "version": "4.2.0",
+      "devDependencies": {
+        "tsup": "^8.5.0",
+        "typescript": "7.0.2",
+      },
+    },
     "packages/deployment": {
       "name": "@opengeni/deployment",
       "version": "0.1.0",
@@ -558,7 +566,7 @@
     },
     "packages/desktop": {
       "name": "@opengeni/desktop",
-      "version": "0.1.7",
+      "version": "0.2.3",
       "dependencies": {
         "@opengeni/agent-host": "workspace:*",
         "@opengeni/sdk": "workspace:*",
@@ -574,7 +582,7 @@
     },
     "packages/documents": {
       "name": "@opengeni/documents",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@llamaindex/liteparse": "2.14.2",
         "@opengeni/config": "workspace:*",
@@ -593,7 +601,7 @@
     },
     "packages/events": {
       "name": "@opengeni/events",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -606,7 +614,7 @@
     },
     "packages/github": {
       "name": "@opengeni/github",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -620,7 +628,7 @@
     },
     "packages/interaction": {
       "name": "@opengeni/interaction",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
       },
@@ -631,7 +639,10 @@
     },
     "packages/jev": {
       "name": "@opengeni/jev",
-      "version": "3.4.0",
+      "version": "4.2.0",
+      "dependencies": {
+        "@opengeni/decisions": "workspace:*",
+      },
       "devDependencies": {
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
@@ -639,7 +650,7 @@
     },
     "packages/network": {
       "name": "@opengeni/network",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "undici": "^6.21.3",
         "ws": "8.21.1",
@@ -652,7 +663,7 @@
     },
     "packages/observability": {
       "name": "@opengeni/observability",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "prom-client": "^15.1.3",
@@ -664,7 +675,7 @@
     },
     "packages/ogtool": {
       "name": "@opengeni/ogtool",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "bin": {
         "ogtool": "./dist/bin/ogtool.cjs",
       },
@@ -679,7 +690,7 @@
     },
     "packages/react": {
       "name": "@opengeni/react",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@bufbuild/protobuf": "^2.2.0",
         "@dnd-kit/core": "6.3.1",
@@ -774,7 +785,7 @@
     },
     "packages/react-native": {
       "name": "@opengeni/react-native",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/react": "workspace:*",
@@ -817,7 +828,7 @@
     },
     "packages/runtime": {
       "name": "@opengeni/runtime",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@alibaba-group/opensandbox": "0.1.11",
         "@grpc/grpc-js": "1.14.4",
@@ -833,6 +844,7 @@
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
+        "@opengeni/decisions": "workspace:*",
         "@opengeni/interaction": "workspace:*",
         "@opengeni/network": "workspace:*",
         "@opengeni/observability": "workspace:*",
@@ -861,7 +873,7 @@
     },
     "packages/sdk": {
       "name": "@opengeni/sdk",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/connect": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -882,7 +894,7 @@
     },
     "packages/storage": {
       "name": "@opengeni/storage",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -898,7 +910,7 @@
     },
     "packages/subscriptions": {
       "name": "@opengeni/subscriptions",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "devDependencies": {
         "@opengeni/testing": "workspace:*",
         "tsup": "^8.5.0",
@@ -932,7 +944,7 @@
     },
     "packages/tool-gateway": {
       "name": "@opengeni/tool-gateway",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/observability": "workspace:*",
@@ -945,7 +957,7 @@
     },
     "packages/vaults": {
       "name": "@opengeni/vaults",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
       },
@@ -956,7 +968,7 @@
     },
     "packages/vaults-bitwarden-bridge": {
       "name": "@opengeni/vaults-bitwarden-bridge",
-      "version": "2.0.4",
+      "version": "2.0.8",
       "bin": {
         "opengeni-bitwarden-bridge": "./src/cli.ts",
       },
@@ -971,7 +983,7 @@
     },
     "packages/vaults-keeper": {
       "name": "@opengeni/vaults-keeper",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@keeper-security/secrets-manager-core": "17.6.0",
         "@opengeni/contracts": "workspace:*",
@@ -984,7 +996,7 @@
     },
     "packages/vaults-onepassword": {
       "name": "@opengeni/vaults-onepassword",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@1password/sdk": "0.5.0",
         "@opengeni/contracts": "workspace:*",
@@ -997,7 +1009,7 @@
     },
     "packages/vaults-protonpass": {
       "name": "@opengeni/vaults-protonpass",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/vaults": "workspace:*",
@@ -1010,7 +1022,7 @@
     },
     "packages/xai-subscription": {
       "name": "@opengeni/xai-subscription",
-      "version": "3.4.0",
+      "version": "4.2.0",
       "dependencies": {
         "@opengeni/network": "workspace:*",
       },
@@ -1303,7 +1315,7 @@
 
     "@braintree/sanitize-url": ["@braintree/sanitize-url@7.1.2", "", {}, "sha512-jigsZK+sMF/cuiB7sERuo9V7N9jx+dhmHHnQyDSVdpZwVutaBu7WvNYqMDLSgFgfB30n452TP3vjDAvFC973mA=="],
 
-    "@bufbuild/protobuf": ["@bufbuild/protobuf@2.13.0", "", {}, "sha512-acq7c49vxfm1ggJ95P70TX7ABDM0vxr1SYD3BB0o0jnBLB4OAqeHyKuN+cD3w80gXEDQ2zxHpR6CUeA+O/aU9g=="],
+    "@bufbuild/protobuf": ["@bufbuild/protobuf@2.16.0", "", {}, "sha512-FWa0sPlqYGJgpTs6OxBRcL/AW4JT0OIO+W1ajerluoTVh8CV0B7XM1qsNCRgnkSCkRCgOICKHRQlY17jrsm0+Q=="],
 
     "@cbor-extract/cbor-extract-darwin-arm64": ["@cbor-extract/cbor-extract-darwin-arm64@2.2.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-ZKZ/F8US7JR92J4DMct6cLW/Y66o2K576+zjlEN/MevH70bFIsB10wkZEQPLzl2oNh2SMGy55xpJ9JoBRl5DOA=="],
 
@@ -1864,6 +1876,8 @@
     "@opengeni/core": ["@opengeni/core@workspace:packages/core"],
 
     "@opengeni/db": ["@opengeni/db@workspace:packages/db"],
+
+    "@opengeni/decisions": ["@opengeni/decisions@workspace:packages/decisions"],
 
     "@opengeni/deployment": ["@opengeni/deployment@workspace:packages/deployment"],
 
@@ -5268,8 +5282,6 @@
     "dprint-node/detect-libc": ["detect-libc@1.0.3", "", { "bin": { "detect-libc": "./bin/detect-libc.js" } }, "sha512-pGjwhsmsp4kL2RTz08wcOlGN83otlqHeD/Z5T8GXZB+/YcpQ/dgo+lbU8ZsGxV0HIvqqxo9l7mqYwyYMD9bKDg=="],
 
     "duplexify/readable-stream": ["readable-stream@3.6.2", "", { "dependencies": { "inherits": "^2.0.3", "string_decoder": "^1.1.1", "util-deprecate": "^1.0.1" } }, "sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA=="],
-
-    "e2b/@bufbuild/protobuf": ["@bufbuild/protobuf@2.16.0", "", {}, "sha512-FWa0sPlqYGJgpTs6OxBRcL/AW4JT0OIO+W1ajerluoTVh8CV0B7XM1qsNCRgnkSCkRCgOICKHRQlY17jrsm0+Q=="],
 
     "e2b/chalk": ["chalk@5.6.2", "", {}, "sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA=="],
 

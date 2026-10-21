@@ -1325,18 +1325,15 @@ Static prompt/control-schema changes at upgrade invalidate the old cached prefix
 once for existing sessions; this is not a zero-cache-miss deployment. After that
 upgrade, catalogs/results never rewrite earlier items or grow the tool block.
 
-`OPENGENI_TOOL_SEARCH_DECISION_MODEL_ID` optionally names an ordinary configured,
-deployment-owned provider model. It reuses the normal single-model-call client,
-minimal supported reasoning effort, cancellation and provider retries. No new
-timeout, concurrency quota or request cap is added. Internal inference is
-deployment-paid; `tool_discovery.*` usage events retain input, cached input,
-output and provider-cost estimates per workspace/session/turn. These are telemetry
-events, not customer-credit debits: the discovery path does not invoke model-usage
-settlement, and the usage-event billing trigger covers only knowledge-query
-embedding events. External hosts may apply their own telemetry policy. It never
-silently borrows a customer's key or subscription. Embedders may instead pass an admitted
-`BuildAgentOptions.toolSearchDecisionModel` callback or use `createToolDecisionModel`
-with their own usage hook. Unset, failed or invalid model selection uses the same
+The optional [shared decision-model category](decision-models.md) serves both
+tool discovery and code search. `OPENGENI_DECISION_MODEL_PROVIDER/ID/API_KEY`
+select explicit deployment-owned Jev, OpenAI Decisions or OpenRouter Decisions
+inference, not an ordinary chat model. Embedders pass a `DecisionModel` as
+`BuildAgentOptions.toolSearchDecisionModel`. No new timeout, concurrency quota
+or request cap is added. `tool_discovery.*` records received tokens and reported
+or estimated provider cost, with unknown usage left unknown. These are telemetry,
+not customer-credit debits; discovery never invokes model-usage settlement.
+It never silently borrows a customer key/subscription. Unset, failed or invalid model selection uses the same
 best-match-first lexical path. If no match can be loaded, browse with `tool_list`
 and load exact names (`schemasLoaded:false` in generic receipts).
 Cancellation propagates rather than being mistaken for an outage.

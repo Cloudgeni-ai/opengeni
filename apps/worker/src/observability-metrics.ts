@@ -3459,27 +3459,27 @@ export function modelCallAccountContext(input: {
 
 export type CodeSearchCallOutcome =
   | "completed"
-  | "jev_unavailable"
-  | "jev_rejected"
+  | "decision_unavailable"
+  | "decision_rejected"
   | "workspace_unavailable"
   | "invalid_arguments"
   | "breaker_open"
   | "cancelled"
   | "failed";
 
-/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+/** One code-search call and the typed decision inference it used. */
 export function recordCodeSearchCall(
   observability: Observability,
   input: {
     outcome: CodeSearchCallOutcome;
     durationSeconds: number;
-    jevRequests: number;
-    jevCostUsd: number;
+    decisionRequests: number;
+    decisionCostUsd: number | null;
   },
 ): void {
   observability.incrementCounter({
     name: "opengeni_code_search_calls_total",
-    help: "Jev-backed code_search tool calls by outcome.",
+    help: "Decision-model-backed code_search tool calls by outcome.",
     labels: { outcome: input.outcome },
   });
   observability.observeHistogram({
@@ -3489,18 +3489,18 @@ export function recordCodeSearchCall(
     labels: { outcome: input.outcome },
     value: Math.max(0, input.durationSeconds),
   });
-  if (input.jevRequests > 0) {
+  if (input.decisionRequests > 0) {
     observability.incrementCounter({
-      name: "opengeni_code_search_jev_requests_total",
-      help: "Jev requests made by code_search.",
-      amount: input.jevRequests,
+      name: "opengeni_code_search_decision_requests_total",
+      help: "Typed decision requests made by code_search.",
+      amount: input.decisionRequests,
     });
   }
-  if (input.jevCostUsd > 0) {
+  if (input.decisionCostUsd !== null && input.decisionCostUsd > 0) {
     observability.incrementCounter({
-      name: "opengeni_code_search_jev_cost_micro_usd_total",
-      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
-      amount: Math.round(input.jevCostUsd * 1_000_000),
+      name: "opengeni_code_search_decision_cost_micro_usd_total",
+      help: "Known decision cost of code_search, in micro-USD; usage events identify estimates.",
+      amount: Math.round(input.decisionCostUsd * 1_000_000),
     });
   }
 }

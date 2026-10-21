@@ -13,6 +13,7 @@ import {
 } from "@openai/agents";
 import OpenAI from "openai";
 import { testSettings } from "@opengeni/testing";
+import { createHttpDecisionModel } from "@opengeni/decisions";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { rankToolPool } from "../src/codex-tool-search";
 import {
@@ -26,10 +27,9 @@ import {
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
 import {
-  createToolDecisionModel,
-  parseToolDecision,
-  toolDecisionRequest,
-  type ToolDecisionModel,
+  createToolSelector,
+  toolSelectionRequest,
+  type ToolSelector,
 } from "../src/tool-discovery-decision";
 
 function candidate(
@@ -329,7 +329,7 @@ class ScriptedModel implements Model {
   }
 }
 
-function decisionRuntime(decision: ToolDecisionModel) {
+function decisionRuntime(decision: ToolSelector) {
   return new LazyToolRuntime(
     "generic_dispatch",
     new Set(),
@@ -458,28 +458,30 @@ describe("decision selection", () => {
     cancelled.refresh([candidate("tasks__get", "Get task"), candidate("tasks__read", "Read task")]);
     await expect(cancelled.prepareSearch({ query: "task" }, controller.signal)).rejects.toThrow();
   });
-  test("decision format validates whole IDs and leaves the catalog prefix unchanged across queries", () => {
+  test("typed selection keeps candidate context unchanged across queries", () => {
     const candidates = [{ name: "tasks__get", description: "Get task", inputFields: ["id"] }];
-    expect(parseToolDecision('{"ids":[0]}', candidates)).toEqual(["tasks__get"]);
-    for (const text of ['{"ids":[1]}', '{"ids":[0,0]}', '{"ids":["0"]}', "{}"])
-      expect(() => parseToolDecision(text, candidates)).toThrow();
-    expect(toolDecisionRequest({ query: "first", candidates }).messages.slice(0, 2)).toEqual(
-      toolDecisionRequest({ query: "second", candidates }).messages.slice(0, 2),
-    );
+    const first = toolSelectionRequest({ query: "first", candidates });
+    const second = toolSelectionRequest({ query: "second", candidates });
+    expect(first.input.candidates).toEqual(second.input.candidates);
+    expect(first.questions).toEqual(second.questions);
   });
-  test("the normal single-model implementation settles usage even for an invalid answer", async () => {
+  test("the shared typed implementation records usage even for an invalid answer", async () => {
     let usageCalls = 0;
-    const model = new ScriptedModel([
-      [{ ...done, content: [{ type: "output_text", text: '{"ids":[99]}' }] }],
-    ]);
-    const choose = createToolDecisionModel(
-      { model },
-      {
-        onUsage: async () => {
-          usageCalls++;
-        },
+    const model = createHttpDecisionModel({
+      provider: "openrouter",
+      model: "test",
+      apiKey: "test-only",
+      fetch: (async () =>
+        Response.json({
+          answers: { 99: { type: "noul", noul: 0.9 } },
+          usage: { input_tokens: 100 },
+        })) as typeof fetch,
+    });
+    const choose = createToolSelector(model, {
+      onUsage: async () => {
+        usageCalls++;
       },
-    );
+    });
     await expect(
       choose({
         query: "get task",
