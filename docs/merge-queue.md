@@ -258,6 +258,12 @@ not itself a verified code-failure verdict. These rows deliberately leave ready,
 actual build and landing timestamps unknown: deterministic candidate commit dates
 are not build timestamps. The controller stage ledger owns those stages and its
 rolling-day wait signal; an unknown batch queue wait must not be read as healthy.
+Batch collection errors are recorded as unavailable and cannot suppress the
+independent full-main alert reconciliation. Provider start delay uses the selected
+attempt's `run_started_at`; a retry without that timestamp remains unknown.
+Hourly reconciliation contains only the latest attempt of each run, while event
+receipts retain each delivered completion. Do not interpret that hourly sample as
+the controller's complete retry history.
 
 Landing instrumentation does **not** post public comments or issues. Explicit
 rollout opt-in `QUEUE_HEALTH_ALERTS=true` enables the hourly/manual reconciliation

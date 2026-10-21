@@ -11,6 +11,7 @@ export type Run = {
   event: string;
   path: string;
   created_at: string;
+  run_started_at?: string | null;
   updated_at: string;
   html_url: string;
   status: string;
@@ -78,6 +79,7 @@ export function batchTiming(run: Run, jobs: Job[]) {
     branch: run.head_branch,
     url: run.html_url,
     candidateObservedAt: run.created_at,
+    attemptObservedAt: run.run_started_at ?? (run.run_attempt === 1 ? run.created_at : null),
     ciStartedAt: row.ciStartedAt,
     ciFinishedAt: row.ciFinishedAt,
     providerConclusion: run.conclusion,
@@ -93,7 +95,7 @@ export function summarizeBatches(rows: ReturnType<typeof batchTiming>[]) {
     .map((row) => minutes(row.ciStartedAt, row.ciFinishedAt))
     .filter((value): value is number => value !== null);
   const waits = rows
-    .map((row) => minutes(row.candidateObservedAt, row.ciStartedAt))
+    .map((row) => minutes(row.attemptObservedAt, row.ciStartedAt))
     .filter((value): value is number => value !== null);
   return {
     samples: rows.length,
@@ -292,6 +294,27 @@ export function collectBatchTimings(api: Api, repository: string, runs: Run[]) {
     );
 }
 
+/** Optional instrumentation must never disable the independent main watch. */
+export function collectBatchReport(api: Api, repository: string, since: string) {
+  try {
+    const runs = paginated(
+      api,
+      `repos/${repository}/actions/workflows/batch-ci.yml/runs?event=push&created=%3E%3D${encodeURIComponent(since)}`,
+      "workflow_runs",
+    ) as Run[];
+    const batchRows = collectBatchTimings(api, repository, runs);
+    return { batchRows, batchSummary: summarizeBatches(batchRows), batchError: null };
+  } catch {
+    // Do not expose provider response bodies or publish a partial healthy sample.
+    return {
+      batchRows: [],
+      batchSummary: null,
+      batchError:
+        "Batch telemetry unavailable; collection failed. Full-main reconciliation remains independent.",
+    };
+  }
+}
+
 /** The associated landing PR is a suspect, not proven causality: coalesced full
  * CI covers intervening commits too. Never automatically revert it. */
 export function reportRedMain(api: Api, repository: string, run: Run) {
@@ -366,13 +389,7 @@ if (import.meta.main) {
     ) as Run[];
     const rows = collectQueueTimings(gh, repository, runs);
     const summary = summarizeQueue(rows, now);
-    const batchRuns = paginated(
-      gh,
-      `repos/${repository}/actions/workflows/batch-ci.yml/runs?event=push&created=%3E%3D${encodeURIComponent(since)}`,
-      "workflow_runs",
-    ) as Run[];
-    const batchRows = collectBatchTimings(gh, repository, batchRuns);
-    const batchSummary = summarizeBatches(batchRows);
+    const { batchRows, batchSummary, batchError } = collectBatchReport(gh, repository, since);
     // The report lane coalesces pending invocations. Reconcile completed red
     // main runs too, so a queue-report burst cannot hide a full-CI failure.
     const redRuns = paginated(
@@ -390,7 +407,7 @@ if (import.meta.main) {
     writeFileSync(
       "queue-health.json",
       JSON.stringify(
-        { ...summary, rows, batchRows, batchSummary, alertsEnabled, alerts },
+        { ...summary, rows, batchRows, batchSummary, batchError, alertsEnabled, alerts },
         null,
         2,
       ) + "\n",
@@ -398,7 +415,7 @@ if (import.meta.main) {
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(
         process.env.GITHUB_STEP_SUMMARY,
-        `## Queue health\n\n${summary.recommendation}\n\n\`\`\`json\n${JSON.stringify({ nativeQueue: summary, batchCi: batchSummary }, null, 2)}\n\`\`\`\n`,
+        `## Queue health\n\n${summary.recommendation}\n\n\`\`\`json\n${JSON.stringify({ nativeQueue: summary, batchCi: batchSummary, batchError }, null, 2)}\n\`\`\`\n`,
       );
     if (summary.stopSignal) console.log("::warning::" + summary.recommendation);
   }

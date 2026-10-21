@@ -4,6 +4,7 @@ import {
   isBatchRun,
   batchTiming,
   collectBatchTimings,
+  collectBatchReport,
   summarizeBatches,
   publicAlertsEnabled,
   queuePullNumber,
@@ -58,6 +59,7 @@ test("batch telemetry binds exact attempt jobs but never invents readiness, buil
     head_branch: "queue/shadow-traffic/abc",
     path: ".github/workflows/batch-ci.yml",
     run_attempt: 2,
+    run_started_at: "2026-10-21T10:02:00Z",
     conclusion: "failure",
   };
   const calls: string[] = [];
@@ -114,6 +116,45 @@ test("batch cancellation is not a failing PR and empty samples remain unknown", 
   expect(summary.providerRedRuns).toBe(0);
   expect(summarizeBatches([]).ci.p95Minutes).toBeNull();
   expect(batchTiming({ ...run, status: "in_progress" }, jobs).ciFinishedAt).toBeNull();
+});
+
+test("retry start delay uses the selected attempt and is unknown without an attempt timestamp", () => {
+  const retry = {
+    ...run,
+    run_attempt: 2,
+    created_at: "2026-10-20T10:00:00Z",
+    run_started_at: "2026-10-21T10:02:00Z",
+  };
+  expect(summarizeBatches([batchTiming(retry, jobs)]).providerStartDelay.p95Minutes).toBe(1);
+  expect(
+    summarizeBatches([batchTiming({ ...retry, run_started_at: null }, jobs)]).providerStartDelay
+      .p95Minutes,
+  ).toBeNull();
+});
+
+test("a batch job lookup failure reports unavailable rather than a partial healthy sample", () => {
+  const report = collectBatchReport(
+    (path) => {
+      if (path.includes("/workflows/"))
+        return {
+          workflow_runs: [
+            {
+              ...run,
+              event: "push",
+              head_branch: "queue/live/abc",
+              path: ".github/workflows/batch-ci.yml",
+            },
+          ],
+        };
+      throw new Error("provider response not for public output");
+    },
+    "owner/repo",
+    run.created_at,
+  );
+  expect(report.batchSummary).toBeNull();
+  expect(report.batchRows).toEqual([]);
+  expect(report.batchError).toContain("unavailable");
+  expect(report.batchError).not.toContain("provider response");
 });
 
 test("stage evidence binds queue event, exact attempt jobs and landed PR; metadata update time is not CI finish", () => {
@@ -173,6 +214,15 @@ test.each(["cancelled", "success", "skipped", "neutral", null])(
 );
 
 test("red-main alert comments on the exact landing PR without pretending causality or reverting", () => {
+  const batch = collectBatchReport(
+    () => {
+      throw new Error("404: batch-ci not on main");
+    },
+    "owner/repo",
+    run.created_at,
+  );
+  expect(batch.batchSummary).toBeNull();
+  expect(batch.batchError).toContain("unavailable");
   const candidate = {
     ...run,
     path: ".github/workflows/ci.yml",
