@@ -16,6 +16,7 @@ class BrowserControlRequestError extends Error {
   constructor(
     readonly status: number,
     readonly error: { code: string; message: string; retryable: boolean },
+    readonly diagnostic: unknown = null,
   ) {
     super(error.message);
   }
@@ -155,5 +156,77 @@ describe("error cause classification", () => {
     expect(lines[2]).not.toContain(sentinel);
     for (const key of ["causeName", "causeCode", "causeAgentCode", "causeStatus", "causeSqlState"])
       expect(JSON.parse(lines[2]!)).not.toHaveProperty(key);
+  });
+
+  test("a driver failure says which driver class, function and message template failed", () => {
+    const title = "Quarterly salary review — Inbox";
+    const failure = new BrowserControlRequestError(
+      500,
+      {
+        code: "driver_failed",
+        message: `CUA get_window_state did not establish completion: window "${title}" is hidden`,
+        retryable: false,
+      },
+      { errorClass: "ComputerBackendError", frame: "CuaComputerBackend.observe" },
+    );
+    const attributes = errorCauseAttributes(
+      new HTTPException(500, { message: "x", cause: failure }),
+    );
+    expect(attributes).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "driver_failed",
+      causeStatus: 500,
+      causeDriverClass: "ComputerBackendError",
+      causeDriverFrame: "CuaComputerBackend.observe",
+      causeDriverMessage: "CUA get_window_state did not establish completion: [redacted]",
+    });
+    const lines = capture((obs) => {
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        origin: "api",
+        ...attributes,
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "driver_failed",
+        causeDriverClass: "has spaces",
+        causeDriverFrame: "/Users/someone/secret",
+        causeDriverMessage: `window "${title}" vanished`,
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "timeout",
+        causeDriverClass: "ComputerBackendError",
+        causeDriverMessage: "anything",
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      causeDriverClass: "ComputerBackendError",
+      causeDriverFrame: "CuaComputerBackend.observe",
+      causeDriverMessage: "CUA get_window_state did not establish completion: [redacted]",
+    });
+    expect(lines.join("\n")).not.toContain("salary");
+    const forged = JSON.parse(lines[1]!);
+    expect(forged).not.toHaveProperty("causeDriverClass");
+    expect(forged).not.toHaveProperty("causeDriverFrame");
+    expect(forged.causeDriverMessage).toBe("window [redacted] vanished");
+    for (const key of ["causeDriverClass", "causeDriverMessage"])
+      expect(JSON.parse(lines[2]!)).not.toHaveProperty(key);
+  });
+
+  test("an older controller's driver failure still logs its redacted message", () => {
+    const failure = new BrowserControlRequestError(500, {
+      code: "driver_failed",
+      message: "interaction controller request failed",
+      retryable: false,
+    });
+    expect(errorCauseAttributes(failure)).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "driver_failed",
+      causeStatus: 500,
+      causeDriverMessage: "interaction controller request failed",
+    });
   });
 });

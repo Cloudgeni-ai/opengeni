@@ -1321,6 +1321,17 @@ describe("BrowserControlClient", () => {
         if (url.pathname === "/v1/failure") {
           return failure(409, "controller_stale", "controller moved");
         }
+        if (url.pathname === "/v1/driver-failure") {
+          return Response.json(
+            {
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: false,
+              error: { code: "driver_failed", message: "driver broke", retryable: false },
+              diagnostic: { errorClass: "TypeError", frame: "Backend.observe", extra: "x" },
+            },
+            { status: 500 },
+          );
+        }
         if (url.pathname === "/v1/malformed") {
           return Response.json({ nope: true });
         }
@@ -1528,6 +1539,19 @@ describe("BrowserControlClient", () => {
           message: "controller moved",
           retryable: false,
         },
+        diagnostic: null,
+      });
+      // A driver failure's operator diagnostic is kept beside the unchanged error.
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/driver-failure",
+          token: controlToken,
+        }),
+      ).rejects.toMatchObject<Partial<BrowserControlRequestError>>({
+        status: 500,
+        error: { code: "driver_failed", message: "driver broke", retryable: false },
+        diagnostic: { errorClass: "TypeError", frame: "Backend.observe" },
       });
       await expect(
         client.requestForSession({

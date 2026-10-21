@@ -140,6 +140,7 @@ export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
+export * from "./interaction-driver-diagnostic";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./api-key-presets";

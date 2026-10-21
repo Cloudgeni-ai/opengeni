@@ -2,6 +2,8 @@ import {
   ComputerNativeCommand,
   ComputerNativeReceipt,
   ComputerOperationReceipt,
+  parseInteractionDriverDiagnostic,
+  type InteractionDriverDiagnostic,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
@@ -528,6 +530,9 @@ export class BrowserControlRequestError extends Error {
   constructor(
     readonly status: number,
     readonly error: InteractionErrorValue,
+    /** Operator-only context the controller sent beside a driver failure;
+     * logged, never shown to callers. */
+    readonly diagnostic: InteractionDriverDiagnostic | null = null,
   ) {
     super(error.message);
     this.retryable = error.retryable;
@@ -2881,7 +2886,15 @@ function parseEnvelope(body: string, status: number): unknown {
   if (value.ok === true && status >= 200 && status < 300 && "data" in value) return value.data;
   if (value.ok === false && status >= 400 && status <= 599) {
     const parsed = InteractionError.safeParse(value.error);
-    if (parsed.success) throw new BrowserControlRequestError(status, parsed.data);
+    if (parsed.success) {
+      throw new BrowserControlRequestError(
+        status,
+        parsed.data,
+        parsed.data.code === "driver_failed"
+          ? parseInteractionDriverDiagnostic(value.diagnostic)
+          : null,
+      );
+    }
   }
   throw new BrowserControlProtocolError("browser controller response envelope is invalid");
 }
