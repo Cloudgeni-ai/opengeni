@@ -459,14 +459,15 @@ export class CuaComputerBackend implements ComputerBackend {
       const id = `cua:window:${window.pid}:${window.window_id}`;
       live.add(id);
       const old = this.targetsById.get(id);
+      // Only macOS cannot read a window that is off screen; Windows and
+      // Linux read minimized or covered windows through their trees.
+      const onScreen = this.identity.platform !== "macos" || window.is_on_screen !== false;
       this.targetsById.set(id, {
         pid: window.pid,
         windowId: window.window_id,
         title: window.title,
         appName: window.app_name,
-        // Only macOS cannot read a window that is off screen; Windows and
-        // Linux read minimized or covered windows through their trees.
-        onScreen: this.identity.platform !== "macos" || window.is_on_screen !== false,
+        onScreen,
         native: {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),
@@ -476,6 +477,7 @@ export class CuaComputerBackend implements ComputerBackend {
           title: window.title || window.app_name,
           bounds: window.bounds,
           focused: false,
+          ...(onScreen ? {} : { offScreen: true as const }),
         },
       });
     }

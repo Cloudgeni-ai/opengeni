@@ -19,6 +19,8 @@ export type ComputerBackendTarget = {
   title: string;
   bounds: InteractionRect | null;
   focused: boolean;
+  /** A window that cannot be captured or read until it is back on screen. */
+  offScreen?: true;
 };
 
 export type ComputerBackendObservation = {
