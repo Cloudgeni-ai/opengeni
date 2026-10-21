@@ -9,7 +9,7 @@ import { googleDriveFailureMessage } from "@/components/capabilities/use-google-
 import {
   oauthCallbackFailureMessage,
   oauthCallbackReasonMessage,
-} from "@/lib/oauth-callback-messages";
+} from "@opengeni/react/app/lib/oauth-callback-messages";
 
 describe("provider OAuth callback failure copy", () => {
   for (const [provider, message] of [

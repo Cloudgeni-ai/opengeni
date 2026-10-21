@@ -4,7 +4,7 @@ import type {
   AtlassianSyncCadence,
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type AtlassianSourceInput = Pick<
   AtlassianBrowseItem,

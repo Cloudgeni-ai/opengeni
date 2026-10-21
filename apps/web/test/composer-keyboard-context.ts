@@ -1,4 +1,4 @@
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 // Preview-only service boundary. All menus, input, composer, and styles are production imports.
 // No rig/network access is needed for the machine keyboard paths.

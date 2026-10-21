@@ -10,7 +10,7 @@ import { Field, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
 import { DisabledReasonTooltip, SettingRow } from "@opengeni/react/ui/setting-row";
 import { StatusDot } from "@opengeni/react/ui/status-dot";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { durationLabel, useWorkspaceTimerClock, workspaceTimerLabel } from "@/lib/workspace-timer";
 
 type Control = Workspace["inferenceControl"];

@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError } from "@opengeni/sdk";
@@ -71,7 +72,7 @@ const context = {
     getFile: async () => fileAsset,
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
 beforeAll(() => {
   GlobalRegistrator.register({ url: "https://example.test" });
@@ -82,7 +83,7 @@ beforeAll(() => {
 afterAll(() => GlobalRegistrator.unregister());
 
 async function renderRoute(embedded = false, initialEntry = "/") {
-  const { RetainedArtifactRoute } = await import("./retained-artifact");
+  const { RetainedArtifactRoute } = await import("@opengeni/react/app/routes/retained-artifact");
   const route = createRootRoute({
     component: () => (
       <RetainedArtifactRoute

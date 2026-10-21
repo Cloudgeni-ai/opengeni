@@ -7,35 +7,38 @@ import { ArrowUpRightIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { CreditAmountPicker } from "@/components/credit-amount-picker";
-import { CouponRedeem } from "@/components/credits/coupon-redeem";
-import { OpenGeniCreditsTile, type ModelProviderId } from "@/components/models/provider-mark";
+import { CreditAmountPicker } from "@opengeni/react/app/components/credit-amount-picker";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
+import {
+  OpenGeniCreditsTile,
+  type ModelProviderId,
+} from "@opengeni/react/app/components/models/provider-mark";
 import {
   ProviderConnectList,
   providerPaymentSummary,
   type ProviderConnectChoice,
 } from "@/components/models/provider-connect-list";
-import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
-import { CreditsPrize } from "@/components/onboarding/credits-prize";
+import { CelebrationBurst } from "@opengeni/react/app/components/onboarding/celebration-burst";
+import { CreditsPrize } from "@opengeni/react/app/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@opengeni/react/ui/button";
 import { ListRow } from "@opengeni/react/ui/list-row";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Notice } from "@opengeni/react/ui/notice";
-import { validTopupAmount } from "@/lib/format";
+import { validTopupAmount } from "@opengeni/react/app/lib/format";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
-import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
+import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import { onboardingJourney } from "@/lib/onboarding-analytics";
 import {
   applyConnectedModelToNewSessionDraft,
   creditCheckoutSuccessUrl,
   creditsModelForCheckout,
   type ConnectedModelFamily,
-} from "@/lib/model-access-onboarding";
+} from "@opengeni/react/app/lib/model-access-onboarding";
 import type { StartingCreditsOnboarding } from "@/lib/onboarding-starting-credits";
-import { formatCreditAmount } from "@/lib/onboarding-use-case";
+import { formatCreditAmount } from "@opengeni/react/app/lib/onboarding-use-case";
 import {
   isRetryableDevicePollError,
   pollSuperGrokDeviceLogin,

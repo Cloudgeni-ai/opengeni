@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
-import type { ConnectionMetadata, SlackInstallationBinding } from "@/types";
+import type { ConnectionMetadata, SlackInstallationBinding } from "@opengeni/react/app/types";
 
 /** Metadata discovery only. Each read still passes the destination API's access checks. */
 export function useSlackInstallationDiscovery(workspaceId: string, enabled: boolean) {

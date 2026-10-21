@@ -8,7 +8,7 @@ import {
   type AccessScope,
 } from "@opengeni/react/ui/access-list";
 import { Button } from "@opengeni/react/ui/button";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DetailPage, DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";

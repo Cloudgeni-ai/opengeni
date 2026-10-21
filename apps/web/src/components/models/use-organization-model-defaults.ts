@@ -4,8 +4,8 @@ import type {
 } from "@opengeni/sdk";
 import { useCallback } from "react";
 
-import { useAppContext } from "@/context";
-import { sharedQueryWriter, useSharedQuery } from "@/lib/shared-query";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { sharedQueryWriter, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    The model defaults every workspace in an organization follows until it sets

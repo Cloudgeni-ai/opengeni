@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 import { PrivacyPreferencesSection } from "./privacy-preferences";
 import { SettingsShell, settingsHomeLink } from "./settings-sidebar";
-import { parseReturnTo, returnToOf, returnToSearch } from "@/lib/return-to";
+import { parseReturnTo, returnToOf, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { usePersonalSecurityContext } from "@/lib/personal-security-context";
 
 /**

@@ -10,6 +10,9 @@ import {
   MENU_SURFACE_CLASS,
 } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const ContextMenuContainedPortal = containedPortal(ContextMenuPrimitive.Portal);
 
 // A thin radix ContextMenu wrapper on the one menu spec (menu-styles.ts), so
 // the rail row's right-click menu reads identically to the app's other menus.
@@ -30,7 +33,7 @@ function ContextMenuContent({
   ...props
 }: React.ComponentProps<typeof ContextMenuPrimitive.Content>) {
   return (
-    <ContextMenuPrimitive.Portal>
+    <ContextMenuContainedPortal>
       <ContextMenuPrimitive.Content
         data-slot="context-menu-content"
         className={cn(
@@ -40,7 +43,7 @@ function ContextMenuContent({
         )}
         {...props}
       />
-    </ContextMenuPrimitive.Portal>
+    </ContextMenuContainedPortal>
   );
 }
 

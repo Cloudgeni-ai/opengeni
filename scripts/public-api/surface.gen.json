@@ -34682,6 +34682,9 @@
       "useOptionalBrowserAccounts": "value",
       "useOptionalBrowserAccountTransitionBlocker": "value"
     },
+    "@opengeni/react/app.css": {
+      "default": "value"
+    },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
       "ArtifactButton": "value",
@@ -35525,6 +35528,17 @@
       "SessionAgentsSignal": "type",
       "sessionGoalStateLabel": "value"
     },
+    "@opengeni/react/session-app": {
+      "EditableArtifactSurfaceProps": "type",
+      "PdfPreviewProps": "type",
+      "SESSION_UI_PRESETS": "value",
+      "SessionApp": "value",
+      "SessionAppProps": "type",
+      "SessionAppSurfaces": "type",
+      "SessionShellSlots": "type",
+      "SessionUiFeatures": "type",
+      "SessionUiPreset": "type"
+    },
     "@opengeni/react/session-attention-model": {
       "readAcknowledgementFrontier": "value",
       "SESSION_ATTENTION_EVENT_TYPES": "value",
@@ -36312,6 +36326,11 @@
       "PageHeaderVariant": "type",
       "usePageHeaderStyle": "value"
     },
+    "@opengeni/react/ui/portal-container": {
+      "containedPortal": "value",
+      "PortalContainerProvider": "value",
+      "usePortalContainer": "value"
+    },
     "@opengeni/react/ui/relative-time": {
       "DateInput": "type",
       "formatAbsoluteTime": "value",
@@ -36573,6 +36592,9 @@
       "useUsage": "value",
       "UseUsageOptions": "type",
       "UseUsageResult": "type"
+    },
+    "@opengeni/react/workbench": {
+      "enableWorkbench": "value"
     }
   },
   "sdkMembers": {

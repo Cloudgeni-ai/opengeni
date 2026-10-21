@@ -36,13 +36,13 @@ import {
   userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import { includedDefaultModel } from "@opengeni/react/app/lib/model-access-onboarding";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
 import {
   storeOnboardingUseCase,
   storedOnboardingUseCase,
   type OnboardingUseCase,
-} from "@/lib/onboarding-use-case";
+} from "@opengeni/react/app/lib/onboarding-use-case";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -52,9 +52,9 @@ import {
   storeOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
-import type { OrganizationInvitation } from "@/types";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
-import { rememberSignupUseCase } from "@/lib/signup-starter-set";
+import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
 
 export function OrganizationOnboardingPanel({
   onComplete,

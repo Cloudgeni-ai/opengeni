@@ -14,7 +14,10 @@ import {
   subscriptionListedCount,
   type OrganizationSubscriptionRows,
 } from "./subscription-account-rows";
-import { SubscriptionAccountRow, SubscriptionRotationSettingRows } from "./subscription-account-ui";
+import {
+  SubscriptionAccountRow,
+  SubscriptionRotationSettingRows,
+} from "@/components/models/subscription-account-ui";
 import {
   managesSubscriptionAccount,
   subscriptionAccountName,
@@ -23,8 +26,8 @@ import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { invalidateSharedQueries } from "@/lib/shared-query";
-import { organizationReachLabel } from "./models-ui";
+import { invalidateSharedQueries } from "@opengeni/react/app/lib/shared-query";
+import { organizationReachLabel } from "@opengeni/react/app/components/models/models-ui";
 import {
   ProviderCustomModels,
   type ProviderConnection,

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import { ChatViewportFileDropTarget } from "./chat-viewport-file-drop-target";
+import { ChatViewportFileDropTarget } from "@opengeni/react/app/components/session/chat-viewport-file-drop-target";
 import { registerDom } from "../../../../../packages/react/test/render-hook";
 
 registerDom();

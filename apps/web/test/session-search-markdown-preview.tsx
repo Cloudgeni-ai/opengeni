@@ -4,7 +4,7 @@ import { SearchIcon } from "lucide-react";
 import {
   SearchPreviewView,
   SearchResultsView,
-} from "../src/components/session/search-results-view";
+} from "@opengeni/react/app/components/session/search-results-view";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@opengeni/react/ui/dialog";
 import { Input } from "@opengeni/react/ui/input";
 import "../src/styles.css";

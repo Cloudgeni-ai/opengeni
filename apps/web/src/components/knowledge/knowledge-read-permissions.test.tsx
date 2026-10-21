@@ -30,7 +30,7 @@ const context = {
     listWorkspaceSkills: mock(async () => ({ skills: [], nextCursor: null })),
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 const { useReviewQueue } = await import("./knowledge-review");
 const { useKnowledgeList } = await import("./knowledge-data");
 function Probe() {

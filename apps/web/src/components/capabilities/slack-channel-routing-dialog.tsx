@@ -15,9 +15,9 @@ import {
   DialogTitle,
 } from "@opengeni/react/ui/dialog";
 import { Select } from "@opengeni/react/ui/select";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 /** The null option: the channel asks the person once and remembers the answer. */
 const ASK_ONCE = "";

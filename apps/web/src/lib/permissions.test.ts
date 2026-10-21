@@ -11,7 +11,7 @@ import {
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
   lacksWorkspacePermission,
-} from "./permissions";
+} from "@opengeni/react/app/lib/permissions";
 import { workspaceMemberAccessRole } from "./workspace-access-levels";
 
 describe("workspace member permission groups", () => {

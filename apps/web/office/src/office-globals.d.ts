@@ -13,12 +13,22 @@ declare namespace Office {
     ): void;
     close(): void;
   };
-  const EventType: { DialogMessageReceived: string; DialogEventReceived: string };
+  const EventType: {
+    DialogMessageReceived: string;
+    DialogEventReceived: string;
+    OfficeThemeChanged?: string;
+  };
   function onReady(): Promise<{ host: string | null; platform: string | null }>;
   const context: {
     diagnostics?: { host: string; version: string; platform: string };
     platform?: string;
-    document?: { url?: string | null };
+    document?: {
+      url?: string | null;
+      addHandlerAsync?(type: string, handler: () => void): void;
+      removeHandlerAsync?(type: string, options: { handler: () => void }): void;
+    };
+    /** Excel's theme colors (Office 2016 and later). */
+    officeTheme?: { bodyBackgroundColor?: string };
     requirements: { isSetSupported(name: string, version?: string): boolean };
     ui: {
       displayDialogAsync(
@@ -32,6 +42,7 @@ declare namespace Office {
         callback: (result: AsyncResult<Dialog>) => void,
       ): void;
       messageParent(message: string): void;
+      openBrowserWindow(url: string): void;
     };
   };
 }

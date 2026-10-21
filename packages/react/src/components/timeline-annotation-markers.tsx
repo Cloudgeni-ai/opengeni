@@ -1,6 +1,7 @@
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { useLayoutEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { usePortalContainer } from "../ui/portal-container";
 import { cn } from "../lib/cn";
 import {
   annotationBoxIntersects,
@@ -129,6 +130,7 @@ export function TimelineAnnotationMarkers({
   rootRef: RefObject<HTMLElement | null>;
 }) {
   const t = useOpenGeniText();
+  const portalContainer = usePortalContainer();
   const [markers, setMarkers] = useState<AnnotationBadgeAnchor[]>([]);
 
   useLayoutEffect(() => {
@@ -180,7 +182,7 @@ export function TimelineAnnotationMarkers({
         </button>
       ))}
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 

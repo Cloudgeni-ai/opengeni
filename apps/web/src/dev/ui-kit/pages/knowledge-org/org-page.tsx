@@ -23,7 +23,7 @@ import { toast } from "sonner";
 import { AccessList } from "@opengeni/react/ui/access-list";
 import { Button } from "@opengeni/react/ui/button";
 import { CopyField } from "@opengeni/react/ui/copy-field";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { Field, TextInput } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";

@@ -5,8 +5,8 @@ import { UsageDashboard } from "@/components/insights/usage-dashboard";
 import { parseUsageSearch, type UsageSearch } from "@/components/insights/usage-search";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader } from "@opengeni/react/ui/page-header";
-import { workspaceSessionPath } from "@/lib/routes";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { workspaceSessionPath } from "@opengeni/react/app/lib/routes";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 
 /**
  * Organization settings > Insights: the workspace Insights dashboard across

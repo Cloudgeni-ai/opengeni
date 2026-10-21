@@ -1,4 +1,4 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { Link } from "@tanstack/react-router";
 import { Building2Icon, LockIcon, PauseIcon, PlusIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
@@ -17,24 +17,31 @@ import {
   DropdownMenuTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   organizationLandingWorkspaceId,
   organizationsForSubject,
   shortAccountId,
   workspacesInOrg,
   type OrgOption,
-} from "@/lib/org";
-import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
-import { hasAccountPermission } from "@/lib/permissions";
-import { currentPageReturnTo, returnToSearch, type ReturnTo } from "@/lib/return-to";
-import { cn } from "@/lib/utils";
-import { administersOrganization } from "@/lib/workspaces";
+} from "@opengeni/react/app/lib/org";
+import {
+  isPersonalWorkspace,
+  type ManagedSelfContext,
+} from "@opengeni/react/app/lib/managed-self-context";
+import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
+import {
+  currentPageReturnTo,
+  returnToSearch,
+  type ReturnTo,
+} from "@opengeni/react/app/lib/return-to";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
 import {
   organizationWorkspacePreferenceStorageId,
   readLastWorkspaceIdsByOrganization,
-} from "@/lib/workspace-navigation-preference";
-import type { Workspace } from "@/types";
+} from "@opengeni/react/app/lib/workspace-navigation-preference";
+import type { Workspace } from "@opengeni/react/app/types";
 
 /** The switcher menu's width; surface and rows are the one menu spec (menu-styles.ts). */
 export const SWITCHER_MENU_CLASS = "w-72 max-w-[calc(100vw-2rem)]";

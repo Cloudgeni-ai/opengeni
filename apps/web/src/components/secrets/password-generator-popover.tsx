@@ -10,7 +10,7 @@ import { useCallback, useId, useState } from "react";
 import { Button } from "@opengeni/react/ui/button";
 import { MENU_SURFACE_CLASS } from "@opengeni/react/ui/menu-styles";
 import { Switch } from "@opengeni/react/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    Generate: a popover next to a password field. Options (length, symbols)

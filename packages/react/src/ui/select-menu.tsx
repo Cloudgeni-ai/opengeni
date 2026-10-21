@@ -27,6 +27,9 @@ import {
   MENU_SURFACE_CLASS,
 } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const PopoverContainedPortal = containedPortal(Popover.Portal);
 
 /* ----------------------------------------------------------------------------
    Types
@@ -726,7 +729,7 @@ export function MenuSelect<V extends string>({
             <TriggerIcon loading={loading} />
           </button>
         </Popover.Anchor>
-        <Popover.Portal>
+        <PopoverContainedPortal>
           <Popover.Content
             align={align}
             side="bottom"
@@ -750,7 +753,7 @@ export function MenuSelect<V extends string>({
               emptyMessage={emptyMessage}
             />
           </Popover.Content>
-        </Popover.Portal>
+        </PopoverContainedPortal>
       </Popover.Root>
       {name ? <input type="hidden" name={name} value={value ?? ""} /> : null}
     </DisabledReasonWrapper>
@@ -899,7 +902,7 @@ export function ComboboxSelect<V extends string>({
             <TriggerIcon loading={loading} />
           </button>
         </Popover.Anchor>
-        <Popover.Portal>
+        <PopoverContainedPortal>
           <Popover.Content
             align={align}
             side="bottom"
@@ -951,7 +954,7 @@ export function ComboboxSelect<V extends string>({
               }
             />
           </Popover.Content>
-        </Popover.Portal>
+        </PopoverContainedPortal>
       </Popover.Root>
       {name ? <input type="hidden" name={name} value={value ?? ""} /> : null}
     </DisabledReasonWrapper>

@@ -1,12 +1,15 @@
 import type { CodexAccount } from "@opengeni/sdk";
-import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
 import { useOrganizationCodexOverview } from "./use-organization-codex-overview";
-import { EnableAccountRow, SubscriptionAccountRow } from "./subscription-account-ui";
+import {
+  EnableAccountRow,
+  SubscriptionAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   CodexDeviceCodePanel,
   CodexRedemptionDialog,
@@ -33,7 +36,7 @@ import {
   resetsLabel,
   type ModelsScopeLabels,
   useModelsListLabel,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
@@ -41,7 +44,7 @@ import { DeviceSignInStatus } from "@/components/subscription-device-code-panel"
 import { Button } from "@opengeni/react/ui/button";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { copyText } from "@opengeni/react/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";

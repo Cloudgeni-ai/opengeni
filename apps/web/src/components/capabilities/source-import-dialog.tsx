@@ -35,8 +35,8 @@ import {
 } from "@opengeni/react/ui/dialog";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
-import { cn } from "@/lib/utils";
-import type { ConnectionMetadata, PluginComponentPreview } from "@/types";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { ConnectionMetadata, PluginComponentPreview } from "@opengeni/react/app/types";
 
 export function SourceImportDialog({
   state,

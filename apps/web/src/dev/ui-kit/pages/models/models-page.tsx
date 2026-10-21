@@ -23,7 +23,7 @@ import {
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
 import { UsageReadout } from "@opengeni/react/ui/usage-meter";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { KIT_NOW, currentWorkspace, organization } from "../../fixtures";
 import {

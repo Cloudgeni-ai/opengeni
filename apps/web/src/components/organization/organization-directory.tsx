@@ -1,6 +1,6 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { BillingPlanBalance } from "@opengeni/sdk";
-import { isSeatLimitError } from "@/lib/subscription-plans";
+import { isSeatLimitError } from "@opengeni/react/app/lib/subscription-plans";
 import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
   createContext,
@@ -26,7 +26,7 @@ import {
   type OrganizationAdminOperationLane,
   type OrganizationAdminOperationSlot,
   type OrganizationAdminResource,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
@@ -34,7 +34,7 @@ import type {
   OrganizationMembershipRole,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    The organization's people, invitations and shared workspaces, loaded once

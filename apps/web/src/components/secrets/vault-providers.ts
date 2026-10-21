@@ -9,7 +9,7 @@ import {
 } from "@opengeni/sdk";
 import type { VaultItem, VaultItemType, VaultSummary } from "@opengeni/react";
 
-import { formatClock } from "./vault-model";
+import { formatClock } from "@opengeni/react/app/components/secrets/vault-model";
 
 /* ----------------------------------------------------------------------------
    Password managers a workspace can link vaults from, what each one needs,

@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ScheduledTask, Session } from "@/types";
+import type { ScheduledTask, Session } from "@opengeni/react/app/types";
 import type { ReactNode } from "react";
 
 GlobalRegistrator.register();
@@ -70,7 +70,7 @@ const context = {
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#chat">{children}</a>,
 }));
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("./schedule-parts", () => ({
   useScheduleAccess: () => ({
     canManage: true,
@@ -84,17 +84,17 @@ mock.module("./create-with-opengeni", () => ({
   useCanCreateScheduleWithAgent: () => false,
   useCreateWithOpenGeni: () => ({ dialog: null }),
 }));
-mock.module("@/lib/use-workspace-machines", () => ({
+mock.module("@opengeni/react/app/lib/use-workspace-machines", () => ({
   useWorkspaceMachines: () => ({ machines, loading: false }),
 }));
-mock.module("@/lib/use-workspace-model-catalog", () => ({
+mock.module("@opengeni/react/app/lib/use-workspace-model-catalog", () => ({
   useWorkspaceModelCatalog: () => ({
     defaultSelection: null,
     rows: [],
     loading: false,
   }),
 }));
-mock.module("@/components/knowledge/agent-learning-settings", () => ({
+mock.module("@opengeni/react/app/components/knowledge/agent-learning-settings", () => ({
   AgentLearningDraftEditor: () => null,
 }));
 mock.module("./schedule-agent-capabilities", () => ({

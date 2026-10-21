@@ -26,7 +26,10 @@ import {
   VaultChooser,
   type LinkVaultActions,
 } from "./vault-chooser";
-import { vaultErrorText, type ConnectionOwner } from "./vault-model";
+import {
+  vaultErrorText,
+  type ConnectionOwner,
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   connectionName,
   lockedText,

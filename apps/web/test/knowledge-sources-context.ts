@@ -1,5 +1,5 @@
 import type { KnowledgeEntryRecord, KnowledgeEntryListRequest } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 const content = {
   kind: "source",

@@ -11,7 +11,7 @@ import {
   retainSharedQueries,
   invalidateSharedQueries,
   invalidateSubscriptionAccountQueries,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 let root: Root;

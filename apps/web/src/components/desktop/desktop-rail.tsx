@@ -1,7 +1,7 @@
 // The rail's desktop app pieces: switching between the app's accounts and
 // telling the app which workspace is open. Each renders nothing outside the
 // desktop app. Offering this computer to agents lives in ./this-computer.
-import type { DesktopAccountsSnapshot } from "@opengeni/desktop/contract";
+import type { DesktopAccountsSnapshot } from "@opengeni/sdk/desktop-bridge";
 import { CheckIcon, LogOutIcon, PlusIcon, UsersIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -12,7 +12,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
-import { desktopCapability } from "@/lib/desktop";
+import { desktopCapability } from "@opengeni/react/app/lib/desktop";
 
 /** Keep the desktop app's links, notifications and computer on the open workspace. */
 export function useDesktopWorkspace(workspaceId: string): void {

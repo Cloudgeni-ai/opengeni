@@ -11,7 +11,7 @@ import type {
   CapabilityCatalogItem,
   InstalledSkillSummary,
   PluginInstallationSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

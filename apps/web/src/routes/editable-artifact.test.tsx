@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -17,7 +18,7 @@ const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
 const fromSession = "cf39f8d3-673f-43c0-9f98-c2787fdcf84e";
 const artifactId = "d10307ab68064d36855af499c9e3ccc7";
 const context = { accessKeyVersion: 0, accessContext: {}, workspaces: [] };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("@/lib/editable-artifact-browser", () => ({
   createConsoleEditableArtifactAuthority: async () => ({}),
   createConsoleEditableArtifactReplicaId: () => "1234567890abcdef",

@@ -9,16 +9,19 @@ import {
   RenameAccountDialog,
   type ModelsScopeLabels,
   useModelsListLabel,
-} from "./models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import {
   managesSubscriptionAccount,
   subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
-import { ACCOUNT_ENABLED_LABELS, EnableAccountRow } from "./subscription-account-ui";
+import {
+  ACCOUNT_ENABLED_LABELS,
+  EnableAccountRow,
+} from "@/components/models/subscription-account-ui";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import {
   DetailFact,

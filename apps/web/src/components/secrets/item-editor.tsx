@@ -23,13 +23,16 @@ import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import { SecretInput } from "@/components/ui/secret-field";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { fieldLabel } from "./item-page";
 import { PasswordGeneratorPopover } from "./password-generator-popover";
 import { HIT_AREA } from "./secret-actions";
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
-import { ITEM_TYPE_LABEL, vaultErrorText } from "./vault-model";
+import {
+  ITEM_TYPE_LABEL,
+  vaultErrorText,
+} from "@opengeni/react/app/components/secrets/vault-model";
 import { creatableTypes, sourceHome, vaultOperations } from "./vault-providers";
 
 /* ----------------------------------------------------------------------------

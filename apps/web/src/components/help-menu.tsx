@@ -13,7 +13,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { documentationLinkFromClientConfig } from "@/lib/documentation-link";
-import type { ClientConfig } from "@/types";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 export type HelpMenuProps = {
   documentationUrl: ClientConfig["documentationUrl"];

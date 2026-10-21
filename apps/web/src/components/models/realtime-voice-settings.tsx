@@ -7,7 +7,7 @@ import { RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { Field, FieldStack } from "@opengeni/react/ui/field";
 import { FormDialog } from "@opengeni/react/ui/form-dialog";
@@ -19,7 +19,7 @@ import {
   invalidateModelSettingsQueries,
   MODEL_SETTINGS_STALE_TIME_MS,
   useSharedQuery,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
    The workspace's voice settings for each realtime voice model: the voice, the

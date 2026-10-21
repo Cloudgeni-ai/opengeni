@@ -3,10 +3,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { SettingsIcon } from "lucide-react";
 
-import { useRail } from "@/components/rail/rail-context";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { isWorkspaceConfigPath } from "@/components/rail/workspace-nav-data";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 export type {
   WorkspaceConfigGroup,

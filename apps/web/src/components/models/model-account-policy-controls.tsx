@@ -2,15 +2,19 @@ import { ArrowDownIcon, ArrowUpIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { Button } from "@opengeni/react/ui/button";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { RowButton } from "@opengeni/react/ui/page-actions";
-import { ModelPicker } from "@/components/pickers";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
 import { Section } from "@opengeni/react/ui/section";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
-import { invalidateSharedQueries, sharedQueryWriter, useSharedQuery } from "@/lib/shared-query";
+import {
+  invalidateSharedQueries,
+  sharedQueryWriter,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
 
 /** Edit one exact preferred-model mapping. Never infer model equivalence. */
 export function FallbackOrderControl({

@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:te
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { useSharedQuery } from "@/lib/shared-query";
+import { useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 import { ModelsRefreshControl } from "./models-refresh-control";
 
 let root: Root, container: HTMLDivElement;

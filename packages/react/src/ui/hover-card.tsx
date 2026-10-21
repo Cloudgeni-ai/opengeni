@@ -5,6 +5,9 @@ import { HoverCard as HoverCardPrimitive } from "radix-ui";
 
 import { MENU_SURFACE_CLASS } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const HoverCardContainedPortal = containedPortal(HoverCardPrimitive.Portal);
 
 function HoverCard({ ...props }: React.ComponentProps<typeof HoverCardPrimitive.Root>) {
   return <HoverCardPrimitive.Root data-slot="hover-card" {...props} />;
@@ -21,7 +24,7 @@ function HoverCardContent({
   ...props
 }: React.ComponentProps<typeof HoverCardPrimitive.Content>) {
   return (
-    <HoverCardPrimitive.Portal>
+    <HoverCardContainedPortal>
       <HoverCardPrimitive.Content
         data-slot="hover-card-content"
         align={align}
@@ -33,7 +36,7 @@ function HoverCardContent({
         )}
         {...props}
       />
-    </HoverCardPrimitive.Portal>
+    </HoverCardContainedPortal>
   );
 }
 

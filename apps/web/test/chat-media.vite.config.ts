@@ -3,12 +3,13 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { previewHost } from "./preview-host";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Fixture-only adapters replace authentication/network, not the production
 // timeline, preview components, iframe bridge, styles, or scroll behavior.
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), previewHost()],
   resolve: {
     alias: [
       { find: "@/context", replacement: path.join(here, "chat-media-context-fixture.ts") },

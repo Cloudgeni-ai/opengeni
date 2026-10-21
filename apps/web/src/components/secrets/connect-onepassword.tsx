@@ -22,7 +22,7 @@ import {
   VaultChooser,
   type LinkVaultActions,
 } from "./vault-chooser";
-import { PLAN_LABEL, vaultErrorText } from "./vault-model";
+import { PLAN_LABEL, vaultErrorText } from "@opengeni/react/app/components/secrets/vault-model";
 import { connectionName, type VaultConnection } from "./vault-providers";
 
 export type { LinkVaultActions } from "./vault-chooser";

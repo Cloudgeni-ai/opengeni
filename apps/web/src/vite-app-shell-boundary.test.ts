@@ -13,7 +13,7 @@ describe("web app-shell chunk boundary", () => {
     const runtimeTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+        path.posix.join("/repo/apps/web/src", relative).replaceAll("/", separator);
       for (const helper of ["integration-connect-return", "secrets-route", "composer-launch"]) {
         expect(runtimeTest.test(moduleId(`lib/${helper}.ts`))).toBe(true);
       }
@@ -24,9 +24,9 @@ describe("web app-shell chunk boundary", () => {
       }
       for (const relative of [
         "routes/secrets.tsx",
-        "routes/session.tsx",
-        "lib/integration-connect-analytics.ts",
-        "components/secrets/vault-model.ts",
+        "../../../packages/react/src/app/routes/session.tsx",
+        "../../../packages/react/src/app/lib/integration-connect-analytics.tsx",
+        "../../../packages/react/src/app/components/secrets/vault-model.tsx",
         "components/secrets/vault-chooser.tsx",
       ]) {
         expect(runtimeTest.test(moduleId(relative))).toBe(false);
@@ -58,7 +58,7 @@ describe("web app-shell chunk boundary", () => {
         "packages/react/src/index.ts",
         "packages/react/src/provider.tsx",
         "packages/react/src/components/session-conversation.tsx",
-        "apps/web/src/routes/session.tsx",
+        "packages/react/src/app/routes/session.tsx",
       ]) {
         expect(runtimeTest.test(moduleId(relative))).toBe(false);
       }
@@ -92,15 +92,17 @@ describe("web app-shell chunk boundary", () => {
 
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
-      expect(shellTest.test(moduleId("lib/session-search-route.ts"))).toBe(true);
+        path.posix.join("/repo/apps/web/src", relative).replaceAll("/", separator);
+      expect(
+        shellTest.test(moduleId("../../../packages/react/src/app/lib/session-search-route.tsx")),
+      ).toBe(true);
       for (const relative of [
-        "components/session/session-search-dialog.tsx",
-        "components/session/conversation-find.tsx",
-        "components/session/search-results-view.tsx",
-        "lib/use-conversation-search.ts",
-        "lib/use-session-search-resource.ts",
-        "routes/session.tsx",
+        "../../../packages/react/src/app/components/session/session-search-dialog.tsx",
+        "../../../packages/react/src/app/components/session/conversation-find.tsx",
+        "../../../packages/react/src/app/components/session/search-results-view.tsx",
+        "../../../packages/react/src/app/lib/use-conversation-search.tsx",
+        "../../../packages/react/src/app/lib/use-session-search-resource.tsx",
+        "../../../packages/react/src/app/routes/session.tsx",
       ]) {
         expect(shellTest.test(moduleId(relative))).toBe(false);
       }
@@ -109,7 +111,7 @@ describe("web app-shell chunk boundary", () => {
     // app-shell recursively includes dependencies: this shared intent contract
     // must remain a leaf, not gain an import of the dialog or search controller.
     const intent = await readFile(
-      new URL("./lib/session-search-route.ts", import.meta.url),
+      new URL("../../../packages/react/src/app/lib/session-search-route.tsx", import.meta.url),
       "utf8",
     );
     expect(intent).not.toMatch(/^\s*import\s+(?!type\b)/mu);

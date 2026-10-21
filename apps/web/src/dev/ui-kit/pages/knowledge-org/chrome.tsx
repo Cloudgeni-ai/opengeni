@@ -2,7 +2,7 @@ import { useId, type ReactNode } from "react";
 
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { useKitPane } from "../../kit";
 import { kitHref } from "../../view";

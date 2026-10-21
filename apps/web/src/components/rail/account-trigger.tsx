@@ -6,7 +6,7 @@ import { Loader2Icon } from "lucide-react";
 
 import { OrganizationInvitationDot } from "@/components/organization-invitations";
 import { Avatar, AvatarFallback, AvatarImage } from "@opengeni/react/ui/avatar";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 function userInitial(label: string): string {
   return (label.trim()[0] ?? "U").toUpperCase();

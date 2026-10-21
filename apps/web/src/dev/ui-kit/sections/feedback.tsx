@@ -10,7 +10,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { StatGroup, StatTile } from "@opengeni/react/ui/stat-tile";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { UsageMeter } from "@opengeni/react/ui/usage-meter";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import {
   codexWorkspaceAccounts,
   connectedCapabilities,

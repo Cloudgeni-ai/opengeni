@@ -14,7 +14,7 @@ import {
   peekSharedQuery,
   retainSharedQueries,
   sharedQueryWriter,
-} from "@/lib/shared-query";
+} from "@opengeni/react/app/lib/shared-query";
 
 let root: Root, container: HTMLDivElement;
 let state: ReturnType<typeof useOrganizationProviderConnection>;

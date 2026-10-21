@@ -15,6 +15,9 @@ import { SECTION_TITLE_CLASS } from "./section";
 import { Sheet, SheetClose, SheetDescription, SheetTitle, SheetTrigger } from "./sheet";
 import { Skeleton } from "./skeleton";
 import { cn } from "../lib/cn";
+import { containedPortal } from "./portal-container";
+
+const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
 /* ----------------------------------------------------------------------------
    DetailSheet, DetailPage and DetailInline (design brief 7.5) - the single
@@ -88,7 +91,7 @@ export function DetailSheetContent({
   // opened (the row) and go back there on close.
   const returnTo = useRef<HTMLElement | null>(null);
   return (
-    <DialogPrimitive.Portal>
+    <DialogContainedPortal>
       <DialogPrimitive.Overlay
         data-slot="detail-sheet-overlay"
         className="fixed inset-0 z-50 bg-black/50 transition-opacity duration-200 starting:opacity-0"
@@ -127,7 +130,7 @@ export function DetailSheetContent({
       >
         <PresentationContext.Provider value="sheet">{children}</PresentationContext.Provider>
       </DialogPrimitive.Content>
-    </DialogPrimitive.Portal>
+    </DialogContainedPortal>
   );
 }
 

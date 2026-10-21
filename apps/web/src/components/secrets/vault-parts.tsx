@@ -30,7 +30,7 @@ import {
   formatClock,
   vaultErrorText,
   type ExpiryState,
-} from "./vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   everListed,
   healthLabel,

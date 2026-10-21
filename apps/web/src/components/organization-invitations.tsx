@@ -13,15 +13,15 @@ import {
 } from "@opengeni/react/ui/dialog";
 import { DropdownMenuItem, DropdownMenuMeta } from "@opengeni/react/ui/dropdown-menu";
 import { Notice } from "@opengeni/react/ui/notice";
-import { isOrganizationConflict } from "@/lib/organization-admin";
+import { isOrganizationConflict } from "@opengeni/react/app/lib/organization-admin";
 import {
   clearOrganizationInvitationContinuation,
   readOrganizationInvitationContinuation,
   storeOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
-import { cn } from "@/lib/utils";
-import type { OrganizationInvitation } from "@/types";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 
 export type OrganizationInvitationsController = {
   open: boolean;

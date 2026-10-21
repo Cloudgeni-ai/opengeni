@@ -15,7 +15,7 @@ import {
   SEMANTIC_TONES,
   type SemanticTone,
 } from "@opengeni/react/ui/status-dot";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import {
   apiKeys,
   connectedCapabilities,

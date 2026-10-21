@@ -42,13 +42,13 @@ import {
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Select } from "@opengeni/react/ui/select";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type {
   ApiIntegrationInstallationSummary,
   IntegrationFacetBindingSummary,
   IntegrationFacetDefinitionSummary,
   IntegrationInstanceFacetsResponse,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type FacetEntry = IntegrationInstanceFacetsResponse["facets"][number];
 type FormValue = string | boolean;

@@ -4,7 +4,11 @@ import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SubscriptionPoolSettings } from "@opengeni/sdk";
 import { ApiError } from "@/api";
 import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
-import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "@/lib/shared-query";
+import {
+  invalidateSharedQueries,
+  useSharedQuery,
+  type SharedQueryKey,
+} from "@opengeni/react/app/lib/shared-query";
 
 export type SubscriptionPoolAccount = {
   id: string;

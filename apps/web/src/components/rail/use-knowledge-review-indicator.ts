@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 
 const REVIEW_UPDATED = "opengeni:knowledge-review-updated";
 export function notifyKnowledgeReviewUpdated() {

@@ -17,9 +17,9 @@ import type {
 import { useMemo, useState } from "react";
 
 import { activityEvents } from "@/dev/session-activity-events";
-import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { ModelPicker } from "@/components/pickers";
-import { SubagentTree } from "@/components/session/subagents";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
+import { SubagentTree } from "@opengeni/react/app/components/session/subagents";
 import {
   emptyAttachments,
   galleryFirstPartyTools,
@@ -30,7 +30,7 @@ import {
   galleryTurn,
   type ChromeScenario,
 } from "@/dev/composer-chrome-fixtures";
-import type { IntelligenceEffort } from "@/lib/session-tools";
+import type { IntelligenceEffort } from "@opengeni/react/app/lib/session-tools";
 
 const SIMULATED_QUEUE_PROMPTS = [
   "Also check that the retry banner disappears once the webhook succeeds.",

@@ -1,10 +1,10 @@
 import { memo } from "react";
 import { BookOpenIcon } from "lucide-react";
 import { CapabilityCatalogRow } from "@opengeni/react/connect";
-import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { catalogStatusForChip } from "./integration-view-model";
-import { capabilityStateChip, type ConnectionHealth } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
+import { catalogStatusForChip } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { capabilityStateChip, type ConnectionHealth } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 /** One full-row action; adding a connection always begins with its setup dialog. */
 export const CapabilityTile = memo(function CapabilityTile({

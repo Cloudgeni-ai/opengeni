@@ -5,7 +5,7 @@ import { cn } from "../lib/cn";
 
 const Select = React.forwardRef<
   HTMLSelectElement,
-  React.ComponentProps<"select"> & { displayValue?: string }
+  React.ComponentProps<"select"> & { displayValue?: string | undefined }
 >(({ className, children, displayValue, ...props }, ref) => (
   <span className="relative inline-block max-w-full">
     <select

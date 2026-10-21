@@ -1,6 +1,6 @@
 import type { ConnectionCatalogService } from "@opengeni/react/connect";
-import { capabilityCuration } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import { capabilityCuration } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 /** Partition already-grouped services in the same order shown on the page. */
 export function partitionConnectionServices(

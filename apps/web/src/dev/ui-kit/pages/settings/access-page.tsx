@@ -13,7 +13,7 @@ import {
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { CheckboxField, Field, FieldStack } from "@opengeni/react/ui/field";
 import { FormDialog, FormPage, type FormFrameProps } from "@opengeni/react/ui/form-dialog";
 import { HelpLink } from "@opengeni/react/ui/inline-help";

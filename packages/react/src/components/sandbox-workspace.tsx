@@ -1048,7 +1048,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
   openFileRequest?:
     | {
         path: string;
-        line?: number | null;
+        line?: number | null | undefined;
         requestId: number;
       }
     | null

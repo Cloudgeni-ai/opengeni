@@ -34,7 +34,7 @@ import {
   DetailPageHeader,
 } from "@opengeni/react/ui/detail-page";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
@@ -52,12 +52,15 @@ import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { resourceScopeLabel } from "@/components/resource-scope-picker";
 import { userFacingError } from "@opengeni/react/ui/api-error";
 import { LoadFailure } from "@opengeni/react/ui/load-failure";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
-import type { Rig } from "@/types";
+import type { Rig } from "@opengeni/react/app/types";
 import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 // Live cadence: fast enough that a verifying change resolves without a manual

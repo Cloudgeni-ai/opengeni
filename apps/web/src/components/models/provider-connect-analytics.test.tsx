@@ -9,7 +9,7 @@ import {
   ReplaceKeyDialog,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
-import { modelsScopeLabels } from "./models-ui";
+import { modelsScopeLabels } from "@opengeni/react/app/components/models/models-ui";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.

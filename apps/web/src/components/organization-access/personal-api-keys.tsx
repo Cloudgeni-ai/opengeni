@@ -3,13 +3,13 @@ import { KeyRoundIcon, PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import {
   OrganizationAccessFields,
   type AccessWorkspace,
 } from "@/components/organization-access/organization-access-fields";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
@@ -22,7 +22,7 @@ import { SecretOnce } from "@/components/ui/secret-field";
 import { Section } from "@opengeni/react/ui/section";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorDetails,
   userErrorText,

@@ -22,6 +22,9 @@ import { cn } from "../lib/cn";
 import { ReasonTooltip } from "./disabled-reason";
 import { FormDialog } from "./form-dialog";
 import { InlineDisabledReason } from "./select-menu";
+import { containedPortal } from "./portal-container";
+
+const SelectContainedPortal = containedPortal(SelectPrimitive.Portal);
 
 export interface RoleOption<R extends string = string> {
   id: R;
@@ -385,7 +388,7 @@ export function RoleSelect<R extends string>({
             />
           )}
         </SelectPrimitive.Trigger>
-        <SelectPrimitive.Portal>
+        <SelectContainedPortal>
           <SelectPrimitive.Content
             position="popper"
             side="bottom"
@@ -425,7 +428,7 @@ export function RoleSelect<R extends string>({
               ))}
             </SelectPrimitive.Viewport>
           </SelectPrimitive.Content>
-        </SelectPrimitive.Portal>
+        </SelectContainedPortal>
       </SelectPrimitive.Root>
       {confirmation}
     </>

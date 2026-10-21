@@ -2,7 +2,7 @@ import { RowButton } from "@opengeni/react/ui/page-actions";
 import { TextInput } from "@opengeni/react/ui/field";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { analyticsAction } from "@opengeni/react/ui/analytics-actions";
-import { validTopupAmount } from "@/lib/format";
+import { validTopupAmount } from "@opengeni/react/app/lib/format";
 
 export function CreditTopupRow({
   amount,

@@ -14,12 +14,12 @@ import { useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
 import { Button } from "@opengeni/react/ui/button";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DetailAside,
   DetailAsideItem,
@@ -47,20 +47,20 @@ import {
   canInviteOrganizationRole,
   canRevokeOrganizationInvitation,
   organizationMemberCapabilities,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import {
   apiErrorDetails,
   userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccess,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   useOrganizationDirectory,

@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -10,10 +11,13 @@ import { act, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
 import { createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
-import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
+import {
+  defaultArtifactFilters,
+  filterArtifactCatalog,
+} from "@opengeni/react/app/lib/artifact-catalog";
 
 // Rows ask the app who the viewer is, to offer a file's owner its share action.
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     client: {},
     accessKeyVersion: 0,
@@ -22,9 +26,9 @@ mock.module("@/context", () => ({
     accessContext: null,
   }),
 }));
-let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
-let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;
-let siteStillDocument: typeof import("./artifact-library").siteStillDocument;
+let ArtifactLibrary: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactLibrary;
+let ArtifactThumbnail: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactThumbnail;
+let siteStillDocument: typeof import("@opengeni/react/app/components/artifacts/artifact-library").siteStillDocument;
 
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -35,7 +39,8 @@ beforeAll(async () => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } = await import("./artifact-library"));
+  ({ ArtifactLibrary, ArtifactThumbnail, siteStillDocument } =
+    await import("@opengeni/react/app/components/artifacts/artifact-library"));
 });
 
 test("offscreen thumbnails never mount the retained loader; visible thumbnails load once", async () => {

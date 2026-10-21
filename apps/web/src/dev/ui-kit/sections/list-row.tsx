@@ -32,7 +32,7 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
 import { usageLevel, usageValueText } from "@opengeni/react/ui/usage-meter";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import airtableLogo from "../../../../../../data/catalog/logos/airtable-com-c6ce8ea28476.jpg";
 import frontLogo from "../../../../../../data/catalog/logos/front-com-96ac210c4196.jpg";

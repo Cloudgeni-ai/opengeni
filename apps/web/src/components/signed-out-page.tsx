@@ -2,7 +2,7 @@ import { ActivityIcon, BoxesIcon, CloudIcon, PaletteIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
-import { BrandMark, Wordmark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
 import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,

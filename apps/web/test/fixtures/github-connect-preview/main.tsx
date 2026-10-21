@@ -2,13 +2,13 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import type { AuthNeededItem } from "@opengeni/react";
 
-import { SessionCapabilityCard } from "../../../src/components/capabilities/session-capability-card";
+import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import "../../../src/styles.css";
 import { scenario, useSessionResources } from "./context";
 import {
   clearGitHubInstallRequest,
   recordGitHubInstallRequest,
-} from "../../../src/lib/github-install-request";
+} from "@opengeni/react/app/lib/github-install-request";
 
 const params = new URLSearchParams(window.location.search);
 document.documentElement.dataset.ogTheme = params.get("theme") === "light" ? "light" : "dark";

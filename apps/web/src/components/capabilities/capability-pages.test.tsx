@@ -9,11 +9,11 @@ import {
   personalOnlyCapability,
 } from "./capability-copy";
 import { CatalogItemPage } from "./catalog-item-page";
-import { nativeCatalogItemNotice } from "./native-connect-readiness";
+import { nativeCatalogItemNotice } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { IntegrationPage } from "./integration-page";
-import type { IntegrationViewModel } from "./integration-view-model";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { ProviderPage } from "./provider-page";
-import type { CapabilityCatalogItem, SocialConnection } from "@/types";
+import type { CapabilityCatalogItem, SocialConnection } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

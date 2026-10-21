@@ -1477,7 +1477,7 @@ the owner, or not the owner's turn) and every other failure stay plain
 refusals, and callers without an exact agent attempt get no card. If the card
 cannot be posted, the original refusal is returned unchanged.
 
-The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
+The card (`packages/react/src/app/components/capabilities/session-machine-card.tsx`):
 
 - lists the workspace's enrolled machines with **Use in this chat**, which swaps
   the session onto that machine and sends `Use the machine “<name>” for this
@@ -1490,7 +1490,7 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   still use the shared permission guide. Connecting does not move an existing
   chat's compute route: **Use in this chat** remains a separate optional action;
 - in a browser, opens the shared **Use your computer** dialog
-  (`apps/web/src/components/machines/connect-machine-dialog.tsx`, also used by
+  (`packages/react/src/app/components/machines/connect-machine-dialog.tsx`, also used by
   the Machines page). It offers the current platform's desktop app download and
   **Open app and connect**. After installation the person returns to that link;
   the app selects the exact account or starts its existing PKCE sign-in, checks

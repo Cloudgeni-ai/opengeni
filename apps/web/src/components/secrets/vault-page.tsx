@@ -32,7 +32,7 @@ import {
   itemSubtitle,
   itemsLabel,
   vaultAudience,
-} from "./vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
 import {
   ExpiryBadge,
   ItemTile,

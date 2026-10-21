@@ -1,9 +1,9 @@
 // Preview-only data/context wiring. SessionList, its hooks, and its styles are real.
 import type { OpenGeniClient, SessionListPageOptions } from "@opengeni/sdk";
 import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
-import type { AppContextValue } from "../src/context";
-import { SessionChannelProjectionAuthority } from "../src/lib/session-pins";
-import type { Session } from "../src/types";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
+import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
+import type { Session } from "@opengeni/react/app/types";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const subjectId = "sidebar-preview";

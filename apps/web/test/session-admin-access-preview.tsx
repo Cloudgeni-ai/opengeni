@@ -3,10 +3,10 @@ import { createRoot } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SessionAdminAccess } from "@opengeni/sdk";
 import { AgentAdminAccessRow } from "../src/components/organization/security-page";
-import { SessionHeader } from "../src/components/rail/session-header";
-import type { SessionAdminAccessControl } from "../src/components/session/session-admin-access";
+import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
+import type { SessionAdminAccessControl } from "@opengeni/react/app/components/session/session-admin-access";
 import { Section } from "@opengeni/react/ui/section";
-import type { Session } from "../src/types";
+import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 // Production components and styles; synthetic organization, people and session.

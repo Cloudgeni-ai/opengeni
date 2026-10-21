@@ -10,7 +10,7 @@ import {
   type ChoiceCardsVariant,
 } from "@opengeni/react/ui/choice-cards";
 import { SelectMenuPanel } from "@opengeni/react/ui/select-menu";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import {
   apiKeyPresets,
   codexOrganizationAccounts,

@@ -6,7 +6,7 @@ import {
   SIGN_IN_METHOD_ORIGIN_MESSAGE,
   signInMethodsHaveSameOrigin,
 } from "@/lib/sign-in-method-origin";
-import { ProblemPanel } from "@/components/common";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { PersonalSettingsShell } from "@/components/settings/personal-settings-shell";
 import {
   SecurityPageBody,

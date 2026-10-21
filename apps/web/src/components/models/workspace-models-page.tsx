@@ -1,8 +1,8 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
-import { AccountGroupHeading } from "./subscription-account-ui";
+import { AccountGroupHeading } from "@/components/models/subscription-account-ui";
 import { ModelsRefreshControl } from "./models-refresh-control";
-import { OrganizationCodexDetailPrefetch } from "./use-organization-codex-overview";
+import { OrganizationCodexDetailPrefetch } from "@/components/models/use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -81,7 +81,7 @@ import {
   organizationReachLabel,
   useModelsNavigation,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import {
   GATEWAYS,
   OrganizationModelsList,
@@ -126,17 +126,17 @@ import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
-import { useAppContext } from "@/context";
-import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { billingClassForModel, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
 import {
   accountKey,
   accountKeyOf,
   connectStepOf,
   type GatewayId,
   type ModelsView,
-} from "@/lib/models-route";
+} from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
   AccountRuleLocksPage,

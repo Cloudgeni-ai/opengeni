@@ -1,7 +1,7 @@
 import { parseTotpInput, totpCodeSync, totpRemainingMs } from "@opengeni/contracts";
 import { useEffect, useMemo, useState } from "react";
 
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    A live one-time code with a countdown ring. The seed stays in the parent's

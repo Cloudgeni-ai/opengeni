@@ -1,7 +1,10 @@
 import { SubscriptionAccountPoolRows, subscriptionListedCount } from "./subscription-account-rows";
 import { SubscriptionAccountPage } from "./subscription-account-detail";
 import type { SuperGrokAccount } from "@opengeni/sdk";
-import { SubscriptionAccountRow, SubscriptionRotationSettingRows } from "./subscription-account-ui";
+import {
+  SubscriptionAccountRow,
+  SubscriptionRotationSettingRows,
+} from "@/components/models/subscription-account-ui";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -12,7 +15,7 @@ import {
   ModelsFormPage,
   ProviderTile,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import {
   SuperGrokDeviceCodePanel,

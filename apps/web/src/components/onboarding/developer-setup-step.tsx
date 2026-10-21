@@ -25,7 +25,7 @@ import {
   deploymentApiOrigin,
   developerSetupKeyRequest,
   developerSetupModelContext,
-} from "@/lib/onboarding-use-case";
+} from "@opengeni/react/app/lib/onboarding-use-case";
 import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
 /**

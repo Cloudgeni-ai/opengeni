@@ -42,7 +42,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { SegmentedControl, type SegmentedControlProps } from "@opengeni/react/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import {
   KIT_NOW,

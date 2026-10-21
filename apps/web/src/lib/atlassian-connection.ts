@@ -1,4 +1,4 @@
-import type { AtlassianConnectionMetadata, ConnectionMetadata } from "@/types";
+import type { AtlassianConnectionMetadata, ConnectionMetadata } from "@opengeni/react/app/types";
 
 export const ATLASSIAN_APP_DESCRIPTION =
   "Previous Jira and Confluence knowledge sync is retired. Use Atlassian agent tools for live access.";

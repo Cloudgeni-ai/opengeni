@@ -49,7 +49,7 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { KIT_NOW, KIT_TIME_ZONE, personById, type ScheduleRun } from "../../fixtures";
 import {

@@ -447,7 +447,7 @@ there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
 `packages/sdk/src/realtime-websocket-transport.ts`,
 `packages/react/src/realtime/realtime-control.tsx`, and
-`apps/web/src/routes/session.tsx`.
+`packages/react/src/app/routes/session.tsx`.
 
 Codex Live and Azure live voice negotiate WebRTC. Every other voice model uses
 one WebSocket path: `POST …/realtime/websocket` asks the provider registry in

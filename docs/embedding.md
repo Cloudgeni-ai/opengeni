@@ -85,9 +85,91 @@ synthetic prompt. See the [conversation UI guide](../docs-site/integrate/convers
 for optional hooks and their scope/lifetime boundaries. Simple embeds still
 use one `OpenGeniChat` component.
 
+**The full session app.** A page that already holds the person's own
+credential (a delegated token, a native-app token, an API key) can render the
+Opengeni web app's session UI itself: the chat list with search, projects,
+pins and archive, the session page with its header, timeline, approvals,
+questions and dock, the new-chat page, and the composer with its pickers.
+`SessionApp` from `@opengeni/react/session-app` is that UI, the same
+components the web app renders, backed by the same app state, with in-memory
+navigation. Pages it does not show (settings, billing, schedules) open the web
+app (`consoleUrl`) through `openUrl`.
+
+```tsx
+import { SessionApp } from "@opengeni/react/session-app";
+import "@opengeni/react/compiled.css";
+
+<SessionApp
+  apiBaseUrl="https://api.example.com"
+  headers={() => ({ Authorization: `Bearer ${token}` })}
+  consoleUrl="https://app.example.com"
+  workspaceId={workspaceId}
+  features={{ dock: true }}
+  messageContext={() => "The person is on the billing page of Acme."}
+  onUnauthorized={() => refreshToken()}
+/>;
+```
+
+`consoleUrl` is the Opengeni web app's origin, which the embed links to for
+pages it does not show. `sessionId` and `onSessionChange` let the page own
+which chat is open; `onSessionChange` runs only when the person opens another
+chat. `openUrl` receives everything that leaves the embed (app pages, provider
+sign-in, checkout, files opened in full); a host that cannot open browser tabs,
+such as an Office add-in, passes its own. `onUnauthorized` runs on any 401,
+from the client or a raw app request. `compiled.css` is the only stylesheet
+the embed needs; it uses the Inter font when the page loads it. Server rendering
+produces only its loading state; the app starts in the browser.
+
+A preset decides which features show and single keys switch them:
+
+| Feature | `app` (web, desktop) | `companion` (first-party side panes) | `embed` (default; customer page) |
+| --- | --- | --- | --- |
+| `chatList`: search, filters, projects, pins, archive, subagent rows | on | on | on |
+| `dock`: files, terminal, desktop, browser, artifacts, inspector | on | on | off |
+| `adminAccess`: workspace-admin access indicator and grant | on | off | off |
+| `newChatShortcut`: ⌘/Ctrl+⇧O | on | off | off |
+| `brand`: the Opengeni row at the top of the chat list | on | on | off |
+
+Everything else (model and effort, capabilities, repositories, runs on,
+secrets, usage limit, approvals and questions, goals, attachments, voice, find
+in chat, message actions) is always on and follows the server's client
+configuration and the person's permissions, as in the web app. A switch only
+hides; it never grants. `slots` adds host sections to the shell (a workspace
+picker or account row under the chat list, banners above the canvas),
+`theme` follows the host application (the embed sets its own `data-og-theme`
+and never touches the host page's `<html>`), and `messageContext` adds
+per-message model context (never instructions) to every new chat and message.
+With the dock off, entries that only open a dock panel hide with it.
+
+The dock's heavier pieces are opt-in so a page that does not show them never
+downloads them. Call `enableWorkbench()` from `@opengeni/react/workbench` once
+(ideally from a lazily loaded module) to turn on highlighted diffs, the
+terminal, the desktop viewer and the code editor. `surfaces` supplies the PDF
+preview and the editable document, spreadsheet and presentation editor; without
+an editor, those artifacts show a link that opens them in the web app.
+
+Everything stays inside the embed: menus, popovers, dialogs and tooltips
+render in its own root with its theme, its toasts stay out of the page's own
+toaster (two embeds on one page share one stack), ⌘/Ctrl+F is only caught
+while focus is inside it, and it never changes the page title or navigates the
+page. The exceptions are deliberate: Reload, offered when part of the app fails
+to download, reloads the page, as the embed's code is the page's; connecting a
+GitHub account opens GitHub's sign-in popup; creating a GitHub App posts its
+manifest to GitHub in a new tab; and links in a sandbox terminal open in a new
+tab. Two
+`SessionApp`s on one page keep separate state, navigation and events.
+The Excel add-in (`apps/web/office`) is the reference `companion` host.
+
+`SessionApp` calls the Opengeni API directly, so it needs a credential with the
+person's own workspace permissions. `OpenGeniChat` and the session proxy
+(`createSessionProxyHandler`) stay the path for products that must not hand the
+browser a credential; the proxy serves only the conversation routes, so it
+renders the conversation components above.
+
 Embedded defaults keep Opengeni's own product choices out of the host's
-product. The Opengeni web app does not mount these surfaces and keeps its own
-behavior. Existing explicit settings keep working.
+product. The Opengeni web app renders its session UI from the same
+`@opengeni/react` components as `SessionApp`. Existing explicit settings keep
+working.
 
 ### Computer connection offers
 

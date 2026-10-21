@@ -10,12 +10,15 @@ import type { OrganizationWorkspaceAdministration } from "@/components/settings/
 import { SettingsHeaderActions } from "@/components/settings/settings-header-actions";
 import { AccessList, type AccessMember } from "@opengeni/react/ui/access-list";
 import { Button } from "@opengeni/react/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import type { RoleOption } from "@opengeni/react/ui/role-select";
 import { Section } from "@opengeni/react/ui/section";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import type { OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
+import type {
+  OrganizationMember,
+  OrganizationWorkspaceAccessMember,
+} from "@opengeni/react/app/types";
 
 import {
   AddPeoplePage,

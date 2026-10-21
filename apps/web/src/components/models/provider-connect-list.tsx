@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 
-import { ProviderTile, type ModelProviderId } from "@/components/models/provider-mark";
+import {
+  ProviderTile,
+  type ModelProviderId,
+} from "@opengeni/react/app/components/models/provider-mark";
 import { ListRow, RowList } from "@opengeni/react/ui/list-row";
 
 /* ----------------------------------------------------------------------------

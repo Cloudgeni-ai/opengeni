@@ -7,17 +7,17 @@
 import { resolveWorkspaceAgentDefaults, type AgentCapabilities } from "@opengeni/contracts";
 import { useMemo } from "react";
 
-import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
+import { AgentCapabilityPicker } from "@opengeni/react/app/components/agent/agent-capability-picker";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { useAppContext } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   capabilityAvailability,
   capabilitySummary,
   draftFromRequest,
   requestFromDraft,
   workspaceAgentDefaultsDraft,
-} from "@/lib/agent-capabilities";
+} from "@opengeni/react/app/lib/agent-capabilities";
 
 export function ScheduleAgentCapabilities({
   workspaceId,

@@ -8,9 +8,9 @@ import * as SonnerPackage from "sonner";
 
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
-import * as ContextModule from "@/context";
+import * as ContextModule from "@opengeni/react/app/app-context";
 import * as AnalyticsModule from "@/lib/analytics";
-import type { CompanyProfileAgentPolicy } from "@/types";
+import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
 const accountId = "account-strict";
 const workspaceId = "workspace-strict";
@@ -198,7 +198,10 @@ const context = {
   revalidatePrincipalAccess: () => undefined,
 };
 
-mock.module("@/context", () => ({ ...ContextModule, useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({
+  ...ContextModule,
+  useAppContext: () => context,
+}));
 mock.module("@opengeni/react", () => ({
   ...ReactPackage,
   useBillingUsage,

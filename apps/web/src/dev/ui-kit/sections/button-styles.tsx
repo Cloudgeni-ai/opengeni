@@ -10,7 +10,7 @@ import {
 
 import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { schedules, variableSetById } from "../fixtures";
 import { Alternative, Fork, KitSection, UsageNotes, useKitPane } from "../kit";
 import { ThemeScope, type ResolvedTheme } from "../theme";
