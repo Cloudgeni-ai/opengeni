@@ -12,6 +12,8 @@ import {
   type Manifest,
   type Pull,
   type Run,
+  type FollowupRequest,
+  type FollowupPull,
 } from "./model";
 import { latestRun } from "./planner";
 import { latencySummary } from "./journal";
@@ -23,10 +25,12 @@ export interface ActiveReads {
   hasComment(number: number, marker: string): Promise<boolean>;
   currentAttempt(run: Run): Promise<{ attempt: number; status: string }>;
   mainBusy(): Promise<boolean>;
+  findFollowup(request: FollowupRequest): Promise<FollowupPull | null>;
 }
 export interface ActiveWrites {
   retry(run: Run): Promise<void>;
   announce(number: number, body: string): Promise<void>;
+  createFollowup(request: FollowupRequest): Promise<void>;
 }
 interface State {
   sha: string | null;
@@ -36,6 +40,46 @@ interface State {
 interface Options {
   clock?: () => Date;
   refreshAuth?: () => Promise<void>;
+}
+function matchesAutoMergedSnapshot(
+  pull: PullSnapshot,
+  request: Pick<FollowupRequest, "landedHeadSha" | "landedMergeSha" | "landedTipSha">,
+): boolean {
+  return (
+    pull.state === "closed" &&
+    pull.merged &&
+    (pull.headSha === request.landedHeadSha ||
+      pull.mergeCommitSha === request.landedMergeSha ||
+      pull.mergeCommitSha === request.landedTipSha)
+  );
+}
+function followupRequest(
+  record: LandedPull,
+  pull: PullSnapshot,
+  headSha: string,
+): { id: string; request: FollowupRequest } {
+  const id = digest({
+    kind: "followup",
+    repository: pull.headRepository,
+    ref: pull.headRef,
+    headSha,
+  });
+  const marker = `<!-- batcher-followup:${id} -->`;
+  return {
+    id,
+    request: {
+      original: record.pull.number,
+      sourceRepository: pull.headRepository!,
+      sourceRef: pull.headRef,
+      headSha,
+      landedHeadSha: record.pull.headSha,
+      landedMergeSha: record.mergeSha,
+      landedTipSha: record.tipSha,
+      marker,
+      title: `Remaining work after #${record.pull.number}`,
+      body: `Remaining source-branch work after #${record.pull.number} was merged. The tested snapshot was ${record.pull.headSha}, landed at ${record.tipSha}. Recovery observed newer head ${headSha}; it has NOT been tested by that batch. This PR needs normal fresh exact-head VM/independent-review evidence and a ready signal before candidate CI. No evidence or readiness was copied.\n\n${marker}`,
+    },
+  };
 }
 
 function addComment(
@@ -281,8 +325,18 @@ export class GitHubActiveExecutor implements Executor {
   }
   private async effectObserved(effect: DurableEffect): Promise<boolean> {
     if (effect.kind === "comment") return this.reads.hasComment(effect.number, effect.marker);
+    if (effect.kind === "followup") return (await this.reads.findFollowup(effect.request)) !== null;
     const run = await this.reads.currentAttempt(effect.run);
     return run.attempt > effect.run.attempt;
+  }
+  private async validFollowup(request: FollowupRequest): Promise<boolean> {
+    const original = await this.reads.pullSnapshot(request.original);
+    return (
+      matchesAutoMergedSnapshot(original, request) &&
+      original.headRepository === request.sourceRepository &&
+      original.headRef === request.sourceRef &&
+      original.branchHeadSha === request.headSha
+    );
   }
   private async processEffect(state: State, effect: DurableEffect): Promise<string> {
     const now = this.now();
@@ -309,6 +363,14 @@ export class GitHubActiveExecutor implements Executor {
           lastError: "REST submission retry budget exhausted",
         });
         return "REST effect blocked by bounded retry budget";
+      }
+      if (effect.kind === "followup" && !(await this.validFollowup(effect.request))) {
+        await this.patchEffect(effect.id, {
+          status: "blocked",
+          attempts: 0,
+          lastError: "Follow-up source snapshot changed before submission; no POST issued",
+        });
+        return "follow-up creation waits for current exact source snapshot";
       }
       if (effect.kind === "rerun") {
         const current = await this.reads.currentAttempt(effect.run);
@@ -356,11 +418,32 @@ export class GitHubActiveExecutor implements Executor {
         return "REST claim changed before submission; reconcile on next owner";
       // There is deliberately no claim that this read makes GitHub POST atomic
       // with the lease. Stable markers / attempt identity reconcile its outcome.
+      if (effect.kind === "followup") {
+        if (await this.reads.findFollowup(effect.request)) {
+          await this.patchEffect(effect.id, { status: "done", lastError: null });
+          return "existing follow-up PR reconciled without creation";
+        }
+        if (!(await this.validFollowup(effect.request))) {
+          await this.patchEffect(effect.id, {
+            status: "blocked",
+            attempts: 0,
+            lastError: "Follow-up source snapshot changed before submission; no POST issued",
+          });
+          return "changed source head suppressed follow-up POST";
+        }
+      }
       postStarted = true;
       if (effect.kind === "comment") await this.writes.announce(effect.number, effect.body);
-      else await this.writes.retry(effect.run);
+      else if (effect.kind === "rerun") await this.writes.retry(effect.run);
+      else await this.writes.createFollowup(effect.request);
       postStarted = false; // A later read/claim failure cannot prove this POST was rejected.
-      await this.patchEffect(effect.id, { status: "done", lastError: null });
+      await this.patchEffect(effect.id, {
+        status: effect.kind === "followup" ? "uncertain" : "done",
+        lastError:
+          effect.kind === "followup"
+            ? "Create accepted; awaiting exact source/marker reconciliation"
+            : null,
+      });
       return "durable REST effect submitted";
     } catch (error) {
       const status = error instanceof ProviderError ? error.status : null;
@@ -396,25 +479,79 @@ export class GitHubActiveExecutor implements Executor {
     let currentHeadSha: string | null = null,
       status: LandedPull["status"] = "unchanged",
       note: string | null = null;
+    let followup: { id: string; request: FollowupRequest } | null = null;
+    let followupNumber: number | undefined;
+    let reconciledEffectId: string | null = null;
     try {
       const pull = await this.reads.pullSnapshot(record.pull.number);
       currentHeadSha = pull.branchHeadSha ?? pull.headSha;
-      if (currentHeadSha !== record.pull.headSha) {
+      if (
+        !pull.branchHeadSha &&
+        record.currentHeadSha &&
+        record.currentHeadSha !== record.pull.headSha
+      ) {
+        currentHeadSha = record.currentHeadSha;
+        status = "followup-blocked";
+        note =
+          "Previously observed newer work is retained, but the source branch is now unavailable; no follow-up can be safely created.";
+      } else if (currentHeadSha !== record.pull.headSha) {
         if (pull.headRepository)
           await this.git.fetch(`https://github.com/${pull.headRepository}.git`, [currentHeadSha]);
         if (await this.git.ancestor(currentHeadSha, state.main)) {
           status = "already-contained";
           note =
             "Newer source head is already reachable from main; no claim it was tested by this batch.";
-        } else if (pull.state === "closed") {
+        } else if (pull.state === "closed" && !pull.merged) {
           status = "closed-newer-head";
-          note = pull.merged
-            ? "GitHub already auto-closed/merged this PR before newer branch work was observed. A merged PR cannot be kept open by this adapter; open a follow-up PR for the remaining delta. The controller did not close it."
-            : "PR was closed externally; newer branch work remains unlanded. The controller does not override that closure.";
+          note =
+            "PR was closed externally without merging; newer work remains unlanded. Automatic follow-up creation does not override that closure.";
         } else if (!(await this.git.ancestor(record.pull.headSha, currentHeadSha))) {
           status = "history-diverged";
           note =
             "New head does not retain landed ancestry; rebase the remaining work onto main before automatic requeue.";
+        } else if (pull.state === "closed") {
+          status = "followup-blocked";
+          note =
+            "Cannot recover automatically: source repository/branch or association with the batcher's merged snapshot is unavailable.";
+          const proof = {
+            landedHeadSha: record.pull.headSha,
+            landedMergeSha: record.mergeSha,
+            landedTipSha: record.tipSha,
+          };
+          if (pull.headRepository && pull.branchHeadSha && matchesAutoMergedSnapshot(pull, proof)) {
+            const proposed = followupRequest(record, pull, currentHeadSha);
+            const existing = await this.reads.findFollowup(proposed.request);
+            if (existing) {
+              followupNumber = existing.number;
+              reconciledEffectId = proposed.id;
+              status =
+                existing.state === "open"
+                  ? existing.headSha === currentHeadSha
+                    ? "followup-open"
+                    : "followup-pending"
+                  : "followup-blocked";
+              note =
+                existing.state === "open"
+                  ? `Source branch already has open PR #${existing.number}, observed head ${existing.headSha}, current source head ${currentHeadSha}. Any PR-head lag must reconcile; fresh exact-head evidence/readiness and candidate CI are required, with nothing inherited.`
+                  : `Recovery PR #${existing.number} was closed; this adapter will not reopen it or create a duplicate for this snapshot.`;
+            } else {
+              const pending = Object.values(state.ledger.effects).find(
+                (e) =>
+                  e.kind === "followup" &&
+                  e.request.sourceRepository === pull.headRepository &&
+                  e.request.sourceRef === pull.headRef &&
+                  ((e.attempts > 0 && e.status !== "done") || e.id === proposed.id),
+              );
+              status =
+                pending?.status === "blocked" || pending?.status === "done"
+                  ? "followup-blocked"
+                  : "followup-pending";
+              note = pending
+                ? `Follow-up recovery ${pending.status}: ${pending.lastError ?? "durable intent awaiting reconciliation"}. No duplicate creation.`
+                : "Durable follow-up creation queued for the exact observed source branch/head; normal new-PR evidence/readiness still required.";
+              if (!pending) followup = proposed;
+            }
+          }
         } else {
           const ready = await this.reads.ready();
           status = ready.ready.some(
@@ -443,11 +580,29 @@ export class GitHubActiveExecutor implements Executor {
         currentHeadSha,
         status,
         note,
+        ...(followupNumber !== undefined ? { followupNumber } : {}),
         checkedAt: now,
         nextCheckAt: new Date(
           Date.parse(now) + (status === "provider-unavailable" ? 300_000 : 60_000),
         ).toISOString(),
       };
+      if (reconciledEffectId && ledger.effects[reconciledEffectId])
+        ledger.effects[reconciledEffectId] = {
+          ...ledger.effects[reconciledEffectId]!,
+          status: "done",
+          lastError: null,
+        } as DurableEffect;
+      if (followup)
+        ledger.effects[followup.id] ??= {
+          id: followup.id,
+          kind: "followup",
+          request: followup.request,
+          status: "pending",
+          attempts: 0,
+          checks: 0,
+          nextAt: now,
+          lastError: null,
+        };
       if (currentHeadSha && currentHeadSha !== record.pull.headSha && note)
         addComment(
           ledger,
@@ -465,11 +620,17 @@ export class GitHubActiveExecutor implements Executor {
     const messages: string[] = [];
     // Bound work per tick. Completed effects are immutable history; blocked
     // effects remain visible without starving candidate planning.
-    const effect = Object.values(state.ledger.effects).find(
-      (item) =>
-        !["done", "blocked"].includes(item.status) &&
-        Date.parse(item.nextAt) <= Date.parse(this.now()),
-    );
+    const effect = Object.values(state.ledger.effects)
+      .sort(
+        (a, b) =>
+          Number(b.kind === "followup") - Number(a.kind === "followup") ||
+          Date.parse(a.nextAt) - Date.parse(b.nextAt),
+      )
+      .find(
+        (item) =>
+          !["done", "blocked"].includes(item.status) &&
+          Date.parse(item.nextAt) <= Date.parse(this.now()),
+      );
     if (effect) messages.push(await this.processEffect(state, effect));
     state = await this.load();
     if (!this.available(state)) return messages.join("; ") || null;

@@ -37,9 +37,23 @@ their **own** exact-head VM/review evidence, and the next merge against main
 contains only the remaining delta. Old evidence is never inherited. Divergent
 history is held with a rebase explanation. The adapter never closes/reopens PRs.
 **GitHub may auto-close a PR when its old head reaches main, before a newer push
-is observed.** A merged PR cannot be kept open by this adapter; this case is
-recorded/commented as `closed-newer-head`, requiring a follow-up PR. Closed PRs
-are not silently reopened and newer work is never represented as tested.
+is observed.** For an original marked merged and associated with the batcher's
+landed snapshot, the adapter durably creates or reuses a follow-up PR on the exact
+observed source repository/branch. It never does this for an externally closed,
+unmerged PR. New work must retain landed ancestry and still needs normal fresh
+exact-head VM/review evidence and readiness; neither is fabricated or copied.
+The follow-up intent is keyed by source repository/branch/head, reconciled by its
+marker or an existing open PR for that exact source/head, and never blindly
+replayed after an ambiguous POST. Permission/source-access/provider failures
+remain `followup-blocked` or `provider-unavailable` with a specific reason. Closed follow-up PRs are not
+reopened or duplicated for the same snapshot.
+
+GitHub creation addresses a mutable branch, not an atomic expected-head SHA.
+The source head is reread immediately before POST, but a later race can make the
+new PR contain an even newer head. Reconciliation reports that actual head as
+untested; only normal fresh admission and candidate CI can qualify it. An
+uncertain earlier creation holds later intents for that source branch until its
+outcome is resolved, preventing duplicate PRs across head changes.
 
 Keep non-FF/deletion guards in a separate ruleset the batcher cannot bypass;
 bypass of a combined PR-admission rule also bypasses its non-FF/deletion guards.
@@ -95,6 +109,8 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_SHADOW_CI_STATE_REF` | No default; explicitly configure `refs/heads/batcher-shadow-ci-state` |
 | `BATCHER_MAX_BATCH_SIZE` | `16` |
 | `BATCHER_MAX_INFLIGHT` | `1` hosted candidate CI |
+| `BATCHER_RUNNER_BUDGET` | No default; explicitly allocated repository runner/job budget, not an assumed organization quota |
+| `BATCHER_MAIN_RESERVE` | No default; conservative slots reserved for full-main CI |
 | `BATCHER_SPECULATION_DEPTH` | `2`, including current candidate |
 | `BATCHER_GIT_DIR` | `/data/objects.git`, disposable bare object cache |
 | `BATCHER_OUTPUT_DIR` | `/data/shadow`, local stage/manifest evidence |
@@ -117,7 +133,8 @@ are suppressed on errors to avoid credential leakage.
 Shadow-ci App authentication requests contents/workflows write and
 actions/pull_requests/issues read, not comment/label or Actions rerun writes.
 Active App authentication requests contents/workflows/actions/pull_requests/issues
-write for atomic Git updates, whole-workflow reruns and exact-head comments.
+write for atomic Git updates, whole-workflow reruns, exact-head comments and
+remaining-delta follow-up PR creation.
 It never uses labels/readiness changes or PR close/merge endpoints.
 
 Public repository reads can work without credentials, but private repository
@@ -252,11 +269,21 @@ operator investigation rather than endlessly rerunning or ejecting a PR.
 With one hosted candidate running, the planner constructs one speculative
 successor **locally**, based on the predecessor tip, without publishing it and
 starting another CI run. A speculative candidate is deterministic and can be
-rebuilt after cache loss. Configured additional in-flight capacity is explicit.
-Full-main push CI has priority: an observed queued/running main workflow holds
-candidate publication, retries and landing, while local speculation can continue.
-External workflows can still start after the observation; this is headroom
-coordination, not a GitHub-wide scheduler or a cancellation mechanism.
+rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
+even if a higher legacy max-inflight planner setting is present.
+Full-main CI retains explicit reserved capacity, but its mere presence does not
+block progress. Before publication/retry/landing, the reader scans current
+repository runs and their latest jobs (at most 32 runs, 100 entries per response;
+incomplete observations hold). Required capacity is other nonterminal job demand
+plus the larger of configured main reserve and observed main demand, plus **18
+candidate slots**. It proceeds only when that fits BATCHER_RUNNER_BUDGET and no
+other Batch CI run occupies the single candidate slot. Missing budget/reserve or
+unobservable other-workflow job demand holds rather than inventing capacity.
+stage.json exposes the measured occupied/reserved slots, configured budget and
+decision. These are explicit repository allocations, not a claim that GitHub
+granted a custom quota or that other repositories are idle. Jobs can expand or
+external runs can start after observation; this is conservative admission from
+observed demand, not an atomic GitHub scheduler or cancellation mechanism.
 Invalidated descendants still occupy CI slots while running: no cancellation
 operation exists in the adapter.
 
@@ -315,11 +342,11 @@ remote ref deletion is performed by this implementation.
 
 ### Recoverable REST effects
 
-Comment and whole-run retry intents live in `state.json`, with deterministic
+Comment, whole-run retry and follow-up PR intents live in `state.json`, with deterministic
 IDs, comment markers, exact run/attempt identity, attempts and next-check times.
 An intent is durably marked `submitting` before POST; a final lease read reduces
 stale-owner races but is **not** an atomic Git/REST fence. Restart reconciliation
-checks the comment marker or advanced attempt before any submission. Accepted
+checks the comment/PR marker, exact source PR or advanced attempt before any submission. Accepted
 requests with lost responses are completed from provider evidence. An ambiguous
 POST (including a crash between durable claim and POST) is never blindly retried.
 It receives bounded read-only reconciliation, then becomes visibly `blocked`.

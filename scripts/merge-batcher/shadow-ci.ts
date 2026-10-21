@@ -102,7 +102,10 @@ export class ShadowCiController {
     if (o.ledger.owner !== this.owner && Date.parse(o.ledger.expiresAt) > Date.parse(o.now))
       return wait("another shadow-ci writer holds the durable lease");
     const pulls = fifo(o.ready, this.config.maxBatchSize);
-    if (o.mainBusy) return wait("full-main CI has priority; no new shadow candidate publication");
+    if (o.mainBusy)
+      return wait(
+        o.headroom?.reason ?? "full-main CI has priority; no new shadow candidate publication",
+      );
     if (!pulls.length) return wait("no eligible ready heads");
     const spec = {
       schemaVersion: 1 as const,
@@ -205,6 +208,7 @@ export class ShadowCiController {
         result,
         comparisons,
         telemetry: o.telemetry ?? null,
+        headroom: o.headroom ?? null,
         measuredStages: (await this.journal.records(o.now)).stages,
         missingRuns: o.missingRuns ?? {},
         observationWarnings: o.observationWarnings ?? [],

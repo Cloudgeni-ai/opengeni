@@ -153,6 +153,7 @@ export class LiveReader implements Reader {
       ledger,
       observationWarnings,
       mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy(),
+      headroom: this.github.lastHeadroom,
     };
   }
 }
@@ -354,6 +355,7 @@ export class Controller {
       result,
       providerCapabilities: this.executor?.capabilities ?? githubCapabilities,
       telemetry: observation.telemetry ?? null,
+      headroom: observation.headroom ?? null,
       measuredStages: (await this.journal.records(observation.now)).stages,
       missingRuns: observation.missingRuns ?? {},
       observationWarnings: observation.observationWarnings ?? [],

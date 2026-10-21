@@ -21,6 +21,8 @@ import {
   type Manifest,
   type Pull,
   type Run,
+  type FollowupRequest,
+  type FollowupPull,
 } from "./model";
 
 const NOW = "2026-10-21T12:00:00.000Z";
@@ -113,6 +115,10 @@ async function fixture() {
     response: "ok" | "lost" | "unknown" | "forbidden" | "throttled" = "ok";
     onReady: (() => void) | null = null;
     onAccepted: (() => void) | null = null;
+    onSnapshot: (() => void) | null = null;
+    beforeCreate: (() => void) | null = null;
+    followups: (FollowupPull & { sourceRepository: string; sourceRef: string; body: string })[] =
+      [];
     override async ready() {
       this.onReady?.();
       return { ready: structuredClone(this.pulls), excluded: [] };
@@ -121,7 +127,19 @@ async function fixture() {
       return structuredClone(this.workflowRuns.filter((r) => r.branch === branch));
     }
     override async pullSnapshot(_number: number) {
+      this.onSnapshot?.();
       return { ...this.snapshot };
+    }
+    override async findFollowup(request: FollowupRequest) {
+      const matches = this.followups.filter(
+        (p) => p.sourceRepository === request.sourceRepository && p.sourceRef === request.sourceRef,
+      );
+      return (
+        matches.find((p) => p.state === "open" && p.headSha === request.headSha) ??
+        matches.find((p) => p.state === "open") ??
+        matches.find((p) => p.body.includes(request.marker)) ??
+        null
+      );
     }
     override async hasComment(_number: number, marker: string) {
       if (this.commentReadThrottled) throw new ProviderError(429, "read");
@@ -155,6 +173,18 @@ async function fixture() {
         attempt: run.attempt + 1,
         status: "queued",
         completedAt: null,
+      });
+    } else if (path.endsWith("/pulls")) {
+      api.beforeCreate?.();
+      const body = JSON.parse(String(init.body)) as { body: string; head: string };
+      api.followups.push({
+        number: api.followups.length + 2,
+        headSha: api.snapshot.branchHeadSha!,
+        state: "open",
+        merged: false,
+        sourceRepository: api.snapshot.headRepository!,
+        sourceRef: api.snapshot.headRef,
+        body: body.body,
       });
     } else throw new Error("unapproved mocked endpoint");
     api.onAccepted?.();
@@ -232,6 +262,7 @@ async function fixture() {
     newer,
     divergent,
     makePull,
+    commit,
     writer,
     executor,
     controller,
@@ -248,6 +279,25 @@ async function fixture() {
       api.pulls = [makePull(sha)];
     },
   };
+}
+
+async function mergedOriginalWithDelta() {
+  const f = await fixture(),
+    manifest = await f.publish();
+  f.verdict(manifest);
+  f.git.beforePush = async () => {
+    f.api.snapshot.state = "closed";
+    f.api.snapshot.merged = true;
+    f.api.snapshot.mergeCommitSha = manifest.pulls[0]!.mergeSha;
+    f.api.snapshot.branchHeadSha = f.newer;
+    f.api.snapshot.headRepository = f.cfg.repository;
+    f.api.pulls = [];
+  };
+  await f.controller().step();
+  expect((await f.state()).ledger.landings[`${manifest.batchId}:1`]?.status).toBe(
+    "followup-pending",
+  );
+  return { ...f, manifest };
 }
 
 describe("actual active executor with local bare Git and mocked GitHub", () => {
@@ -305,7 +355,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       const record = (await f.state()).ledger.landings[`${m.batchId}:1`]!;
       expect(record.status).toBe(
         kind === "closed"
-          ? "closed-newer-head"
+          ? "followup-blocked"
           : kind === "divergent"
             ? "history-diverged"
             : "awaiting-evidence",
@@ -605,7 +655,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await f.controller().step();
     const record = (await f.state()).ledger.landings[`${m.batchId}:1`]!;
     expect(record.currentHeadSha).toBe(f.newer);
-    expect(record.status).toBe("closed-newer-head");
+    expect(record.status).toBe("followup-blocked");
   });
   test("GitHub read adapter binds actual fork branch and exact attempt identity", async () => {
     const f = await fixture(),
@@ -644,25 +694,70 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     wrongAttemptIdentity = true;
     await expect(reader.currentAttempt(run)).rejects.toThrow("identity changed");
   });
-  test("headroom reader finds waiting full-main run and ignores other workflow paths", async () => {
-    const cfg = config({ BATCHER_MODE: "active" });
-    const statuses: string[] = [];
-    const transport = (async (url: string | URL | Request) => {
-      const status = new URL(String(url)).searchParams.get("status")!;
-      statuses.push(status);
-      return Response.json({
-        workflow_runs: [
-          {
-            head_branch: "main",
-            path: status === "waiting" ? ".github/workflows/ci.yml" : "unrelated.yml",
-            event: "push",
-            status,
-          },
-        ],
+  test.each([
+    [10, 2, false],
+    [44, 2, true],
+    [10, 3, true],
+  ] as const)(
+    "observed main jobs %i and other jobs %i yield capacity hold %s",
+    async (mainJobs, otherJobs, held) => {
+      const cfg = config({
+        BATCHER_MODE: "active",
+        BATCHER_RUNNER_BUDGET: "60",
+        BATCHER_MAIN_RESERVE: "40",
       });
-    }) as typeof fetch;
-    expect(await new GitHubReader(cfg, new GitHubAuth({}), transport).mainBusy()).toBe(true);
-    expect(statuses).toEqual(["in_progress", "queued", "waiting"]);
+      const transport = (async (url: string | URL | Request) => {
+        if (String(url).includes("/jobs?")) {
+          const count = String(url).includes("/runs/1/") ? mainJobs : otherJobs;
+          return Response.json({
+            total_count: count + 3,
+            jobs: [
+              ...Array.from({ length: count }, () => ({ status: "in_progress" })),
+              ...Array.from({ length: 3 }, () => ({ status: "completed" })),
+            ],
+          });
+        }
+        const status = new URL(String(url)).searchParams.get("status");
+        const runs =
+          status === "waiting"
+            ? [
+                {
+                  id: 1,
+                  head_branch: "main",
+                  path: ".github/workflows/ci.yml",
+                  event: "push",
+                  status,
+                },
+                { id: 2, head_branch: "feature", path: "other.yml", event: "push", status },
+              ]
+            : [];
+        return Response.json({ total_count: runs.length, workflow_runs: runs });
+      }) as typeof fetch;
+      const reader = new GitHubReader(cfg, new GitHubAuth({}), transport);
+      expect(await reader.mainBusy()).toBe(held);
+      expect(reader.lastHeadroom?.reservedMain).toBe(Math.max(40, mainJobs));
+      expect(reader.lastHeadroom?.occupied).toBe(mainJobs + otherJobs);
+      expect(reader.lastHeadroom?.candidateSlots).toBe(18);
+    },
+  );
+  test("capacity budget is explicit and incomplete scans never invent headroom", async () => {
+    const unconfigured = new GitHubReader(config({}), new GitHubAuth({}), (async () => {
+      throw new Error("must not assume quota");
+    }) as unknown as typeof fetch);
+    expect(await unconfigured.mainBusy()).toBe(true);
+    expect(unconfigured.lastHeadroom?.budget).toBeNull();
+    const settings = config({ BATCHER_RUNNER_BUDGET: "60", BATCHER_MAIN_RESERVE: "40" });
+    const incomplete = new GitHubReader(settings, new GitHubAuth({}), (async () =>
+      Response.json({ total_count: 101, workflow_runs: [] })) as unknown as typeof fetch);
+    expect(await incomplete.mainBusy()).toBe(true);
+    expect(incomplete.lastHeadroom?.reason).toContain("Incomplete");
+    const batch = new GitHubReader(settings, new GitHubAuth({}), (async () =>
+      Response.json({
+        total_count: 1,
+        workflow_runs: [{ id: 2, path: settings.workflow, status: "queued" }],
+      })) as unknown as typeof fetch);
+    expect(await batch.mainBusy()).toBe(true);
+    expect(batch.lastHeadroom?.reason).toContain("single candidate");
   });
   test("recovery CLI requires explicit active configuration and confirmation before auth", async () => {
     await expect(main(["recover-effect"], {})).rejects.toThrow("requires active mode");
@@ -717,5 +812,209 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await f.executor().maintain();
     expect(f.api.calls).toHaveLength(0);
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("pending");
+  });
+  test("auto-merged original gets one durable follow-up, with no inherited evidence or readiness", async () => {
+    const f = await mergedOriginalWithDelta();
+    await f.executor().maintain();
+    expect(f.api.followups).toHaveLength(1);
+    expect(f.api.followups[0]?.headSha).toBe(f.newer);
+    expect(f.api.followups[0]?.body).toContain("NOT been tested");
+    f.advance(180);
+    await f.executor().maintain();
+    const record = (await f.state()).ledger.landings[`${f.manifest.batchId}:1`]!;
+    expect(record.status).toBe("followup-open");
+    expect(record.followupNumber).toBe(2);
+    expect((await f.controller().step()).manifest).toBeNull();
+    expect(f.api.pulls).toEqual([]);
+    expect(f.api.calls.filter((call) => call.endsWith("/pulls"))).toHaveLength(1);
+  });
+  test("existing exact-source open PR is reused without duplicate creation", async () => {
+    const f = await mergedOriginalWithDelta();
+    f.api.followups.push({
+      number: 99,
+      headSha: f.newer,
+      sourceRepository: f.cfg.repository,
+      sourceRef: "feature",
+      state: "open",
+      merged: false,
+      body: "Existing human-created follow-up",
+    });
+    f.advance(180);
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${f.manifest.batchId}:1`]?.followupNumber).toBe(99);
+    expect(f.api.calls.filter((call) => call.endsWith("/pulls"))).toHaveLength(0);
+  });
+  test("accepted create with lost response reconciles marker after restart without second POST", async () => {
+    const f = await mergedOriginalWithDelta();
+    f.api.response = "lost";
+    await f.executor().maintain();
+    expect(f.api.followups).toHaveLength(1);
+    f.api.response = "ok";
+    f.advance(180);
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${f.manifest.batchId}:1`]?.status).toBe(
+      "followup-open",
+    );
+    expect(f.api.calls.filter((call) => call.endsWith("/pulls"))).toHaveLength(1);
+  });
+  test("provider denial leaves precise blocked recovery instead of claiming newer work is open", async () => {
+    const f = await mergedOriginalWithDelta();
+    f.api.response = "forbidden";
+    await f.executor().maintain();
+    f.advance(180);
+    await f.executor().maintain();
+    const record = (await f.state()).ledger.landings[`${f.manifest.batchId}:1`]!;
+    expect(record.status).toBe("followup-blocked");
+    expect(record.note).toContain("403");
+    expect(f.api.followups).toEqual([]);
+    expect(f.api.calls.filter((call) => call.endsWith("/pulls"))).toHaveLength(1);
+  });
+  test("never creates recovery PR for externally closed unmerged original", async () => {
+    const f = await fixture(),
+      manifest = await f.publish();
+    f.verdict(manifest);
+    f.git.beforePush = async () => {
+      f.api.snapshot.state = "closed";
+      f.api.snapshot.merged = false;
+      f.api.snapshot.branchHeadSha = f.newer;
+      f.api.snapshot.headRepository = f.cfg.repository;
+      f.api.pulls = [];
+    };
+    await f.controller().step();
+    f.advance(180);
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${manifest.batchId}:1`]?.status).toBe(
+      "closed-newer-head",
+    );
+    expect(
+      Object.values((await f.state()).ledger.effects).some((effect) => effect.kind === "followup"),
+    ).toBe(false);
+    expect(f.api.calls.filter((call) => call.endsWith("/pulls"))).toHaveLength(0);
+  });
+  test("changed source head before POST supersedes an unsent intent without duplicating PRs", async () => {
+    const f = await mergedOriginalWithDelta();
+    const next = await f.commit({ base: "base", feature: "old", delta: "new", extra: "later" }, [
+      f.newer,
+    ]);
+    await f.origin.exec(["update-ref", "refs/heads/newest", next]);
+    let reads = 0;
+    f.api.onSnapshot = () => {
+      if (++reads === 2) f.api.snapshot.branchHeadSha = next;
+    };
+    await f.executor().maintain();
+    expect(f.api.followups).toHaveLength(0);
+    f.api.onSnapshot = null;
+    f.advance(180);
+    await f.executor().maintain();
+    const effects = Object.values((await f.state()).ledger.effects).filter(
+      (e) => e.kind === "followup",
+    );
+    expect(
+      effects.some(
+        (e) => e.kind === "followup" && e.request.headSha === next && e.status === "pending",
+      ),
+    ).toBe(true);
+    f.advance(180);
+    await f.executor().maintain();
+    expect(f.api.followups).toHaveLength(1);
+    expect(f.api.followups[0]?.headSha).toBe(next);
+  });
+  test("create-time branch race is reconciled as untested newer work; closed follow-up is not reopened", async () => {
+    const f = await mergedOriginalWithDelta();
+    f.api.beforeCreate = () => {
+      f.api.snapshot.branchHeadSha = f.divergent;
+    };
+    await f.executor().maintain();
+    // Provider creation is branch-addressed, not SHA-CAS; the receipt marker
+    // binds recovery, never an assertion that the newer captured head was tested.
+    const effect = Object.values((await f.state()).ledger.effects).find(
+      (e) => e.kind === "followup",
+    )!;
+    expect(effect.kind === "followup" && effect.request.headSha).toBe(f.newer);
+    expect(f.api.followups[0]?.headSha).toBe(f.divergent);
+    f.api.followups[0]!.state = "closed";
+    f.api.beforeCreate = null;
+    f.api.snapshot.branchHeadSha = f.newer;
+    f.advance(180);
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${f.manifest.batchId}:1`]?.status).toBe(
+      "followup-blocked",
+    );
+    expect(f.api.calls.filter((call) => call.endsWith("/pulls"))).toHaveLength(1);
+  });
+  test("unavailable source branch preserves a blocked newer-work record", async () => {
+    const f = await mergedOriginalWithDelta();
+    f.api.snapshot.branchHeadSha = null;
+    f.advance(180);
+    await f.executor().maintain();
+    const record = (await f.state()).ledger.landings[`${f.manifest.batchId}:1`]!;
+    expect(record.status).toBe("followup-blocked");
+    expect(record.currentHeadSha).toBe(f.newer);
+    expect(record.note).toContain("source branch is now unavailable");
+    expect(f.api.followups).toEqual([]);
+  });
+  test("provider follow-up adapter binds repository/branch/base and creates no readiness or evidence", async () => {
+    const request: FollowupRequest = {
+      original: 1,
+      sourceRepository: "owner/fork",
+      sourceRef: "feature/work",
+      headSha: "a".repeat(40),
+      landedHeadSha: "b".repeat(40),
+      landedMergeSha: "c".repeat(40),
+      landedTipSha: "d".repeat(40),
+      marker: "<!-- batcher-followup:fixture -->",
+      title: "Remaining work",
+      body: "Untested newer work",
+    };
+    const posted: Record<string, unknown>[] = [];
+    const settings = config({ BATCHER_MODE: "active", BATCHER_REPOSITORY: "owner/base" });
+    const transport = (async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posted.push(JSON.parse(String(init.body)));
+        return Response.json({ number: 5 }, { status: 201 });
+      }
+      const common = { state: "open", merged: false, body: request.marker, base: { ref: "main" } };
+      return Response.json([
+        {
+          ...common,
+          number: 2,
+          head: { sha: request.headSha, ref: request.sourceRef, repo: { full_name: "wrong/fork" } },
+        },
+        {
+          ...common,
+          number: 3,
+          head: {
+            sha: request.headSha,
+            ref: "wrong",
+            repo: { full_name: request.sourceRepository },
+          },
+        },
+        {
+          ...common,
+          number: 5,
+          head: {
+            sha: request.headSha,
+            ref: request.sourceRef,
+            repo: { full_name: request.sourceRepository },
+          },
+        },
+      ]);
+    }) as typeof fetch;
+    const reader = new GitHubReader(settings, new GitHubAuth({}), transport);
+    expect((await reader.findFollowup(request))?.number).toBe(5);
+    await new GitHubMutations(reader).createFollowup(request);
+    expect(posted[0]).toEqual({
+      title: request.title,
+      body: request.body,
+      head: "owner:feature/work",
+      head_repo: "fork",
+      base: "main",
+      draft: false,
+    });
+    await expect(
+      new GitHubMutations(
+        new GitHubReader({ ...settings, mode: "shadow" }, new GitHubAuth({}), transport),
+      ).createFollowup(request),
+    ).rejects.toThrow("Shadow mode");
   });
 });

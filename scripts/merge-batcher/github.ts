@@ -1,7 +1,16 @@
 import { createSign } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence";
-import { type Config, type Manifest, type Outcome, type Pull, type Run } from "./model";
+import {
+  type Config,
+  type Manifest,
+  type Outcome,
+  type Pull,
+  type Run,
+  type Headroom,
+  type FollowupRequest,
+  type FollowupPull,
+} from "./model";
 import { verifyResult, type VerifiedResult } from "./result";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
@@ -28,6 +37,7 @@ export interface PullSnapshot {
   headRepository: string | null;
   state: "open" | "closed";
   merged: boolean;
+  mergeCommitSha?: string | null;
 }
 export class ProviderError extends Error {
   constructor(
@@ -113,6 +123,7 @@ export class GitHubAuth {
 // Only GET and GraphQL query operations exist on this class. The shadow runner
 // receives this read adapter, never the mutation adapter.
 export class GitHubReader {
+  lastHeadroom: Headroom | null = null;
   readonly cache: DiskCache;
   private blockedUntil = 0;
   constructor(
@@ -207,6 +218,7 @@ export class GitHubReader {
       headRepository: repository,
       state: pull.state,
       merged: Boolean(pull.merged),
+      mergeCommitSha: /^[a-f0-9]{40}$/.test(pull.merge_commit_sha) ? pull.merge_commit_sha : null,
     };
   }
   async hasComment(number: number, marker: string): Promise<boolean> {
@@ -228,25 +240,100 @@ export class GitHubReader {
     return { attempt: data.run_attempt, status: data.status };
   }
   async mainBusy(): Promise<boolean> {
-    // Filter server-side instead of truncating recent history: a long-running
-    // older main run still reserves capacity after many subsequent pushes.
+    this.lastHeadroom = await this.headroom();
+    return !this.lastHeadroom.allowed;
+  }
+  async headroom(): Promise<Headroom> {
+    const result: Headroom = {
+      allowed: false,
+      reason: "Configure allocated repository runner budget and full-main reserve",
+      budget: this.config.runnerBudget,
+      occupied: 0,
+      reservedMain: this.config.mainReserve ?? 0,
+      candidateSlots: 18,
+    };
+    if (!this.config.runnerBudget || !this.config.mainReserve) return result;
+    const runs = new Map<number, Json>();
     for (const status of ["in_progress", "queued", "waiting", "pending", "requested"]) {
-      const runs = await this.pages(
-        `actions/workflows/ci.yml/runs?branch=${encodeURIComponent(this.config.baseBranch)}&event=push&status=${status}`,
-        "workflow_runs",
-      );
+      const page = (await this.get(`actions/runs?status=${status}&per_page=100&page=1`)) as Json;
       if (
-        runs.some(
-          (run) =>
-            run.head_branch === this.config.baseBranch &&
-            run.path === ".github/workflows/ci.yml" &&
-            run.event === "push" &&
-            run.status !== "completed",
-        )
+        !Array.isArray(page.workflow_runs) ||
+        !Number.isSafeInteger(page.total_count) ||
+        page.total_count > 100 ||
+        page.total_count !== page.workflow_runs.length
       )
-        return true;
+        return { ...result, reason: "Incomplete or oversized active workflow observation" };
+      for (const run of page.workflow_runs) {
+        if (!Number.isSafeInteger(run.id) || run.id < 1)
+          return { ...result, reason: "Invalid active run identity" };
+        if (run.status !== "completed") runs.set(run.id, run);
+      }
     }
-    return false;
+    if (runs.size > 32)
+      return { ...result, reason: "Active workflows exceed bounded 32-run observation" };
+    if ([...runs.values()].some((run) => run.path === this.config.workflow))
+      return { ...result, reason: "Another Batch CI run occupies the single candidate slot" };
+    let mainDemand = 0,
+      otherDemand = 0;
+    for (const run of runs.values()) {
+      const page = (await this.get(
+        `actions/runs/${run.id}/jobs?filter=latest&per_page=100&page=1`,
+      )) as Json;
+      if (
+        !Array.isArray(page.jobs) ||
+        !Number.isSafeInteger(page.total_count) ||
+        page.total_count > 100 ||
+        page.total_count !== page.jobs.length
+      )
+        return { ...result, reason: "Incomplete or oversized current job observation" };
+      const isMain =
+        run.path === ".github/workflows/ci.yml" &&
+        run.head_branch === this.config.baseBranch &&
+        run.event === "push";
+      if (!page.jobs.length && !isMain)
+        return { ...result, reason: "Other workflow job demand is not yet observable" };
+      const demand = Math.max(
+        1,
+        page.jobs.filter((job: Json) => job.status !== "completed").length,
+      );
+      if (isMain) mainDemand += demand;
+      else otherDemand += demand;
+    }
+    result.occupied = mainDemand + otherDemand;
+    result.reservedMain = Math.max(this.config.mainReserve, mainDemand);
+    result.allowed = otherDemand + result.reservedMain + 18 <= this.config.runnerBudget;
+    result.reason = result.allowed
+      ? "Observed jobs plus full-main reserve and 18 candidate slots fit the configured budget"
+      : "Insufficient observed runner headroom after full-main reserve";
+    return result;
+  }
+  async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {
+    const owner = request.sourceRepository.split("/")[0]!;
+    const pulls = await this.pages(
+      `pulls?state=all&base=${encodeURIComponent(this.config.baseBranch)}&head=${encodeURIComponent(`${owner}:${request.sourceRef}`)}`,
+    );
+    const matches = pulls.filter(
+      (p) =>
+        p.number !== request.original &&
+        p.head?.repo?.full_name === request.sourceRepository &&
+        p.head?.ref === request.sourceRef &&
+        p.base?.ref === this.config.baseBranch &&
+        /^[a-f0-9]{40}$/.test(p.head?.sha) &&
+        Number.isSafeInteger(p.number) &&
+        (p.state === "open" || p.state === "closed"),
+    );
+    const match =
+      matches.find((p) => p.state === "open" && p.head.sha === request.headSha) ??
+      matches.find((p) => p.state === "open") ??
+      matches.find((p) => typeof p.body === "string" && p.body.includes(request.marker));
+    return match
+      ? {
+          number: match.number,
+          headSha: match.head.sha,
+          state: match.state,
+          merged: Boolean(match.merged_at ?? match.merged),
+        }
+      : null;
   }
   async timeline(number: number): Promise<ReadyEvent[]> {
     const [owner, name] = this.config.repository.split("/");
@@ -610,8 +697,7 @@ export function requireActiveCapabilities(
 }
 
 // Explicit write surface, not instantiated or reachable by the shadow runner.
-// A provider implementation must also supply atomic ready-state and side-effect
-// fencing before Controller will call these methods.
+// The active executor durably claims and reconciles these non-atomic REST effects.
 export class GitHubMutations {
   constructor(readonly reader: GitHubReader) {}
   private async post(path: string, body: unknown): Promise<void> {
@@ -638,5 +724,16 @@ export class GitHubMutations {
   }
   async announce(number: number, body: string): Promise<void> {
     await this.post(`issues/${number}/comments`, { body });
+  }
+  async createFollowup(request: FollowupRequest): Promise<void> {
+    const [owner, name] = request.sourceRepository.split("/");
+    await this.post("pulls", {
+      title: request.title,
+      body: request.body,
+      head: `${owner}:${request.sourceRef}`,
+      ...(owner === this.reader.config.repository.split("/")[0] ? { head_repo: name } : {}),
+      base: this.reader.config.baseBranch,
+      draft: false,
+    });
   }
 }

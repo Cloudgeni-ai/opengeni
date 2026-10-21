@@ -120,8 +120,30 @@ export interface EffectState {
   nextAt: string;
   lastError: string | null;
 }
+export interface FollowupRequest {
+  original: number;
+  sourceRepository: string;
+  sourceRef: string;
+  headSha: string;
+  landedHeadSha: string;
+  landedMergeSha: string;
+  landedTipSha: string;
+  marker: string;
+  title: string;
+  body: string;
+}
+export interface FollowupPull {
+  number: number;
+  headSha: string;
+  state: "open" | "closed";
+  merged: boolean;
+}
 export type DurableEffect = EffectState &
-  ({ kind: "rerun"; run: Run } | { kind: "comment"; number: number; body: string; marker: string });
+  (
+    | { kind: "rerun"; run: Run }
+    | { kind: "comment"; number: number; body: string; marker: string }
+    | { kind: "followup"; request: FollowupRequest }
+  );
 export interface LandedPull {
   batchId: string;
   tipSha: string;
@@ -135,11 +157,23 @@ export interface LandedPull {
     | "awaiting-evidence"
     | "already-contained"
     | "closed-newer-head"
+    | "followup-pending"
+    | "followup-open"
+    | "followup-blocked"
     | "history-diverged"
     | "provider-unavailable";
   nextCheckAt: string;
   checkedAt: string | null;
   note: string | null;
+  followupNumber?: number;
+}
+export interface Headroom {
+  allowed: boolean;
+  reason: string;
+  budget: number | null;
+  occupied: number;
+  reservedMain: number;
+  candidateSlots: 18;
 }
 export const emptyLedger = (): Ledger => ({
   schemaVersion: 1,
@@ -166,6 +200,7 @@ export interface Observation {
   stateSha: string | null;
   ledger: Ledger;
   mainBusy?: boolean;
+  headroom?: Headroom | null;
   observationWarnings?: string[];
   telemetry?: {
     status: "unknown" | "within-threshold" | "stop";
@@ -193,6 +228,8 @@ export interface Config {
   port: number;
   fetchTimeoutSeconds: number;
   missingRunSeconds: number;
+  runnerBudget: number | null;
+  mainReserve: number | null;
 }
 export function config(env: Record<string, string | undefined>): Config {
   const integer = (key: string, fallback: number, max: number): number => {
@@ -242,6 +279,8 @@ export function config(env: Record<string, string | undefined>): Config {
     port: integer("PORT", 8080, 65535),
     fetchTimeoutSeconds: integer("BATCHER_FETCH_TIMEOUT_SECONDS", 600, 3600),
     missingRunSeconds: integer("BATCHER_MISSING_RUN_SECONDS", 900, 86400),
+    runnerBudget: env.BATCHER_RUNNER_BUDGET ? integer("BATCHER_RUNNER_BUDGET", 0, 100000) : null,
+    mainReserve: env.BATCHER_MAIN_RESERVE ? integer("BATCHER_MAIN_RESERVE", 0, 100000) : null,
   };
 }
 export const bindingKey = (pull: Pull): string =>
