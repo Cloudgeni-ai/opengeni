@@ -26,8 +26,7 @@ const resolvedConfig =
 const configs = Array.isArray(resolvedConfig) ? resolvedConfig : [resolvedConfig];
 
 for (const config of configs) {
-  // TypeScript 7 exposes its stable compiler through the tsc CLI. tsup 8's
-  // declaration bundler requires the removed legacy compiler API, so retain
+  // tsup 8's declaration bundler requires the legacy compiler API, so retain
   // tsup for JavaScript and source maps while emitting declarations below.
   await build({ ...config, dts: false });
 }
@@ -76,9 +75,9 @@ await writeFile(
 );
 
 try {
-  const tscPath = join(import.meta.dir, "../node_modules/typescript/bin/tsc");
+  const compilerPath = join(import.meta.dir, "../node_modules/tsrs/bin/tsrs");
   const child = Bun.spawn({
-    cmd: ["bun", tscPath, "--project", declarationConfigPath],
+    cmd: ["node", compilerPath, "--project", declarationConfigPath],
     cwd: packageDirectory,
     stdin: "ignore",
     stdout: "inherit",
@@ -86,7 +85,7 @@ try {
   });
   const status = await child.exited;
   if (status !== 0) {
-    throw new Error(`TypeScript declaration emit failed with exit code ${status}`);
+    throw new Error(`tsrs declaration emit failed with exit code ${status}`);
   }
   await rewriteDeclarationModuleSpecifiers(join(packageDirectory, "dist"));
 } finally {

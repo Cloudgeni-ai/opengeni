@@ -7,7 +7,7 @@
  * checks cannot catch a broken published exports map, missing CSS declaration,
  * cross-tarball declaration drift, or a client-only global reached during SSR.
  * This gate stages release-shaped tarballs, installs them twice (the second time
- * from the frozen Bun lock), typechecks with stable TypeScript 7, builds the root and session
+ * from the frozen Bun lock), typechecks with pinned tsrs, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
  * server-renders populated embedded host surfaces without a DOM. A second
  * consumer installs only the session subpath's required peers. A third imports
@@ -542,8 +542,8 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
-      "typecheck:nodenext": "tsc -p tsconfig.nodenext.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
+      "typecheck:nodenext": "tsrs -p tsconfig.nodenext.json --noEmit",
       build: "vite build --logLevel warn",
       "build:session": "vite build --config session.vite.config.ts --logLevel warn",
       "build:worker-entry": "vite build --config worker.vite.config.ts --logLevel warn",
@@ -567,7 +567,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       "@vitejs/plugin-react": reactSource.devDependencies?.["@vitejs/plugin-react"],
       vite: reactSource.devDependencies?.vite,
     },
@@ -978,7 +978,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
     },
     dependencies: {
@@ -992,7 +992,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
@@ -1057,7 +1057,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
     },
     dependencies: {
@@ -1070,7 +1070,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
@@ -1121,7 +1121,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
       ssr: "bun realtime.tsx",
     },
@@ -1135,7 +1135,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {

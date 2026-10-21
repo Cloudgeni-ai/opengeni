@@ -6,9 +6,16 @@
     "strict": true,
     "skipLibCheck": true,
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["bun"],
+    "types": ["bun", "vite/client"],
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"],
+  "contentMappers": [
+    {
+      "package": "@chatium/vue-ts-mapper-rs",
+      "extensions": [".vue"],
+      "options": { "languageFeatures": false }
+    }
+  ]
 }
