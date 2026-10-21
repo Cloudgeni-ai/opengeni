@@ -12994,6 +12994,22 @@ describe("runtime event normalization", () => {
       );
       expect(warned).toBe(true);
       expect(JSON.stringify(warnings)).toContain('"serverId":"flaky"');
+      // The warning names the failure's structural cause so operators can tell
+      // a provider error from a protocol mismatch, still without message text.
+      const listFailure = warnings
+        .flat()
+        .find(
+          (arg) =>
+            typeof arg === "object" &&
+            arg !== null &&
+            (arg as { errorCode?: unknown }).errorCode === "mcp_tools_list_failed",
+        ) as Record<string, unknown> | undefined;
+      expect(listFailure).toBeDefined();
+      expect(
+        listFailure!.causeName !== undefined ||
+          listFailure!.causeCode !== undefined ||
+          listFailure!.causeNumber !== undefined,
+      ).toBe(true);
     } finally {
       console.warn = originalWarn;
       brokenOptional.close();
