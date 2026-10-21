@@ -203,8 +203,8 @@ the threshold to exempt a new file.
 `bun run check:migration-online-safety` checks **0888 and later**. This separate
 boundary leaves the already-shipped 0786–0887 deployment-mode range frozen;
 never raise it to admit a new migration. The impact-selected CI guard runs with
-the other migration checks. A small `Migration online safety` PR workflow also
-runs the lint and its unit tests without installing the full application.
+the other migration checks. Ordinary main PRs use targeted local tests before
+merge; the full CI impact plan runs after merge, following repository policy.
 `bun scripts/check-migration-online-safety.ts --audit-existing` reports the older
 0786+ range without failing CI or modifying SQL.
 
