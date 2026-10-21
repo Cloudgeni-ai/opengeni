@@ -139,6 +139,14 @@ const FILTERED_PAGE_CAP = 32;
 // pages of conversation reloads the latest window.
 const DIRECT_REPLAY_MAX_SEQUENCES = 16;
 const CATCHUP_MAX_PAGES = 2;
+// Rejoining the tip after a reconnect or a wake is bounded: each attempt
+// times out, a transient failure retries (with backoff) only this many times
+// in a row, and after that the stream replays exactly from where the view
+// stands rather than staying stuck "reconnecting".
+const STRICT_REJOIN_ATTEMPTS = 5;
+const REJOIN_ATTEMPT_TIMEOUT_MS = 15_000;
+const FOREGROUND_REJOIN_RETRY_MS = 500;
+const FOREGROUND_REJOIN_RETRY_MAX_MS = 8_000;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
 // Durable history remains on the server and is available through bounded
@@ -831,18 +839,19 @@ export function useSessionEvents(
      */
     // The durable head: the conversation's fresh detail read when one started
     // since `mark` (the session view's own), else a new one.
-    const readSessionHead = async (mark: number) => {
+    const effectScope: RejoinScope = { signal: controller.signal, isCurrent };
+    const readSessionHead = async (mark: number, scope: RejoinScope) => {
       const joined = joinSessionDetailRead(client, workspaceId, sessionId, mark);
       if (joined) {
         try {
           return await joined;
         } catch (cause) {
-          if (controller.signal.aborted) throw cause;
+          if (scope.signal.aborted) throw cause;
         }
       }
       return await client.getSession(workspaceId, sessionId, {
         fresh: true,
-        signal: controller.signal,
+        signal: scope.signal,
       });
     };
     // `strict` (a stream reconnect) fails on a transient read failure, so the
@@ -850,39 +859,46 @@ export function useSessionEvents(
     // backlog it could not size; any other failed read replays the gap.
     const rejoinLive = async (
       force: boolean,
-      strict = false,
-      mark = detailReadMark,
-    ): Promise<"joined" | "reload"> => {
+      {
+        strict = false,
+        mark = detailReadMark,
+        scope = effectScope,
+      }: { strict?: boolean; mark?: number; scope?: RejoinScope } = {},
+    ): Promise<RejoinOutcome> => {
       const activeTurn = activeConversationTurn(eventWindowRef.current.events);
       if (!force && !activeTurn) return "joined";
       const cursor = streamResumeSequenceRef.current;
       let head: number;
       let sessionActiveTurn: string | null = null;
       try {
-        const session = await readSessionHead(mark);
+        const session = await readSessionHead(mark, scope);
         head = session.lastSequence;
         sessionActiveTurn = session.activeTurnId;
       } catch (cause) {
-        if (controller.signal.aborted || (strict && isRetryableStreamError(cause))) throw cause;
+        if (!scope.isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
         // An optimization read: replay from the exact cursor instead.
         return "joined";
       }
-      if (!isCurrent()) throw abortError();
+      if (!scope.isCurrent()) throw abortError();
       // A head the client does not report is unknown: replay from the cursor.
       if (!Number.isSafeInteger(head) || head - cursor <= DIRECT_REPLAY_MAX_SEQUENCES) {
         return "joined";
       }
       let catchup: SessionEvent[] | null;
       try {
-        catchup = await loadConversationCatchup(client, workspaceId, sessionId, cursor, head, {
-          signal: controller.signal,
-          isCurrent,
-        });
+        catchup = await loadConversationCatchup(
+          client,
+          workspaceId,
+          sessionId,
+          cursor,
+          head,
+          scope,
+        );
       } catch (cause) {
-        if (!isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
+        if (!scope.isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
         return "joined";
       }
-      if (!isCurrent()) throw abortError();
+      if (!scope.isCurrent()) throw abortError();
       if (catchup === null) return "reload";
       // Continuity broke: steps of turns still working before the catch-up
       // may be missing, so those stores go (the working one is re-read).
@@ -901,7 +917,7 @@ export function useSessionEvents(
 
     // Replace the browser window with the newest conversation window. The
     // previous window stays on screen until the replacement is installed.
-    const loadLatestWindow = async (): Promise<boolean> => {
+    const loadLatestWindow = async (scope: RejoinScope = effectScope): Promise<boolean> => {
       // First paint is ONE compact fetch of the conversation — the newest
       // window, revealed at the bottom in a few hundred ms. Deeper history
       // loads only when the reader scrolls up (the sentinel drives
@@ -912,10 +928,10 @@ export function useSessionEvents(
         targetGroups: Number.POSITIVE_INFINITY,
         maxFetches: INITIAL_FETCH_CAP,
         boundaryPageCap: BOUNDARY_PAGE_CAP,
-        signal: controller.signal,
+        signal: scope.signal,
         filter: CONVERSATION_FILTER,
       });
-      if (!isCurrent()) {
+      if (!scope.isCurrent()) {
         return false;
       }
       const status = observeSessionStatus(window.events, sessionStatusRef);
@@ -965,29 +981,83 @@ export function useSessionEvents(
       liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
     };
 
+    // One bounded rejoin attempt: it times out, and a late result is fenced
+    // out of the view (reads without a signal can only be outwaited). A
+    // `strict` attempt that failed transiently or timed out resolves the
+    // cause so the caller retries; any other failure resolves "joined", which
+    // replays exactly from where the view stands.
+    const boundedRejoin = async (
+      strict: boolean,
+      join: (scope: RejoinScope) => Promise<RejoinOutcome>,
+    ): Promise<RejoinOutcome | { retry: unknown }> => {
+      const attempt = new AbortController();
+      let timedOut = false;
+      const abortAttempt = () => attempt.abort();
+      controller.signal.addEventListener("abort", abortAttempt, { once: true });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        attempt.abort();
+      }, REJOIN_ATTEMPT_TIMEOUT_MS);
+      let stopWaiting: (() => void) | undefined;
+      const stopped = new Promise<never>((_resolve, reject) => {
+        stopWaiting = () => reject(abortError());
+        attempt.signal.addEventListener("abort", stopWaiting, { once: true });
+      });
+      const scope: RejoinScope = {
+        signal: attempt.signal,
+        isCurrent: () => isCurrent() && !attempt.signal.aborted,
+      };
+      try {
+        return await Promise.race([join(scope), stopped]);
+      } catch (cause) {
+        if (!isCurrent()) throw cause;
+        if (timedOut) {
+          return strict
+            ? {
+                retry: new TypeError(
+                  `rejoining the live session timed out after ${REJOIN_ATTEMPT_TIMEOUT_MS}ms`,
+                ),
+              }
+            : "joined";
+        }
+        if (strict && isRetryableStreamError(cause)) return { retry: cause };
+        return "joined";
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", abortAttempt);
+        if (stopWaiting) attempt.signal.removeEventListener("abort", stopWaiting);
+      }
+    };
+
     // Every reconnect after the stream first opened (a dropped connection, a
     // heartbeat timeout, a sleep) joins the tip like a hidden-tab return: a
     // short gap replays over SSE, a long one is caught up or reloaded instead
-    // of being poured through the live stream.
+    // of being poured through the live stream. A transient failure makes the
+    // SDK back off and call this again, at most STRICT_REJOIN_ATTEMPTS times
+    // in a row; after that the reconnect replays exactly rather than staying
+    // stuck.
+    let strictFailures = 0;
     const beforeReconnect = async (cursor: number): Promise<number> => {
       // Deliver what the broken connection already yielded first.
       flush();
       if (!isCurrent()) throw abortError();
+      const strict = strictFailures < STRICT_REJOIN_ATTEMPTS;
       const mark = sessionDetailReadMark();
-      if ((await rejoinLive(true, true, mark)) === "reload") {
-        let loaded: boolean;
-        try {
-          loaded = await loadLatestWindow();
-        } catch (cause) {
-          if (!isCurrent() || isRetryableStreamError(cause)) throw cause;
-          // A window that cannot be read at all: replay exactly instead.
-          return cursor;
-        }
-        if (!loaded) throw abortError();
+      const result = await boundedRejoin(strict, async (scope) => {
+        if ((await rejoinLive(true, { strict, mark, scope })) === "joined") return "joined";
+        if (!(await loadLatestWindow(scope))) throw abortError();
         // The fresh window's own gap is short: join its head the same way.
-        await rejoinLive(true, true, mark);
-      }
+        if ((await rejoinLive(true, { strict, mark, scope })) === "reload" && strict) {
+          throw new TypeError("the session outran a fresh window while rejoining it");
+        }
+        return "joined";
+      });
       if (!isCurrent()) throw abortError();
+      if (typeof result === "object") {
+        strictFailures += 1;
+        throw result.retry;
+      }
+      strictFailures = 0;
       noteStreamResume();
       return Math.max(cursor, streamResumeSequenceRef.current);
     };
@@ -998,7 +1068,25 @@ export function useSessionEvents(
           setConnectionState("connecting");
           // A short gap replays over SSE into the loaded steps; a longer one
           // drops the steps of turns that were working and re-reads the tail.
-          if ((await rejoinLive(true)) === "reload") {
+          // A transient failure (the network often returns just after a wake)
+          // retries with backoff instead of replaying the backlog it could
+          // not size; only after that does the stream replay exactly.
+          let outcome: RejoinOutcome;
+          for (let attempt = 0; ; attempt += 1) {
+            const strict = attempt < STRICT_REJOIN_ATTEMPTS;
+            const result = await boundedRejoin(strict, (scope) =>
+              rejoinLive(true, { strict, scope }),
+            );
+            if (typeof result === "string") {
+              outcome = result;
+              break;
+            }
+            await abortableDelay(
+              Math.min(FOREGROUND_REJOIN_RETRY_MS * 2 ** attempt, FOREGROUND_REJOIN_RETRY_MAX_MS),
+              controller.signal,
+            );
+          }
+          if (outcome === "reload") {
             // Keep the last known window visible until the bounded latest
             // replacement is ready, then install that replacement below.
             initialWindowLoadedRef.current = false;
@@ -2505,6 +2593,28 @@ function abortError(): Error {
   error.name = "AbortError";
   return error;
 }
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** One rejoin attempt's cancellation: its signal and whether it still owns state. */
+type RejoinScope = { signal: AbortSignal; isCurrent: () => boolean };
+type RejoinOutcome = "joined" | "reload";
 
 /* ----------------------------------------------------------------------------
    Conversation-first history

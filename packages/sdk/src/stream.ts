@@ -54,15 +54,18 @@ export type StreamSessionEventsOptions = {
   heartbeatTimeoutMs?: number;
   onStateChange?: (state: StreamConnectionState) => void;
   /**
-   * Session event streams only; opt-in. Runs before every reconnect (never
-   * before the first connection) with the sequence the stream would resume
+   * Session event streams only (other streams ignore it); opt-in. Runs before
+   * every reconnect, including a retry after a failed first attempt, but not
+   * before the first attempt, with the sequence the stream would resume
    * after. Resolve a larger sequence to resume after it instead: the events
    * in between are then NOT delivered, so the caller must already hold an
    * equivalent view (for example, it re-read a bounded newest window after a
    * long disconnect). Resolve nothing, or a sequence at or below the cursor,
    * to replay exactly once from the cursor. A rejection counts as a failed
    * reconnect attempt: retryable errors back off and call this again, others
-   * end the stream. Without it, reconnects keep exactly-once replay.
+   * end the stream. Aborting `signal` ends the stream without waiting for it;
+   * the callback should bound its own work. Without it, reconnects keep
+   * exactly-once replay.
    */
   beforeReconnect?: ((cursor: number) => number | void | Promise<number | void>) | undefined;
 };
@@ -107,7 +110,7 @@ export async function* streamSessionEvents(
     let cursorAtOpen = cursor;
     try {
       if (attempted && options.beforeReconnect) {
-        const resumeAfter = await options.beforeReconnect(cursor);
+        const resumeAfter = await runBeforeReconnect(options.beforeReconnect, cursor, signal);
         if (signal?.aborted) return;
         if (typeof resumeAfter === "number" && Number.isSafeInteger(resumeAfter)) {
           cursor = Math.max(cursor, resumeAfter);
@@ -205,6 +208,28 @@ export async function runBeforeLive(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+  }
+}
+
+// Races the caller's reconnect hook against abort so a hung callback can never
+// hold an aborted stream open. The hook bounds its own work (no timeout here:
+// a slow but progressing catch-up must not be cut short into a full replay).
+async function runBeforeReconnect(
+  beforeReconnect: (cursor: number) => number | void | Promise<number | void>,
+  cursor: number,
+  signal: AbortSignal | undefined,
+): Promise<number | void> {
+  if (!signal) return await beforeReconnect(cursor);
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  let abortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    abortListener = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abortListener, { once: true });
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => beforeReconnect(cursor)), aborted]);
+  } finally {
+    if (abortListener) signal.removeEventListener("abort", abortListener);
   }
 }
 

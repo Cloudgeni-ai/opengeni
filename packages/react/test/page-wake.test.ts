@@ -1,4 +1,4 @@
-import { afterEach, expect, jest, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import {
   PAGE_WAKE_CHECK_INTERVAL_MS,
   PAGE_WAKE_GAP_MS,
@@ -91,4 +91,23 @@ test("network return, lifecycle resume and a bfcache restore wake every subscrib
   // The last unsubscribe stops listening.
   window.dispatchEvent(new Event("online"));
   expect(wakes).toHaveLength(6);
+});
+
+test("one wall-clock timer serves every subscriber and stops with the last", () => {
+  const started = spyOn(globalThis, "setInterval");
+  const stopped = spyOn(globalThis, "clearInterval");
+  try {
+    const first = subscribePageWake(() => {});
+    const second = subscribePageWake(() => {});
+    expect(started).toHaveBeenCalledTimes(1);
+    const timer = started.mock.results[0]!.value;
+    first();
+    expect(stopped).not.toHaveBeenCalled();
+    second();
+    expect(stopped).toHaveBeenCalledTimes(1);
+    expect(stopped).toHaveBeenCalledWith(timer);
+  } finally {
+    started.mockRestore();
+    stopped.mockRestore();
+  }
 });

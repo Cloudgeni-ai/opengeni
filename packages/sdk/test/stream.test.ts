@@ -625,5 +625,32 @@ describe("streamSessionEvents", () => {
       expect(sequences(seen)).toEqual([1, 2]);
       expect(transport.openedAfter).toEqual([0]);
     });
+
+    test("an abort ends the stream without waiting for a hook that never settles", async () => {
+      const controller = new AbortController();
+      const transport = scriptedTransport([{ events: range(1, 2) }, { events: range(3, 4) }]);
+      let markAsked = () => {};
+      const asked = new Promise<void>((resolve) => {
+        markAsked = resolve;
+      });
+      const seen: SessionEvent[] = [];
+      const reading = (async () => {
+        for await (const event of streamSessionEvents(transport, {
+          ...FAST,
+          signal: controller.signal,
+          beforeReconnect: () => {
+            markAsked();
+            return new Promise<never>(() => {});
+          },
+        })) {
+          seen.push(event);
+        }
+      })();
+      await asked;
+      controller.abort();
+      await reading;
+      expect(sequences(seen)).toEqual([1, 2]);
+      expect(transport.openedAfter).toEqual([0]);
+    });
   });
 });
