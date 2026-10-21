@@ -674,4 +674,48 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(config({}).mode).toBe("shadow");
     expect(config({ BATCHER_MODE: "active" }).branchPrefix).toBe("queue/live/");
   });
+  test("missing-run abandonment is Git-backed and explicit recovery releases only infrastructure slot", async () => {
+    const f = await fixture(),
+      manifest = await f.publish();
+    f.advance(7200);
+    await f.controller().step();
+    const state = await f.state();
+    expect(state.ledger.missingRuns[manifest.batchId]?.status).toBe("abandoned");
+    expect(state.ledger.ejected).toEqual([]);
+    await expect(
+      f.executor().recoverMissingRun(manifest.batchId, state.sha!, false),
+    ).rejects.toThrow("confirmation");
+    await f.executor().recoverMissingRun(manifest.batchId, state.sha!, true);
+    await f.controller().step();
+    expect((await f.state()).ledger.invalidated).toContain(manifest.batchId);
+    expect((await f.controller().step()).action.kind).toBe("wait");
+    f.api.pulls[0]!.binding.eventId = "explicit-re-ready";
+    const next = await f.publish();
+    expect(next.batchId).not.toBe(manifest.batchId);
+  });
+  test("failed landing does not record fabricated measured landed time", async () => {
+    const f = await fixture(),
+      manifest = await f.publish();
+    f.verdict(manifest);
+    f.git.beforePush = async () => {
+      await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
+    };
+    const controller = f.controller();
+    await expect(controller.step()).rejects.toThrow();
+    expect((await controller.journal.records(NOW)).stages[manifest.batchId]?.landedAt).toBeNull();
+    expect((await f.state()).ledger.stages[manifest.batchId]?.landedAt).toBeNull();
+  });
+  test("latency stop signal also holds an already-durable whole-run retry intent", async () => {
+    const f = await fixture(),
+      manifest = await f.publish();
+    f.verdict(manifest, "code_failure");
+    expect((await f.controller().step()).action.kind).toBe("retry");
+    await f.seed((ledger) => {
+      ledger.stages[manifest.batchId]!.ciStartedAt = "2026-10-21T12:40:00Z";
+    });
+    f.advance(3601);
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(0);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("pending");
+  });
 });

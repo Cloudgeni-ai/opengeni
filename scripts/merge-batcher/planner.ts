@@ -69,6 +69,11 @@ export function plan(o: Observation, c: Config): Action {
   };
   const fresh = new Map(o.ready.map((p) => [p.number, bindingKey(p)]));
   const matches = (p: Pull) => fresh.get(p.number) === bindingKey(p);
+  if (o.telemetry?.status === "stop")
+    return {
+      kind: "wait",
+      reason: "stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes",
+    };
   for (const item of o.candidates) {
     const id = item.manifest.batchId;
     if (item.containedInBase && !ledger.landed.includes(id)) {
@@ -88,6 +93,18 @@ export function plan(o: Observation, c: Config): Action {
         compareText(a.manifest.batchId, b.manifest.batchId),
     );
   for (const item of live) {
+    const missing = o.missingRuns?.[item.manifest.batchId];
+    if (!item.runs.length && missing?.status === "released")
+      return invalid(
+        item.manifest.batchId,
+        "operator-released missing-run infrastructure candidate; no PR blame",
+      );
+    if (!item.runs.length && missing?.status === "abandoned")
+      return {
+        kind: "wait",
+        reason:
+          "missing-run infrastructure hold expired; candidate abandoned pending explicit recover-missing-run confirmation",
+      };
     if (item.manifest.pulls.some((p) => !matches(p)))
       return invalid(
         item.manifest.batchId,
@@ -243,6 +260,11 @@ export function plan(o: Observation, c: Config): Action {
     (p) =>
       !assigned.has(p.number) &&
       !alreadyLanded(p) &&
+      !o.candidates.some(
+        (candidate) =>
+          o.missingRuns?.[candidate.manifest.batchId]?.status === "released" &&
+          candidate.manifest.pulls.some((member) => ejectionKey(member) === ejectionKey(p)),
+      ) &&
       !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
   );
   const pulls = fifo(queued, c.maxBatchSize);

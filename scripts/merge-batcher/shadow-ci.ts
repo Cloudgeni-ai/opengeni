@@ -1,9 +1,10 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Reader, StepResult } from "./controller";
-import { AtomicGitWriter, GitStore } from "./git";
+import { AtomicGitWriter, GitStore, MergeConflict } from "./git";
 import { bindingKey, canonical, type Config, type Manifest, type Observation } from "./model";
 import { fifo, latestRun } from "./planner";
+import { ObservationJournal } from "./journal";
 
 export interface CandidatePublisher {
   publish(expectedState: string | null, nextState: string, manifest: Manifest): Promise<void>;
@@ -28,7 +29,7 @@ export class QueueOnlyPublisher implements CandidatePublisher {
     manifest: Manifest,
   ): Promise<void> {
     // This surface cannot express main, labels, comments, reruns, deletes or
-    // readiness writes. The separately authorized state ref is the CAS slot.
+    // readiness writes. The configured routine state ref is the CAS slot.
     await this.writer.transaction([
       { ref: this.config.stateRef, expected: expectedState, next: nextState },
       {
@@ -51,6 +52,7 @@ export interface OutcomeReader {
   mainOutcomes(headSha: string): Promise<MainOutcome[]>;
 }
 export class ShadowCiController {
+  readonly journal: ObservationJournal;
   constructor(
     readonly config: Config,
     readonly reader: Reader,
@@ -60,9 +62,10 @@ export class ShadowCiController {
     readonly outcomes?: OutcomeReader,
   ) {
     if (config.mode !== "shadow-ci") throw new Error("Shadow-ci controller requires explicit mode");
+    this.journal = new ObservationJournal(config);
   }
   async step(): Promise<StepResult> {
-    const o = await this.reader.observe();
+    const o = await this.journal.observe(await this.reader.observe());
     const wait = async (reason: string): Promise<StepResult> => {
       const result: StepResult = {
         mode: "shadow-ci",
@@ -73,12 +76,23 @@ export class ShadowCiController {
       await this.stage(o, result);
       return result;
     };
+    if (o.telemetry?.status === "stop")
+      return wait("stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes");
+    if (
+      o.candidates.some(
+        (c) => !c.runs.length && o.missingRuns?.[c.manifest.batchId]?.status === "abandoned",
+      )
+    )
+      return wait(
+        "missing-run infrastructure hold expired; abandoned pending explicit recover-missing-run confirmation",
+      );
     // Published-but-not-started also holds the slot. Count invalid/stale heads:
     // neither this mode nor the active controller cancels a running candidate.
     if (
       o.candidates.some(
         (candidate) =>
-          !latestRun(candidate, this.config) ||
+          (!latestRun(candidate, this.config) &&
+            o.missingRuns?.[candidate.manifest.batchId]?.status !== "released") ||
           candidate.runs.some(
             (run) => run.status !== "completed" && run.workflow === this.config.workflow,
           ),
@@ -98,21 +112,32 @@ export class ShadowCiController {
       createdAt: new Date(Math.max(...pulls.map((p) => Date.parse(p.binding.at)))).toISOString(),
       pulls,
     };
-    const manifest = await this.git.build(spec);
+    let manifest: Manifest;
+    try {
+      manifest = await this.git.build(spec);
+    } catch (error) {
+      if (!(error instanceof MergeConflict)) throw error;
+      await this.journal.conflict(pulls.find((p) => p.number === error.number)!, o.now);
+      return this.step();
+    }
+    await this.journal.event(manifest, "builtAt", new Date().toISOString());
     if (o.candidates.some((c) => c.manifest.batchId === manifest.batchId))
       return wait(
         "exact shadow candidate already observed; no automatic rerun or duplicate publication",
       );
     // No stale observed snapshot is knowingly published. A later PR metadata
     // race remains possible, but can never land on main from this mode.
-    const fresh = await this.reader.observe();
+    const fresh = await this.journal.observe(await this.reader.observe());
     if (
       fresh.stateSha !== o.stateSha ||
       fresh.baseSha !== o.baseSha ||
+      fresh.mainBusy ||
+      fresh.telemetry?.status === "stop" ||
       pulls.some((p) => !fresh.ready.some((current) => bindingKey(current) === bindingKey(p))) ||
       fresh.candidates.some(
         (c) =>
-          !latestRun(c, this.config) ||
+          (!latestRun(c, this.config) &&
+            fresh.missingRuns?.[c.manifest.batchId]?.status !== "released") ||
           c.runs.some((r) => r.status !== "completed" && r.workflow === this.config.workflow),
       )
     )
@@ -123,8 +148,15 @@ export class ShadowCiController {
       epoch: o.ledger.epoch + 1,
       expiresAt: new Date(Date.parse(o.now) + this.config.leaseSeconds * 1000).toISOString(),
     };
+    Object.assign(ledger, await this.journal.records(o.now));
+    ledger.stages[manifest.batchId]!.publishedAt = new Date().toISOString();
     const nextState = await this.git.stateCommit(ledger, o.stateSha, o.now);
     await this.publisher.publish(o.stateSha, nextState, manifest);
+    await this.journal.event(
+      manifest,
+      "publishedAt",
+      ledger.stages[manifest.batchId]!.publishedAt!,
+    );
     const result: StepResult = {
       mode: "shadow-ci",
       action: { kind: "build", spec, publish: true, recoveryIndex: null },
@@ -172,6 +204,10 @@ export class ShadowCiController {
         candidates: o.candidates,
         result,
         comparisons,
+        telemetry: o.telemetry ?? null,
+        measuredStages: (await this.journal.records(o.now)).stages,
+        missingRuns: o.missingRuns ?? {},
+        observationWarnings: o.observationWarnings ?? [],
       }),
       { mode: 0o600 },
     );

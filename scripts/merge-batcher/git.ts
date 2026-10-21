@@ -23,6 +23,7 @@ export class GitStore {
   constructor(
     readonly dir: string,
     readonly authEnv: Record<string, string> = {},
+    readonly fetchTimeoutSeconds = 600,
   ) {}
   async exec(
     args: string[],
@@ -42,7 +43,7 @@ export class GitStore {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const timer = setTimeout(() => child.kill("SIGTERM"), 60_000);
+    const timer = setTimeout(() => child.kill("SIGTERM"), this.commandTimeoutMs(args));
     const [out, , code] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -54,6 +55,9 @@ export class GitStore {
   async init(): Promise<void> {
     await mkdir(this.dir, { recursive: true });
     await this.exec(["init", "--bare"]);
+  }
+  commandTimeoutMs(args: string[]): number {
+    return args[0] === "fetch" ? this.fetchTimeoutSeconds * 1000 : 60_000;
   }
   async fetch(remote: string, refs: string[]): Promise<void> {
     await this.exec(["fetch", "--no-tags", "--no-write-fetch-head", remote, ...refs]);
@@ -180,6 +184,8 @@ export class GitStore {
     // Additive state fields permit restart from the earlier controller schema.
     state.effects ??= {};
     state.landings ??= {};
+    state.stages ??= {};
+    state.missingRuns ??= {};
     if (
       state.schemaVersion !== 1 ||
       !Number.isSafeInteger(state.epoch) ||

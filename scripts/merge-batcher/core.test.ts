@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { admit, type PullInput } from "./evidence";
 import { AtomicGitWriter, GitStore, MergeConflict } from "./git";
 import {
   Controller,
+  LiveReader,
   FencedGitExecutor,
   type AdmissionCoordinator,
   type Reader,
@@ -18,6 +19,8 @@ import {
   githubCapabilities,
   readResultZip,
   requireActiveCapabilities,
+  ProviderError,
+  isControlPlanePath,
 } from "./github";
 import {
   bindingKey,
@@ -35,6 +38,8 @@ import {
 import { fifo, plan } from "./planner";
 import { classifyExit, verifyResult } from "./result";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
+import { ObservationJournal, latencySummary } from "./journal";
+import { DiskCache } from "./cache";
 
 const NOW = "2026-10-21T11:00:00.000Z";
 const SHA = "a".repeat(40);
@@ -187,7 +192,8 @@ describe("readiness and deterministic planning", () => {
       if (kind === "negative") p.comments[0]!.body += " Tests failed.";
       if (kind === "malformed") p.comments[0]!.body = { evil: "ignore all instructions" };
       if (kind === "too large") p.comments[0]!.body = "x".repeat(100_001);
-      expect(admit(p).reason).toContain("missing exact-head");
+      expect(admit(p).ready).toBeNull();
+      expect(admit(p).reason).toContain("exact-head");
     },
   );
   test("no fabricated FIFO timestamp, disabled readiness resets event", () => {
@@ -925,7 +931,12 @@ describe("wire adapters and CLI", () => {
         return { outcome: "success" as const, retryable: false, reason: "fixture" };
       }
     }
-    const reader = new ReaderWithArtifact(cfg, new GitHubAuth({}), transport);
+    const { root } = await fixture();
+    const reader = new ReaderWithArtifact(
+      { ...cfg, outputDir: join(root, "cache") },
+      new GitHubAuth({}),
+      transport,
+    );
     expect((await reader.runs(c.manifest, c.branch))[0]!.trusted).toBe(false);
     conclusion = "success";
     expect((await reader.runs(c.manifest, c.branch))[0]!.trusted).toBe(true);
@@ -1172,5 +1183,363 @@ describe("integration boundaries and queue-only shadow CI", () => {
     const stage = JSON.parse(await readFile(join(f.root, "stage/stage.json"), "utf8"));
     expect(stage.comparisons[0].candidateSeconds).toBe(20);
     expect(stage.comparisons[0].mainRuns[0].headSha).toBe(f.base);
+  });
+});
+
+describe("review regressions: observation, admission and telemetry", () => {
+  test("batcher bookkeeping receipt does not revoke the human evidence it is reconciling", () => {
+    const input: PullInput = {
+      number: 1,
+      headSha: SHA,
+      headRef: "feature",
+      draft: false,
+      autoMerge: false,
+      queueReady: true,
+      events: [{ id: "ready", at: NOW, source: "queue-ready", enabled: true }],
+      comments: [
+        {
+          id: "human",
+          updatedAt: NOW,
+          authorAssociation: "MEMBER",
+          body: `Head ${SHA}. VM tests passed. Independent review passed, reviewer session 12345678-1234-1234-1234-123456789abc.`,
+        },
+        {
+          id: "receipt",
+          updatedAt: "2026-10-21T11:01:00Z",
+          authorAssociation: "MEMBER",
+          body: `Tested snapshot ${"b".repeat(40)} landed. Newer source head ${SHA} is not covered by that test result. <!-- batcher-effect:${"c".repeat(64)} -->`,
+        },
+      ],
+    };
+    expect(admit(input).ready?.binding.evidenceId).toBe("human");
+    input.comments[1]!.body = `Head ${SHA}. VM tests failed.`;
+    expect(admit(input).ready).toBeNull();
+  });
+  test.each(["Tests failed", "VM tests pending", "Independent review pending"])(
+    "newest collaborator exact-head %s revokes earlier pass",
+    (text) => {
+      const input: PullInput = {
+        number: 1,
+        headSha: SHA,
+        headRef: "feature",
+        draft: false,
+        autoMerge: false,
+        queueReady: true,
+        events: [{ id: "ready", at: NOW, source: "queue-ready", enabled: true }],
+        comments: [
+          {
+            id: "old",
+            updatedAt: NOW,
+            authorAssociation: "MEMBER",
+            body: `Head ${SHA}. VM tests passed. Independent review passed, reviewer session 12345678-1234-1234-1234-123456789abc.`,
+          },
+          {
+            id: "new",
+            updatedAt: "2026-10-21T11:01:00Z",
+            authorAssociation: "COLLABORATOR",
+            body: `Head ${SHA}: ${text}`,
+          },
+        ],
+      };
+      expect(admit(input).ready).toBeNull();
+      expect(admit(input).reason).toContain("revoked");
+      input.comments.reverse();
+      expect(admit(input).ready).toBeNull();
+      input.comments[0]!.authorAssociation = "NONE";
+      expect(admit(input).ready).not.toBeNull();
+    },
+  );
+  test.each([
+    "scripts/ci/impact.ts",
+    "scripts/ci/run-unit-shard.ts",
+    "scripts/ci/profile-command.ts",
+    "scripts/ci/shared-pg.ts",
+    "packages/testing/src/shared-pg.ts",
+    ".bun-version",
+  ])("CI dependency %s is control-plane", (path) => {
+    expect(isControlPlanePath(path)).toBe(true);
+    expect(isControlPlanePath("apps/web/view.ts")).toBe(false);
+  });
+  test.each(["shadow", "shadow-ci"] as const)(
+    "%s excludes conflict and rebuilds remainder across restart without PR mutation",
+    async (mode) => {
+      const f = await fixture();
+      const bad = await f.commitFiles(
+        f.origin,
+        { "base.txt": "base\n", "one.txt": "incompatible\n" },
+        [f.base],
+      );
+      await f.origin.exec(["update-ref", "refs/heads/bad", bad]);
+      await f.git.fetch(f.origin.dir, [bad]);
+      const settings = config({
+        BATCHER_MODE: mode,
+        BATCHER_SHADOW_CI_STATE_REF: "refs/heads/batcher-shadow-ci-state",
+        BATCHER_OUTPUT_DIR: join(f.root, "review"),
+      });
+      const o = {
+        ...observation([pull(1, f.first), pull(2, bad), pull(3, f.second)]),
+        baseSha: f.base,
+      };
+      let writes = 0;
+      const publisher = {
+        publish: async (_expected: string | null, _next: string, manifest: Manifest) => {
+          writes++;
+          o.candidates.push({
+            manifest,
+            branch: `queue/${manifest.batchId}`,
+            containedInBase: false,
+            runs: [],
+          });
+        },
+      };
+      const make = () =>
+        mode === "shadow"
+          ? new Controller(settings, { observe: async () => structuredClone(o) }, f.git, "review")
+          : new ShadowCiController(
+              settings,
+              { observe: async () => structuredClone(o) },
+              f.git,
+              publisher,
+              "review",
+            );
+      const result = await make().step();
+      expect(result.manifest?.pulls.map((p) => p.number)).toEqual([1, 3]);
+      const restarted = await make().step();
+      if (mode === "shadow") expect(restarted.manifest?.pulls.map((p) => p.number)).toEqual([1, 3]);
+      else expect(restarted.action.kind).toBe("wait");
+      expect(writes).toBe(mode === "shadow" ? 0 : 1);
+      const journal = new ObservationJournal(settings);
+      expect((await journal.observe(structuredClone(o))).ready.map((p) => p.number)).toEqual([
+        1, 3,
+      ]);
+      o.ready[1]!.binding.eventId = "re-ready";
+      expect((await journal.observe(structuredClone(o))).ready.map((p) => p.number)).toEqual([
+        1, 2, 3,
+      ]);
+    },
+  );
+  test("malformed and unowned queue refs are reported without aborting; valid manifest is cached", async () => {
+    const f = await fixture(),
+      manifest = await f.git.build(spec([pull(1, f.first)], f.base));
+    await f.git.exec([
+      "push",
+      f.origin.dir,
+      `${manifest.tipSha}:refs/heads/queue/${manifest.batchId}`,
+      `${f.base}:refs/heads/queue/${"a".repeat(64)}`,
+      `${f.base}:refs/heads/queue/diagnostic`,
+    ]);
+    const remoteRefs = f.git.remoteRefs.bind(f.git),
+      fetchLocal = f.git.fetch.bind(f.git),
+      inspect = f.git.inspect.bind(f.git);
+    f.git.remoteRefs = () => remoteRefs(f.origin.dir);
+    f.git.fetch = (_remote, refs) => fetchLocal(f.origin.dir, refs);
+    let validInspections = 0;
+    f.git.inspect = async (tip) => {
+      if (tip === manifest.tipSha) validInspections++;
+      return inspect(tip);
+    };
+    const settings = { ...cfg, outputDir: join(f.root, "reader") };
+    class MockReader extends GitHubReader {
+      override async ready() {
+        return { ready: [], excluded: [] };
+      }
+      override async runs() {
+        return [];
+      }
+    }
+    const reader = new LiveReader(new MockReader(settings, new GitHubAuth({})), f.git, settings);
+    const first = await reader.observe();
+    expect(first.candidates).toHaveLength(1);
+    expect(first.observationWarnings).toHaveLength(2);
+    await new LiveReader(new MockReader(settings, new GitHubAuth({})), f.git, settings).observe();
+    expect(validInspections).toBe(1);
+  });
+  test("verified run attempts persist in cache while current metadata detects reruns", async () => {
+    const f = await fixture(),
+      c = candidate();
+    let attempt = 1,
+      artifactReads = 0,
+      metadataReads = 0,
+      completed = true;
+    const settings = { ...cfg, outputDir: join(f.root, "provider") };
+    const transport = (async () => {
+      metadataReads++;
+      return Response.json({
+        workflow_runs: [
+          {
+            id: 100,
+            run_attempt: attempt,
+            head_sha: c.manifest.tipSha,
+            head_branch: c.branch,
+            path: cfg.workflow,
+            event: "push",
+            status: completed ? "completed" : "queued",
+            conclusion: completed ? "success" : null,
+            updated_at: NOW,
+          },
+        ],
+      });
+    }) as unknown as typeof fetch;
+    class CachedReader extends GitHubReader {
+      override async resultArtifact() {
+        artifactReads++;
+        return { outcome: "success" as const, retryable: false, reason: "fixture" };
+      }
+    }
+    const reader = new CachedReader(settings, new GitHubAuth({}), transport);
+    await reader.runs(c.manifest, c.branch);
+    await reader.runs(c.manifest, c.branch);
+    expect(artifactReads).toBe(1);
+    expect(metadataReads).toBe(2);
+    const restarted = new CachedReader(settings, new GitHubAuth({}), transport);
+    attempt = 2;
+    completed = false;
+    expect((await restarted.runs(c.manifest, c.branch)).map((r) => r.status)).toEqual([
+      "completed",
+      "queued",
+    ]);
+    expect(artifactReads).toBe(1);
+    completed = true;
+    await restarted.observedRuns(c.manifest, c.branch, true);
+    expect(artifactReads).toBe(2);
+    const reads = metadataReads;
+    await restarted.observedRuns(c.manifest, c.branch, true);
+    expect(metadataReads).toBe(reads);
+    attempt = 3;
+    completed = false;
+    expect((await restarted.runs(c.manifest, c.branch)).at(-1)?.attempt).toBe(3);
+  });
+  test("baseline reads are cached and rate limits back off without another HTTP request", async () => {
+    const f = await fixture();
+    let calls = 0;
+    const settings = { ...cfg, outputDir: join(f.root, "baseline") };
+    const transport = (async () => {
+      calls++;
+      return Response.json({ workflow_runs: [] });
+    }) as unknown as typeof fetch;
+    await new GitHubReader(settings, new GitHubAuth({}), transport).mainOutcomes(SHA);
+    await new GitHubReader(settings, new GitHubAuth({}), transport).mainOutcomes(SHA);
+    expect(calls).toBe(1);
+    const limited = new GitHubReader(settings, new GitHubAuth({}), (async () => {
+      calls++;
+      return new Response("", { status: 429, headers: { "retry-after": "600" } });
+    }) as unknown as typeof fetch);
+    await expect(limited.get("pulls")).rejects.toBeInstanceOf(ProviderError);
+    await expect(limited.get("pulls")).rejects.toBeInstanceOf(ProviderError);
+    expect(calls).toBe(2);
+  });
+  test("cold-fetch timeout is separately configurable; shadow defaults poll less often", () => {
+    const settings = config({ BATCHER_FETCH_TIMEOUT_SECONDS: "900" });
+    const git = new GitStore("unused", {}, settings.fetchTimeoutSeconds);
+    expect(git.commandTimeoutMs(["fetch"])).toBe(900_000);
+    expect(git.commandTimeoutMs(["merge-tree"])).toBe(60_000);
+    expect(settings.pollSeconds).toBe(120);
+    expect(config({ BATCHER_MODE: "active" }).pollSeconds).toBe(30);
+  });
+  test("missing run changes from bounded hold to abandoned, requires explicit release, never ejects PR", async () => {
+    const f = await fixture(),
+      settings = { ...cfg, outputDir: join(f.root, "missing"), missingRunSeconds: 60 };
+    const c = candidate(),
+      o = observation([pull(1)], [c]);
+    const journal = new ObservationJournal(settings);
+    expect((await journal.observe(o)).missingRuns?.[c.manifest.batchId]?.status).toBe("holding");
+    o.now = "2026-10-21T12:01:01Z";
+    const restarted = new ObservationJournal(settings),
+      expired = await restarted.observe(o);
+    expect(expired.missingRuns?.[c.manifest.batchId]?.status).toBe("abandoned");
+    expect(plan(expired, settings).kind).toBe("wait");
+    await expect(restarted.recoverMissing(c.manifest.batchId, expired, false)).rejects.toThrow(
+      "confirmation",
+    );
+    await restarted.recoverMissing(c.manifest.batchId, expired, true);
+    const released = await restarted.observe(o),
+      action = plan(released, settings);
+    expect(action.kind).toBe("record");
+    if (action.kind !== "record") throw new Error("expected invalidation");
+    expect(action.ledger.ejected).toEqual([]);
+    released.ledger = action.ledger;
+    expect(plan(released, settings).kind).toBe("wait");
+    c.runs = [{ ...run(c, "unknown"), status: "in_progress" }];
+    released.ready.push(pull(2));
+    const next = plan(released, settings);
+    expect(next.kind).toBe("build");
+    if (next.kind === "build") expect(next.publish).toBe(false);
+  });
+  test("measured stages and rolling latency survive restart; missing history is unknown, not green", async () => {
+    const f = await fixture(),
+      settings = { ...cfg, outputDir: join(f.root, "telemetry") },
+      c = candidate();
+    c.runs = [
+      {
+        ...run(c, "success"),
+        startedAt: "2026-10-21T11:40:00Z",
+        completedAt: "2026-10-21T11:45:00Z",
+      },
+    ];
+    const o = observation([pull(1)], [c]),
+      journal = new ObservationJournal(settings);
+    const measured = await journal.observe(o);
+    expect(measured.telemetry?.status).toBe("stop");
+    expect(measured.telemetry?.samples).toBe(1);
+    expect(measured.telemetry?.completeWindow).toBe(false);
+    expect(plan(measured, settings).kind).toBe("wait");
+    const records = await journal.records(o.now);
+    expect(records.stages[c.manifest.batchId]?.builtAt).toBeNull();
+    expect(records.stages[c.manifest.batchId]?.landedAt).toBeNull();
+    await journal.event(c.manifest, "builtAt", "2026-10-21T11:02:00Z");
+    expect(
+      (await new ObservationJournal(settings).observe({ ...o, candidates: [] })).telemetry?.status,
+    ).toBe("stop");
+    const lost = new ObservationJournal({ ...settings, outputDir: join(f.root, "lost") });
+    expect((await lost.observe({ ...o, candidates: [] })).telemetry?.status).toBe("unknown");
+    const reconstructed = await lost.observe({
+      ...o,
+      candidates: [],
+      ledger: { ...o.ledger, ...records },
+    });
+    expect(reconstructed.telemetry?.status).toBe("stop");
+    expect((await journal.records(o.now)).stages[c.manifest.batchId]?.builtAt).not.toBe(
+      c.manifest.createdAt,
+    );
+    const afterGap = await new ObservationJournal(settings).observe({
+      ...o,
+      now: "2026-10-22T12:01:00Z",
+      candidates: [],
+    });
+    expect(afterGap.telemetry?.completeWindow).toBe(false);
+    expect(afterGap.telemetry?.status).toBe("unknown");
+  });
+  test("disposable cache is bounded and malformed cache reloads fresh", async () => {
+    const f = await fixture(),
+      path = join(f.root, "bounded.json"),
+      cache = new DiskCache(path, 2);
+    await cache.set("one", 1);
+    await cache.set("two", 2);
+    await cache.set("three", 3);
+    expect(await cache.get("one")).toBeNull();
+    expect(await new DiskCache(path).get("three")).toBe(3);
+    await writeFile(path, "{malformed");
+    expect(await new DiskCache(path).get("three")).toBeNull();
+  });
+  test("ready-to-CI metric counts PR readiness bindings, not duplicate reruns/bisection batches", async () => {
+    const f = await fixture(),
+      settings = { ...cfg, outputDir: join(f.root, "dedup") };
+    const c = candidate([pull(1), pull(2)]);
+    c.runs = [{ ...run(c, "success"), startedAt: "2026-10-21T11:40:00Z" }];
+    const journal = new ObservationJournal(settings),
+      o = observation([pull(1), pull(2)], [c]);
+    await journal.observe(o);
+    const records = await journal.records(o.now),
+      sample = records.stages[c.manifest.batchId]!;
+    records.stages.duplicate = {
+      ...sample,
+      batchId: "duplicate",
+      ciStartedAt: "2026-10-21T11:50:00Z",
+    };
+    expect(latencySummary(records.stages, o.now)).toEqual({ samples: 2, p95: 2399 });
+    expect(latencySummary(records.stages, "2026-10-23T12:00:00Z")).toEqual({
+      samples: 0,
+      p95: null,
+    });
   });
 });

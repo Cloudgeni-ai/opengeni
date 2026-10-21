@@ -4,7 +4,8 @@ import { Controller, LiveReader, type StepResult } from "./controller";
 import { AtomicGitWriter, GitStore } from "./git";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { GitHubActiveExecutor } from "./active";
-import { GitHubAuth, GitHubReader, GitHubMutations } from "./github";
+import { GitHubAuth, GitHubReader, GitHubMutations, ProviderError } from "./github";
+import { ObservationJournal } from "./journal";
 import { assertSha, config, type Config } from "./model";
 
 export async function main(
@@ -21,6 +22,8 @@ export async function main(
       "effect-id": { type: "string" },
       "state-sha": { type: "string" },
       "confirm-not-applied": { type: "boolean" },
+      "batch-id": { type: "string" },
+      "confirm-no-run": { type: "boolean" },
     },
   });
   const command = positionals[0] ?? "shadow";
@@ -32,9 +35,18 @@ export async function main(
     );
     return;
   }
-  if (!["shadow", "run", "recover-effect"].includes(command))
-    throw new Error("Expected inspect, shadow, run, or recover-effect");
+  if (!["shadow", "run", "recover-effect", "recover-missing-run"].includes(command))
+    throw new Error("Expected inspect, shadow, run, recover-effect or recover-missing-run");
   const settings = config({ ...env, ...(command === "shadow" ? { BATCHER_MODE: "shadow" } : {}) });
+  if (
+    command === "recover-missing-run" &&
+    (!values["confirm-no-run"] ||
+      !/^[a-f0-9]{64}$/.test(values["batch-id"] ?? "") ||
+      (settings.mode === "active" && !values["state-sha"]))
+  )
+    throw new Error(
+      "recover-missing-run requires --batch-id, --confirm-no-run and --state-sha for active mode",
+    );
   if (
     command === "recover-effect" &&
     (settings.mode !== "active" ||
@@ -46,7 +58,7 @@ export async function main(
       "recover-effect requires active mode, --effect-id, --state-sha and --confirm-not-applied",
     );
   const auth = new GitHubAuth({ ...env, BATCHER_MODE: settings.mode });
-  const git = new GitStore(settings.gitDir, await auth.gitEnv());
+  const git = new GitStore(settings.gitDir, await auth.gitEnv(), settings.fetchTimeoutSeconds);
   await git.init();
   const github = new GitHubReader(settings, auth);
   const reader = new LiveReader(github, git, settings);
@@ -80,6 +92,19 @@ export async function main(
     );
     return;
   }
+  if (command === "recover-missing-run") {
+    if (executor)
+      await executor.recoverMissingRun(values["batch-id"]!, assertSha(values["state-sha"]!), true);
+    else {
+      const journal = new ObservationJournal(settings);
+      const observation = await journal.observe(await reader.observe());
+      await journal.recoverMissing(values["batch-id"]!, observation, true);
+    }
+    console.log(
+      JSON.stringify({ batchId: values["batch-id"], status: "released-infrastructure-only" }),
+    );
+    return;
+  }
   const controller =
     settings.mode === "shadow-ci"
       ? new ShadowCiController(
@@ -110,6 +135,8 @@ export async function runService(
   let stopping = false,
     ready = false,
     lastSuccess = 0;
+  let failures = 0,
+    delaySeconds = settings.pollSeconds;
   let wake: (() => void) | null = null;
   const stop = () => {
     stopping = true;
@@ -148,6 +175,8 @@ export async function runService(
         const result = await controller.step();
         ready = true;
         lastSuccess = Date.now();
+        failures = 0;
+        delaySeconds = settings.pollSeconds;
         console.log(
           JSON.stringify({
             mode: result.mode,
@@ -158,6 +187,12 @@ export async function runService(
         );
       } catch (error) {
         ready = false;
+        failures++;
+        delaySeconds = Math.max(
+          settings.pollSeconds,
+          Math.min(3600, 60 * 2 ** Math.min(failures - 1, 6)),
+          error instanceof ProviderError ? error.retryAfterSeconds : 0,
+        );
         // Provider bodies, URLs and arbitrary Git stderr are deliberately absent.
         if (once) throw error;
         console.error(
@@ -172,7 +207,7 @@ export async function runService(
         const timer = setTimeout(() => {
           wake = null;
           resolve();
-        }, settings.pollSeconds * 1000);
+        }, delaySeconds * 1000);
         wake = () => {
           clearTimeout(timer);
           wake = null;

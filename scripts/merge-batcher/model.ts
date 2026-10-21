@@ -80,6 +80,22 @@ export interface RetryIntent {
   fromAttempt: number;
   requestedAt: string;
 }
+export interface StageSample {
+  batchId: string;
+  readyAt: string;
+  readyBindings: { key: string; number: number; headSha: string; readyAt: string }[];
+  builtAt: string | null;
+  publishedAt: string | null;
+  ciStartedAt: string | null;
+  ciCompletedAt: string | null;
+  landedAt: string | null;
+  observedAt: string;
+}
+export interface MissingRun {
+  firstSeenAt: string;
+  status: "holding" | "abandoned" | "released";
+  updatedAt: string;
+}
 export interface Ledger {
   schemaVersion: 1;
   epoch: number;
@@ -93,6 +109,8 @@ export interface Ledger {
   codeFailures: Record<string, string[]>;
   effects: Record<string, DurableEffect>;
   landings: Record<string, LandedPull>;
+  stages: Record<string, StageSample>;
+  missingRuns: Record<string, MissingRun>;
 }
 export interface EffectState {
   id: string;
@@ -136,6 +154,8 @@ export const emptyLedger = (): Ledger => ({
   codeFailures: {},
   effects: {},
   landings: {},
+  stages: {},
+  missingRuns: {},
 });
 export interface Observation {
   now: string;
@@ -146,6 +166,15 @@ export interface Observation {
   stateSha: string | null;
   ledger: Ledger;
   mainBusy?: boolean;
+  observationWarnings?: string[];
+  telemetry?: {
+    status: "unknown" | "within-threshold" | "stop";
+    p95ReadyToCiSeconds: number | null;
+    samples: number;
+    coverageSince: string;
+    completeWindow: boolean;
+  };
+  missingRuns?: Record<string, MissingRun>;
 }
 export interface Config {
   repository: string;
@@ -162,6 +191,8 @@ export interface Config {
   gitDir: string;
   outputDir: string;
   port: number;
+  fetchTimeoutSeconds: number;
+  missingRunSeconds: number;
 }
 export function config(env: Record<string, string | undefined>): Config {
   const integer = (key: string, fallback: number, max: number): number => {
@@ -204,11 +235,13 @@ export function config(env: Record<string, string | undefined>): Config {
     maxBatchSize: integer("BATCHER_MAX_BATCH_SIZE", 16, 256),
     maxInflight: integer("BATCHER_MAX_INFLIGHT", 1, 16),
     speculationDepth: integer("BATCHER_SPECULATION_DEPTH", 2, 16),
-    pollSeconds: integer("BATCHER_POLL_SECONDS", 30, 3600),
+    pollSeconds: integer("BATCHER_POLL_SECONDS", mode === "active" ? 30 : 120, 3600),
     leaseSeconds: integer("BATCHER_LEASE_SECONDS", 120, 3600),
     gitDir: env.BATCHER_GIT_DIR ?? "/data/objects.git",
     outputDir: env.BATCHER_OUTPUT_DIR ?? "/data/shadow",
     port: integer("PORT", 8080, 65535),
+    fetchTimeoutSeconds: integer("BATCHER_FETCH_TIMEOUT_SECONDS", 600, 3600),
+    missingRunSeconds: integer("BATCHER_MISSING_RUN_SECONDS", 900, 86400),
   };
 }
 export const bindingKey = (pull: Pull): string =>

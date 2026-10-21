@@ -1,6 +1,6 @@
 # Portable merge batcher
 
-This is the OPE-834 in-house batcher core. It uses Bun 1.4.3, built-in APIs and
+This is the in-house batcher core. It uses Bun 1.4.3, built-in APIs and
 Git (2.38 or newer for `merge-tree --write-tree`). No database, checkout, native
 `merge_group`, vendor queue, cloud SDK or cloud-specific state service is used.
 The default mode is **read-only shadow**. Opt-in `shadow-ci` publishes candidates
@@ -98,7 +98,9 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_SPECULATION_DEPTH` | `2`, including current candidate |
 | `BATCHER_GIT_DIR` | `/data/objects.git`, disposable bare object cache |
 | `BATCHER_OUTPUT_DIR` | `/data/shadow`, local stage/manifest evidence |
-| `BATCHER_POLL_SECONDS` | `30` |
+| `BATCHER_POLL_SECONDS` | `120` in shadow modes, `30` in active; failures back off |
+| `BATCHER_FETCH_TIMEOUT_SECONDS` | `600` for cold/large Git fetches; other Git commands retain a 60-second bound |
+| `BATCHER_MISSING_RUN_SECONDS` | `900` before a never-started workflow becomes an abandoned infrastructure hold |
 | `BATCHER_LEASE_SECONDS` | `120`, durable provider lease, not local leadership |
 | `PORT` | `8080` |
 | `GH_TOKEN` or `GITHUB_TOKEN` | Existing repository token; never baked into the image |
@@ -141,6 +143,11 @@ rejects missing/malformed/oversized/untrusted comments and explicit pending or
 failed evidence, recording a human-readable exclusion reason. Instructions in
 comments are never evaluated. Evidence author association, body and update time
 are hashed into the exact readiness binding; an edit invalidates an old batch.
+The newest collaborator comment naming the exact head decides (ordered by update
+time, not list position). A newer failing or incomplete statement revokes an
+older pass; the reader does not search backward for more convenient evidence.
+The batcher's own marked landing/ejection/reconciliation receipts are bookkeeping,
+not VM/review attestations; they neither satisfy nor revoke the human evidence.
 
 FIFO uses actual GraphQL ready timeline events, never PR creation time or the
 time a controller first saw it. Turning readiness off then on creates a new
@@ -162,6 +169,9 @@ workflow changes. The parent owns that workflow/ruleset enforcement.
 Version commit subjects retain literal `changeset-release/main` for the existing
 non-coalescing main-CI lane. PRs touching `.github/workflows/batch-ci.yml`,
 `scripts/ci/batch-*` or `scripts/merge-batcher/**` are also singleton barriers.
+The same rule covers `scripts/ci/impact*`, `run-unit-shard*`, `profile-command*`,
+`shared-pg*`, `packages/testing/src/shared-pg.ts` and `.bun-version`, including
+renamed previous paths.
 Their normal exact-head VM/independent-review comment must explicitly mention
 **control-plane** review; generic review alone does not admit these changes.
 
@@ -335,6 +345,68 @@ operator limitations. Git landing itself remains atomic and restart-reconcilable
 
 ## Shadow evidence and operations
 
+### Bounded observation and measured stages
+
+Validated immutable manifests are cached by tip SHA. Verified completed results
+are cached by tip/batch/run/attempt; current run metadata is still reread before
+active landing/retry, so a rerun invalidates earlier green. Historical terminal
+candidates and baseline main outcomes are sampled at most once per 15 minutes.
+This preserves bounded rerun detection without redownloading completed artifacts
+each poll; it is not instantaneous detection of external/manual historical reruns.
+Cache files are disposable and capped at 4,096 entries. Rate-limit headers defer
+HTTP reads, while service failures back off exponentially to 3,600 seconds.
+Malformed/unowned queue refs appear in observationWarnings and are excluded,
+rather than making unrelated candidates unobservable.
+
+The namespace-specific observations journal retains measured ready, build,
+publication, provider CI-start/end and landing stages (up to 4,096 batches and
+48 hours of observations). Build time is actual local instrumentation, **not**
+the deterministic manifest.createdAt. Publication/landing records in Git state
+use the successful atomic transaction's invocation timestamp; they are not an
+exact server-side receipt time. Failed transactions do not invent these events.
+Reconstructed main ancestry proves containment, not a historical landing time;
+unmeasured stages remain null. Active writes checkpoint samples and missing-run
+state in the durable Git ledger. Shadow-ci includes them in its next publication;
+strict read-only shadow only retains local evidence and never writes remote state.
+
+Telemetry reports the nearest-rank rolling 24-hour p95 from each exact
+head/ready-event's **first measured provider CI start**, deduplicating reruns and
+bisection candidates. More than 1,800 seconds emits a stop signal and holds new
+batch work/landing; reconciliation and observation continue. stage.json reports
+sample count, coverageSince and completeWindow alongside the signal. This is a
+sample of heads that reached CI, not a latency claim for unknown/unstarted work
+or a completeness claim about all historical PRs. Small/partial samples are
+explicit; missing history is unknown, never reset to healthy. Restart reloads the
+retained journal or Git samples; cache loss cannot fabricate historical timings.
+Observation gaps reset coverageSince rather than turning elapsed downtime into
+a complete window; retained real latency samples can still trigger the stop signal.
+Use separate writable output directories for replicas; remote Git, not the local
+journal, fences their mutations. External historical reruns can be observed up
+to 15 minutes late and may overlap independently started work.
+
+### Missing workflow admission
+
+A published candidate with no exact workflow initially reserves the hosted slot.
+After BATCHER_MISSING_RUN_SECONDS from known publication or first observation it
+becomes an **abandoned infrastructure hold**, not a PR failure or code-red retry.
+The hold is persisted and visible, with explicit recovery instead of an opaque
+permanent wait. After fixing workflow admission and confirming that this candidate
+has no queued/running workflow that can start later, release its slot:
+
+```sh
+# Use the intended mode and namespace. Active additionally requires --state-sha.
+bun scripts/merge-batcher/main.ts recover-missing-run \
+  --batch-id "$BATCH_ID" --confirm-no-run
+```
+
+Active recovery CAS-updates the Git ledger under the lease and rereads provider
+runs. Shadow modes update only their local observation journal. No mode deletes
+the candidate ref, cancels CI, comments blame or changes readiness. The exact
+released snapshot is not automatically republished; a changed head/new ready
+event can return. A late run is still observed and consumes capacity. GitHub
+cannot prove that an absent run will never appear, so release is an explicit
+operator decision, not an automatic unsafe inference from missing metadata.
+
 ### Shadow with real CI, never landing
 
 `shadow-ci` uses a separate controller and a `QueueOnlyPublisher` that can express
@@ -359,6 +431,11 @@ atomic state update. `stage.json` compares candidate verdicts/timings with
 main-CI runs on the exact original base SHA. These are baseline comparisons,
 not equivalent-tree claims: shadow candidates contain unlanded PR heads.
 Missing results remain observable infrastructure, never ejection/comment effects.
+Both shadow modes catch merge conflicts, retain local exclusions keyed by exact
+head and ready event, and rebuild the viable remainder. Restart reloads these
+exclusions; a new head or ready event can return. Neither mode publishes ejection
+comments or changes PR readiness. A lost disposable journal may require repeating
+the local conflict calculation, but cannot mutate a PR or claim code-red CI.
 
 ### Strictly read-only shadow
 
@@ -375,7 +452,8 @@ candidate runs are compared using the same strict artifact binding as active.
 observation. A shadow process can be ready without having any eligible PR.
 SIGTERM/SIGINT stop new polls, finish the current bounded observation, wake an idle
 poll immediately and close the server. No CI cancellation occurs on shutdown.
-HTTP calls have 30-second bounds and Git subprocesses have a 60-second bound.
+HTTP calls have 30-second bounds. Git fetch has a separately configurable
+600-second default for cold histories; other Git subprocesses have a 60-second bound.
 Operators should allow termination grace for the current observation; forced
 termination loses only local cache/proposed shadow evidence, not remote truth.
 

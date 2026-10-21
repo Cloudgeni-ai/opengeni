@@ -41,14 +41,28 @@ export function admit(input: PullInput): Admission {
     .filter((e) => (e.source === "auto-merge" ? input.autoMerge : input.queueReady))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || compareText(a.id, b.id))[0];
   if (!event) return no("missing actual ready-event timestamp (not PR creation time)");
-  for (const comment of [...input.comments].reverse()) {
+  for (const comment of [...input.comments].sort(
+    (a, b) =>
+      (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || compareText(b.id, a.id),
+  )) {
     if (!["OWNER", "MEMBER", "COLLABORATOR"].includes(comment.authorAssociation)) continue;
-    if (typeof comment.body !== "string" || comment.body.length > 100_000) continue;
+    if (typeof comment.body !== "string") continue;
     const text = comment.body;
+    // Our status/ejection receipts quote SHAs but are not VM/review attestations.
+    // In PAT mode their author can be MEMBER; do not revoke a human's evidence
+    // merely by posting the promised changed-head reconciliation comment.
+    if (
+      /^(?:Merge batcher (?:landed|excluded)|Tested snapshot)\b/.test(text) &&
+      /<!-- batcher-effect:[a-f0-9]{64} -->/.test(text)
+    )
+      continue;
     if (
       !(text.match(/\b[a-f0-9]{40}\b/gi) ?? []).some((sha) => sha.toLowerCase() === input.headSha)
     )
       continue;
+    // The newest collaborator statement about this exact head is authoritative:
+    // an incomplete or negative update revokes an older passing attestation.
+    if (text.length > 100_000) return no("latest exact-head evidence is oversized");
     const vm = /\bVM\b|virtual machine|connected machine/i.test(text);
     const tests =
       /\b(test|tests|suite|suites|typecheck)\b/i.test(text) &&
@@ -87,6 +101,11 @@ export function admit(input: PullInput): Admission {
           },
         },
       };
+    return no(
+      input.controlPlane
+        ? "latest exact-head evidence lacks passing VM/independent control-plane review"
+        : "latest exact-head evidence is incomplete or negative; earlier pass revoked",
+    );
   }
   return no(
     input.controlPlane

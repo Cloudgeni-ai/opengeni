@@ -14,6 +14,7 @@ import {
   type Run,
 } from "./model";
 import { latestRun } from "./planner";
+import { latencySummary } from "./journal";
 
 export interface ActiveReads {
   ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }>;
@@ -314,12 +315,13 @@ export class GitHubActiveExecutor implements Executor {
         if (
           current.attempt !== effect.run.attempt ||
           current.status !== "completed" ||
+          (latencySummary(state.ledger.stages, now).p95 ?? 0) > 1800 ||
           (await this.reads.mainBusy())
         ) {
           await this.patchEffect(effect.id, {
             nextAt: new Date(Date.parse(now) + 60_000).toISOString(),
           });
-          return "whole-workflow retry waits for exact completed attempt and main headroom";
+          return "whole-workflow retry waits for exact completed attempt, latency stop clearance and main headroom";
         }
         await this.git.fetch(this.writer.remote, [effect.run.headSha]);
         const manifest = await this.git.inspect(effect.run.headSha);
@@ -476,6 +478,34 @@ export class GitHubActiveExecutor implements Executor {
       .sort(([, a], [, b]) => Date.parse(a.nextCheckAt) - Date.parse(b.nextCheckAt))[0];
     if (entry) messages.push(await this.reconcile(entry[0], entry[1]));
     return messages.join("; ") || null;
+  }
+  async recoverMissingRun(
+    id: string,
+    expectedState: string,
+    confirmedNoRun: boolean,
+  ): Promise<void> {
+    const state = await this.load(),
+      missing = state.ledger.missingRuns[id];
+    if (
+      !confirmedNoRun ||
+      !this.available(state) ||
+      state.sha !== expectedState ||
+      missing?.status !== "abandoned"
+    )
+      throw new Error(
+        "Missing-run recovery needs abandoned state, current lease/CAS and explicit no-run confirmation",
+      );
+    const refs = await this.git.remoteRefs(this.writer.remote);
+    const branch = `${this.config.branchPrefix}${id}`,
+      tip = refs.get(`refs/heads/${branch}`);
+    if (!tip) throw new Error("Missing-run candidate ref disappeared");
+    await this.git.fetch(this.writer.remote, [tip]);
+    const manifest = await this.git.inspect(tip);
+    if (manifest.batchId !== id || (await this.reads.runs(manifest, branch)).length)
+      throw new Error("Candidate has a provider run; missing-run recovery refused");
+    await this.persist(state, (ledger) => {
+      ledger.missingRuns[id] = { ...missing, status: "released", updatedAt: this.now() };
+    });
   }
   /** Explicit operator recovery, never an automatic uncertain-effect replay. */
   async recoverEffect(

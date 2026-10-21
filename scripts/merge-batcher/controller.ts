@@ -21,6 +21,8 @@ import {
   type Run,
 } from "./model";
 import { plan, type Action } from "./planner";
+import { DiskCache } from "./cache";
+import { ObservationJournal } from "./journal";
 
 export interface Reader {
   observe(): Promise<Observation>;
@@ -50,11 +52,14 @@ export interface Executor {
   transact(transaction: Transaction): Promise<void>;
 }
 export class LiveReader implements Reader {
+  readonly manifestCache: DiskCache;
   constructor(
     readonly github: GitHubReader,
     readonly git: GitStore,
     readonly config: Config,
-  ) {}
+  ) {
+    this.manifestCache = new DiskCache(join(config.outputDir, "manifest-cache.json"));
+  }
   async observe(): Promise<Observation> {
     Object.assign(this.git.authEnv, await this.github.auth.gitEnv());
     const remote = `https://github.com/${this.config.repository}.git`;
@@ -62,9 +67,16 @@ export class LiveReader implements Reader {
     const baseSha = refs.get(`refs/heads/${this.config.baseBranch}`);
     if (!baseSha) throw new Error("Base ref missing");
     const stateSha = refs.get(this.config.stateRef) ?? null;
-    const queue = [...refs].filter(([ref]) =>
-      ref.startsWith(`refs/heads/${this.config.branchPrefix}`),
-    );
+    const observationWarnings: string[] = [];
+    const queue = [...refs]
+      .filter(([ref]) => ref.startsWith(`refs/heads/${this.config.branchPrefix}`))
+      .filter(([ref]) => {
+        const owned = /^[a-f0-9]{64}$/.test(
+          ref.slice(`refs/heads/${this.config.branchPrefix}`.length),
+        );
+        if (!owned) observationWarnings.push(`Excluded unowned queue ref ${ref}`);
+        return owned;
+      });
     // Exact SHAs, not mutable ref names: a racing fetch cannot silently change
     // the base or candidate bound by the remote-ref observation.
     await this.git.fetch(remote, [
@@ -103,15 +115,32 @@ export class LiveReader implements Reader {
     }
     const candidates: Candidate[] = [];
     for (const [ref, sha] of queue) {
-      const manifest = await this.git.inspect(sha);
+      let manifest: Manifest;
+      try {
+        const cached = await this.manifestCache.get<Manifest>(sha);
+        manifest = cached ?? (await this.git.inspect(sha));
+        if (!cached) await this.manifestCache.set(sha, manifest);
+      } catch {
+        observationWarnings.push(`Excluded malformed candidate ${ref} at ${sha}`);
+        continue;
+      }
       const branch = ref.slice("refs/heads/".length);
-      if (branch !== `${this.config.branchPrefix}${manifest.batchId}`)
-        throw new Error("Queue ref is not bound to manifest batchId");
+      if (branch !== `${this.config.branchPrefix}${manifest.batchId}`) {
+        observationWarnings.push(`Excluded queue ref not bound to manifest ${ref}`);
+        continue;
+      }
+      const containedInBase = await this.git.ancestor(manifest.tipSha, baseSha);
       candidates.push({
         manifest,
         branch,
-        runs: await this.github.runs(manifest, branch),
-        containedInBase: await this.git.ancestor(manifest.tipSha, baseSha),
+        runs: await this.github.observedRuns(
+          manifest,
+          branch,
+          this.config.mode !== "active" ||
+            containedInBase ||
+            ledger.invalidated.includes(manifest.batchId),
+        ),
+        containedInBase,
       });
     }
     return {
@@ -122,6 +151,7 @@ export class LiveReader implements Reader {
       candidates,
       stateSha,
       ledger,
+      observationWarnings,
       mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy(),
     };
   }
@@ -133,13 +163,16 @@ export interface StepResult {
   reason: string | null;
 }
 export class Controller {
+  readonly journal: ObservationJournal;
   constructor(
     readonly config: Config,
     readonly reader: Reader,
     readonly git: GitStore,
     readonly owner: string,
     readonly executor?: Executor,
-  ) {}
+  ) {
+    this.journal = new ObservationJournal(config);
+  }
   async step(): Promise<StepResult> {
     if (this.config.mode === "shadow-ci") throw new Error("Use the restricted ShadowCiController");
     if (this.config.mode === "active") {
@@ -150,13 +183,30 @@ export class Controller {
       if (!this.executor) throw new Error("Active mode requires a fenced provider adapter");
     }
     const maintenance = this.config.mode === "active" ? await this.executor?.maintain?.() : null;
-    const observation = await this.reader.observe();
-    const action = plan(observation, this.config);
+    const observation = await this.journal.observe(await this.reader.observe());
+    let action = plan(observation, this.config);
+    const plannedAction = action;
+    const records = await this.journal.records(observation.now);
+    const stamp = (stages: Ledger["stages"]) =>
+      Object.fromEntries(
+        Object.entries(stages).map(([id, { observedAt: _, ...sample }]) => [id, sample]),
+      );
+    if (
+      this.config.mode === "active" &&
+      action.kind === "wait" &&
+      (digest(stamp(records.stages)) !== digest(stamp(observation.ledger.stages)) ||
+        digest(records.missingRuns) !== digest(observation.ledger.missingRuns))
+    )
+      action = {
+        kind: "record",
+        ledger: structuredClone(observation.ledger),
+        reason: "checkpoint measured stages and missing-run infrastructure state",
+      };
     const result: StepResult = {
       mode: this.config.mode,
-      action,
+      action: plannedAction,
       manifest: null,
-      reason: maintenance ?? null,
+      reason: maintenance ?? (plannedAction.kind === "wait" ? plannedAction.reason : null),
     };
     let ledger = structuredClone(observation.ledger);
     let effect: Effect = { kind: "record" };
@@ -169,9 +219,14 @@ export class Controller {
     if (action.kind === "build") {
       try {
         result.manifest = await this.git.build(action.spec);
+        await this.journal.event(result.manifest, "builtAt", new Date().toISOString());
       } catch (error) {
         if (!(error instanceof MergeConflict)) throw error;
         const pull = action.spec.pulls.find((p) => p.number === error.number)!;
+        if (this.config.mode === "shadow") {
+          await this.journal.conflict(pull, observation.now);
+          return this.step();
+        }
         ledger.ejected.push({
           pull,
           batchId: digest(action.spec),
@@ -200,7 +255,7 @@ export class Controller {
         throw new Error("Landing would not fast-forward");
       // A fresh complete observation catches changed heads, edited/deleted
       // evidence, ready toggles, main races, reruns and invalid predecessors.
-      const fresh = await this.reader.observe();
+      const fresh = await this.journal.observe(await this.reader.observe());
       const replan = plan(fresh, this.config);
       if (
         fresh.stateSha !== observation.stateSha ||
@@ -255,6 +310,12 @@ export class Controller {
         ledger.expiresAt = new Date(
           Date.parse(observation.now) + this.config.leaseSeconds * 1000,
         ).toISOString();
+        Object.assign(ledger, await this.journal.records(observation.now));
+        if (effect.kind === "publish" || effect.kind === "land") {
+          const sample = ledger.stages[effect.manifest.batchId];
+          if (sample)
+            sample[effect.kind === "land" ? "landedAt" : "publishedAt"] = new Date().toISOString();
+        }
         ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
         const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);
         await this.executor!.transact({
@@ -266,6 +327,14 @@ export class Controller {
           bindings,
           effect,
         });
+        if (effect.kind === "publish" || effect.kind === "land")
+          await this.journal.event(
+            effect.manifest,
+            effect.kind === "land" ? "landedAt" : "publishedAt",
+            ledger.stages[effect.manifest.batchId]![
+              effect.kind === "land" ? "landedAt" : "publishedAt"
+            ]!,
+          );
       }
     }
     await this.stage(observation, result);
@@ -284,6 +353,10 @@ export class Controller {
       ledger: observation.ledger,
       result,
       providerCapabilities: this.executor?.capabilities ?? githubCapabilities,
+      telemetry: observation.telemetry ?? null,
+      measuredStages: (await this.journal.records(observation.now)).stages,
+      missingRuns: observation.missingRuns ?? {},
+      observationWarnings: observation.observationWarnings ?? [],
     });
     const destination = join(this.config.outputDir, "stage.json");
     const temporary = `${destination}.${this.owner}.tmp`;

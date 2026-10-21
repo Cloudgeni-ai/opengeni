@@ -4,8 +4,22 @@ import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence
 import { type Config, type Manifest, type Outcome, type Pull, type Run } from "./model";
 import { verifyResult, type VerifiedResult } from "./result";
 import type { MainOutcome } from "./shadow-ci";
+import { join } from "node:path";
+import { DiskCache } from "./cache";
+import { digest } from "./model";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
+export function isControlPlanePath(path: unknown): boolean {
+  return (
+    typeof path === "string" &&
+    (path === ".github/workflows/batch-ci.yml" ||
+      path.startsWith("scripts/ci/batch-") ||
+      path.startsWith("scripts/merge-batcher/") ||
+      /^scripts\/ci\/(?:impact|run-unit-shard|profile-command|shared-pg)(?:[./-]|$)/.test(path) ||
+      path === ".bun-version" ||
+      path === "packages/testing/src/shared-pg.ts")
+  );
+}
 export interface PullSnapshot {
   number: number;
   headSha: string;
@@ -19,6 +33,7 @@ export class ProviderError extends Error {
   constructor(
     readonly status: number,
     readonly operation: string,
+    readonly retryAfterSeconds = 0,
   ) {
     super(`GitHub ${operation} failed (${status}); response body suppressed`);
   }
@@ -98,15 +113,47 @@ export class GitHubAuth {
 // Only GET and GraphQL query operations exist on this class. The shadow runner
 // receives this read adapter, never the mutation adapter.
 export class GitHubReader {
+  readonly cache: DiskCache;
+  private blockedUntil = 0;
   constructor(
     readonly config: Config,
     readonly auth: GitHubAuth,
     readonly transport: typeof fetch = fetch,
-  ) {}
+  ) {
+    this.cache = new DiskCache(
+      join(config.outputDir, `provider-cache-${digest(config.repository)}.json`),
+    );
+  }
+  private checkRateLimit(response: Response): void {
+    if (
+      response.status === 429 ||
+      (response.status === 403 &&
+        (response.headers.get("x-ratelimit-remaining") === "0" ||
+          response.headers.has("retry-after")))
+    ) {
+      const seconds = Math.min(
+        3600,
+        Math.max(
+          60,
+          Number(response.headers.get("retry-after")) ||
+            Number(response.headers.get("x-ratelimit-reset")) - Date.now() / 1000 ||
+            300,
+        ),
+      );
+      this.blockedUntil = Date.now() + seconds * 1000;
+      throw new ProviderError(response.status, "rate limited read", Math.ceil(seconds));
+    }
+  }
   async get(path: string): Promise<Json | Json[]> {
     return this.getFromRepository(this.config.repository, path);
   }
   async getFromRepository(repository: string, path: string): Promise<Json | Json[]> {
+    if (Date.now() < this.blockedUntil)
+      throw new ProviderError(
+        429,
+        "read backoff",
+        Math.ceil((this.blockedUntil - Date.now()) / 1000),
+      );
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid source repository");
     const token = await this.auth.token();
     const response = await this.transport(`https://api.github.com/repos/${repository}/${path}`, {
@@ -117,6 +164,7 @@ export class GitHubReader {
       },
       signal: AbortSignal.timeout(30_000),
     });
+    this.checkRateLimit(response);
     if (!response.ok) throw new ProviderError(response.status, "read");
     return response.json() as Promise<Json | Json[]>;
   }
@@ -230,6 +278,7 @@ export class GitHubReader {
         }),
         signal: AbortSignal.timeout(30_000),
       });
+      this.checkRateLimit(response);
       if (!response.ok) throw new ProviderError(response.status, "ready timeline");
       const data = (await response.json()) as Json;
       const timeline = data.data?.repository?.pullRequest?.timelineItems;
@@ -296,13 +345,7 @@ export class GitHubReader {
       );
       const files = await this.pages(`pulls/${number}/files`);
       const controlPlane = files.some((file) =>
-        [file.filename, file.previous_filename].some(
-          (path) =>
-            typeof path === "string" &&
-            (path === ".github/workflows/batch-ci.yml" ||
-              path.startsWith("scripts/ci/batch-") ||
-              path.startsWith("scripts/merge-batcher/")),
-        ),
+        [file.filename, file.previous_filename].some(isControlPlanePath),
       );
       const input: PullInput = {
         controlPlane,
@@ -339,6 +382,15 @@ export class GitHubReader {
       if (!Number.isSafeInteger(count) || count < 1 || count > 1000)
         throw new Error("Invalid workflow attempt count");
       for (let attempt = 1; attempt <= count; attempt++) {
+        const key = `verified:${manifest.tipSha}:${manifest.batchId}:${run.id}:${attempt}`;
+        const cached = await this.cache.get<{ run: Run; conclusion: unknown }>(key);
+        if (
+          cached &&
+          (attempt < count || (run.status === "completed" && cached.conclusion === run.conclusion))
+        ) {
+          result.push(cached.run);
+          continue;
+        }
         const details =
           attempt === count
             ? run
@@ -373,7 +425,7 @@ export class GitHubReader {
             trusted = true;
           }
         }
-        result.push({
+        const verifiedRun: Run = {
           id: Number(run.id),
           attempt,
           headSha: manifest.tipSha,
@@ -385,17 +437,34 @@ export class GitHubReader {
           retryable,
           startedAt: details.run_started_at ?? null,
           completedAt: status === "completed" ? details.updated_at : null,
-        });
+        };
+        result.push(verifiedRun);
+        if (status === "completed" && (trusted || outcome === "cancelled"))
+          await this.cache.set(key, { run: verifiedRun, conclusion: details.conclusion });
       }
     }
     return result;
   }
+  async observedRuns(manifest: Manifest, branch: string, archived: boolean): Promise<Run[]> {
+    const key = `observation:${manifest.tipSha}:${branch}`;
+    const cached = await this.cache.get<Run[]>(key, 900_000);
+    // Historical terminal candidates are sampled every 15 minutes. Active
+    // landing always calls runs() directly for fresh provider attempt metadata.
+    if (cached && archived && cached.length && cached.every((r) => r.status === "completed"))
+      return cached;
+    const runs = await this.runs(manifest, branch);
+    if (runs.length && runs.every((r) => r.status === "completed")) await this.cache.set(key, runs);
+    return runs;
+  }
   async mainOutcomes(headSha: string): Promise<MainOutcome[]> {
+    const key = `baseline:${headSha}`;
+    const cached = await this.cache.get<MainOutcome[]>(key, 900_000);
+    if (cached) return cached;
     const runs = await this.pages(
       `actions/workflows/ci.yml/runs?branch=${encodeURIComponent(this.config.baseBranch)}&head_sha=${headSha}&event=push`,
       "workflow_runs",
     );
-    return runs
+    const result = runs
       .filter(
         (run) =>
           run.head_sha === headSha &&
@@ -411,6 +480,8 @@ export class GitHubReader {
         startedAt: run.run_started_at ?? null,
         completedAt: run.status === "completed" ? run.updated_at : null,
       }));
+    await this.cache.set(key, result);
+    return result;
   }
   async resultArtifact(
     manifest: Manifest,
@@ -438,6 +509,7 @@ export class GitHubReader {
         },
       );
       let download = response;
+      this.checkRateLimit(response);
       if (response.status === 302) {
         const target = new URL(response.headers.get("location") ?? "");
         if (target.protocol !== "https:") continue;
@@ -445,6 +517,7 @@ export class GitHubReader {
         download = await this.transport(target, { signal: AbortSignal.timeout(30_000) });
       }
       if (!download.ok) {
+        this.checkRateLimit(download);
         if ([404, 410].includes(download.status)) continue;
         throw new ProviderError(download.status, "artifact download");
       }
