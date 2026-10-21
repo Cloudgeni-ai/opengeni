@@ -149,6 +149,10 @@ export function projectElements(
               ].includes(element.role)
       )
         actions.push("set_value");
+      // A control a person can operate can take the keyboard focus, so keys
+      // can be sent to it (a field in a popover, a list to arrow through).
+      // Only macOS's driver focuses an element on its own.
+      if (platform === "macos" && actions.length > 0) actions.push("focus");
     }
     const label = element.label && !valueLabel ? element.label : undefined;
     const contained = (childTexts.get(element.element_index) ?? []).filter(

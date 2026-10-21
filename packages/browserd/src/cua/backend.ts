@@ -1098,10 +1098,28 @@ export class CuaComputerBackend implements ComputerBackend {
     if (action.type === "semantic") {
       const node = this.locateObserved(command.targetId, observed, action.locator);
       if (!node.actions.includes(action.action))
-        throw unsupported("CUA element does not advertise this semantic action");
+        throw unsupported(
+          action.action === "focus"
+            ? this.identity.platform === "macos"
+              ? "This element cannot take the keyboard focus: invoke it, or set its value"
+              : "Elements cannot be focused on their own here: invoke the element, or set its value"
+            : "CUA element does not advertise this semantic action",
+        );
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+      if (action.action === "focus")
+        return [
+          {
+            name: "click",
+            args: {
+              ...args,
+              element_token: node.ref,
+              action: "focus",
+              delivery_mode: "background",
+            },
+          },
+        ];
       if (action.action === "set_value") {
         if (action.value === undefined)
           throw new ComputerBackendError(
