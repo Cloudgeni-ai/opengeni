@@ -424,6 +424,7 @@ function safePosture(): RuntimeDatabasePosture {
     tables: [
       {
         name: "tenant_rows",
+        hasInheritance: false,
         owner: "opengeni_migrator",
         rlsEnabled: true,
         rlsForced: true,
@@ -2966,9 +2967,6 @@ describe("runtime database posture evaluator", () => {
     posture.tables.push({
       ...posture.tables[0]!,
       name: "future_tenant_rows",
-      truncate: true,
-      references: true,
-      trigger: true,
     });
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
   });
@@ -2979,6 +2977,8 @@ describe("runtime database posture evaluator", () => {
     { rlsActive: false },
     { policyCount: 0 },
     { owner: "opengeni_app" },
+    { hasInheritance: true },
+    { hasInheritance: undefined },
   ]) {
     test(`rejects unknown table with unsafe shape ${JSON.stringify(unsafe)}`, () => {
       const posture = safePosture();
@@ -3000,6 +3000,55 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  for (const grants of [
+    { truncate: true },
+    { references: true },
+    { trigger: true },
+    { columnPrivileges: ["REFERENCES"] },
+    { extraPrivileges: ["MAINTAIN"] },
+  ]) {
+    test(`rejects unknown non-row privileges in both schemas: ${JSON.stringify(grants)}`, () => {
+      for (const inventory of ["tables", "privateTables"] as const) {
+        const posture = safePosture();
+        posture[inventory].push({ ...posture.tables[0]!, name: "future_rows", ...grants });
+        expect(
+          evaluateRuntimeDatabasePosture(posture, options).some((v) => v.includes("future_rows")),
+        ).toBe(true);
+      }
+    });
+  }
+
+  for (const name of [
+    "connection_authority_convergence_audit_capabilities",
+    "document_migration_audit_capabilities",
+    "session_create_idempotency_guard",
+    "session_history_items_repair_audit",
+  ]) {
+    test(`preserves no-grant contract for existing ${name}`, () => {
+      const posture = safePosture();
+      posture.tables.push({ ...posture.tables[0]!, name });
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `table ${name} grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE`,
+      );
+    });
+  }
+
+  for (const [name, message] of [
+    [
+      "subscription_plan_catalog_revisions",
+      "runtime role cannot read the subscription plan catalog",
+    ],
+    ["credit_promotion_policy_revisions", "runtime role cannot read the credit promotion policy"],
+  ]) {
+    test(`column-only SELECT cannot satisfy known private ${name}`, () => {
+      const posture = safePosture();
+      const table = posture.privateTables.find((t) => t.name === name)!;
+      table.select = false;
+      table.columnPrivileges = ["SELECT"];
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(message!);
+    });
+  }
+
   test("applies the same additive table rule to the private schema without relaxing known capabilities", () => {
     const posture = safePosture();
     const table: RuntimePrivateTablePosture = {
@@ -3014,6 +3063,7 @@ describe("runtime database posture evaluator", () => {
       { rlsActive: false },
       { policyCount: 0 },
       { owner: "opengeni_app" },
+      { hasInheritance: true },
     ]) {
       const changed = {
         ...posture,
@@ -3055,6 +3105,7 @@ describe("runtime database posture evaluator", () => {
           execute,
           publicExecute: false,
           securityDefiner: !execute,
+          triggerCallable: false,
         });
         expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
       }
@@ -3064,6 +3115,8 @@ describe("runtime database posture evaluator", () => {
       { owner: "opengeni_app", securityDefiner: false },
       { securityDefiner: true },
       { execute: false, publicExecute: true, securityDefiner: true },
+      { execute: false, securityDefiner: true, triggerCallable: true },
+      { execute: false, securityDefiner: true, triggerCallable: undefined },
     ]) {
       test(`rejects unknown unsafe routine in ${inventory}: ${JSON.stringify(unsafe)}`, () => {
         const posture = safePosture();
@@ -3072,6 +3125,7 @@ describe("runtime database posture evaluator", () => {
           owner: "opengeni_migrator",
           execute: true,
           publicExecute: false,
+          triggerCallable: false,
           configuration: ["search_path=pg_catalog"],
           ...unsafe,
         });

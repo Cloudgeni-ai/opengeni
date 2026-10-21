@@ -2697,6 +2697,10 @@ const DECLARED_TARGET_TABLES = new Set<string>([
   ...PROTECTED_NO_DIRECT_DML_TABLES,
   ...Object.values(SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES).flat(),
   "schema_migrations",
+  "connection_authority_convergence_audit_capabilities",
+  "document_migration_audit_capabilities",
+  "session_create_idempotency_guard",
+  "session_history_items_repair_audit",
 ]);
 
 // Before OPE-834 private routines had an implicit catalog-wide EXECUTE
@@ -2723,7 +2727,7 @@ const DECLARED_TARGET_ROUTINES = new Set<string>([
 function securelyShapedUnknownTable(
   table: Pick<
     RuntimePrivateTablePosture,
-    "owner" | "rlsEnabled" | "rlsForced" | "rlsActive" | "policyCount"
+    "owner" | "rlsEnabled" | "rlsForced" | "rlsActive" | "policyCount" | "hasInheritance"
   >,
   runtimeRole: string,
 ): boolean {
@@ -2732,7 +2736,10 @@ function securelyShapedUnknownTable(
     table.rlsEnabled === true &&
     table.rlsForced === true &&
     table.rlsActive === true &&
-    (table.policyCount ?? 0) >= 1
+    (table.policyCount ?? 0) >= 1 &&
+    // Queries through a parent use the parent's ACL/RLS, not the child's.
+    // Conservatively require a standalone relation, including across schemas.
+    table.hasInheritance === false
   );
 }
 
@@ -2745,12 +2752,18 @@ function unknownRoutineViolations(
   if (routine.owner === runtimeRole) {
     violations.push(`runtime role owns unknown routine ${schema}.${routine.name}`);
   }
-  // SECURITY INVOKER cannot elevate the runtime's identity. An uncallable
-  // definer is inert for this role. A callable unknown definer is NOT proven
+  // SECURITY INVOKER cannot elevate the runtime's identity. Revoked EXECUTE
+  // alone does not make a definer inert: triggers do not check EXECUTE when
+  // firing. Reject trigger/event-trigger return types and pg_trigger bindings,
+  // including absent metadata, even if both runtime and PUBLIC ACLs are revoked.
+  // A callable unknown definer is NOT proven
   // safe by FORCE RLS, a trusted owner or a fixed search_path: its body could
   // disable owner RLS or expose a capability. Require a prior explicit binary
   // contract for it. Treat missing PUBLIC metadata as unknown, not revoked.
-  if (routine.securityDefiner && (routine.execute || routine.publicExecute !== false)) {
+  if (
+    routine.securityDefiner &&
+    (routine.execute || routine.publicExecute !== false || routine.triggerCallable !== false)
+  ) {
     violations.push(`unknown routine ${schema}.${routine.name} exposes SECURITY DEFINER execution`);
   }
   return violations;
@@ -2810,6 +2823,8 @@ export type RuntimeTablePosture = {
   trigger: boolean;
   /** Effective column ACLs, kept separate so they cannot satisfy table grants. */
   columnPrivileges?: string[];
+  extraPrivileges?: string[];
+  hasInheritance?: boolean | undefined;
 };
 
 export type RuntimeRoutinePosture = {
@@ -2818,6 +2833,7 @@ export type RuntimeRoutinePosture = {
   execute: boolean;
   publicExecute?: boolean;
   securityDefiner: boolean;
+  triggerCallable?: boolean | undefined;
   configuration?: string[] | null;
 };
 
@@ -2841,6 +2857,8 @@ export type RuntimePrivateTablePosture = {
   trigger?: boolean;
   /** Effective relation ACL privileges not represented by the named flags. */
   extraPrivileges?: string[];
+  columnPrivileges?: string[];
+  hasInheritance?: boolean | undefined;
 };
 
 export type RuntimeDatabasePosture = {
@@ -3166,6 +3184,8 @@ export async function inspectRuntimeDatabasePosture(
         can_references: boolean;
         can_trigger: boolean;
         column_privileges: string[];
+        extra_privileges: string[];
+        has_inheritance: boolean;
       }>(
         await tx.execute(sql`
           select
@@ -3192,6 +3212,13 @@ export async function inspectRuntimeDatabasePosture(
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
             has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+            exists(select 1 from pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid) as has_inheritance,
+            ARRAY(
+              SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+              WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
+                AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
+              ORDER BY acl.privilege_type
+            ) AS extra_privileges,
             ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
               WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
           from pg_class c
@@ -3217,6 +3244,8 @@ export async function inspectRuntimeDatabasePosture(
         references: row.can_references,
         trigger: row.can_trigger,
         columnPrivileges: row.column_privileges,
+        extraPrivileges: row.extra_privileges,
+        hasInheritance: row.has_inheritance,
       }));
 
       const privateTables = resultRows<{
@@ -3234,6 +3263,8 @@ export async function inspectRuntimeDatabasePosture(
         can_references: boolean;
         can_trigger: boolean;
         extra_privileges: string[];
+        column_privileges: string[];
+        has_inheritance: boolean;
       }>(
         await tx.execute(sql`
           select
@@ -3243,19 +3274,16 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            -- Column-only grants on capability tables are also unsafe; a pin
-            -- table must remain EXECUTE-only even after column ACL drift.
-            (has_table_privilege(current_user, c.oid, 'SELECT') or
-              has_any_column_privilege(current_user, c.oid, 'SELECT')) as can_select,
-            (has_table_privilege(current_user, c.oid, 'INSERT') or
-              has_any_column_privilege(current_user, c.oid, 'INSERT')) as can_insert,
-            (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              has_any_column_privilege(current_user, c.oid, 'UPDATE')) as can_update,
+            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
+            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
+            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
-            (has_table_privilege(current_user, c.oid, 'REFERENCES') or
-              has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
+            has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
             has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+            exists(select 1 from pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid) as has_inheritance,
+            ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
+              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges,
             ARRAY(
               SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
               WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
@@ -3282,6 +3310,8 @@ export async function inspectRuntimeDatabasePosture(
         references: row.can_references,
         trigger: row.can_trigger,
         ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
+        columnPrivileges: row.column_privileges,
+        hasInheritance: row.has_inheritance,
       }));
 
       const targetRoutines = resultRows<{
@@ -3290,6 +3320,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        trigger_callable: boolean;
         configuration: string[] | null;
       }>(
         await tx.execute(sql`
@@ -3303,6 +3334,8 @@ export async function inspectRuntimeDatabasePosture(
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
             p.prosecdef as security_definer,
+            (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
+              or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -3317,6 +3350,7 @@ export async function inspectRuntimeDatabasePosture(
           execute: row.can_execute,
           publicExecute: row.public_execute,
           securityDefiner: row.security_definer,
+          triggerCallable: row.trigger_callable,
           configuration: row.configuration,
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
@@ -3327,6 +3361,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        trigger_callable: boolean;
         configuration: string[] | null;
       }>(
         await tx.execute(sql`
@@ -3340,6 +3375,8 @@ export async function inspectRuntimeDatabasePosture(
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
             p.prosecdef as security_definer,
+            (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
+              or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -3353,6 +3390,7 @@ export async function inspectRuntimeDatabasePosture(
         execute: row.can_execute,
         publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
+        triggerCallable: row.trigger_callable,
         configuration: row.configuration,
       }));
 
@@ -3581,7 +3619,20 @@ export function evaluateRuntimeDatabasePosture(
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
   for (const table of posture.privateTables) {
-    if (DECLARED_PRIVATE_TABLES.has(table.name)) continue;
+    if (DECLARED_PRIVATE_TABLES.has(table.name)) {
+      // Keep table-level flags exact for required-grant checks below. Column
+      // grants may add forbidden access but cannot satisfy a table contract.
+      const tableGrants = new Set([
+        ...(table.select ? ["SELECT"] : []),
+        ...(table.insert ? ["INSERT"] : []),
+        ...(table.update ? ["UPDATE"] : []),
+        ...(table.references ? ["REFERENCES"] : []),
+      ]);
+      if (table.columnPrivileges?.some((privilege) => !tableGrants.has(privilege))) {
+        violations.push(`private table ${table.name} has excess column privileges`);
+      }
+      continue;
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns private table ${table.name}`);
     }
@@ -3593,8 +3644,14 @@ export function evaluateRuntimeDatabasePosture(
         table.truncate ||
         table.references ||
         table.trigger ||
-        table.extraPrivileges?.length) &&
-      !securelyShapedUnknownTable(table, expectedRole)
+        table.extraPrivileges?.length ||
+        table.columnPrivileges?.length) &&
+      (!securelyShapedUnknownTable(table, expectedRole) ||
+        table.truncate ||
+        table.references ||
+        table.trigger ||
+        table.extraPrivileges?.length ||
+        table.columnPrivileges?.includes("REFERENCES"))
     ) {
       violations.push(`unknown private table ${table.name} has unsafe runtime privileges`);
     }
@@ -3798,7 +3855,8 @@ export function evaluateRuntimeDatabasePosture(
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
     if (toleratedUnknownTables.has(table.name)) {
-      for (const [privilege] of privileges) toleratedPrivileges.add(privilege);
+      // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
@@ -3811,13 +3869,14 @@ export function evaluateRuntimeDatabasePosture(
         `table ${table.name} lacks required runtime privileges: ${missingPrivileges.join(", ")}`,
       );
     }
-    const excessPrivileges = privileges
+    const excessPrivileges: string[] = privileges
       .filter(
         ([privilege, granted]) =>
           !toleratedPrivileges.has(privilege) &&
           (granted || table.columnPrivileges?.includes(privilege)),
       )
       .map(([privilege]) => privilege);
+    excessPrivileges.push(...(table.extraPrivileges ?? []));
     if (excessPrivileges.length > 0) {
       violations.push(
         `table ${table.name} grants excess runtime privileges: ${excessPrivileges.join(", ")}`,
