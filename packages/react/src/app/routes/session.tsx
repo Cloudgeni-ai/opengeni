@@ -131,7 +131,7 @@ import {
 import { toast } from "../lib/toast";
 
 import { isApiErrorStatus, useAppApi } from "../lib/app-api";
-import { userErrorText } from "../../ui/api-error";
+import { apiErrorFacts, userErrorText } from "../../ui/api-error";
 import { ConsoleComposer } from "../components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "../lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "../components/workspace-composer-plus";
@@ -3405,7 +3405,7 @@ function SessionChatPane(props: {
   // The plain refusal text shows while the notice chunk loads or if it fails.
   const creditRefusalFallback = sessionCreditRefusal ? (
     <p role="alert" className="px-1.5 text-sm text-fg-muted">
-      {sessionCreditRefusal.message}
+      {apiErrorFacts(sessionCreditRefusal.message).serverMessage ?? sessionCreditRefusal.message}
     </p>
   ) : null;
   const creditRefusalNotice = sessionCreditRefusal ? (

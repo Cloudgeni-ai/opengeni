@@ -119,3 +119,14 @@ test("people who cannot buy credits are not offered a purchase", async () => {
   expect(container.querySelectorAll("a")).toHaveLength(0);
   expect(container.textContent).toContain(SERVER_MESSAGE);
 });
+
+test("the refusal shows the server's sentence, not the SDK's status prefix or reference", async () => {
+  // OpenGeniApiError.message for a 402 from the API, as the routes pass it.
+  const container = await render({
+    message: `API 402: ${SERVER_MESSAGE} Reference: 9f1c2b7e-4d1a-4c55-9a0e-3b8f2d6c1a47.`,
+  });
+  const alert = container.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain(SERVER_MESSAGE);
+  expect(alert.textContent).not.toContain("API 402");
+  expect(alert.textContent).not.toContain("Reference");
+});
