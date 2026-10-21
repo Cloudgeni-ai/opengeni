@@ -60,20 +60,23 @@ their static menu.
 
 ## The key set
 
+Mac keys are written in Apple's order (⌃⌥⇧⌘). Punctuation keys also match the
+character typed, so ⌘/ works on layouts where "/" needs Shift.
+
 | Action | Mac | Windows and Linux | Notes |
 | --- | --- | --- | --- |
 | Command menu | ⌘K | Ctrl+K | Chats and actions in one list |
-| New chat | ⌘⇧O, and ⌘N on desktop | Ctrl+Shift+O, Ctrl+N on desktop | Browsers reserve ⌘N |
-| Copy chat link | ⌘⇧, | Ctrl+Shift+, | Linear's key for copying an issue URL |
-| Pin or unpin chat | ⌘⌥P | Ctrl+Alt+P | Clear of the common browser shortcuts |
-| Inbox | ⌘⇧I | Ctrl+Shift+I on desktop only | Browsers on Windows and Linux use Ctrl+Shift+I for developer tools |
+| New chat | ⌘N on desktop, ⇧⌘O everywhere | Ctrl+N on desktop, Ctrl+Shift+O everywhere | Browsers reserve ⌘N |
+| Copy chat link | ⇧⌘, | Ctrl+Shift+, | Linear's key for copying an issue URL |
+| Pin or unpin chat | ⌥⌘P | Ctrl+Alt+P | Clear of the common browser shortcuts |
+| Inbox | ⇧⌘I | Ctrl+Shift+I on desktop only | Browsers on Windows and Linux use Ctrl+Shift+I for developer tools |
 | Previous or next chat | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | Sidebar order, like Slack |
 | Pinned chat 1 to 9 | ⌘1 to ⌘9 on desktop | Ctrl+1 to 9 on desktop | Browsers use these for tabs |
 | Find in chat | ⌘F | Ctrl+F | Exists today |
 | Toggle sidebar | ⌃⌘S | Ctrl+Shift+S | Exists on desktop, added on web |
 | Shortcut cheat sheet | ⌘/ | Ctrl+/ | Slack's key |
 
-Desktop keeps ⌘⌥1 to 9 for switching accounts and ⌘[ / ⌘] for back and forward.
+Desktop keeps ⌥⌘1 to 9 for switching accounts and ⌘[ / ⌘] for back and forward.
 
 **Control+Tab** is open. Browsers keep Control+Tab for switching tabs, so on the
 web it can never reach the page. On desktop the recommendation is a recent-chats
@@ -85,17 +88,21 @@ switcher and VS Code. The alternative is to make it a second key for next chat.
 
 Opening it is instant: no request is made before it appears.
 
-- **Empty query:** recent chats you opened (most recent first), then pinned
-  chats, then a short list of common actions (new chat, inbox, copy link, pin)
-  with their keys.
+- **Empty query:** recent chats you opened (most recent first, topped up from
+  the top of the sidebar), then actions for the chat you are in (copy link,
+  pin, rename, mark unread, archive) with their keys, then general actions
+  (new chat, find, inbox, search messages, sidebar, shortcuts).
 - **Typing:** results update on every keystroke from chats already loaded in
   the sidebar and recent list, ranked by how well the title matches. The server
   title search runs alongside and merges in chats the sidebar has not loaded.
   Actions that match appear in their own group with their keys.
 - **Ranking:** whole-title prefix, then a word in the title starting with the
   query, then substring, then all query words found in any order, then letters
-  in order (so "kbsh" finds "Keyboard shortcuts"). Ties go to the chat updated
-  most recently. Archived chats are included last and marked.
+  in order, read as an abbreviation that starts words (so "kbsh" finds
+  "Keyboard shortcuts"). Those letter guesses only show when nothing matches
+  properly, so "pin" lists the pin action and not every title with p, i and n
+  in it. Ties go to the chat updated most recently. Archived chats are
+  included last and marked.
 - **Message text:** the last row is always "Search messages for “…”", which
   opens the existing full-history search with the query filled in. Full-history
   message search stays where it is; it is no longer on the path for finding a

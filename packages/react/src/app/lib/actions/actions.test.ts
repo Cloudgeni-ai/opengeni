@@ -8,15 +8,22 @@ import {
   matchesChord,
   type Chord,
 } from "./chords";
-import { rankLabel, rankWithKeywords } from "./rank";
+import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
 import { APP_ACTIONS } from "./registry";
 
 function key(
   code: string,
-  modifiers: Partial<{ meta: boolean; ctrl: boolean; shift: boolean; alt: boolean }> = {},
+  modifiers: Partial<{
+    meta: boolean;
+    ctrl: boolean;
+    shift: boolean;
+    alt: boolean;
+    key: string;
+  }> = {},
 ) {
   return {
     code,
+    key: modifiers.key ?? "",
     metaKey: Boolean(modifiers.meta),
     ctrlKey: Boolean(modifiers.ctrl),
     shiftKey: Boolean(modifiers.shift),
@@ -39,6 +46,28 @@ describe("chords", () => {
       false,
     );
     expect(matchesChord(key("KeyO", { meta: true }), newChat, "mac")).toBe(false);
+  });
+
+  test("punctuation matches the typed character on other layouts", () => {
+    const sheet: Chord = { code: "Slash", mod: true };
+    // US: the physical "/" key.
+    expect(matchesChord(key("Slash", { meta: true, key: "/" }), sheet, "mac")).toBe(true);
+    // Nordic: "/" is Shift+7.
+    expect(matchesChord(key("Digit7", { meta: true, shift: true, key: "/" }), sheet, "mac")).toBe(
+      true,
+    );
+    // Shift+7 that types something else is not the chord.
+    expect(matchesChord(key("Digit7", { meta: true, shift: true, key: "&" }), sheet, "mac")).toBe(
+      false,
+    );
+    // A chord that needs Shift only matches its physical key.
+    const copyLink: Chord = { code: "Comma", mod: true, shift: true };
+    expect(matchesChord(key("Comma", { meta: true, shift: true, key: "<" }), copyLink, "mac")).toBe(
+      true,
+    );
+    expect(matchesChord(key("KeyM", { meta: true, shift: true, key: "," }), copyLink, "mac")).toBe(
+      false,
+    );
   });
 
   test("held keys and input methods never fire", () => {
@@ -119,6 +148,17 @@ describe("ranking", () => {
     expect(rankLabel("A long title about many unrelated things", "zq")).toBeNull();
     expect(rankLabel("Keyboard shortcuts", "kbsh")).not.toBeNull();
     expect(rankLabel("Anything", "x")).toBeNull();
+    // Abbreviations start words; letters picked out of the middle of words don't.
+    expect(rankLabel("Refactor billing webhooks", "rbw")).not.toBeNull();
+    expect(rankLabel("Customer churn analysis", "rna")).toBeNull();
+  });
+
+  test("real matches outrank every letters-in-order guess", () => {
+    expect(rankLabel("Pin", "pin")!).toBeGreaterThanOrEqual(LOOSE_MATCH_BELOW);
+    expect(rankLabel("Fix the deploy script", "script fix")!).toBeGreaterThanOrEqual(
+      LOOSE_MATCH_BELOW,
+    );
+    expect(rankLabel("Postgres slow query investigation", "pin")!).toBeLessThan(LOOSE_MATCH_BELOW);
   });
 
   test("keywords find an action under another name, a little lower", () => {

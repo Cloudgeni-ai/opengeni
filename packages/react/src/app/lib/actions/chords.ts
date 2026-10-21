@@ -4,7 +4,8 @@
  * A chord always has ⌘ (Mac) or Ctrl (Windows and Linux) unless it is a
  * navigation chord with ⌥/Alt, so it never fights with typing. Chords match on
  * `KeyboardEvent.code`, which names the physical key, so they work on every
- * keyboard layout.
+ * keyboard layout. Punctuation also matches the character typed, because many
+ * layouts put it elsewhere: "/" is ⇧7 on Nordic and German keyboards.
  */
 
 export type ChordPlatform = "mac" | "other";
@@ -48,14 +49,20 @@ export function applicableChords(
 export function matchesChord(
   event: Pick<
     KeyboardEvent,
-    "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "repeat" | "isComposing"
+    "code" | "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "repeat" | "isComposing"
   >,
   chord: Chord,
   platform: ChordPlatform,
 ): boolean {
   if (event.repeat || event.isComposing) return false;
-  if (event.code !== chord.code) return false;
-  if (Boolean(chord.shift) !== event.shiftKey) return false;
+  if (event.code === chord.code) {
+    if (Boolean(chord.shift) !== event.shiftKey) return false;
+  } else {
+    // The character on another key: whatever Shift it took to type it is part
+    // of typing the character, so only a chord without Shift can match this way.
+    const character = PUNCTUATION[chord.code];
+    if (!character || chord.shift || event.key !== character) return false;
+  }
   if (Boolean(chord.alt) !== event.altKey) return false;
   if (platform === "mac") {
     if (Boolean(chord.mod) !== event.metaKey) return false;
@@ -66,6 +73,20 @@ export function matchesChord(
   }
   return true;
 }
+
+const PUNCTUATION: Record<string, string> = {
+  Comma: ",",
+  Period: ".",
+  Slash: "/",
+  Backslash: "\\",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Semicolon: ";",
+  Quote: "'",
+  Minus: "-",
+  Equal: "=",
+  Backquote: "`",
+};
 
 const KEY_NAMES: Record<string, { mac: string; other: string; accelerator: string }> = {
   Comma: { mac: ",", other: ",", accelerator: "," },

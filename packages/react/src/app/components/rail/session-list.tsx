@@ -4446,6 +4446,16 @@ function SessionRow(props: {
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
+  // A key press puts the person's attention elsewhere (⌘K right after opening a
+  // chat, with the pointer still on its row), so the hover card gives way, as
+  // tooltips do.
+  const [hoverOpen, setHoverOpen] = useState(false);
+  useEffect(() => {
+    if (!hoverOpen || typeof document === "undefined") return;
+    const close = () => setHoverOpen(false);
+    document.addEventListener("keydown", close, true);
+    return () => document.removeEventListener("keydown", close, true);
+  }, [hoverOpen]);
   // Who started a session only adds information where other people work too.
   const personalWorkspace = isPersonalWorkspace(
     context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
@@ -4563,7 +4573,7 @@ function SessionRow(props: {
         <div className={rowClassName}>
           {lead}
           <SiteOriginLink session={props.session} compact />
-          <HoverCard openDelay={100} closeDelay={80}>
+          <HoverCard openDelay={100} closeDelay={80} open={hoverOpen} onOpenChange={setHoverOpen}>
             <HoverCardTrigger asChild>
               <Link
                 to="/workspaces/$workspaceId/sessions/$sessionId"

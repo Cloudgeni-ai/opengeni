@@ -29,7 +29,7 @@ const SHEET_TITLES: Record<string, string> = {
   "go.inbox": "Go to inbox",
   "go.previousChat": "Previous chat",
   "go.nextChat": "Next chat",
-  "go.pinnedChat": "Open pinned chat 1 to 9",
+  "go.pinnedChat": "Pinned chats 1 to 9",
   "commandMenu.open": "Search chats and actions",
 };
 
@@ -74,23 +74,28 @@ export default function ShortcutSheet(props: {
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent
         data-og-shortcut-sheet=""
-        className="gap-0 p-0 sm:max-w-[560px] sm:p-0"
+        className="gap-0 p-0 sm:max-w-[720px] sm:p-0"
         aria-describedby="shortcut-sheet-description"
+        // Focus the sheet itself: a ring on the close button reads as a selection.
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (event.currentTarget as HTMLElement | null)?.focus();
+        }}
       >
         <div className="px-6 pt-6 pb-2 max-sm:px-5 max-sm:pt-5">
           <DialogTitle className="text-base">Keyboard shortcuts</DialogTitle>
           <DialogDescription id="shortcut-sheet-description" className="mt-1 text-sm text-fg-muted">
-            Everything here, and more, is also in the command menu
             {menuChord ? (
               <>
-                {" "}
-                <Keycaps chord={menuChord} platform={platform} className="align-[-4px]" />
+                Press <Keycaps chord={menuChord} platform={platform} className="align-[-4px]" />{" "}
+                anywhere to find a chat or run any action.
               </>
-            ) : null}
-            .
+            ) : (
+              "Every action is also in the command menu."
+            )}
           </DialogDescription>
         </div>
-        <div className="grid gap-x-8 px-6 pb-6 max-sm:px-5 sm:grid-cols-2">
+        <div className="grid gap-x-10 px-6 pb-6 max-sm:px-5 sm:grid-cols-2">
           {GROUPS.map(({ group, label }) => {
             const groupRows = rows.filter((row) => row.action.group === group);
             if (groupRows.length === 0) return null;
@@ -101,24 +106,24 @@ export default function ShortcutSheet(props: {
                   {groupRows.map((row) => (
                     <div
                       key={row.action.id}
-                      className="flex min-h-8 items-center gap-3 border-b border-border/60 py-1 last:border-b-0"
+                      className="flex min-h-9 items-center gap-3 border-b border-border/60 py-1 last:border-b-0"
                     >
-                      <dt className="min-w-0 flex-1 text-sm text-fg-label">
-                        {row.title}
+                      <dt className="flex min-w-0 flex-1 items-center gap-2 text-sm text-fg-label">
+                        <span className="truncate">{row.title}</span>
                         {row.desktopOnly ? (
-                          <span className="ml-1.5 text-xs text-fg-muted">Desktop app</span>
+                          <span className="shrink-0 rounded-full bg-hover px-1.5 py-px text-[11px] leading-4 whitespace-nowrap text-fg-muted">
+                            Desktop app
+                          </span>
                         ) : null}
                       </dt>
                       <dd className="flex shrink-0 items-center gap-1.5 text-xs text-fg-muted">
                         {row.summary ? (
-                          <span className="inline-flex items-center gap-1">
-                            <Keycaps chord={row.chords[0]!} platform={platform} />
-                            <span aria-hidden="true">–</span>
-                            <Keycaps
-                              chord={row.chords[row.chords.length - 1]!}
-                              platform={platform}
-                            />
-                          </span>
+                          <Keycaps
+                            chord={row.chords[0]!}
+                            platform={platform}
+                            keyLabel="1–9"
+                            ariaLabel={row.summary}
+                          />
                         ) : (
                           row.chords.map((chord, index) => (
                             <Fragment key={chordLabel(chord, platform)}>

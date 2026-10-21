@@ -5,10 +5,14 @@
  * whole label starts with the query, a word starts with it, it appears
  * anywhere, every query word appears in some order, and finally the query's
  * letters appear in order ("kbsh" → "Keyboard shortcuts"). Within a tier,
- * shorter labels and earlier positions win.
+ * shorter labels and earlier positions win. Letters-in-order matches rank below
+ * `LOOSE_MATCH_BELOW`, so a list can drop them once it has real matches.
  */
 
 const COMBINING_MARKS = /[\u0300-\u036f]/g;
+
+/** Ranks below this are letters-in-order guesses rather than real matches. */
+export const LOOSE_MATCH_BELOW = 400;
 
 /** Case- and accent-insensitive form used for matching. */
 export function foldForSearch(value: string): string {
@@ -31,14 +35,35 @@ function wordStarts(label: string): number[] {
 }
 
 function subsequenceScore(label: string, query: string): number | null {
-  // Letters in order; consecutive letters and letters at word starts are worth more.
-  const starts = new Set(wordStarts(label));
+  // Letters in order, read the way people abbreviate: the first letter starts a
+  // word, and moving on to a later word means landing on its first letter
+  // ("kbsh" → Keyboard shortcuts). Consecutive letters are worth more.
+  const startList = wordStarts(label);
+  const starts = new Set(startList);
+  const wordOf = (index: number) => {
+    let word = -1;
+    for (const start of startList) {
+      if (start > index) break;
+      word++;
+    }
+    return word;
+  };
   let position = 0;
   let score = 0;
   let previous = -2;
   for (const character of query) {
     if (character === " ") continue;
-    const found = label.indexOf(character, position);
+    let found = label.indexOf(character, position);
+    // Prefer the next letter inside the current word; otherwise only the start
+    // of a later word counts.
+    while (
+      found >= 0 &&
+      found !== previous + 1 &&
+      !starts.has(found) &&
+      (previous < 0 || wordOf(found) !== wordOf(previous))
+    ) {
+      found = label.indexOf(character, found + 1);
+    }
     if (found < 0) return null;
     score += found === previous + 1 ? 3 : starts.has(found) ? 2 : 0;
     previous = found;

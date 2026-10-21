@@ -39,7 +39,12 @@ import {
 } from "../../lib/actions/chat-directory";
 import { matchesChord, type Chord } from "../../lib/actions/chords";
 import { useAppActions } from "../../lib/actions/actions-provider";
-import { foldForSearch, rankLabel, rankWithKeywords } from "../../lib/actions/rank";
+import {
+  foldForSearch,
+  LOOSE_MATCH_BELOW,
+  rankLabel,
+  rankWithKeywords,
+} from "../../lib/actions/rank";
 import {
   APP_ACTIONS,
   actionIcon,
@@ -353,9 +358,11 @@ function CommandMenuDialog(props: {
     const trimmed = query.trim();
     if (!trimmed) {
       const result: Group[] = [];
-      const recentIds = (
-        directory.recent.length > 0 ? directory.recent : directory.sidebarOrder
-      ).filter((id) => id !== current?.id);
+      // Chats opened recently come first; the top of the sidebar fills the
+      // rest, so a fresh window still offers somewhere to go.
+      const recentIds = [...new Set([...directory.recent, ...directory.sidebarOrder])].filter(
+        (id) => id !== current?.id,
+      );
       const recent = recentIds
         .map((id) => directory.rows.get(id))
         .filter((record): record is ChatRecord =>
@@ -405,10 +412,11 @@ function CommandMenuDialog(props: {
     // Chats: everything the app knows, ranked by title, plus the server's matches.
     const recentIndex = new Map(directory.recent.map((id, index) => [id, index]));
     const serverIds = new Set(server.query === trimmed ? server.rows.map((row) => row.id) : []);
-    const scored: Array<{ record: ChatRecord; rank: number }> = [];
+    const scored: Array<{ record: ChatRecord; rank: number; loose: boolean }> = [];
     for (const record of directory.rows.values()) {
       if (!listable(record)) continue;
       let rank = rankLabel(record.title, trimmed);
+      const loose = rank !== null && rank < LOOSE_MATCH_BELOW;
       // The server matched every word in the title or first message.
       if (rank === null && serverIds.has(record.id)) rank = 50;
       if (rank === null) continue;
@@ -416,12 +424,10 @@ function CommandMenuDialog(props: {
       if (visited !== undefined) rank += Math.max(0, 20 - visited);
       if (record.pinned) rank += 5;
       if (record.archived) rank -= 300;
-      scored.push({ record, rank });
+      scored.push({ record, rank, loose });
     }
-    scored.sort((a, b) => b.rank - a.rank || b.record.updatedAt - a.record.updatedAt);
-    const chats = scored.slice(0, CHAT_RESULT_LIMIT);
 
-    const actionScores: Array<{ item: Item; rank: number }> = [];
+    const actionScores: Array<{ item: Item; rank: number; loose: boolean }> = [];
     for (const action of APP_ACTIONS) {
       if (action.inCommandMenu === false) continue;
       const target = action.forChat ? current : null;
@@ -429,10 +435,24 @@ function CommandMenuDialog(props: {
       if (!action.available(env, target)) continue;
       const rank = rankWithKeywords(actionTitle(action, env, target), action.keywords, trimmed);
       if (rank === null) continue;
-      actionScores.push({ rank, item: actionItem(action, target, "Actions", trimmed) });
+      actionScores.push({
+        rank,
+        loose: rank < LOOSE_MATCH_BELOW,
+        item: actionItem(action, target, "Actions", trimmed),
+      });
     }
-    actionScores.sort((a, b) => b.rank - a.rank);
-    const actionsFound = actionScores.slice(0, ACTION_RESULT_LIMIT);
+    // Letters-in-order guesses only help when nothing really matches; next to
+    // real matches they are noise ("pin" → "Postgres … investigation").
+    const hasRealMatch =
+      scored.some((entry) => !entry.loose) || actionScores.some((entry) => !entry.loose);
+    const chats = scored
+      .filter((entry) => !hasRealMatch || !entry.loose)
+      .sort((a, b) => b.rank - a.rank || b.record.updatedAt - a.record.updatedAt)
+      .slice(0, CHAT_RESULT_LIMIT);
+    const actionsFound = actionScores
+      .filter((entry) => !hasRealMatch || !entry.loose)
+      .sort((a, b) => b.rank - a.rank)
+      .slice(0, ACTION_RESULT_LIMIT);
 
     const result: Group[] = [];
     if (chats.length > 0) {
@@ -664,6 +684,8 @@ function CommandMenuDialog(props: {
               maxLength={200}
               placeholder={placeholder}
               onChange={(event) => setQuery(event.target.value)}
+              // The whole menu is the focus context; a ring on the field adds noise.
+              style={{ outline: "none" }}
               className="h-13 min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-hidden placeholder:text-fg-subtle"
             />
             {searching ? (

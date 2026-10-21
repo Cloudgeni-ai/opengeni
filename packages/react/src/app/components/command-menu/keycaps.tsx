@@ -8,13 +8,18 @@ import { cn } from "../../lib/utils";
 export function Keycaps(props: {
   chord: Chord;
   platform: ChordPlatform;
+  /** Shows this on the last cap instead of the chord's key, e.g. "1–9" for a range. */
+  keyLabel?: string | undefined;
+  /** What screen readers hear instead of the chord's own label. */
+  ariaLabel?: string | undefined;
   className?: string | undefined;
 }) {
   const keys = chordKeys(props.chord, props.platform);
+  if (props.keyLabel) keys[keys.length - 1] = props.keyLabel;
   return (
     <span
       className={cn("inline-flex shrink-0 items-center gap-0.5", props.className)}
-      aria-label={chordLabel(props.chord, props.platform)}
+      aria-label={props.ariaLabel ?? chordLabel(props.chord, props.platform)}
     >
       {keys.map((key) => (
         <kbd
