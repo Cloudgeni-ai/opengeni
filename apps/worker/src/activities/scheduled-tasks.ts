@@ -95,6 +95,7 @@ import {
   initializeSessionStartAtomically,
   materializeScheduledTaskReusableSessionFromRun,
   listInstalledApiIntegrationServerIdsForDelegations,
+  isWorkspaceAgentActivityPaused,
   markScheduledTaskRunFailedIfQueued,
   markScheduledTaskRunSkippedIfQueued,
   recordUsageEvent,
@@ -1527,6 +1528,25 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             task.runMode === "new_session_per_run" ||
             (task.runMode === "reusable_session" && !existingSessionId)
           ) {
+            // A workspace Pause holds every new chat, so a run skips rather than
+            // leave a chat waiting behind it. A run that already got its chat
+            // keeps it and is refused below like any other paused chat.
+            if (
+              !run.sessionId &&
+              (await isWorkspaceAgentActivityPaused(dispatchDb, task.workspaceId))
+            ) {
+              await markScheduledTaskRunSkippedIfQueued(dispatchDb, {
+                workspaceId: task.workspaceId,
+                runId: run.id,
+                sessionId: null,
+                error: "scheduled_workspace_paused",
+              });
+              return {
+                kind: "blocked" as const,
+                result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
+                run: { ...run, status: "skipped" as const, error: "scheduled_workspace_paused" },
+              };
+            }
             // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
             // an attached variableSet must still exist here; fail closed if not.
             const variableSet = acceptedVariableSet;
@@ -1953,6 +1973,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               },
               {
                 requireIdleSession: task.overlapPolicy === "skip" && !sessionCreated,
+                // A Pause refuses every overlap policy: queued behind it the
+                // occurrence could neither run nor settle. A chat created for
+                // this run was checked above and is never left empty.
+                refusePaused: !sessionCreated,
                 ...(incidentPreflightRequired
                   ? {
                       prepareSource: async (tx, sessionId) =>
@@ -1972,7 +1996,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (
               scheduledUpdate.reason === "session_cancelled" ||
               scheduledUpdate.reason === "session_not_idle" ||
-              scheduledUpdate.reason === "session_paused"
+              scheduledUpdate.reason === "session_paused" ||
+              scheduledUpdate.reason === "workspace_paused"
             ) {
               const error = scheduledSessionRejectionError(scheduledUpdate.reason);
               return {
@@ -2088,6 +2113,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               },
               {
                 requireIdleSession: task.overlapPolicy === "skip",
+                refusePaused: true,
                 prepareSource: async (tx, sessionId) => {
                   const goalEvents =
                     task.runMode === "reusable_session" && goalSpec && run.status === "queued"
@@ -2125,7 +2151,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (
               bundled.reason === "session_cancelled" ||
               bundled.reason === "session_not_idle" ||
-              bundled.reason === "session_paused"
+              bundled.reason === "session_paused" ||
+              bundled.reason === "workspace_paused"
             ) {
               const error = scheduledSessionRejectionError(bundled.reason);
               return {
@@ -2412,9 +2439,19 @@ function scheduledRunTerminalResult(
 }
 
 function scheduledSessionRejectionError(
-  rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
-): "session_cancelled" | "scheduled_session_not_idle" | "scheduled_session_paused" {
+  rejectionReason:
+    | "session_cancelled"
+    | "session_not_idle"
+    | "session_paused"
+    | "workspace_paused"
+    | null,
+):
+  | "session_cancelled"
+  | "scheduled_session_not_idle"
+  | "scheduled_session_paused"
+  | "scheduled_workspace_paused" {
   if (rejectionReason === "session_paused") return "scheduled_session_paused";
+  if (rejectionReason === "workspace_paused") return "scheduled_workspace_paused";
   return rejectionReason === "session_not_idle"
     ? "scheduled_session_not_idle"
     : "session_cancelled";
@@ -3156,6 +3193,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     },
     {
       requireIdleSession: task.overlapPolicy === "skip" && !generatedSession,
+      refusePaused: !generatedSession,
       prepareSource: async (tx, sessionId) => {
         const goal = task.agentConfig.goal;
         const goalEvents =
@@ -3192,7 +3230,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
   if (
     scheduledUpdate.reason === "session_cancelled" ||
     scheduledUpdate.reason === "session_not_idle" ||
-    scheduledUpdate.reason === "session_paused"
+    scheduledUpdate.reason === "session_paused" ||
+    scheduledUpdate.reason === "workspace_paused"
   ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
   }

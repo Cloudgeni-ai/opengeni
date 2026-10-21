@@ -253,6 +253,7 @@ async function acceptanceFixture(
       if (options.runMode === "existing_session") throw stopAfterCapture;
       return runRow;
     }),
+    spyOn(db, "isWorkspaceAgentActivityPaused").mockResolvedValue(false),
     spyOn(db, "createSessionWithIdempotencyKeyResult").mockImplementation(async (_db, input) => {
       createdMetadata = input.metadata ?? {};
       throw stopAfterCapture;

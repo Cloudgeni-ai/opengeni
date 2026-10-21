@@ -20499,7 +20499,8 @@ export async function markScheduledTaskRunSkippedIfQueued(
   input: {
     workspaceId: string;
     runId: string;
-    sessionId: string;
+    /** Null when the run was skipped before it got a chat. */
+    sessionId: string | null;
     error: string;
   },
 ): Promise<void> {
@@ -20513,6 +20514,23 @@ export async function markScheduledTaskRunSkippedIfQueued(
       'skipped'::text,
       ${input.error}::text
     )`);
+  });
+}
+
+/**
+ * Whether a workspace Pause holds every new chat in the workspace. A chat
+ * created now could not run, so scheduled work checks this before creating one.
+ */
+export async function isWorkspaceAgentActivityPaused(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ state: schema.workspaceInferenceControls.workspaceState })
+      .from(schema.workspaceInferenceControls)
+      .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId));
+    return row?.state === "paused";
   });
 }
 
@@ -84317,7 +84335,10 @@ export type AddSessionSystemUpdateInput = {
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
   | (RequireIdleSession extends true
-      ? { added: false; reason: "session_not_idle" } | { added: false; reason: "session_paused" }
+      ?
+          | { added: false; reason: "session_not_idle" }
+          | { added: false; reason: "session_paused" }
+          | { added: false; reason: "workspace_paused" }
       : never)
   | {
       added: boolean;
@@ -84360,7 +84381,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
-    rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
+    rejectionReason:
+      | "session_cancelled"
+      | "session_not_idle"
+      | "session_paused"
+      | "workspace_paused"
+      | null,
   ) => Promise<void>,
   options: {
     /**
@@ -84368,6 +84394,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
      * idle, or failed (its last turn ended and it accepts new turns).
      */
     requireIdleSession?: RequireIdleSession;
+    /**
+     * Refuse while a Pause holds the session, whatever its other work:
+     * `session_paused` for a Pause of this session or an ancestor,
+     * `workspace_paused` for a workspace Pause alone. Input queued behind a
+     * Pause could neither run nor settle until someone resumes.
+     */
+    refusePaused?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
       tx: Database,
@@ -84463,18 +84496,26 @@ export async function addSessionSystemUpdateWithSourceMutation<
             input.workspaceId,
             input.sessionId,
           ));
+        const sessionPaused = effectiveControl.blockers.some(
+          (blocker) => blocker.kind === "session",
+        );
         if (
-          options.requireIdleSession &&
-          ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
-            session.activeTurnId !== null ||
-            effectiveControl.state !== "active")
+          (options.refusePaused && effectiveControl.state !== "active") ||
+          (options.requireIdleSession &&
+            ((session.status !== "idle" && session.status !== "failed" && !emptyQueuedProjection) ||
+              session.activeTurnId !== null ||
+              effectiveControl.state !== "active"))
         ) {
           const replayed = await replayExistingUpdate([]);
           if (replayed) {
             return replayed;
           }
           const reason =
-            effectiveControl.state !== "active" ? "session_paused" : "session_not_idle";
+            effectiveControl.state === "active"
+              ? "session_not_idle"
+              : sessionPaused
+                ? "session_paused"
+                : "workspace_paused";
           await mutateSource(tx as unknown as Database, null, null, reason);
           return { added: false, reason } as const;
         }

@@ -1458,12 +1458,17 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
-Skip-overlap admission distinguishes effective Pause (`session_paused`) from
-busy work (`session_not_idle`) under the same session lock. The scheduler records
-`scheduled_session_paused` on the skipped occurrence, and its detail page and
-run badge explain that the chat must be resumed for future runs. This describes
-the recorded skip, not a live assertion that the chat is still paused. Opening
-the chat does not resume it, and skipped occurrences are never replayed.
+Scheduled admission refuses an effectively paused session under every overlap
+policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
+could neither run nor settle. Under the same session lock it distinguishes a
+Pause of the chat or an ancestor (`session_paused`), a workspace Pause alone
+(`workspace_paused`) and, for skip, busy work (`session_not_idle`). The
+scheduler records `scheduled_session_paused` or `scheduled_workspace_paused` on
+the skipped occurrence, and its detail page and run badge explain what must be
+resumed. This describes the recorded skip, not a live assertion that the chat
+is still paused. Opening the chat does not resume it, and skipped occurrences
+are never replayed. A chat the run just created is never refused (it would be
+left empty); a new-chat run checks the workspace Pause before creating it.
 
 An explicit account pin whose allocator is disabled is classified as
 `pinned_account_disabled`, not temporary quota exhaustion. It remains a durable

@@ -1,5 +1,6 @@
 import {
   NOTIFICATION_SUBTITLE_MAX_CHARS,
+  ScheduledTaskScheduleSpec,
   SessionNotificationPostedPayload,
   SessionNotificationWithdrawnPayload,
 } from "@opengeni/contracts";
@@ -24,15 +25,20 @@ import type { Observability } from "@opengeni/observability";
  *   chat is paused or gone, a pinned account or other resource it needs is
  *   unavailable, or it was refused as non-retryable), the schedule pauses
  *   itself with that reason and its owner is told once.
- * - When runs keep failing or being skipped for a reason that may clear by
- *   itself, the owner is told once, after {@link SCHEDULED_TASK_BLOCKER_STREAK}
- *   in a row; the schedule keeps running. A single skip or failure is normal.
+ * - When a run fails or is skipped for a reason that may clear by itself, the
+ *   owner is told once and the schedule keeps running. Only a schedule that
+ *   runs at least hourly waits for {@link SCHEDULED_TASK_BLOCKER_STREAK} such
+ *   runs in a row, so one busy or flaky moment stays quiet; a daily, weekly or
+ *   one-time schedule, and a schedule's last run, tell the owner at once.
  *
  * The notice is withdrawn when a later run succeeds or a person resumes,
  * pauses or deletes the schedule. Only scheduled (not manual) runs count, and
  * only runs since the schedule was last edited or resumed.
  */
 export const SCHEDULED_TASK_BLOCKER_STREAK = 3;
+
+/** Schedules running at least this often tolerate a short streak before telling. */
+export const SCHEDULED_TASK_FREQUENT_INTERVAL_SECONDS = 3_600;
 
 const SETTLED = new Set(["succeeded", "failed", "skipped"]);
 
@@ -57,6 +63,32 @@ const RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
   monthly_agent_run_limit: "the monthly run limit was reached",
   session_usage_limit: "the schedule reached its usage limit",
 };
+
+/**
+ * How many failed or skipped runs in a row the owner can afford to wait for
+ * after `run`, and whether a later run is due at all. Unknown or unparseable
+ * specs tell at once.
+ */
+export function scheduledTaskBlockerCadence(
+  schedule: unknown,
+  run: Pick<ScheduledTaskBlockerRun, "createdAt">,
+): { streak: number; laterRuns: boolean } {
+  const parsed = ScheduledTaskScheduleSpec.safeParse(schedule);
+  if (!parsed.success) return { streak: 1, laterRuns: true };
+  const spec = parsed.data;
+  if (spec.type === "once") return { streak: 1, laterRuns: false };
+  if (spec.type !== "interval") return { streak: 1, laterRuns: true };
+  const laterRuns =
+    spec.endAt === undefined ||
+    run.createdAt.getTime() + spec.everySeconds * 1_000 <= Date.parse(spec.endAt);
+  return {
+    streak:
+      laterRuns && spec.everySeconds <= SCHEDULED_TASK_FREQUENT_INTERVAL_SECONDS
+        ? SCHEDULED_TASK_BLOCKER_STREAK
+        : 1,
+    laterRuns,
+  };
+}
 
 /** A blocker no later run can get past until a person acts, or null. */
 export function scheduledRunHardBlocker(
@@ -104,12 +136,22 @@ export function scheduledRunHardBlocker(
   }
 }
 
-function streakBlocker(streak: readonly ScheduledTaskBlockerRun[]): Blocker {
+function streakBlocker(streak: readonly ScheduledTaskBlockerRun[], laterRuns: boolean): Blocker {
   const count = streak.length;
+  const runs = count === 1 ? "The last scheduled run was" : `The last ${count} scheduled runs were`;
+  const keepsTrying = laterRuns ? "The schedule keeps trying." : "It has no more runs scheduled.";
   if (streak.every((run) => run.error === "scheduled_session_not_idle")) {
     return {
       reason: "scheduled_session_not_idle",
-      text: `The last ${count} scheduled runs were skipped because its chat was still busy with earlier work. Check whether that chat is stuck. The schedule keeps trying.`,
+      text: `${runs} skipped because its chat was still busy with earlier work. Check whether that chat is stuck. ${keepsTrying}`,
+    };
+  }
+  if (streak.every((run) => run.error === "scheduled_workspace_paused")) {
+    return {
+      reason: "scheduled_workspace_paused",
+      text: `${runs} skipped because the workspace's agent activity was paused. ${
+        laterRuns ? "Runs start again once the workspace is resumed." : keepsTrying
+      }`,
     };
   }
   const refusal = streak[0]?.admissionRefusal;
@@ -121,15 +163,19 @@ function streakBlocker(streak: readonly ScheduledTaskBlockerRun[]): Blocker {
   ) {
     return {
       reason: refusal.reason,
-      text: `The last ${count} scheduled runs were skipped because ${
+      text: `${runs} skipped because ${
         RETRYABLE_REFUSAL_TEXT[refusal.reason] ?? `they were refused (${refusal.reason})`
-      }. Runs start again once that clears.`,
+      }. ${laterRuns ? "Runs start again once that clears." : keepsTrying}`,
     };
   }
   const latest = streak[0]!;
   return {
     reason: latest.error ?? latest.status,
-    text: `The last ${count} scheduled runs failed or were skipped. Open the latest run to see why. The schedule keeps trying.`,
+    text: `${
+      count === 1
+        ? "The last scheduled run failed or was skipped."
+        : `The last ${count} scheduled runs failed or were skipped.`
+    } Open the latest run to see why. ${keepsTrying}`,
   };
 }
 
@@ -211,13 +257,14 @@ export function decideScheduledTaskBlocker(
     };
   }
   if (review?.state === "notified") return none(latest.id);
+  const cadence = scheduledTaskBlockerCadence(task.schedule, latest);
   const streak: ScheduledTaskBlockerRun[] = [];
   for (const run of runs) {
     if (!SETTLED.has(run.status) || run.status === "succeeded" || !current(run)) break;
     streak.push(run);
   }
-  if (streak.length < SCHEDULED_TASK_BLOCKER_STREAK) return none(latest.id);
-  const soft = streakBlocker(streak);
+  if (streak.length < cadence.streak) return none(latest.id);
+  const soft = streakBlocker(streak, cadence.laterRuns);
   const first = streak.at(-1)!;
   return {
     kind: "block",

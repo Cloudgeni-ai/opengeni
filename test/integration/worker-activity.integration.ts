@@ -4783,10 +4783,10 @@ describe("worker activities integration", () => {
     const skipped = (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
       (run) => run.status === "skipped",
     );
-    // The occurrence dispatched while the session was paused records that it
-    // was paused, not merely busy.
+    // The occurrence dispatched while the workspace was paused records that,
+    // not a busy or self-pausing chat.
     expect(skipped.filter((run) => run.error === "scheduled_session_not_idle")).toHaveLength(2);
-    expect(skipped.filter((run) => run.error === "scheduled_session_paused")).toHaveLength(1);
+    expect(skipped.filter((run) => run.error === "scheduled_workspace_paused")).toHaveLength(1);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
