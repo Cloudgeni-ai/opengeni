@@ -577,7 +577,7 @@ export class CuaComputerBackend implements ComputerBackend {
     const offScreen = () =>
       new ComputerBackendError(
         "unsupported",
-        "This window is not on screen (it is minimized, hidden, or on another Space or display), so it can be neither captured nor read. Observe a window that is on screen instead.",
+        "This window is not on screen (it is on another Space, such as a full-screen app, or otherwise not shown), so it can be neither captured nor read. Observe a window that is on screen instead.",
         false,
         false,
       );
