@@ -56,7 +56,7 @@ describe("composer connector account controls (local fixture)", () => {
     });
     let moduleRequests = 0;
     await page.route(
-      /\/src\/components\/session-connectors-menu-body\.tsx(?:\?|$)/,
+      /\/packages\/react\/src\/app\/components\/session-connectors-menu-body\.tsx(?:\?|$)/,
       async (route) => {
         moduleRequests++;
         await moduleReady;
