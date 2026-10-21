@@ -1350,7 +1350,9 @@ fn deminiaturize(process_id: u32, window: &AxElement) -> Result<(), MacFfiError>
     set_bool_attribute(window, kAXMinimizedAttribute, false)?;
     let settle_by = Instant::now() + DEMINIATURIZE_SETTLE;
     while watching && Instant::now() < settle_by {
-        let _ = CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(20), true);
+        let _ = unsafe {
+            CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(20), true)
+        };
         while let Ok((element, notification)) = receiver.try_recv() {
             if notification == AX_WINDOW_DEMINIATURIZED_NOTIFICATION && element.0 == *window {
                 return Ok(());
