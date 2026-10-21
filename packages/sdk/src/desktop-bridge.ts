@@ -30,7 +30,26 @@ export type DesktopCapability =
   /** Menu bar and keyboard commands for the web app to carry out. */
   | "commands"
   /** A shortcut sends the window the person is looking at into the composer. */
-  | "appShots";
+  | "appShots"
+  /** The web app lists its actions and keys; the shell builds the menu bar from them. */
+  | "menuActions";
+
+/** Which menu bar section shows an action. */
+export type DesktopMenuSection = "file" | "view" | "go" | "chat" | "help";
+
+/** One web app action as the desktop menu bar shows it. */
+export interface DesktopMenuAction {
+  /** Sent back through `menuActions.onAction` when the item or its key is used. */
+  id: string;
+  label: string;
+  section: DesktopMenuSection;
+  /**
+   * The key the item shows and owns, in Electron accelerator syntax
+   * ("CmdOrCtrl+Shift+O"). Other keys for the same action stay with the page.
+   */
+  accelerator: string | null;
+  enabled: boolean;
+}
 
 /**
  * What the app's menus and shortcuts ask the web app to do. A page that does
@@ -193,6 +212,13 @@ export interface DesktopBridge {
     /** Carry out menu and shortcut commands; only the newest listener receives them. */
     onCommand(listener: (command: DesktopCommand) => void): Unsubscribe;
   };
+  /** The menu bar's web app actions. With the `menuActions` capability. */
+  readonly menuActions?: {
+    /** Replace the actions the menu bar shows. The shell keeps its own items (accounts, zoom, quit). */
+    set(actions: DesktopMenuAction[]): void;
+    /** Carry out an action chosen from the menu or by its key; only the newest listener receives them. */
+    onAction(listener: (id: string) => void): Unsubscribe;
+  };
   /** Follow the web app's appearance, so window materials and controls match it. */
   setAppearance(appearance: "light" | "dark" | "system"): void;
   /** App-shots. With the `appShots` capability. */
@@ -248,6 +274,8 @@ export const DESKTOP_IPC = {
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
   command: "og:command",
+  menuActionsSet: "og:menu-actions:set",
+  menuAction: "og:menu-action",
   appearanceSet: "og:appearance:set",
   appShotsStatus: "og:app-shots:status",
   appShotsUpdate: "og:app-shots:update",

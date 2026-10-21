@@ -20,6 +20,7 @@ import { AppContext, useAppContext } from "../app-context";
 import { createSlackLinkPrepareController, useAppState, type AppStateHost } from "../app-state";
 import { LoadingPanel, ProblemPanel } from "../components/common";
 import { RailProvider } from "../components/rail/rail-context";
+import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
 import { CreditRequiredGate } from "../components/credit-required-gate";
 import { Toaster } from "../components/toaster";
@@ -319,9 +320,11 @@ function SessionAppWorkspace({
         >
           <SecretsUiProvider value={webSecretsUi}>
             <RailProvider workspaceId={workspaceId}>
-              <SessionShell slots={slots}>
-                <SessionAppRoutes workspaceId={workspaceId} />
-              </SessionShell>
+              <ActionsProvider>
+                <SessionShell slots={slots}>
+                  <SessionAppRoutes workspaceId={workspaceId} />
+                </SessionShell>
+              </ActionsProvider>
             </RailProvider>
           </SecretsUiProvider>
         </OpenGeniProvider>

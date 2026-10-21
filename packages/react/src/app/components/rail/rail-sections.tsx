@@ -9,7 +9,7 @@ import { useRail } from "./rail-context";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
-import { NEW_SESSION_SHORTCUT, shortcutLabel } from "../../lib/keyboard-shortcuts";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { windowControlsInPage } from "../../lib/desktop";
@@ -139,13 +139,11 @@ export function PrimaryNav() {
   const { primaryNav } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
-  const newChatShortcut = useSessionUiFeature("newChatShortcut");
+  const newChatShortcut = useActionShortcut("chat.new");
   return (
     <div className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}>
       <NewSessionLink
-        aria-label={
-          newChatShortcut ? `New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}` : "New session"
-        }
+        aria-label={newChatShortcut ? `New session · ${newChatShortcut.label}` : "New session"}
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-hidden transition-colors pointer-coarse:h-10",
           "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",

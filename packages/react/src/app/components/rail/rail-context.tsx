@@ -18,8 +18,9 @@ import {
 
 import { useAppContext } from "../../app-context";
 import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
+import { requestCommandMenu } from "../../lib/actions/events";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
-import { OPEN_SESSION_SEARCH_EVENT, requestSessionSearch } from "../../lib/session-search-route";
+import { OPEN_SESSION_SEARCH_EVENT } from "../../lib/session-search-route";
 import { workspaceManagementLocation } from "../../lib/workspace-management-location";
 import { useUiEventTarget } from "../../lib/ui-events";
 
@@ -73,6 +74,12 @@ export type RailContextValue = {
   drawerTriggerRef: RefObject<HTMLButtonElement | null>;
   /** Retiring drawers must not take focus from an open search dialog. */
   restoreDrawerFocus: () => void;
+  /**
+   * Close the phone drawer for a dialog that takes over from it (search, the
+   * command menu). That dialog returns focus itself, so the retiring drawer
+   * must not reclaim it when its exit animation ends.
+   */
+  handOffDrawer: () => void;
   /** Navigate to a workspace's sessions index (used by the switchers). */
   openWorkspace: (workspaceId: string) => void;
   /** Switch organization: navigate to the first workspace in the target org. */
@@ -129,6 +136,8 @@ export function RailProvider({
   const appContext = useAppContext();
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchMounted, setSearchMounted] = useState(false);
+  // What to search for when the dialog opens from the ⌘K menu ("Search messages for …").
+  const [searchSeed, setSearchSeed] = useState<{ query: string; nonce: number } | null>(null);
   const searchReturnFocus = useRef<HTMLElement | null>(null);
   const searchOpenRef = useRef(searchOpen);
   searchOpenRef.current = searchOpen;
@@ -151,6 +160,13 @@ export function RailProvider({
     }
     if (!searchOpenRef.current) drawerTriggerRef.current?.focus({ preventScroll: true });
   }, []);
+  const drawerOpenRef = useRef(drawerOpen);
+  drawerOpenRef.current = drawerOpen;
+  const handOffDrawer = useCallback(() => {
+    if (!drawerOpenRef.current) return;
+    suppressDrawerRestore.current = true;
+    setDrawerOpenState(false);
+  }, []);
   const changeSearchOpen = useCallback((next: boolean) => {
     searchOpenRef.current = next;
     setSearchOpen(next);
@@ -161,6 +177,7 @@ export function RailProvider({
         event as CustomEvent<{
           workspaceId?: string | undefined;
           returnFocus?: HTMLElement | undefined;
+          query?: string | undefined;
         }>
       ).detail;
       if (detail?.workspaceId !== workspaceId) return;
@@ -173,14 +190,17 @@ export function RailProvider({
               ? document.activeElement
               : null;
       }
-      if (drawerOpen) suppressDrawerRestore.current = true;
+      if (typeof detail.query === "string" && detail.query) {
+        const query = detail.query;
+        setSearchSeed((current) => ({ query, nonce: (current?.nonce ?? 0) + 1 }));
+      }
       setSearchMounted(true);
       changeSearchOpen(true);
-      setDrawerOpen(false);
+      handOffDrawer();
     };
     windowEvents.addEventListener(OPEN_SESSION_SEARCH_EVENT, open);
     return () => windowEvents.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open);
-  }, [workspaceId, isMobile, drawerOpen, changeSearchOpen, setDrawerOpen, windowEvents]);
+  }, [workspaceId, isMobile, changeSearchOpen, handOffDrawer, windowEvents]);
   useEffect(() => {
     searchReturnFocus.current = null;
     changeSearchOpen(false);
@@ -302,7 +322,7 @@ export function RailProvider({
     if (!bridge) return;
     return bridge.commands.onCommand((command) => {
       if (command === "newSession") startNewSession();
-      else if (command === "searchSessions") requestSessionSearch(windowEvents, workspaceId);
+      else if (command === "searchSessions") requestCommandMenu(windowEvents);
       else if (command === "toggleSidebar") toggleCollapsed();
       else if (command === "openInbox") {
         setDrawerOpen(false);
@@ -326,6 +346,7 @@ export function RailProvider({
       setDrawerOpen,
       drawerTriggerRef,
       restoreDrawerFocus,
+      handOffDrawer,
       openWorkspace,
       openOrg,
       openSession,
@@ -340,6 +361,7 @@ export function RailProvider({
       drawerOpen,
       setDrawerOpen,
       restoreDrawerFocus,
+      handOffDrawer,
       setCollapsed,
       toggleCollapsed,
       openWorkspace,
@@ -360,6 +382,7 @@ export function RailProvider({
             open={searchOpen}
             onOpenChange={changeSearchOpen}
             returnFocus={searchReturnFocus}
+            seed={searchSeed}
           />
         </Suspense>
       ) : null}

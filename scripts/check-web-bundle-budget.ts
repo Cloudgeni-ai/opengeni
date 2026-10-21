@@ -461,7 +461,10 @@ const budgets = {
   // next whole-KiB envelope; every other cap remains fixed.
   // Product UI added since then (secrets, vaults, retention, artifact library)
   // measures 46,869 gzip bytes on Bun 1.4 Linux/x64.
-  cssGzip: wholeKibEnvelope(46_869),
+  // The command menu, shortcut sheet and keycaps add their utilities: main
+  // e6b228547 measures 47,993 gzip bytes and the merged menu 48,180 (Bun 1.4
+  // Linux/x64). Keep the next whole-KiB envelope; every other cap is fixed.
+  cssGzip: wholeKibEnvelope(48_180),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across

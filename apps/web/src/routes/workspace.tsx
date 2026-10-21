@@ -19,6 +19,7 @@ import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
 import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
+import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
 import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
 import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
@@ -524,20 +525,24 @@ function AuthorizedWorkspaceShell({
           {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-          {managementLocation ? (
-            <WorkspaceManagementShell
-              workspaceId={workspaceId}
-              workspaceName={activeWorkspace?.name}
-              organizationName={organizationName}
-              location={managementLocation}
-            >
-              {children}
-            </WorkspaceManagementShell>
-          ) : (
-            <RailProvider workspaceId={workspaceId}>
-              <RailShell>{children}</RailShell>
-            </RailProvider>
-          )}
+          {/* The rail state and the action system (⌘K, shortcuts, the desktop
+          menu bar) span both shells, so keys work in settings too. */}
+          <RailProvider workspaceId={workspaceId}>
+            <ActionsProvider>
+              {managementLocation ? (
+                <WorkspaceManagementShell
+                  workspaceId={workspaceId}
+                  workspaceName={activeWorkspace?.name}
+                  organizationName={organizationName}
+                  location={managementLocation}
+                >
+                  {children}
+                </WorkspaceManagementShell>
+              ) : (
+                <RailShell>{children}</RailShell>
+              )}
+            </ActionsProvider>
+          </RailProvider>
         </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>

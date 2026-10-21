@@ -83,7 +83,7 @@ person's permissions, exactly as in the web app. A switch only hides.
 | `chatList` (search, filters, projects, pins, archive, subagent rows) | on | on (a drawer when narrow) | on |
 | `dock` (files, terminal, desktop, browser, artifacts, inspector; lazy) | on | on | off |
 | `adminAccess` (workspace-admin access indicator and grant) | on | off | off |
-| `newChatShortcut` (⌘/Ctrl+⇧O) | on | off | off |
+| `keyboardShortcuts` (⌘K menu, shortcut keys, ⌘/ sheet; `newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand` (the Opengeni row at the top of the chat list) | on | on | off |
 
 `SessionApp` defaults to `embed`; first-party hosts pass `companion` or `app`.

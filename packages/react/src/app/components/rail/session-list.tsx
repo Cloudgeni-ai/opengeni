@@ -17,7 +17,6 @@ import {
 import { SiteOriginLink } from "../session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
-import { requestSessionSearch } from "../../lib/session-search-route";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -40,6 +39,7 @@ import {
   PlusIcon,
   SearchIcon,
   Trash2Icon,
+  LinkIcon,
 } from "lucide-react";
 import { toast } from "../../lib/toast";
 import {
@@ -75,6 +75,7 @@ import {
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuTrigger,
 } from "../../../ui/context-menu";
 import {
@@ -84,6 +85,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
@@ -237,7 +239,11 @@ import { cn } from "../../lib/utils";
 import type { Channel, Session as SessionDetails } from "../../types";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
-import { useSessionUiFeature } from "../../lib/session-ui-features";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { requestCommandMenu } from "../../lib/actions/events";
+import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
+import { useChatOperations } from "../../lib/actions/chat-operations";
+import { TooltipWithKeys } from "../command-menu/keycaps";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -254,7 +260,7 @@ export function NewSessionLink(props: {
   children: ReactNode;
 }) {
   const windowEvents = useUiEventTarget("window");
-  const newChatShortcut = useSessionUiFeature("newChatShortcut");
+  const newChatShortcut = useActionShortcut("chat.new");
   const rail = useRail();
   const context = useAppContext();
   return (
@@ -263,7 +269,7 @@ export function NewSessionLink(props: {
       params={{ workspaceId: rail.workspaceId }}
       search={props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }}
       aria-label={props["aria-label"]}
-      aria-keyshortcuts={newChatShortcut ? "Meta+Shift+O Control+Shift+O" : undefined}
+      aria-keyshortcuts={newChatShortcut?.ariaKeys}
       className={props.className}
       {...analyticsAction("new_session")}
       onClick={(event) => {
@@ -375,11 +381,8 @@ export function SessionList() {
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
-  const openSearchDialog = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) =>
-      requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget),
-    [rail.workspaceId, windowEvents],
-  );
+  const openSearchDialog = useCallback(() => requestCommandMenu(windowEvents), [windowEvents]);
+  const searchShortcut = useActionShortcut("commandMenu.open");
   const [search, setSearch] = useState("");
   const browsePreferenceStorageId = useMemo(
     () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId, rail.workspaceId),
@@ -2232,6 +2235,21 @@ export function SessionList() {
   ]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
+  // The ⌘K menu answers from the chats loaded here, and next or previous chat
+  // and ⌘1 to ⌘9 follow the order shown here.
+  const directorySubject = context.accessContext.subjectId;
+  useEffect(() => {
+    rememberChats(directorySubject, rail.workspaceId, [...pinned, ...sessions]);
+  }, [directorySubject, rail.workspaceId, pinned, sessions]);
+  useEffect(() => {
+    setSidebarOrder(
+      directorySubject,
+      rail.workspaceId,
+      flat.map((session) => session.id),
+      pinned.map((session) => session.id),
+    );
+  }, [directorySubject, rail.workspaceId, flat, pinned]);
+
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
     const root = listRef.current;
@@ -3293,12 +3311,15 @@ export function SessionList() {
               onClick={openSearchDialog}
               aria-label="Search sessions"
               aria-haspopup="dialog"
+              aria-keyshortcuts={searchShortcut?.ariaKeys}
               className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
             >
               <SearchIcon aria-hidden="true" className="size-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="bottom">Search sessions</TooltipContent>
+          <TooltipContent side="bottom">
+            <TooltipWithKeys label="Search sessions" shortcut={searchShortcut} />
+          </TooltipContent>
         </Tooltip>
         {channelMode ? (
           <Tooltip>
@@ -4419,9 +4440,25 @@ function SessionRow(props: {
   const title = sessionDisplayTitle(props.session);
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
+  const chatOps = useChatOperations();
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
+  // A key press puts the person's attention elsewhere (⌘K right after opening a
+  // chat, with the pointer still on its row), so the hover card gives way, as
+  // tooltips do.
+  const [hoverOpen, setHoverOpen] = useState(false);
+  useEffect(() => {
+    if (!hoverOpen || typeof document === "undefined") return;
+    const close = () => setHoverOpen(false);
+    document.addEventListener("keydown", close, true);
+    return () => document.removeEventListener("keydown", close, true);
+  }, [hoverOpen]);
+  // The right-click menu replaces the preview: it would otherwise stay drawn
+  // over the menu, since the pointer is still on the row.
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   // Who started a session only adds information where other people work too.
   const personalWorkspace = isPersonalWorkspace(
     context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
@@ -4534,12 +4571,22 @@ function SessionRow(props: {
   }
 
   return (
-    <ContextMenu>
+    <ContextMenu
+      onOpenChange={(open) => {
+        setContextMenuOpen(open);
+        if (open) setHoverOpen(false);
+      }}
+    >
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
           {lead}
           <SiteOriginLink session={props.session} compact />
-          <HoverCard openDelay={100} closeDelay={80}>
+          <HoverCard
+            openDelay={100}
+            closeDelay={80}
+            open={hoverOpen && !contextMenuOpen}
+            onOpenChange={(open) => setHoverOpen(open && !contextMenuOpen)}
+          >
             <HoverCardTrigger asChild>
               <Link
                 to="/workspaces/$workspaceId/sessions/$sessionId"
@@ -4702,9 +4749,18 @@ function SessionRow(props: {
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
+        <ContextMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(props.session)}
+        >
+          <LinkIcon className="size-4" />
+          Copy link
+          {copyLinkKeys ? <ContextMenuShortcut>{copyLinkKeys.label}</ContextMenuShortcut> : null}
+        </ContextMenuItem>
         {!props.session.archived ? (
           <>
             <ContextMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               onSelect={() => {
                 contextPinSelection.current = true;
                 void props.onPin(props.session, !props.session.pinned, "row");
@@ -4712,6 +4768,7 @@ function SessionRow(props: {
             >
               <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
               {props.session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <ContextMenuShortcut>{pinKeys.label}</ContextMenuShortcut> : null}
             </ContextMenuItem>
             <ContextMenuItem
               onSelect={() =>
@@ -4887,6 +4944,9 @@ function RowActionsMenu({
   onRequestDelete: RequestDeleteFn;
 }) {
   const remountSelection = useRef(false);
+  const chatOps = useChatOperations();
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
   // Filing is a root-session concept: the rail groups a whole tree by its
   // root's channel, so children offer no move affordance.
   const canMove = channels.length > 0 && session.parentSessionId === null && !session.archived;
@@ -4928,9 +4988,19 @@ function RowActionsMenu({
           <PencilIcon className="size-4" />
           Rename
         </DropdownMenuItem>
+        <DropdownMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(session)}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <LinkIcon className="size-4" />
+          Copy link
+          {copyLinkKeys ? <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut> : null}
+        </DropdownMenuItem>
         {!session.archived ? (
           <>
             <DropdownMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               onSelect={() => {
                 remountSelection.current = true;
                 void onPin(session, !session.pinned, "actions");
@@ -4939,6 +5009,7 @@ function RowActionsMenu({
             >
               <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
               {session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => void onUpdateAttention(session, { unread: !session.unread })}
@@ -5038,6 +5109,7 @@ function EmptySessions({ archived = false }: { archived?: boolean | undefined })
  */
 export function CollapsedSessionsButton() {
   const windowEvents = useUiEventTarget("window");
+  const searchShortcut = useActionShortcut("commandMenu.open");
   const rail = useRail();
   const { workspaceSessionListEvent } = useOpenGeni();
   const hintsAvailable =
@@ -5065,15 +5137,16 @@ export function CollapsedSessionsButton() {
             variant="ghost"
             size="icon-sm"
             aria-label="Search sessions"
-            onClick={(event) =>
-              requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget)
-            }
+            aria-keyshortcuts={searchShortcut?.ariaKeys}
+            onClick={() => requestCommandMenu(windowEvents)}
             className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="right">Search sessions</TooltipContent>
+        <TooltipContent side="right">
+          <TooltipWithKeys label="Search sessions" shortcut={searchShortcut} />
+        </TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>

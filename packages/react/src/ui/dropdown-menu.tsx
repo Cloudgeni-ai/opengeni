@@ -175,8 +175,11 @@ function DropdownMenuSeparator({
 function DropdownMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
   return (
     <span
+      // The item carries the key in aria-keyshortcuts; glyphs like "⇧⌘,"
+      // would only garble its accessible name.
+      aria-hidden
       data-slot="dropdown-menu-shortcut"
-      className={cn(MENU_META_CLASS, "tracking-widest", className)}
+      className={cn(MENU_META_CLASS, "tracking-widest pointer-coarse:hidden", className)}
       {...props}
     />
   );

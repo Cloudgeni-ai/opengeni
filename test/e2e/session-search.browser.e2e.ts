@@ -252,12 +252,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         );
         expect(await search.evaluate((element) => element === document.activeElement)).toBe(true);
         await page.keyboard.press("Space");
-        const input = dialog.getByRole("searchbox", {
-          name: "Search session titles and messages",
-          exact: true,
-        });
-        await input.waitFor();
-        expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
+        await expectCommandMenuFocused(page);
       } finally {
         releaseDraft();
         await page.unrouteAll({ behavior: "wait" });
@@ -298,14 +293,12 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
               true,
             );
             await page.keyboard.press(key);
-            const input = dialog.getByRole("searchbox", {
-              name: "Search session titles and messages",
-              exact: true,
-            });
-            await input.waitFor();
-            expect(await input.evaluate((element) => element === document.activeElement)).toBe(
-              true,
+            await expectCommandMenuFocused(page);
+            await page.waitForFunction(
+              () =>
+                document.querySelector('[aria-label="Search sessions"]') === document.activeElement,
             );
+            await openSearchDialog(page);
           }
         } finally {
           await context.close();
@@ -1358,14 +1351,34 @@ function fillerTurns(count: number): SeededTurn[] {
 let dbRef: ReturnType<typeof createDb>["db"] | null = null;
 
 async function openSearchDialog(page: Page): Promise<Locator> {
+  // The sidebar's search button opens the command menu; full message search is
+  // its "Search messages" action.
   const button = page.getByRole("button", { name: "Search sessions", exact: true }).first();
   await button.waitFor({ timeout: 15_000 });
   await button.click();
-  const dialog = page.getByRole("dialog");
+  await commandMenu(page)
+    .getByRole("option", { name: "Search messages", exact: true })
+    .click({ timeout: 15_000 });
+  const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
   await dialog
     .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
     .waitFor({ timeout: 15_000 });
   return dialog;
+}
+
+function commandMenu(page: Page): Locator {
+  return page.getByRole("dialog", { name: "Command menu", exact: true });
+}
+
+async function expectCommandMenuFocused(page: Page): Promise<void> {
+  const input = commandMenu(page).getByRole("combobox", {
+    name: "Search chats and actions",
+    exact: true,
+  });
+  await input.waitFor();
+  expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
+  await page.keyboard.press("Escape");
+  await commandMenu(page).waitFor({ state: "hidden" });
 }
 
 function conversationFind(page: Page): Locator {
