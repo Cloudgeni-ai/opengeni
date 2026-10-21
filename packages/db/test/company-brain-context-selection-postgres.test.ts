@@ -15,6 +15,7 @@ import {
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   inspectCompanyBrainContextReceipts,
+  listTaskNotes,
   nestedPostgresSqlState,
   resolveCompanyBrainContextSelection,
   saveWorkspaceMemory,
@@ -744,6 +745,78 @@ describe("accepted-turn Company Brain context selection", () => {
       rootSessionId: f.root.id,
       turnContextSnapshotSource: "accepted_turn",
     });
+  }, 180_000);
+
+  test("starts another member's turn in a shared child of a private chat without opening that chat's task tree", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ child: true, privateRoot: true, mode: "retrieval_only" });
+    const [child] = await shared.admin<{ visibility: string; authority_epoch: number }[]>`
+      select visibility, authority_epoch from sessions where id = ${f.child!.id}`;
+    if (child!.visibility !== "workspace_shared") {
+      await transitionSessionVisibility(client.db, {
+        workspaceId: f.grant.workspaceId,
+        sessionId: f.child!.id,
+        actorSubjectId: f.ownerSubjectId,
+        targetVisibility: "workspace_shared",
+        expectedAuthorityEpoch: Number(child!.authority_epoch),
+        operationKey: `context-share-child-${crypto.randomUUID()}`,
+      });
+    }
+    expect(
+      await shared.admin<{ id: string; visibility: string }[]>`
+        select id, visibility from sessions where id in (${f.root.id}, ${f.child!.id})
+        order by (id = ${f.root.id}) desc`,
+    ).toEqual([
+      { id: f.root.id, visibility: "user_private" },
+      { id: f.child!.id, visibility: "workspace_shared" },
+    ]);
+
+    // Another member prompts the shared child. The private parent stays the owner's alone.
+    const memberSubjectId = `user:member-${crypto.randomUUID()}`;
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.child!.id,
+      ownerSubjectId: memberSubjectId,
+    });
+    await prepareSnapshots(attempt);
+    const selected = await resolve(attempt);
+    expect(selected.receipt).toMatchObject({
+      rootSessionId: f.root.id,
+      sessionRole: "child",
+    });
+
+    // Task notes coordinate the whole tree, including the private parent, so
+    // they stay closed to a member who cannot see that parent.
+    await expectSqlState(
+      () =>
+        withSessionRlsActorContext(
+          { subjectId: "worker:context", initiatingHumanSubjectId: memberSubjectId },
+          async () => listTaskNotes(client!.db, claims(attempt)),
+        ),
+      "42501",
+    );
+
+    // A member who cannot see the addressed chat itself is still refused.
+    const other = await fixture({ child: true, privateRoot: true, mode: "retrieval_only" });
+    const [otherChild] = await shared.admin<{ authority_epoch: number }[]>`
+      select authority_epoch from sessions where id = ${other.child!.id}`;
+    await transitionSessionVisibility(client.db, {
+      workspaceId: other.grant.workspaceId,
+      sessionId: other.child!.id,
+      actorSubjectId: other.ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: Number(otherChild!.authority_epoch),
+      operationKey: `context-private-child-${crypto.randomUUID()}`,
+    });
+    const refused = await seedAttempt({
+      accountId: other.grant.accountId,
+      workspaceId: other.grant.workspaceId,
+      sessionId: other.child!.id,
+      ownerSubjectId: memberSubjectId,
+    });
+    await prepareSnapshots(refused).catch(() => undefined);
+    await expectSqlState(() => resolve(refused), "42501");
   }, 180_000);
 
   test("inspects only existing receipts for the exact initiating human and visible task tree", async () => {
