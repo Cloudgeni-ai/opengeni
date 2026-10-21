@@ -3000,6 +3000,22 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("rejects unknown ungranted non-RLS inheritance children in either schema", () => {
+    for (const inventory of ["tables", "privateTables"] as const) {
+      const posture = safePosture();
+      posture[inventory].push({
+        ...knowledgeAuthorityTables()[0]!,
+        name: "future_child",
+        hasInheritance: true,
+      });
+      expect(
+        evaluateRuntimeDatabasePosture(posture, options).some(
+          (v) => v.includes("future_child") && v.includes("inheritance or partition"),
+        ),
+      ).toBe(true);
+    }
+  });
+
   for (const grants of [
     { truncate: true },
     { references: true },

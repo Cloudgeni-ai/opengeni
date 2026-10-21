@@ -3647,6 +3647,11 @@ export function evaluateRuntimeDatabasePosture(
       }
       continue;
     }
+    if (table.hasInheritance) {
+      violations.push(
+        `unknown private table ${table.name} has an inheritance or partition relationship`,
+      );
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns private table ${table.name}`);
     }
@@ -3851,6 +3856,11 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   for (const table of posture.tables) {
+    // Even an ungranted child can be read/written through a known parent.
+    // Relation-local ACL flags do not describe that indirect access path.
+    if (!knownTables.has(table.name) && table.hasInheritance) {
+      violations.push(`unknown table ${table.name} has an inheritance or partition relationship`);
+    }
     const privileges = [
       ["SELECT", table.select],
       ["INSERT", table.insert],
