@@ -2594,9 +2594,8 @@ function mergeLoadedEvents(
   };
   // Exact outputs first: they replace the previews a step page delivered.
   presented.forEach(add);
-  exactOutputs.forEach((event) => {
-    if (event.turnId && turns.has(event.turnId)) add(event);
-  });
+  // `add` keeps only events of the window's turns.
+  exactOutputs.forEach(add);
   for (const [turnId, store] of stores) if (turns.has(turnId)) store.events.forEach(add);
   for (const event of turnless) {
     if (ids.has(event.id)) continue;

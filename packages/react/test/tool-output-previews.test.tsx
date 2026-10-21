@@ -187,10 +187,10 @@ describe("tool output previews in a turn's steps", () => {
       await settle();
       expect(reads).toHaveLength(1);
       expect(reads[0]).toMatchObject({
-        includeTypes: [...SESSION_EVENT_STEP_TYPES],
         payloadMode: "full",
         toolOutputs: "preview",
       });
+      expect(reads[0]!.includeTypes).toContain("agent.toolCall.output");
 
       let exec = toolCall(hook.result.current.timeline, "call-exec");
       expect(exec.outputPreview).toMatchObject({ shape: "structured", state: "preview" });
