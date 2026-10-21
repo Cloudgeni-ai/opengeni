@@ -647,7 +647,16 @@ describe("BrowserControlClient", () => {
         status: 400,
         error: { code: rejected.code, message: rejected.message },
       });
-      expect(requests).toHaveLength(6);
+      rejected = { status: 404, code: "resource_not_found", message: "route not found" };
+      await expect(browser.startRecording(command.targetId)).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message: expect.stringContaining("browser recording"),
+        },
+      });
+      expect(requests).toHaveLength(7);
     } finally {
       server.stop(true);
     }
