@@ -123,8 +123,8 @@ realTest(
         ...future,
         privateRoutines: [...future.privateRoutines, { ...original, name }],
       };
-      for (const module of [{ evaluateRuntimeDatabasePosture }, baseline!.module]) {
-        expect(module.evaluateRuntimeDatabasePosture(unsafe, options)).toContain(
+      for (const evaluator of [{ evaluateRuntimeDatabasePosture }, baseline!.module]) {
+        expect(evaluator.evaluateRuntimeDatabasePosture(unsafe, options)).toContain(
           `unknown routine opengeni_private.${name} exposes SECURITY DEFINER execution`,
         );
       }
