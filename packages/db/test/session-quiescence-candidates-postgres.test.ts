@@ -181,7 +181,7 @@ test.each(["attempt", "process-admission", "active-process"] as const)(
     const ctx = await fixture();
     const owner = await writer(ctx, kind);
     expect(await observe(ctx)).toEqual({ kind: "cancellation-wait", attemptId: owner.attemptId });
-    // Candidate discovery is not authority: the same subject in another
+    // Candidate discovery is not authority: a subject in another
     // workspace cannot read the old attempt or turn it into work.
     const foreign = await fixture();
     const visible = await withWorkspaceSubjectRls(
