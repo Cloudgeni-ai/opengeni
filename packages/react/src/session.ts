@@ -147,6 +147,8 @@ export type {
   TurnOutcome,
   ToolCallItem,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,

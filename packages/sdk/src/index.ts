@@ -202,6 +202,11 @@ export {
   turnCompletedWithEmptyFinalReply,
 } from "@opengeni/contracts/session-final-reply";
 export type { EmptyFinalReplyCompletion } from "@opengeni/contracts/session-final-reply";
+export {
+  SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_STEP_TYPES,
+  isPresentedSessionToolName,
+} from "@opengeni/contracts/session-history";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
 export type {
   PluginDiscoveryItem,

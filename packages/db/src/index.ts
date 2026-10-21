@@ -896,6 +896,7 @@ import {
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -36767,6 +36768,15 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
+   * Keep `agent.toolCall.created` rows of presented tools (see
+   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files and Skill
+   * changes without loading every step. Excluded rows without a turn (PTY
+   * output) are kept too: no per-turn step read can find them. No effect
+   * unless `agent.toolCall.created` is excluded.
+   */
+  retainPresentedToolCalls?: boolean;
+  /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
    * not compete with current truth. Durable session sequence is authoritative
@@ -36775,6 +36785,28 @@ export type ListSessionEventsOptions = {
    */
   authoritativeLatest?: boolean;
 };
+
+function sessionEventExcludeTypesFilter(
+  excludeTypes: readonly SessionEventType[],
+  options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
+): SQL {
+  const excluded = notInArray(schema.sessionEvents.type, [...excludeTypes]);
+  if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
+    return excluded;
+  }
+  // The name check reads only created rows (never tool outputs), but it still
+  // detoasts large arguments on each excluded call it scans.
+  const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  return or(
+    excluded,
+    // Turnless rows (PTY output) belong to no turn's step read.
+    isNull(schema.sessionEvents.turnId),
+    and(
+      eq(schema.sessionEvents.type, "agent.toolCall.created"),
+      sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
+    ),
+  )!;
+}
 
 export type ListSessionEventPageOptions = ListSessionEventsOptions & {
   /** UTF-8 JSON-array page target; one oversized full event is returned alone. */
@@ -36959,7 +36991,7 @@ export async function listSessionEventPage(
         filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
       }
       if (typeFilters.excludeTypes.length > 0) {
-        filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+        filters.push(sessionEventExcludeTypesFilter(typeFilters.excludeTypes, options));
       }
       if (direction === "before") {
         if (cursor !== undefined && cursor <= POSTGRES_INT_MAX) {
@@ -37415,7 +37447,7 @@ export async function listSessionEvents(
       filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
     }
     if (typeFilters.excludeTypes.length > 0) {
-      filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+      filters.push(sessionEventExcludeTypesFilter(typeFilters.excludeTypes, options));
     }
     if (before !== undefined && before <= POSTGRES_INT_MAX) {
       filters.push(lt(schema.sessionEvents.sequence, before));

@@ -67,6 +67,7 @@ import {
   type PreparingProps,
 } from "./turn";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
 
@@ -644,6 +645,7 @@ function TimelineGroupView({
             failureText={group.failureText}
             foldKey={group.id}
             defaultOpen={readableWorkDefaultOpen(group)}
+            unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
             facets={context.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
             onOpenStateChange={
@@ -655,6 +657,12 @@ function TimelineGroupView({
             }
           >
             <TurnRailFrame compact>
+              {group.work.steps ? (
+                <TurnStepsLoader
+                  steps={group.work.steps}
+                  autoLoad={!readableWorkDefaultOpen(group)}
+                />
+              ) : null}
               <FoldedGroups groups={group.work.details} context={context} />
             </TurnRailFrame>
           </TurnSummary>
