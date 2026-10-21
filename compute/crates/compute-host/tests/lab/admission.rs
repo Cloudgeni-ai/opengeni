@@ -1,7 +1,7 @@
-//! A full host: a wake it cannot hold is refused at once as host full,
-//! saying what it needs, and goes through as soon as an idle sandbox is
-//! paused and saved, whose VM then ends at once to make room, losing
-//! nothing. VM cgroups get the sandboxes' guarantees.
+//! A full host: a wake it cannot hold, and a create, are refused at once as
+//! host full, saying what they need, and a wake goes through as soon as an
+//! idle sandbox is paused and saved, whose VM then ends at once to make
+//! room, losing nothing. VM cgroups get the sandboxes' guarantees.
 
 use compute_host::protocol::ErrorCode;
 
@@ -190,8 +190,9 @@ fn check_oom_order(agent: &Agent) {
     assert!(checked > 0, "no VMM found");
 }
 
-/// On a full host, waking `sandbox` and creating then waking `unknown` are
-/// both refused at once, saying what they need.
+/// On a full host, waking `sandbox` and creating `unknown` are both
+/// refused at once, saying what they need: a host takes a sandbox only
+/// while it can wake it.
 async fn refused_at_once(agent: &Agent, sandbox: Id, unknown: Id) {
     let begin = Instant::now();
     let message = refused(&agent.client, sandbox).await;
@@ -201,13 +202,27 @@ async fn refused_at_once(agent: &Agent, sandbox: Id, unknown: Id) {
         "says what it needs: {message}"
     );
     let begin = Instant::now();
-    agent.create(unknown, SAVE_SOON).await;
-    refused(&agent.client, unknown).await;
-    let create_and_refusal = begin.elapsed();
-    eprintln!(
-        "on a full host: wake refused in {refusal:?}, create then wake refused in \
-         {create_and_refusal:?}"
+    let reply = agent
+        .client
+        .call(&Request::Create {
+            id: unknown,
+            config: SandboxConfig::new(1, 512, SAVE_SOON),
+        })
+        .await
+        .unwrap();
+    let create_refusal = begin.elapsed();
+    let Reply::Error {
+        code: ErrorCode::HostFull,
+        message,
+    } = reply
+    else {
+        panic!("{unknown} was taken on a full host: {reply:?}");
+    };
+    assert!(
+        message.contains(&(512 * MIB).to_string()),
+        "says what it needs: {message}"
     );
+    eprintln!("on a full host: wake refused in {refusal:?}, create refused in {create_refusal:?}");
     assert!(refusal < Duration::from_millis(100), "{refusal:?}");
 }
 
@@ -262,9 +277,11 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
     );
     let agent = host.start().await;
     let ids: Vec<Id> = (0..3).map(id).collect();
-    for sandbox in &ids[..2] {
-        agent.create(*sandbox, SAVE_SOON).await;
-    }
+    let unknown = id(3);
+
+    // The third first, while there is room: it runs, then idles until it
+    // is paused and saved, its VM kept until another sandbox needs the
+    // memory.
     let third = SandboxConfig {
         image: None,
         cpu_request_millis: Some(250),
@@ -279,9 +296,15 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         .await
         .unwrap();
     assert_eq!(reply, Reply::Done);
-    let unknown = id(3);
+    let (output, _) = exec(&agent.client, ids[2], "echo third=up").await;
+    assert!(output.contains("third=up"), "{output}");
+    wait_paused_and_saved(&agent, ids[2]).await;
 
-    // Two sandboxes held awake fill the host.
+    // Two sandboxes held awake fill the host: the host takes both, counting
+    // the third's saved VM as room, and ends that VM as they wake.
+    for sandbox in &ids[..2] {
+        agent.create(*sandbox, SAVE_SOON).await;
+    }
     hold_with_tokens(&agent, &ids[..2]).await;
     check_guarantees(&agent, ids[0]).await;
     let capacity = agent.status().await.capacity.expect("admission is on");
@@ -295,8 +318,8 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         (1024 * MIB, 1024 * MIB, 0, 2)
     );
 
-    // Nothing idle and saved to end: the third is refused at once, and so
-    // is a sandbox created on the full host and woken.
+    // Nothing idle and saved to end: waking the third is refused at once,
+    // and so is a create.
     refused_at_once(&agent, ids[2], unknown).await;
     let status = agent.status().await;
     let waiting = status
