@@ -1803,7 +1803,7 @@ describe("runtime database posture evaluator", () => {
       for (const table of [
         "model_call_fact_reconciliation_candidates",
         "model_call_fact_reconciliation_progress",
-      ]) {
+      ] as const) {
         expect(FORCE_RLS_TABLES).toContain(table);
         expect(RUNTIME_FULL_DML_TABLES).toContain(table);
         expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
