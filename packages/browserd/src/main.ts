@@ -10,7 +10,7 @@ import {
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
 import { resolvePinnedAgentBrowserBinary } from "./binary";
 import { resolvePinnedHeadlessShell } from "./headless-shell";
-import { resolvePinnedLightpandaBinary } from "./lightpanda-binary";
+import { lazyPinnedLightpandaBinary } from "./lightpanda-binary";
 import {
   ExistingComputerEnvironmentAllocator,
   LinuxVirtualComputerEnvironmentAllocator,
@@ -41,7 +41,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     ? await resolvePinnedAgentBrowserBinary({ binaryPath: config.agentBrowserBinaryPath })
     : undefined;
   const lightpandaBinary = config.lightpandaBinaryPath
-    ? await resolvePinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
+    ? lazyPinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
     : undefined;
   const headlessShell = config.headlessShellDirectory
     ? await resolvePinnedHeadlessShell(config.headlessShellDirectory)

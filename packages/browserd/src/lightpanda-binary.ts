@@ -63,6 +63,23 @@ export async function resolvePinnedLightpandaBinary(options: {
   return { path, name, version: LIGHTPANDA_VERSION, sha256 };
 }
 
+/** Verifies the pinned binary on first use, not at controller start: hashing it
+ * reads the whole file, which costs about a second on a fresh VM's cold disk,
+ * and most sessions never use Lightpanda. A failed check is not remembered, so
+ * a later Lightpanda session checks again. */
+export function lazyPinnedLightpandaBinary(options: {
+  binaryPath: string;
+}): () => Promise<ResolvedLightpandaBinary> {
+  let pending: Promise<ResolvedLightpandaBinary> | undefined;
+  return () => {
+    pending ??= resolvePinnedLightpandaBinary(options).catch((error: unknown) => {
+      pending = undefined;
+      throw error;
+    });
+    return pending;
+  };
+}
+
 function lightpandaBinaryName(
   platform: NodeJS.Platform,
   architecture: string,
