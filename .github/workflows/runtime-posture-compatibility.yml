@@ -1,0 +1,82 @@
+name: Runtime posture compatibility
+
+on:
+  pull_request:
+    branches: [main, production]
+    paths:
+      - "packages/db/**"
+      - "packages/testing/**"
+      - "scripts/runtime-posture-baseline*"
+      - ".github/workflows/runtime-posture-compatibility.yml"
+      - "bun.lock"
+      - ".bun-version"
+  push:
+    branches: [main, production]
+    paths:
+      - "packages/db/**"
+      - "packages/testing/**"
+      - "scripts/runtime-posture-baseline*"
+      - ".github/workflows/runtime-posture-compatibility.yml"
+      - "bun.lock"
+      - ".bun-version"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-posture-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    name: Previous-binary database readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: x
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out exact candidate and pinned baseline history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Validate baseline advancement scope
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bun scripts/runtime-posture-baseline.ts "$BASE_SHA"
+      - name: Fetch the exact pinned source (including the bootstrap PR commit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pin="$(bun -e 'import {readRuntimePostureBaseline} from "./scripts/runtime-posture-baseline"; console.log((await readRuntimePostureBaseline(process.cwd())).sourceCommit)')"
+          # Exact immutable commit only, never a current-source fallback. gh's
+          # credential helper authenticates without persisting checkout credentials.
+          git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$pin"
+      - name: Unit regressions and baseline validation
+        run: bun test --max-concurrency=2 packages/db/test/runtime-posture.test.ts scripts/runtime-posture-baseline.test.ts
+      - name: Database package typecheck
+        run: bun run --cwd packages/db typecheck
+      - name: Migrate, provision restricted roles and run pinned readiness
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_TEST_PG_URL: postgres://postgres:x@127.0.0.1:5432/postgres
+        run: bun test --max-concurrency=1 packages/db/test/runtime-posture-compatibility-postgres.test.ts

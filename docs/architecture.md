@@ -2651,6 +2651,11 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
+Readiness is forward-compatible only for entirely unknown, securely shaped
+objects; named-object ACL, RLS and capability contracts remain exact. Unknown
+callable SECURITY DEFINER routines require a prior explicit binary contract.
+The pinned previous-binary inspector/evaluator CI and its release bootstrap are
+documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
 The migration ledger keys receipts by full SQL filename, not ordinal. Published
 SQL names and bytes remain immutable, including historical duplicate ordinals.
 The source guard permits a duplicate group already present together on one
