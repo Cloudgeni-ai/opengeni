@@ -4777,6 +4777,8 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
     .$type<Record<string, number>>()
     .notNull()
     .default({}),
+  // Voice settings by realtime model id (0895); a workspace's own win.
+  realtimeVoice: jsonb("realtime_voice").$type<Record<string, unknown>>().notNull().default({}),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -15218,7 +15220,14 @@ export const organizationModelProviderConnections = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+      >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
@@ -15243,7 +15252,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15272,7 +15281,14 @@ export const organizationModelProviderConnectionOperations = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+      >()
       .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
@@ -15294,7 +15310,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",

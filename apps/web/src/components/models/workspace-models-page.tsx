@@ -19,7 +19,7 @@ import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-
 import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
   ModelAccountSettingValues,
-  OrganizationModelProviderKind,
+  OrganizationModelCatalogProviderKind,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
@@ -169,7 +169,7 @@ import { compactionSummary } from "./model-compaction-page";
    -------------------------------------------------------------------------- */
 
 /** The organization connection kind behind each API-key provider. */
-const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
+const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelCatalogProviderKind> = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
@@ -1319,18 +1319,24 @@ export function WorkspaceModelsPageBody({
                 {workspacePage ? (
                   <Section
                     title="Voice"
-                    description="Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens in this workspace."
+                    description={
+                      personal
+                        ? "Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens."
+                        : `How each voice model sounds and listens in this workspace. Anything not set here follows ${possessive(organizationName)} defaults.`
+                    }
                   >
                     <ElevenLabsVoiceConnection
                       key={workspaceId}
                       workspaceId={workspaceId}
                       canManage={canManageWorkspaceKeys}
+                      organizationName={organizationName}
                       onConnectionChange={connectionChanged}
                     />
                     <RealtimeVoiceSettingsRows
                       key={`voice-settings:${workspaceId}`}
                       workspaceId={workspaceId}
                       canManage={canManageSettings}
+                      organizationName={organizationName}
                     />
                   </Section>
                 ) : null}

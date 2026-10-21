@@ -21081,6 +21081,8 @@
         "$.allowedProviders[]": "string",
         "$.modelCompactionThresholds": "object!",
         "$.modelCompactionThresholds{}": "integer",
+        "$.realtimeVoice": "object!",
+        "$.realtimeVoice{}": "ref(RealtimeVoiceSettings)",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)! null",
         "$.updatedAt": "string! null"
       }
@@ -21090,7 +21092,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
+        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"elevenlabs\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
     "OrganizationModelUsage": {
@@ -28031,6 +28033,8 @@
         "$": "object",
         "$.modelCompactionThresholds": "unknown?",
         "$.modelPolicy": "ref(UpdateWorkspaceModelPolicyRequest)? null",
+        "$.realtimeVoice": "object?",
+        "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)? null"
       }
     },
@@ -30399,6 +30403,7 @@
         "$.label": "string!",
         "$.languages": "array?",
         "$.languages[]": "string",
+        "$.organizationVoiceSettings": "ref(RealtimeVoiceSettings)?",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
         "$.turnEagerness": "array?",
@@ -31826,6 +31831,7 @@
       "OrganizationMember": "type",
       "OrganizationMembershipRole": "type",
       "OrganizationModelAccountSettings": "type",
+      "OrganizationModelCatalogProviderKind": "type",
       "OrganizationModelDefaults": "type",
       "OrganizationModelProviderConnection": "type",
       "OrganizationModelProviderKind": "type",
@@ -35536,6 +35542,8 @@
     },
     "@opengeni/react/session-app": {
       "EditableArtifactSurfaceProps": "type",
+      "MessageContextInput": "type",
+      "MessageContextItem": "type",
       "PdfPreviewProps": "type",
       "SESSION_UI_PRESETS": "value",
       "SessionApp": "value",

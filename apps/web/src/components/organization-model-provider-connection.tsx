@@ -8,7 +8,7 @@ import {
 import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
-  OrganizationModelProviderKind as ProviderKind,
+  OrganizationModelCatalogProviderKind as ProviderKind,
   OrganizationProviderCustomModel as CustomModel,
 } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
