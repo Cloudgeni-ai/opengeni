@@ -246,7 +246,10 @@ const nativeAdapters = adapters();
 
 const ONE_READ_EACH = {
   listEvents: 1,
-  getSession: 1,
+  // The session detail, plus the durable head the conversation reads beside
+  // its window so the live stream joins there instead of replaying terminal
+  // output written after the last turn. Both reads run alongside the window.
+  getSession: 2,
   getQueue: 1,
   getComposerDraft: 1,
   listHumanInputRequests: 1,
