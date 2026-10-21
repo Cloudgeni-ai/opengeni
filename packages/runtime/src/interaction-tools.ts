@@ -956,8 +956,11 @@ const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: 
 
 export type CreateInteractionAttemptToolsInput = {
   /** The session's API client. Publishing is optional so narrower transports
-   * still work; an upload by path then reports that it is unavailable. */
-  transport: InteractionTransport & Partial<Pick<OpenGeniClient, "publishSandboxFileArtifact">>;
+   * still work; an upload by path then reports that it is unavailable. The
+   * session read is optional too: without it, a placement-less open reuses a
+   * live session on any non-personal placement. */
+  transport: InteractionPlacementTransport &
+    Partial<Pick<OpenGeniClient, "publishSandboxFileArtifact">>;
   workspaceId: string;
   sessionId: string;
   selectedTools?: readonly FirstPartyMcpToolName[];
@@ -2926,7 +2929,7 @@ async function actInComputerNativeBatch(
 }
 
 async function openBrowser(
-  transport: InteractionTransport,
+  transport: InteractionPlacementTransport,
   workspaceId: string,
   sourceSessionId: string,
   value: z.output<typeof BrowserOpenInput>,
@@ -2948,7 +2951,7 @@ async function openBrowser(
     // resolution adds no sequential round trip.
     const resolveProfile =
       value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
-    const [listed, attachedInventory] = await Promise.all([
+    const [listed, attachedInventory, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
         : transport.listBrowserSessions(workspaceId, {
@@ -2958,6 +2961,9 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
+      value.mode === "new" || value.placement
+        ? null
+        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
     ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
@@ -2972,7 +2978,11 @@ async function openBrowser(
               (candidate) =>
                 candidate.headless === requestedHeadless &&
                 browserSessionStorageMode(candidate) === (value.storageMode ?? "private_profile") &&
-                compatibleInteractionPlacement(candidate.placement, value.placement) &&
+                compatibleInteractionPlacement(
+                  candidate.placement,
+                  value.placement,
+                  currentPlacement,
+                ) &&
                 (value.identityId === undefined || candidate.identityId === value.identityId) &&
                 (value.baseRevisionId === undefined ||
                   candidate.baseRevisionId === value.baseRevisionId) &&
@@ -3191,7 +3201,7 @@ function sameBrowserUrl(left: string, right: string): boolean {
 }
 
 async function openComputer(
-  transport: InteractionTransport,
+  transport: InteractionPlacementTransport,
   workspaceId: string,
   sourceSessionId: string,
   value: z.output<typeof ComputerOpenInput>,
@@ -3201,16 +3211,20 @@ async function openComputer(
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
-    const listed =
+    const [listed, currentPlacement] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
-        : await transport.listComputerSessions(workspaceId, {
+        : transport.listComputerSessions(workspaceId, {
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
-          });
+          }),
+      value.mode === "new" || value.placement
+        ? null
+        : readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId),
+    ]);
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
-        compatibleInteractionPlacement(candidate.placement, value.placement),
+        compatibleInteractionPlacement(candidate.placement, value.placement, currentPlacement),
       ),
       sourceSessionId,
     );
@@ -3234,12 +3248,45 @@ async function openComputer(
   };
 }
 
+type InteractionPlacementTransport = InteractionTransport &
+  Partial<Pick<OpenGeniClient, "getSession">>;
+
+/** Where a placement-less open creates its session: the machine the chat is
+ * routed to now. No active sandbox means the session's own group sandbox; a
+ * swapped chat uses the machine it swapped to. Read at call time, since
+ * sandbox_swap can move the chat mid-turn. Null when the transport cannot
+ * read the session. */
+async function readCurrentInteractionPlacement(
+  transport: InteractionPlacementTransport,
+  workspaceId: string,
+  sessionId: string,
+): Promise<z.infer<typeof InteractionPlacement> | null> {
+  if (!transport.getSession) return null;
+  const session = await transport.getSession(workspaceId, sessionId, { fresh: true });
+  return session.activeSandboxId === null
+    ? { kind: "sandbox_group", sandboxGroupId: session.sandboxGroupId }
+    : { kind: "connected_machine", sandboxId: session.activeSandboxId };
+}
+
 function compatibleInteractionPlacement(
   candidate: z.infer<typeof InteractionPlacement>,
   requested: z.infer<typeof BrowserOpenPlacement> | undefined,
+  current: z.infer<typeof InteractionPlacement> | null = null,
 ): boolean {
-  if (!requested) return candidate.kind !== "attached_device";
-  return Object.entries(requested).every(
+  if (!requested) {
+    if (candidate.kind === "attached_device") return false;
+    // Without a placement only a session on the chat's current machine is
+    // reused, never one left on a machine the chat has since swapped away from.
+    return current === null || placementFieldsMatch(candidate, current);
+  }
+  return placementFieldsMatch(candidate, requested);
+}
+
+function placementFieldsMatch(
+  candidate: z.infer<typeof InteractionPlacement>,
+  wanted: z.infer<typeof BrowserOpenPlacement> | z.infer<typeof InteractionPlacement>,
+): boolean {
+  return Object.entries(wanted).every(
     ([key, value]) => (candidate as Record<string, unknown>)[key] === value,
   );
 }
