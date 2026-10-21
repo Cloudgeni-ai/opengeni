@@ -5,6 +5,13 @@ agents adopt the normal batcher readiness signal. This is **not queue admission*
 `mergedAt` is explicitly a FIFO readiness proxy, not an assertion that tests or
 independent review existed at that time. It never changes the active batcher.
 
+This is a **fixed-count historical composition experiment, not an arrival/service-
+time queue simulation**. A cohort can span hours. Observed PR heads may already
+contain main landings newer than the pre-cohort base; conflicts or tree differences
+from such heads are replay artifacts, not measurements of live queue feasibility,
+batch-size throughput or failing PRs. Use a separate empirical discrete-event
+simulation for queue latency/capacity questions.
+
 ## Read-only replay
 
 ```sh
@@ -43,6 +50,13 @@ occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
   merged main PRs by exact `merged_at`. This is not Search and does not use its
   1,000-result limit. Incomplete pagination fails explicitly. Keep the most recent
   `max-prs`, then sort FIFO; report how many were omitted by this bound.
+  Updated-descending pagination is not a consistent snapshot: concurrent PR updates
+  can move rows between pages. Cross-check against retained first-parent main commits
+  in the committer-time window, report unrepresented commits and selected SHAs absent
+  from main, and distinguish known intentionally capped merges when collected metadata
+  permits. Unrepresented commits are explicit possible collection gaps, not silently
+  treated as complete input; they can also be direct/batch commits or timestamp skew.
+  Commit-subject PR numbers are hints, not authoritative associations.
 - Preserve PR number, exact observed head, head ref, provider merge SHA, creation
   and merge time. Same-time merges are ordered by actual main first-parent
   position, then PR number. Deduplicate identical records, reject inconsistent
@@ -58,6 +72,13 @@ occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
   tree to match. An omitted/direct commit, missing object, unsupported projection,
   conflict or differing tree is reported, never called equivalent. Synthetic
   commit identities are deliberately different from historical landings.
+- `historicalHeads` records each observed head's exact main ancestors newer than
+  the cohort base. For heads with this temporal leakage, also try merge-tree on
+  their actual historical first parent and record whether it is clean and matches
+  the actual landed tree. This differentiates packed-history disagreement from
+  actual-parent composition without inventing the unavailable historical ready head.
+  Even `equivalent=true` only describes the compared trees/composition, not temporal
+  validity or a simulated queue admission/service schedule.
 - The conflict step identifies where composition failed, **not a unique culprit**.
   Record that exact PR/head as an excluded direct member, then rebuild the viable
   remainder from the original pre-cohort base, repeating if another conflict
@@ -94,7 +115,7 @@ its event ID begins `traffic-shadow:merged-at-proxy:`, evidence ID is explicitly
 `NOT-ADMISSION-OR-REVIEW-EVIDENCE`, and the report records the real proxy type. Do
 not feed these manifests into live admission or represent them as ready labels.
 
-## Optional hosted CI shadow — separately authorize before use
+## Optional hosted CI shadow — explicit configuration
 
 ```sh
 # This command WRITES queue/state refs. It was not run against GitHub in this task.
@@ -127,7 +148,7 @@ remote refs/state; do not blindly retry an external mutation.
 After 600 seconds without a discovered run, a publication becomes an explicit
 infrastructure block, not an automatic retry/cancellation. An operator must
 verify infrastructure is idle, restore a missing/retargeted known ref if needed,
-then separately authorize this one-shot recovery (which records CAS state only):
+then invoke this explicit one-shot recovery (which records CAS state only):
 
 ```sh
 bun scripts/ci/batch-traffic-shadow.ts --ci-shadow --recover-no-run <batchId> \
@@ -150,8 +171,13 @@ not a discovered GitHub/custom quota; reserve for other organization consumers
 outside this repository separately. Actions scheduling is not transactionally
 fenced by the Git CAS, so this observation is not a provider capacity reservation.
 
-The candidate's **pre-cohort base must already contain the Batch CI adapter**,
-and the adapter paths must be unchanged in the candidate. The program never
+The candidate's **pre-cohort base must already contain the Batch CI adapter**.
+Pin the entire `scripts` tree (all merge-batcher core, impact, profile, shard and
+transitive script files), the Batch CI workflow, `.bun-version`, `package.json`
+and `bun.lock` unchanged in the candidate. This deliberately conservative guard
+also blocks unrelated script changes. `adapterCoverage` states its boundary:
+workspace package sources, other configuration and third-party action/image bytes
+are not an exhaustive pinned execution closure. The program never
 overlays today's verifier on a historical tree. Viable rebuilt remainders may
 publish, but their historical outcomes remain explicitly non-comparable. Before the adapter lands on main, this intentionally reports a wait;
 read-only historical replay still produces useful candidates. The shipped
@@ -170,7 +196,8 @@ The one-slot guarantee covers coordinated traffic publishers. Manual external
 reruns or writers outside the state-ref protocol are not atomically fenced by
 GitHub Actions; do not operate competing writers/reruns in this namespace. Queue
 publication/App/ruleset permissions remain an operator prerequisite, not something
-the tool grants itself. No cloud service or database is required.
+the tool grants itself. Explicit state/prefix configuration establishes parity, not
+additional authority or an extra approval workflow. No cloud service or database is required.
 
 ## Tests
 
@@ -188,3 +215,12 @@ bounded scan progress, missing refs, full-main headroom, persistent rate backoff
 and terminal-attempt versus mutable observation caching. Compare cap16 (default)
 with an explicit cap8 replay of the same retained input and frozen main snapshot;
 do not interpret different sampling windows as batching improvements.
+
+The default core `queue/` reader must ignore nested `queue/shadow-traffic/` refs;
+the core worker owns that exact/direct-prefix fix. To test interoperability with
+an available core implementation without editing it, set
+`TRAFFIC_SHADOW_CORE_MODULES` to a directory containing its `controller.ts`,
+`git.ts`, `github.ts` and dependencies. The opt-in integration test uses local bare
+Git only, checks default-prefix exclusion and explicit-traffic-prefix recognition,
+and performs no provider reads/writes. Until that core fix is integrated, traffic
+publication can disrupt the old normal reader and must remain off.

@@ -8,6 +8,7 @@ import { type Run } from "../merge-batcher/model";
 import { verifyResult } from "../merge-batcher/result";
 import {
   ADAPTER_PATHS,
+  adapterPresent,
   TRAFFIC_PREFIX,
   TRAFFIC_STATE,
   collectTraffic,
@@ -72,7 +73,9 @@ async function fixture(options: { conflict?: boolean; adapter?: boolean; gap?: b
   await origin.init();
   await git.init();
   const files: Record<string, string> = { "base.txt": "base\n" };
-  if (options.adapter) for (const path of ADAPTER_PATHS) files[path] = "adapter fixture\n";
+  if (options.adapter)
+    for (const path of ADAPTER_PATHS)
+      files[path === "scripts" ? "scripts/merge-batcher/main.ts" : path] = "adapter fixture\n";
   const base = await origin.commit(await tree(origin, files), [], "base", date(0));
   const firstFiles = {
     ...files,
@@ -142,7 +145,7 @@ async function fixture(options: { conflict?: boolean; adapter?: boolean; gap?: b
     settings,
     new AtomicGitWriter(git, origin.dir, TRAFFIC_STATE, "refs/heads/main"),
   );
-  return { root, origin, git, base, merge1, merge2, pulls, input, settings, publisher };
+  return { root, origin, git, base, merge1, merge2, pulls, input, settings, publisher, files };
 }
 function run(tip: string, branch: string, patch: Partial<Run> = {}): Run {
   return {
@@ -161,6 +164,115 @@ function run(tip: string, branch: string, patch: Partial<Run> = {}): Run {
 }
 
 describe("merged traffic replay", () => {
+  test("post-base main ancestry is a historical replay artifact, not live queue infeasibility", async () => {
+    const f = await fixture();
+    const changed = { ...f.files, "one.txt": "changed after squash\n", "two.txt": "two\n" };
+    const head = await f.origin.commit(
+      await tree(f.origin, changed),
+      [f.merge1],
+      "later head",
+      date(4),
+    );
+    const landing = await f.origin.commit(
+      await tree(f.origin, changed),
+      [f.merge1],
+      "later squash (#2)",
+      date(5),
+    );
+    await f.origin.exec(["update-ref", "refs/heads/main", landing]);
+    await f.origin.exec(["update-ref", "refs/heads/later-head", head]);
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: [f.pulls[0]!, { ...f.pulls[1]!, headSha: head, mergeSha: landing }],
+    });
+    const cohort = report.cohorts[0]!;
+    const projection = cohort.historicalHeads.find((h) => h.number === 2)!;
+    expect(projection.postBaseMainAncestors).toEqual([f.merge1]);
+    expect(projection.onActualParent).toMatchObject({ clean: true, treeEqual: true });
+    expect(cohort.exclusions.find((e) => e.number === 2)?.reason).toContain("replay artifact");
+    expect(cohort.equivalent).toBe(false);
+    expect(report.replayMeaning).toContain("NOT an arrival/service-time queue simulation");
+  });
+  test("coverage reports uncollected main landings separately from known intentional caps", async () => {
+    const f = await fixture();
+    const missing = await replayTraffic(f.git, f.origin.dir, { ...f.input, pulls: [f.pulls[0]!] });
+    expect(missing.collectionCoverage.unrepresented.some((r) => r.sha === f.merge2)).toBe(true);
+    expect(missing.collectionCoverage.status).toBe("unmapped-main-commits");
+    const capped = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: [f.pulls[1]!],
+      omittedByCap: 1,
+      observedMerges: f.pulls.map(({ number, mergeSha, mergedAt }) => ({
+        number,
+        mergeSha,
+        mergedAt,
+      })),
+    });
+    expect(capped.collectionCoverage.knownOmittedByCap).toBe(1);
+    expect(capped.collectionCoverage.unrepresented.some((r) => r.sha === f.merge1)).toBe(false);
+    expect(capped.collectionCoverage.limitation).toContain("not snapshot-consistent");
+  });
+  test("adapter pin covers whole core and CI scripts, including formerly omitted transitive entry points", async () => {
+    const f = await fixture({ adapter: true });
+    expect(await adapterPresent(f.origin, f.base, f.base)).toBe(true);
+    for (const path of [
+      "scripts/merge-batcher/controller.ts",
+      "scripts/ci/impact.ts",
+      "scripts/ci/profile-command.ts",
+      "scripts/ci/run-unit-shard.ts",
+      "scripts/run-test-shard.ts",
+    ]) {
+      const changed = await f.origin.commit(
+        await tree(f.origin, { ...f.files, [path]: "changed verifier\n" }),
+        [f.base],
+        "control change",
+        date(2),
+      );
+      expect(await adapterPresent(f.origin, f.base, changed)).toBe(false);
+    }
+  });
+  test.skipIf(!process.env.TRAFFIC_SHADOW_CORE_MODULES)(
+    "core LiveReader ignores nested traffic refs under default queue and recognizes the explicit traffic prefix",
+    async () => {
+      const core = process.env.TRAFFIC_SHADOW_CORE_MODULES!;
+      const { LiveReader } = await import(join(core, "controller.ts"));
+      const { GitStore: CoreGitStore } = await import(join(core, "git.ts"));
+      const { config: coreConfig } = await import(join(core, "model.ts"));
+      const { GitHubAuth: CoreAuth, GitHubReader: CoreReader } = await import(
+        join(core, "github.ts")
+      );
+      const f = await fixture();
+      const report = await replayTraffic(f.git, f.origin.dir, f.input);
+      const manifest = report.cohorts[0]!.manifest!;
+      await f.origin.fetch(f.git.dir, [manifest.tipSha]);
+      await f.origin.exec([
+        "update-ref",
+        `refs/heads/${TRAFFIC_PREFIX}${manifest.batchId}`,
+        manifest.tipSha,
+      ]);
+      const git = new CoreGitStore(join(f.root, "interop.git"));
+      await git.init();
+      const fetchLocal = git.fetch.bind(git);
+      git.remoteRefs = async () => f.git.remoteRefs(f.origin.dir);
+      git.fetch = async (_remote: string, refs: string[]) => fetchLocal(f.origin.dir, refs);
+      for (const branchPrefix of ["queue/", TRAFFIC_PREFIX]) {
+        const settings = {
+          ...coreConfig({ BATCHER_MODE: "shadow" }),
+          branchPrefix,
+          gitDir: git.dir,
+          outputDir: join(f.root, "interop-output"),
+          stateRef: "refs/heads/interop-state",
+        };
+        const reader = new CoreReader(settings, new CoreAuth({}), async () => {
+          throw Error("No provider calls allowed");
+        });
+        reader.ready = async () => ({ ready: [], excluded: [] });
+        reader.runs = reader.observedRuns = async () => [];
+        const observation = await new LiveReader(reader, git, settings).observe();
+        expect(observation.candidates).toHaveLength(branchPrefix === "queue/" ? 0 : 1);
+      }
+    },
+  );
   test("real squash/merge history reconstructs equivalent trees; remote refs unchanged", async () => {
     const f = await fixture(),
       before = await f.git.remoteRefs(f.origin.dir);

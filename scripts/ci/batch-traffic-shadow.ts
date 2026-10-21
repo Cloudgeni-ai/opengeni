@@ -24,13 +24,22 @@ export const TRAFFIC_PREFIX = "queue/shadow-traffic/";
 export const TRAFFIC_STATE = "refs/heads/batcher-shadow-traffic-state";
 export const ADAPTER_PATHS = [
   ".github/workflows/batch-ci.yml",
+  "scripts",
   "scripts/merge-batcher/main.ts",
   "scripts/merge-batcher/git.ts",
   "scripts/merge-batcher/model.ts",
   "scripts/ci/batch-result.ts",
   "scripts/ci/batch-setup.ts",
   "scripts/ci/batch-source.ts",
+  "scripts/ci/impact.ts",
+  "scripts/ci/profile-command.ts",
+  "scripts/ci/run-unit-shard.ts",
+  ".bun-version",
+  "package.json",
+  "bun.lock",
 ] as const;
+export const ADAPTER_COVERAGE =
+  "Exact scripts tree (including all core and CI scripts), Batch CI workflow, Bun version, root package manifest and lockfile. Not an exhaustive execution dependency closure: workspace package sources, other configuration and third-party actions/images can differ.";
 export interface MergedPull {
   number: number;
   headSha: string;
@@ -64,6 +73,14 @@ export interface TrafficInput {
   runs: MainCI[];
   observedMerged: number;
   omittedByCap: number;
+  observedMerges?: { number: number; mergeSha: string; mergedAt: string }[];
+}
+export interface HistoricalHead {
+  number: number;
+  headSha: string;
+  postBaseMainAncestors: string[];
+  classification: "contains-post-base-main" | "no-post-base-main-detected";
+  onActualParent: { clean: boolean; treeEqual: boolean | null; tree: string | null } | null;
 }
 export interface Cohort {
   key: string;
@@ -75,6 +92,7 @@ export interface Cohort {
   reason: string | null;
   conflictAt: number | null;
   exclusions: { number: number; headSha: string; reason: string }[];
+  historicalHeads: HistoricalHead[];
   candidateTree: string | null;
   actualTree: string | null;
   treeEqual: boolean;
@@ -97,6 +115,22 @@ export interface TrafficReport {
   observedAt: string;
   mode: "read-only" | "ci-shadow";
   readinessMeaning: string;
+  replayMeaning: string;
+  adapterCoverage: string;
+  collectionCoverage: {
+    status: "unmapped-main-commits" | "no-unmapped-main-commits";
+    windowMainCommits: number;
+    selectedMapped: number;
+    knownOmittedByCap: number;
+    selectedNotOnMain: number[];
+    unrepresented: {
+      sha: string;
+      committedAt: string;
+      prNumberHints: number[];
+      classification: "not-selected-or-direct-commit" | "outside-retained-cap-or-unmapped";
+    }[];
+    limitation: string;
+  };
   input: TrafficInput;
   mainSha: string;
   cohorts: Cohort[];
@@ -226,6 +260,7 @@ export async function collectTraffic(
     runs,
     observedMerged: all.length,
     omittedByCap: Math.max(0, all.length - pulls.length),
+    observedMerges: all.map(({ number, mergeSha, mergedAt }) => ({ number, mergeSha, mergedAt })),
   };
 }
 
@@ -302,6 +337,8 @@ export async function adapterPresent(git: GitStore, base: string, tip: string): 
       const after = await git.exec(["rev-parse", `${assertSha(tip)}:${path}`]);
       // Do not run newly introduced or changed verifier bytes in historical cohorts.
       if (!/^[a-f0-9]{40}$/.test(before) || before !== after) return false;
+      if (path === "scripts" && (await git.exec(["cat-file", "-t", before])) !== "tree")
+        return false;
     } catch (e) {
       if (e instanceof GitFailure) return false;
       throw e;
@@ -323,6 +360,47 @@ export async function replayTraffic(
     "\n",
   );
   const order = new Map(history.map((sha, i) => [sha, i]));
+  const selected = new Set(input.pulls.map((p) => p.mergeSha));
+  const observed = new Set(input.observedMerges?.map((p) => p.mergeSha) ?? []);
+  const earliestSelected = Math.min(...input.pulls.map((p) => order.get(p.mergeSha) ?? Infinity));
+  const mainRows = (await git.exec(["log", "--first-parent", "--format=%H%x09%cI%x09%s", mainSha]))
+    .split("\n")
+    .map((line) => {
+      const [sha, committedAt, ...subject] = line.split("\t");
+      return {
+        sha: assertSha(sha ?? ""),
+        committedAt: timestamp(committedAt),
+        subject: subject.join("\t"),
+      };
+    })
+    .filter((row) => row.committedAt >= input.since && row.committedAt <= input.until);
+  const collectionCoverage: TrafficReport["collectionCoverage"] = {
+    status: "no-unmapped-main-commits",
+    windowMainCommits: mainRows.length,
+    selectedMapped: input.pulls.filter((p) => order.has(p.mergeSha)).length,
+    knownOmittedByCap: mainRows.filter((row) => observed.has(row.sha) && !selected.has(row.sha))
+      .length,
+    selectedNotOnMain: input.pulls.filter((p) => !order.has(p.mergeSha)).map((p) => p.number),
+    unrepresented: mainRows
+      .filter((row) => !selected.has(row.sha) && !observed.has(row.sha))
+      .map((row) => ({
+        sha: row.sha,
+        committedAt: row.committedAt,
+        prNumberHints: [...row.subject.matchAll(/(?:\(#(\d+)\)|Merge pull request #(\d+))/g)].map(
+          (match) => Number(match[1] ?? match[2]),
+        ),
+        classification:
+          !input.observedMerges &&
+          input.omittedByCap > 0 &&
+          (order.get(row.sha) ?? Infinity) < earliestSelected
+            ? ("outside-retained-cap-or-unmapped" as const)
+            : ("not-selected-or-direct-commit" as const),
+      })),
+    limitation:
+      "Cross-check of current retained first-parent main by committer-time window, not snapshot-consistent PR pagination. Unrepresented commits may be missing PR collection, direct commits, batch landings or timestamp differences; subject PR numbers are hints only. Old retained input lacks exact omitted-merge projections. No exhaustive PR-history guarantee.",
+  };
+  if (collectionCoverage.unrepresented.length || collectionCoverage.selectedNotOnMain.length)
+    collectionCoverage.status = "unmapped-main-commits";
   const cohorts: Cohort[] = [];
   for (const pulls of fifoCohorts(input.pulls, cap, order)) {
     const at = performance.now(),
@@ -337,6 +415,7 @@ export async function replayTraffic(
       reason: null,
       conflictAt: null,
       exclusions: [],
+      historicalHeads: [],
       candidateTree: null,
       actualTree: null,
       treeEqual: false,
@@ -373,6 +452,42 @@ export async function replayTraffic(
           await git.fetch(remote, [p.headSha]);
         }
       }
+      for (const pull of pulls) {
+        const ancestors = new Set(
+          (await git.exec(["rev-list", pull.headSha, `^${cohort.baseSha}`])).split("\n"),
+        );
+        const postBaseMainAncestors = history
+          .slice((order.get(cohort.baseSha) ?? -1) + 1)
+          .filter((sha) => ancestors.has(sha));
+        const projection: HistoricalHead = {
+          number: pull.number,
+          headSha: pull.headSha,
+          postBaseMainAncestors,
+          classification: postBaseMainAncestors.length
+            ? "contains-post-base-main"
+            : "no-post-base-main-detected",
+          onActualParent: null,
+        };
+        if (postBaseMainAncestors.length) {
+          const actual = await commitInfo(git, pull.mergeSha);
+          try {
+            const merged = assertSha(
+              (
+                await git.exec(["merge-tree", "--write-tree", actual.parents[0]!, pull.headSha])
+              ).split("\n")[0] ?? "",
+            );
+            projection.onActualParent = {
+              clean: true,
+              treeEqual: merged === actual.tree,
+              tree: merged,
+            };
+          } catch (error) {
+            if (!(error instanceof GitFailure)) throw error;
+            projection.onActualParent = { clean: false, treeEqual: null, tree: null };
+          }
+        }
+        cohort.historicalHeads.push(projection);
+      }
       let viable = pulls;
       let manifest: Manifest | null = null;
       while (viable.length) {
@@ -395,8 +510,10 @@ export async function replayTraffic(
           cohort.exclusions.push({
             number: excluded.number,
             headSha: excluded.headSha,
-            reason:
-              "Exact-head composition conflict: excluded as a direct member, not a unique culprit or proof its changes are absent from later heads",
+            reason: cohort.historicalHeads.find((h) => h.number === excluded.number)!
+              .postBaseMainAncestors.length
+              ? "Historical replay artifact: observed head contains main commits newer than cohort base. Excluded direct member, not queue infeasibility or unique culprit evidence; later heads may retain its changes"
+              : "Exact-head composition conflict: excluded as a direct member, not a unique culprit or proof its changes are absent from later heads",
           });
           viable = viable.filter(
             (p) => p.number !== excluded.number || p.headSha !== excluded.headSha,
@@ -437,6 +554,9 @@ export async function replayTraffic(
       cohort.reason = cohort.equivalent
         ? null
         : "Tree or intermediate composition differs; historical CI is not equivalent candidate evidence";
+      if (!cohort.equivalent && cohort.historicalHeads.some((h) => h.postBaseMainAncestors.length))
+        cohort.reason +=
+          "; historical heads contain post-cohort-base main ancestry, so disagreement is a replay artifact, not queue feasibility evidence";
     } catch (e) {
       if (e instanceof MergeConflict) {
         cohort.status = "conflict";
@@ -456,6 +576,10 @@ export async function replayTraffic(
     observedAt: new Date().toISOString(),
     readinessMeaning:
       "mergedAt is a FIFO readiness PROXY, never queue admission, VM tests or review evidence. Historical main CI is observational, not candidate CI or release admission.",
+    replayMeaning:
+      "Fixed-count historical composition experiment, NOT an arrival/service-time queue simulation. Cohorts may span hours and observed heads can contain main ancestry newer than their cohort base. Conflicts/disagreements do not measure live batch feasibility or throughput.",
+    adapterCoverage: ADAPTER_COVERAGE,
+    collectionCoverage,
     input,
     mainSha,
     cohorts,
@@ -472,6 +596,22 @@ export async function replayTraffic(
       disagreements: cohorts.filter((c) => c.status === "built" && !c.equivalent).length,
       adapterReady: cohorts.filter((c) => c.adapterReady).length,
       mainRuns: input.runs.length,
+      temporalLeakageHeads: cohorts.reduce(
+        (sum, c) =>
+          sum + c.historicalHeads.filter((h) => h.postBaseMainAncestors.length > 0).length,
+        0,
+      ),
+      replayArtifactExclusions: cohorts.reduce(
+        (sum, c) =>
+          sum +
+          c.exclusions.filter((e) =>
+            c.historicalHeads.some(
+              (h) => h.number === e.number && h.postBaseMainAncestors.length > 0,
+            ),
+          ).length,
+        0,
+      ),
+      unrepresentedMainCommits: collectionCoverage.unrepresented.length,
     },
     timingsMilliseconds: { collect: 0, replay: performance.now() - started },
   };
