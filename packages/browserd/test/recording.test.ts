@@ -98,9 +98,17 @@ test("a recording keeps distinct frames, follows the agent's tab and bundles an 
       [2, 2],
       [3, 3, 3, 3],
     ]);
-    expect(bundle.header.frames.map((frame) => frame.targetId)).toEqual(["tab-a", "tab-a", "tab-b"]);
+    expect(bundle.header.frames.map((frame) => frame.targetId)).toEqual([
+      "tab-a",
+      "tab-a",
+      "tab-b",
+    ]);
     expect(bundle.header.actions).toEqual([
-      expect.objectContaining({ kind: "action", targetId: "tab-a", action: { type: "click", ref: "e1" } }),
+      expect.objectContaining({
+        kind: "action",
+        targetId: "tab-a",
+        action: { type: "click", ref: "e1" },
+      }),
       expect.objectContaining({ kind: "open_tab", targetId: "tab-b", url: "https://example.com/" }),
     ]);
   } finally {

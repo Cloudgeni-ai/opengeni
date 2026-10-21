@@ -1426,13 +1426,9 @@ export class BrowserSupervisor {
     const driver = runtime.driver;
     const record = driver.recordFrames;
     if (!record) {
-      throw new InteractionControllerError(
-        "unsupported",
-        "this browser cannot record video",
-      );
+      throw new InteractionControllerError("unsupported", "this browser cannot record video");
     }
-    return async (targetId, onFrame, onEnd) =>
-      await record.call(driver, targetId, onFrame, onEnd);
+    return async (targetId, onFrame, onEnd) => await record.call(driver, targetId, onFrame, onEnd);
   }
 
   /** Logs a tab the agent used and keeps the recording on the current
