@@ -12978,6 +12978,12 @@ describe("runtime event normalization", () => {
         const toolNames = tools.map((tool) => tool.name);
         expect(toolNames).toContain("docs__search_documents");
         expect(toolNames.some((name) => name.startsWith("flaky__"))).toBe(false);
+        // Tool discovery can say which integration is missing and why, from the
+        // same public projection: never the provider's response text.
+        expect([...prepared.unavailableMcpServers.keys()]).toEqual(["flaky"]);
+        expect(prepared.unavailableMcpServers.get("flaky")).toMatch(
+          /^connected but could not list its tools \(.+\)/,
+        );
       } finally {
         await prepared.close();
       }
