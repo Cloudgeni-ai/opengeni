@@ -26,6 +26,13 @@ import { useSessionUiFeature } from "../session-ui-features";
 import { useUiEventTarget } from "../ui-events";
 import { readChatDirectory, recordChatVisit } from "./chat-directory";
 import {
+  isSwitcherKey,
+  openChatSwitcher,
+  stepChatSwitcher,
+  SWITCHER_SHOW_DELAY_MS,
+  type ChatSwitcherState,
+} from "./chat-switcher";
+import {
   applicableChords,
   chordAccelerator,
   chordAriaKeys,
@@ -43,6 +50,8 @@ import { APP_ACTIONS, actionTitle, findAction, type ActionEnv, type AppAction } 
 
 const CommandMenu = lazy(() => import("../../components/command-menu/command-menu"));
 const ShortcutSheet = lazy(() => import("../../components/command-menu/shortcut-sheet"));
+const loadChatSwitcher = () => import("../../components/command-menu/chat-switcher");
+const ChatSwitcher = lazy(loadChatSwitcher);
 
 type ActionsContextValue = {
   env: ActionEnv;
@@ -210,6 +219,15 @@ export function ActionsProvider(props: { children: ReactNode }) {
       renameCurrentChat: () => uiEvents.dispatchEvent(new Event(RENAME_CURRENT_CHAT_EVENT)),
       openCommandMenu,
       openShortcutSheet,
+      switchToRecentChat: () => {
+        const target = openChatSwitcher(
+          readChatDirectory(subjectId, workspaceId),
+          routeChatId,
+          false,
+        );
+        const id = target?.ids[target.index];
+        if (id) rail.openSession(id);
+      },
       sidebarOrder: () => readChatDirectory(subjectId, workspaceId).sidebarOrder,
       pinnedOrder: () => readChatDirectory(subjectId, workspaceId).pinnedOrder,
     }),
@@ -218,6 +236,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       subjectId,
       platform,
       currentChat,
+      routeChatId,
       ops,
       chatList,
       rail,
@@ -297,6 +316,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
       for (const action of APP_ACTIONS) {
         // ⌘F belongs to the conversation's own find bar.
         if (action.id === "chat.find") continue;
+        // The chat switcher handles Control+Tab itself: it needs Control's release.
+        if (action.id === "go.recentChat") continue;
         const chord = applicableChords(action.chords, surface, platform).find((candidate) =>
           matchesChord(event, candidate, platform),
         );
@@ -321,6 +342,102 @@ export function ActionsProvider(props: { children: ReactNode }) {
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [keyboardShortcuts, menuBridge, platform, run]);
 
+  // Control+Tab: the recent-chats switcher (desktop app only; browsers keep the key).
+  const [switcher, setSwitcherState] = useState<ChatSwitcherState | null>(null);
+  const switcherRef = useRef<ChatSwitcherState | null>(null);
+  const setSwitcher = useCallback((next: ChatSwitcherState | null) => {
+    switcherRef.current = next;
+    setSwitcherState(next);
+  }, []);
+  const routeChatIdRef = useRef(routeChatId);
+  routeChatIdRef.current = routeChatId;
+  const switcherEnabled = keyboardShortcuts && chatList && surface === "desktop";
+  const pickSwitcherChat = useCallback(
+    (index?: number) => {
+      const state = switcherRef.current;
+      if (!state) return;
+      const id = state.ids[index ?? state.index];
+      setSwitcher(null);
+      if (id && id !== routeChatIdRef.current) envRef.current.openChat(id);
+    },
+    [setSwitcher],
+  );
+  useEffect(() => {
+    if (!switcherEnabled) {
+      setSwitcher(null);
+      return;
+    }
+    let showTimer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => {
+      clearTimeout(showTimer);
+      if (switcherRef.current) setSwitcher(null);
+    };
+    function onKeyDown(event: KeyboardEvent) {
+      const state = switcherRef.current;
+      if (isSwitcherKey(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (state) {
+          clearTimeout(showTimer);
+          setSwitcher(stepChatSwitcher(state, event.shiftKey ? -1 : 1));
+          return;
+        }
+        // Not over the ⌘K menu, the shortcut sheet or another dialog.
+        if (event.repeat || menuOpen.current || sheetOpen.current) return;
+        if (insideOtherOverlay(event.target)) return;
+        const opened = openChatSwitcher(
+          readChatDirectory(subjectId, workspaceId),
+          routeChatIdRef.current,
+          event.shiftKey,
+        );
+        if (!opened) return;
+        void loadChatSwitcher();
+        setSwitcher(opened);
+        // A quick press switches without drawing the list at all.
+        showTimer = setTimeout(() => {
+          const current = switcherRef.current;
+          if (current && !current.visible) setSwitcher({ ...current, visible: true });
+        }, SWITCHER_SHOW_DELAY_MS);
+        return;
+      }
+      if (!state) return;
+      // Control was let go somewhere the page did not hear it.
+      if (!event.ctrlKey && event.key !== "Control") {
+        cancel();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        cancel();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        clearTimeout(showTimer);
+        pickSwitcherChat();
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        event.stopPropagation();
+        clearTimeout(showTimer);
+        setSwitcher(stepChatSwitcher(state, event.key === "ArrowDown" ? 1 : -1));
+      }
+    }
+    function onKeyUp(event: KeyboardEvent) {
+      if (event.key !== "Control" || !switcherRef.current) return;
+      clearTimeout(showTimer);
+      pickSwitcherChat();
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", cancel);
+    return () => {
+      clearTimeout(showTimer);
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", cancel);
+    };
+  }, [switcherEnabled, subjectId, workspaceId, pickSwitcherChat, setSwitcher]);
+
   const value = useMemo<ActionsContextValue>(
     () => ({ env, run, chordsFor }),
     [env, run, chordsFor],
@@ -344,6 +461,23 @@ export function ActionsProvider(props: { children: ReactNode }) {
             open={sheet.open}
             onOpenChange={(open) => setSheet((current) => ({ ...current, open }))}
             returnFocus={returnFocus}
+          />
+        </Suspense>
+      ) : null}
+      {switcher?.visible ? (
+        <Suspense fallback={null}>
+          <ChatSwitcher
+            state={switcher}
+            subjectId={subjectId}
+            workspaceId={workspaceId}
+            currentChatId={routeChatId}
+            platform={platform}
+            onHover={(index) => {
+              const current = switcherRef.current;
+              if (current) setSwitcher({ ...current, index });
+            }}
+            onPick={pickSwitcherChat}
+            onDismiss={() => setSwitcher(null)}
           />
         </Suspense>
       ) : null}

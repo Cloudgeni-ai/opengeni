@@ -10,6 +10,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CommandIcon,
+  HistoryIcon,
   InboxIcon,
   KeyboardIcon,
   LinkIcon,
@@ -52,6 +53,8 @@ export type ActionEnv = {
   renameCurrentChat(): void;
   openCommandMenu(): void;
   openShortcutSheet(): void;
+  /** Back to the most recently viewed other chat (a quick Control+Tab). */
+  switchToRecentChat(): void;
   /** Chats in sidebar order, and the pinned ones in their order. */
   sidebarOrder(): readonly string[];
   pinnedOrder(): readonly string[];
@@ -254,6 +257,23 @@ export const APP_ACTIONS: readonly AppAction[] = [
     inCommandMenu: false,
     available: (env) => env.chatList,
     run: (env) => stepChat(env, 1),
+  },
+  {
+    // Hold Control to see recent chats and keep pressing Tab; release to open.
+    // The actions provider runs the switcher itself because it needs Control's
+    // release, so the desktop menu bar never owns this key.
+    id: "go.recentChat",
+    title: "Switch to recent chat",
+    group: "navigate",
+    icon: HistoryIcon,
+    chords: [
+      { code: "Tab", control: true, platform: "mac", only: "desktop" },
+      // Browsers keep Control+Tab for their own tabs.
+      { code: "Tab", mod: true, platform: "other", only: "desktop" },
+    ],
+    inCommandMenu: false,
+    available: ALWAYS,
+    run: (env) => env.switchToRecentChat(),
   },
   {
     id: "go.pinnedChat",

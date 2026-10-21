@@ -72,17 +72,23 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | Inbox | ⇧⌘I | Ctrl+Shift+I on desktop only | Browsers on Windows and Linux use Ctrl+Shift+I for developer tools |
 | Previous or next chat | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | Sidebar order, like Slack |
 | Pinned chat 1 to 9 | ⌘1 to ⌘9 on desktop | Ctrl+1 to 9 on desktop | Browsers use these for tabs |
+| Recent chat switcher | ⌃Tab on desktop | Ctrl+Tab on desktop | Browsers use these for tabs; see below |
 | Find in chat | ⌘F | Ctrl+F | Exists today |
 | Toggle sidebar | ⌃⌘S | Ctrl+Shift+S | Exists on desktop, added on web |
 | Shortcut cheat sheet | ⌘/ | Ctrl+/ | Slack's key |
 
 Desktop keeps ⌥⌘1 to 9 for switching accounts and ⌘[ / ⌘] for back and forward.
 
-**Control+Tab** is open. Browsers keep Control+Tab for switching tabs, so on the
-web it can never reach the page. On desktop the recommendation is a recent-chats
-switcher: hold Control, press Tab to step back through the chats you viewed
-most recently, and let go to open the highlighted one, like the macOS app
-switcher and VS Code. The alternative is to make it a second key for next chat.
+**Control+Tab** switches between recently viewed chats in the desktop app.
+Browsers keep Control+Tab for switching tabs, so on the web it never reaches
+the page. A quick press opens the chat you viewed before this one, and pressing
+it again comes back, so two chats can be flipped between. Holding Control shows
+the recent chats (at most ten, most recently viewed first) in the middle of the
+window; each Tab moves down the list, Shift+Tab moves up, and letting go of
+Control opens the highlighted chat. Esc, a click outside the list or leaving
+the window cancels. The list only appears after a short delay, so a quick
+press never flashes it. Archived and subagent chats are left out. On Windows
+and Linux, Ctrl+Tab does the same.
 
 ## The ⌘K menu
 
