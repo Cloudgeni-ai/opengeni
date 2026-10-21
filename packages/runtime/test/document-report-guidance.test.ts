@@ -18,6 +18,7 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
   );
   expect(prose).toContain("the file itself is the deliverable");
   expect(prose).toContain("so do not load artifact tools just to check");
+  expect(prose).toContain("only if an import fails");
   expect(prose).toContain("Do not create a goal only to declare a document.");
   expect(prose).toContain("a short summary and the artifact link, not a restatement");
   expect(prose).not.toContain("create one with the report requirement");

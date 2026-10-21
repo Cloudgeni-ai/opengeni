@@ -37,8 +37,9 @@ new PowerPoint file while `opengeni__editable_artifact_export` is unavailable or
 does not list that format, the file itself is the deliverable:
 
 1. Make or edit it in the sandbox with ordinary tools (`python-pptx`;
-   LibreOffice (`soffice --headless --convert-to pdf`) for a PDF copy). Install
-   a missing package with `pip install <package>` if needed.
+   LibreOffice (`soffice --headless --convert-to pdf`) for a PDF copy). Managed
+   sandboxes already include them, so do not check first; run
+   `pip install <package>` only if an import fails.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content.

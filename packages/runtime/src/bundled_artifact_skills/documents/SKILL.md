@@ -53,7 +53,8 @@ that format), so do not load artifact tools just to check:
 
 1. Make or edit it in the sandbox with ordinary tools (`python-docx` for Word;
    `pandoc` or LibreOffice (`soffice --headless --convert-to pdf`) for PDF).
-   Install a missing package with `pip install <package>` if needed.
+   Managed sandboxes already include them, so do not check first; run
+   `pip install <package>` only if an import fails.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content.
