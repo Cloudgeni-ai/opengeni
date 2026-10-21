@@ -26,6 +26,8 @@ export type BrowserTextTarget = {
   title: string;
   url: string;
   selected?: boolean | undefined;
+  controllerGeneration?: string | undefined;
+  targetGeneration?: string | undefined;
   documentGeneration?: string | null | undefined;
 };
 
@@ -281,6 +283,8 @@ export function browserObservationDiff<Observation extends BrowserTextObservatio
     next.agentView.sourceKind !== "snapshot" ||
     base.target.id !== next.target.id ||
     base.target.url !== next.target.url ||
+    base.target.controllerGeneration !== next.target.controllerGeneration ||
+    base.target.targetGeneration !== next.target.targetGeneration ||
     (base.target.documentGeneration ?? null) !== (next.target.documentGeneration ?? null)
   )
     return null;
