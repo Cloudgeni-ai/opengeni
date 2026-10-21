@@ -359,6 +359,37 @@ describe("postgres-js real-driver TLS socket retention", () => {
       }
     }, 10_000);
 
+    test(`${entrypoint} rejects a query queued between a reset and its close, never replaying it`, async () => {
+      const fixture = await startPostgresFixture(credentials, "plain", 0, 2);
+      const { client, sockets } = connectDriver(driver, fixture, false);
+      try {
+        assertResult(await query(client));
+        // A failed transaction sends its rollback from the rejection: after the
+        // socket error, before the separately delivered close.
+        let queued: Promise<unknown> | undefined;
+        const reset = await query(client).then(
+          () => null,
+          (error: unknown) => {
+            queued = Promise.resolve(client.unsafe("select fixture_payload").simple()).then(
+              () => null,
+              (failure: unknown) => failure,
+            );
+            return error;
+          },
+        );
+        expect((reset as NodeJS.ErrnoException).code).toBe("ECONNRESET");
+        const late = await bounded(queued!, "query queued before close");
+        expect((late as NodeJS.ErrnoException).code).toBe("CONNECTION_CLOSED");
+        // The replacement connection answers only its own queries, in order.
+        assertResult(await query(client));
+        assertResult(await query(client));
+        expect(fixture.queryCount).toBe(4);
+        expect(fixture.connectionCount).toBe(2);
+      } finally {
+        await cleanup(fixture, client, sockets);
+      }
+    }, 10_000);
+
     test.skipIf(!Bun.which("node"))(
       `${entrypoint} stays compatible with Node's TLS transport`,
       async () => {
