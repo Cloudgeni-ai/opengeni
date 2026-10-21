@@ -39723,6 +39723,7 @@ export async function appendSessionHistoryItems(
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -40242,6 +40243,7 @@ export async function attachOpenSuffixToPendingToolCalls(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          rowProjection: "event",
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -41578,7 +41580,7 @@ export async function markSessionTurnModelTransportHttpOnly(
 ): Promise<boolean> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return false;
       await tx
         .update(schema.sessionTurns)
@@ -41615,6 +41617,7 @@ export async function setSessionLastInputTokensForTurnAttempt(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
       const fence = await lockTurnAttemptWriteFenceTx(tx, {
+        rowProjection: "event",
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         turnId: input.turnId,
@@ -85855,6 +85858,7 @@ export async function appendSessionEvents(
           .map((input) => input.turnAttemptId)
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
           sessionIds: [sessionId],
@@ -87343,6 +87347,7 @@ export async function appendSessionEventsAndUpdateSession(
           .map((input) => input.turnAttemptId)
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          rowProjection: "event",
           workspaceId,
           controlLock: "none",
           sessionIds: [sessionId],

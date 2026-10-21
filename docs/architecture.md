@@ -151,6 +151,9 @@ Receipt and operation checkpoints explicitly request the same narrow fence
 projection as plain event appends; they do not fetch frozen prompts or catalogs
 they never read. Plain mutation callbacks retain their full-row contract. Both
 projections use identical locks and admission decisions in the same transaction.
+Generic event appends (including explicit field updates), history checkpoints,
+open-suffix attachment and transport/token markers use that narrow projection
+too; none needs frozen session or attempt configuration to perform its write.
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
