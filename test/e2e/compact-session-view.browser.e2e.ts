@@ -718,6 +718,9 @@ describe("compact session view on the live local workspace route (API fixture)",
         await invalidate();
         await settleRead();
         expect(await matchingChildren.count()).toBe(0);
+        // A failed quiet refresh must leave cached disclosure and its cursor
+        // usable, not turn them into a failed request for older sessions.
+        expect(await rail.getByRole("button", { name: /^Retry sessions in/ }).count()).toBe(0);
         await rail.getByText("Unrelated 00", { exact: true }).waitFor();
         for (let visible = 8; visible <= 48; visible += 4) {
           await disclosure.click();

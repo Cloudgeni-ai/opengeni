@@ -231,6 +231,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
   for (const platform of ["browser", "macos"] as const)
     test(`commit hints keep an idle ${platform} sidebar quiet and refresh remote edits`, async () => {
+      const fixtureSessionIds: string[] = [];
       const context = await configuredContext(browser, {
         viewport: { width: 1280, height: 800 },
         extraHTTPHeaders: ownerHeaders,
@@ -261,6 +262,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           workspaceId,
           `Quiet ${platform} conversation`,
         );
+        fixtureSessionIds.push(session.id);
         const child = await createTitledSession(dbClient.db, {
           accountId: session.accountId,
           workspaceId,
@@ -274,6 +276,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           sandboxBackend: "none",
           createdBy: { kind: "subject", subjectId },
         });
+        fixtureSessionIds.push(child.id);
         const commandId = crypto.randomUUID();
         // A retained command receipt, not a real process: this fixture exercises
         // the list projection and commit notification without running a worker.
@@ -288,12 +291,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           workspaceId,
           `Archive ${platform} remotely`,
         );
+        fixtureSessionIds.push(archived.id);
         const deleted = await createSessionThroughApi(
           page,
           apiBaseUrl,
           workspaceId,
           `Delete ${platform} remotely`,
         );
+        fixtureSessionIds.push(deleted.id);
         await navigateWithProjectPages(page, workspaceId, () => page.reload());
         const row = page.locator(`a[data-session-row="${session.id}"]`);
         await row.waitFor();
@@ -412,6 +417,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         }
       } finally {
         await context.close();
+        // These cases share the configured owner's workspace with the rest of
+        // this file. Leave no pinned/archived roots or children behind.
+        if (fixtureSessionIds.length)
+          await shared.admin`delete from sessions where id = any(${fixtureSessionIds}::uuid[])`;
       }
     }, 90_000);
 
