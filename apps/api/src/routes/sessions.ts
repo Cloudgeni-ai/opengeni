@@ -3393,6 +3393,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // them with includeTypes when it opens. Unknown values are ignored
     // so older and newer clients degrade to the plain type filter.
     const retainPresentedToolCalls = c.req.query("presentedToolCalls") === "include";
+    // Step readers ask for large tool outputs as bounded previews and read one
+    // row's exact output when the reader needs it. Full payload pages only;
+    // older servers ignore the option and return exact outputs.
+    const toolOutputPreview =
+      c.req.query("toolOutputs") === "preview" &&
+      payloadMode === "full" &&
+      resultMode !== "compact";
     const limit = latestClass
       ? 1
       : eventListLimit(
@@ -3412,6 +3419,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(retainPresentedToolCalls && !latestClass ? { retainPresentedToolCalls: true } : {}),
+      ...(toolOutputPreview && !latestClass ? { toolOutputPreview: true } : {}),
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
       ...(latestClass ? { authoritativeLatest: true } : {}),
     });
@@ -3458,6 +3466,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header("X-OpenGeni-Event-Mode", mode);
     c.header("X-OpenGeni-Event-Direction", direction);
     c.header("X-OpenGeni-Payload-Mode", payloadMode);
+    if (toolOutputPreview && !latestClass) c.header("X-OpenGeni-Tool-Outputs", "preview");
     c.header("X-OpenGeni-Forensic-Exact", String(forensicExact));
     const coveredFirst = page.events[0]?.sequence;
     const coveredLastEvent = page.events.at(-1);

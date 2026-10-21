@@ -58,6 +58,7 @@ export type {
   TurnStepsItem,
   TurnStepsState,
   ToolCallItem,
+  ToolOutputPreview,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,

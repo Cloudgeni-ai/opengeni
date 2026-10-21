@@ -2668,6 +2668,28 @@ type SessionEventListCommonOptions = {
    * that predate this option ignore it and apply the plain type filter.
    */
   presentedToolCalls?: "include";
+  /**
+   * With `payloadMode: "full"`, return large `agent.toolCall.output` payloads
+   * as bounded previews carrying an `outputPreview` fact (see
+   * {@link SessionEventToolOutputPreview}). Read one row's exact output with
+   * an ordinary full read around its sequence. Servers that predate this
+   * option ignore it and return exact outputs.
+   */
+  toolOutputs?: "preview";
+};
+
+/**
+ * The fact a previewed `agent.toolCall.output` payload carries in
+ * `payload.outputPreview`. `structured` keeps the output's shape with long
+ * strings shortened to their head and tail around an omission marker; `text`
+ * replaces the output with the head and tail of its text.
+ */
+export type SessionEventToolOutputPreview = {
+  truncated: true;
+  reason: "tool_output_preview";
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &

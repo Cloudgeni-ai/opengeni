@@ -1388,6 +1388,7 @@ export type {
   SessionEventReadMode,
   SessionEventResultMode,
   SessionEventSemanticClass,
+  SessionEventToolOutputPreview,
   SessionEventType,
   SessionGoal,
   SessionGoalRevision,

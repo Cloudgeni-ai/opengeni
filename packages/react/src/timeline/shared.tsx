@@ -7,7 +7,7 @@ import { stringifyPayload } from "../lib/format";
 import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
-import type { ToolCallTruncation } from "./types";
+import type { ToolCallTruncation, ToolOutputPreview } from "./types";
 import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
@@ -31,6 +31,30 @@ import { useOpenGeniText } from "../messages/runtime";
      bad      a settled failure      red dot + red text ("exit 6") — the one hue
      muted    quiet metadata         subtle text ("session 3")
    -------------------------------------------------------------------------- */
+
+const ToolOutputPreviewContext = createContext<ToolOutputPreview | null>(null);
+
+/**
+ * Marks a tool row whose output is a bounded preview. The row's disclosure
+ * reads the exact output when it opens and shows it once it lands; until then
+ * the body says it is loading, and a failed read says it is a preview.
+ */
+export function ToolOutputPreviewProvider({
+  value,
+  children,
+}: {
+  value: ToolOutputPreview | null;
+  children: ReactNode;
+}) {
+  return (
+    <ToolOutputPreviewContext.Provider value={value}>{children}</ToolOutputPreviewContext.Provider>
+  );
+}
+
+/** The row's output preview, when its output is not exact. */
+export function useToolOutputPreview(): ToolOutputPreview | null {
+  return useContext(ToolOutputPreviewContext);
+}
 
 /**
  * A subtle settle signal — see the CHIP DOCTRINE above. The closed tone set.
@@ -168,6 +192,14 @@ export function ActivityDisclosure({
   const truncationContext = useContext(ToolCallTruncationContext);
   const truncation = plain ? null : truncationContext;
   const compact = useContext(CompactActivityContext);
+  // A previewed output reads its exact output when the row opens (once: a
+  // failed read waits for Retry).
+  const outputPreview = useContext(ToolOutputPreviewContext);
+  const loadOutput = outputPreview?.load;
+  const outputPending = outputPreview?.state === "preview";
+  useEffect(() => {
+    if (open && outputPending && !compact) loadOutput?.();
+  }, [open, outputPending, loadOutput, compact]);
   if (compact)
     return (
       <span className="og-rolling-label">
@@ -288,9 +320,53 @@ export function ActivityDisclosure({
       </div>
       {open ? (
         <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
-          {children}
+          {outputPreview && loadOutput && outputPreview.state !== "error" ? (
+            // Never show a preview's body as if it were the whole output.
+            <div
+              data-og-tool-output-loading=""
+              role="status"
+              className="text-og-sm leading-5 text-og-fg-subtle"
+            >
+              {t("timeline.shared.loadingFullOutput")}
+            </div>
+          ) : outputPreview ? (
+            <>
+              <ToolOutputPreviewNotice preview={outputPreview} />
+              <ToolOutputPreviewContext.Provider value={null}>
+                {children}
+              </ToolOutputPreviewContext.Provider>
+            </>
+          ) : (
+            children
+          )}
           {truncation ? <ToolCallTruncationNotice truncation={truncation} /> : null}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Says the body below is a preview, with Retry when the exact read failed. */
+function ToolOutputPreviewNotice({ preview }: { preview: ToolOutputPreview }) {
+  const t = useOpenGeniText();
+  const retry = preview.load;
+  return (
+    <div
+      data-og-tool-output-preview=""
+      role="status"
+      className="flex flex-wrap items-center gap-x-2 text-og-sm leading-5 text-og-fg-subtle"
+    >
+      <span>
+        {retry ? t("timeline.shared.outputPreviewFailed") : t("timeline.shared.outputPreviewOnly")}
+      </span>
+      {retry ? (
+        <button
+          type="button"
+          onClick={retry}
+          className="rounded-og-sm font-medium text-og-fg-muted underline-offset-2 hover:text-og-fg hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+        >
+          {t("timeline.shared.retryFullOutput")}
+        </button>
       ) : null}
     </div>
   );

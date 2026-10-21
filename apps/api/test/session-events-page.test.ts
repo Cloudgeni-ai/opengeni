@@ -310,6 +310,56 @@ describe("session event byte-bounded HTTP pages", () => {
     expect(ordinaryFull.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
   });
 
+  test("step reads can ask for bounded tool-output previews", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const output = `${"line of command output\n".repeat(3_000)}exit 0`;
+    await admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload
+      ) values
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 1, 'agent.toolCall.created',
+          ${admin.json({ id: "call-1", name: "exec_command", arguments: { cmd: "seq" } })}),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 2, 'agent.toolCall.output',
+          ${admin.json({ id: "call-1", output })})`;
+    const base = `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`;
+    const steps = "includeTypes=agent.toolCall.created,agent.toolCall.output&compact=1";
+
+    const preview = await app.request(
+      `${base}?${steps}&before=3&direction=before&limit=200&payloadMode=full&toolOutputs=preview`,
+      { headers: { authorization } },
+    );
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("X-OpenGeni-Tool-Outputs")).toBe("preview");
+    expect(preview.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
+    const previewBody = (await preview.json()) as Array<{ payload: Record<string, unknown> }>;
+    expect(previewBody).toHaveLength(2);
+    const previewed = previewBody[1]!.payload;
+    expect(previewed.id).toBe("call-1");
+    expect(previewed.outputPreview).toEqual(
+      expect.objectContaining({ truncated: true, shape: "structured" }),
+    );
+    expect(String(previewed.output).endsWith("exit 0")).toBe(true);
+    expect(String(previewed.output).length).toBeLessThan(2_000);
+    expect(Number(preview.headers.get("X-OpenGeni-Page-Bytes"))).toBeLessThan(4_000);
+
+    // Summary pages and servers ignore the option; one row reads exactly.
+    const summary = await app.request(
+      `${base}?${steps}&after=0&limit=2&payloadMode=summary&toolOutputs=preview`,
+      { headers: { authorization } },
+    );
+    expect(summary.headers.get("X-OpenGeni-Tool-Outputs")).toBeNull();
+    const exact = await app.request(
+      `${base}?includeTypes=agent.toolCall.output&after=1&before=3&direction=after&limit=1&payloadMode=full`,
+      { headers: { authorization } },
+    );
+    const exactBody = (await exact.json()) as Array<{ payload: Record<string, unknown> }>;
+    expect(exactBody).toHaveLength(1);
+    expect(exactBody[0]!.payload).toEqual({ id: "call-1", output });
+  });
+
   test("delivers an oversized chat message intact and resumes after its exact cursor", async () => {
     if (!available) return;
     const { workspaceId, sessionId, authorization } = await fixture();
