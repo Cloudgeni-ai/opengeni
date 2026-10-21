@@ -960,8 +960,11 @@ creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. With an agent configuration it only
-refines inside the enabled capabilities (a name owned by a capability that is
-off is a 422 `agent_config_conflict`); prefer `agent.capabilities`. It accepts only names from
+refines inside the enabled capabilities: a name owned by a capability that is
+off is left out, so a client built against an older capability map keeps
+creating sessions when a tool moves under a capability it turns off (an agent's
+own `session_create` list is still a 422 `agent_config_conflict`); prefer
+`agent.capabilities`. It accepts only names from
 `FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
 connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools, while explicit `[]` remains
 empty. Connector tools require an explicit selection and their independent

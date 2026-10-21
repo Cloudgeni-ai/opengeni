@@ -212,8 +212,12 @@ Rules:
    bounds what first-party tools may do; approvals still gate individual calls.
 6. **Legacy fields keep working.** `firstPartyMcpTools`, `tools`,
    `excludedMcpServerIds` and `bundledSkillIds` refine inside the resolved
-   capabilities; naming a tool of a capability that is off is a 422
-   `agent_config_conflict`. Under `"none"`, an omitted `bundledSkillIds`
+   capabilities. A first-party tool of a capability that is off is left out of
+   an API or SDK client's `firstPartyMcpTools`, because the tool-to-capability
+   map grows and a client built against an older one cannot know a tool moved;
+   an agent's own list, read from the live catalog, is still a 422
+   `agent_config_conflict`, as is a `tools` entry naming the `files` or `docs`
+   server of a capability that is off. Under `"none"`, an omitted `bundledSkillIds`
    freezes as `[]` at create (no bundled Opengeni guides); an explicit list
    opts in exactly. Without `agent`, resolution reproduces the creator's
    legacy values exactly.

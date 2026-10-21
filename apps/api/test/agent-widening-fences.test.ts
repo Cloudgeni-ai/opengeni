@@ -301,6 +301,33 @@ describe("child first-party tool selection may only narrow (real PostgreSQL)", (
     ).toEqual(["set_session_title", "session_create"]);
   });
 
+  test("an agent's own list naming a tool of a capability it turns off is still refused", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await narrowedRootSession(grant, ["set_session_title", "session_create"]);
+    const attempt = await liveAttempt(grant, root.id);
+    const response = await sessionRoutesApp().request(
+      `/v1/workspaces/${grant.workspaceId}/sessions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await agentBearer(grant, attempt, ["set_session_title", "session_create"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          initialMessage: "child work",
+          resources: [],
+          firstPartyMcpTools: ["set_session_title", "session_create"],
+          agent: { capabilities: "none" },
+        }),
+      },
+    );
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(
+      "firstPartyMcpTools lists session_create, but agent capability subagents is off",
+    );
+  });
+
   test("the session_create MCP tool applies the same fence and says so", async () => {
     if (!available) return;
     const grant = await fixture();
