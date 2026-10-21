@@ -43,6 +43,118 @@ type PlanNode = {
   Plans?: PlanNode[];
 };
 
+test("shallow workspace totals only read cursors contributing to unarchived groups", async () => {
+  const identity = crypto.randomUUID();
+  const access = await bootstrapWorkspace(db, {
+    accountExternalSource: "test",
+    accountExternalId: identity,
+    accountName: "Shallow totals",
+    workspaceExternalSource: "test",
+    workspaceExternalId: identity,
+    workspaceName: "Shallow totals",
+    subjectId: `shallow-totals-${identity}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const roots = 1000;
+  const archivedRoots = 650;
+  const childrenPerRoot = 7;
+  await withWorkspaceSessionActivityRls(db, grant.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      with roots as materialized (
+        select gen_random_uuid() id, ordinal from generate_series(1, ${roots}) ordinal
+      ), generated as (
+        select id, id as root_id, null::uuid parent_id, ordinal from roots
+        union all
+        select gen_random_uuid(), roots.id, roots.id, roots.ordinal
+          from roots cross join generate_series(1, ${childrenPerRoot}) child
+      )
+      insert into sessions(id, account_id, workspace_id, initial_message, model, reasoning_effort,
+        latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
+        parent_session_id, root_session_id, status, metadata)
+      select id, ${grant.accountId}, ${grant.workspaceId}, 'Shallow fixture', 'test-model', 'medium',
+        'standard', 'none', id, jsonb_build_object('mode','explicit','inheritedFromSessionId',null),
+        parent_id, root_id, 'idle', jsonb_build_object('ordinal', ordinal) from generated
+    `);
+  });
+  await shared.admin`insert into session_pins(account_id, workspace_id, subject_id, session_id,
+    pinned, pinned_at, archived, archived_at, acknowledged_sequence, actively_working)
+    select account_id, workspace_id, ${grant.subjectId}, id, false, null,
+      parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots},
+      case when parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots}
+        then now() else null end, 0, false
+    from sessions where workspace_id=${grant.workspaceId}`;
+  await shared.admin`analyze sessions`;
+  await shared.admin`analyze session_pins`;
+  await shared.admin`analyze session_event_cursors`;
+  const contributing = (roots - archivedRoots) * (childrenPerRoot + 1);
+  const iterations = process.env.OPENGENI_BENCH_SESSION_LIST === "1" ? 6 : 2;
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    const page = await listSessionEntriesForSubject(db, grant.workspaceId, {
+      subjectId: grant.subjectId,
+      parentSessionId: null,
+      limit: 1,
+      includeTotals: true,
+      includePinned: false,
+    });
+    expect(page.totals?.groups[0]).toMatchObject({ total: contributing, unread: 0, activeWork: 0 });
+    const query = captured;
+    if (!query) throw new Error("Exact totals query was not captured");
+    await withWorkspaceSubjectRls(db, grant.workspaceId, grant.subjectId, async (tx) => {
+      const mode = iteration % 2 === 0 ? "force_custom_plan" : "force_generic_plan";
+      await tx.execute(sql.raw(`set local plan_cache_mode = ${mode}`));
+      await tx.execute(sql.raw(`prepare shallow_totals as ${query.query}`));
+      // EXECUTE arguments are SQL expressions, not extended-protocol bind
+      // parameters. Quote the captured scalar fixture values, never SQL text.
+      const argumentsSql = sql.raw(
+        query.parameters
+          .map((value) => {
+            if (value === null) return "NULL";
+            if (typeof value === "boolean") return value ? "true" : "false";
+            if (typeof value === "number" && Number.isFinite(value)) return String(value);
+            if (typeof value === "string") return `'${value.replaceAll("'", "''")}'`;
+            throw new Error("Unsupported prepared totals fixture parameter");
+          })
+          .join(", "),
+      );
+      let result;
+      try {
+        const totals = await tx.execute(sql`execute shallow_totals(${argumentsSql})`);
+        const groups = totals[0]?.groups as Array<{ total: number }> | undefined;
+        expect(groups?.[0]?.total).toBe(contributing);
+        result = await tx.execute(
+          sql`explain (analyze, buffers, format json) execute shallow_totals(${argumentsSql})`,
+        );
+      } finally {
+        await tx.execute(sql.raw("deallocate shallow_totals")).catch(() => undefined);
+      }
+      const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode; "Execution Time": number }[];
+      let cursorRows = 0;
+      let sessionRows = 0;
+      function walk(node: PlanNode) {
+        if (node["Relation Name"] === "session_event_cursors")
+          cursorRows += node["Actual Rows"] * node["Actual Loops"];
+        if (node["Relation Name"] === "sessions")
+          sessionRows += node["Actual Rows"] * node["Actual Loops"];
+        node.Plans?.forEach(walk);
+      }
+      walk(plans[0]!.Plan);
+      console.log(
+        JSON.stringify({
+          fixture: "shallow",
+          mode,
+          iteration,
+          contributing,
+          cursorRows,
+          sessionRows,
+          executionMs: plans[0]!["Execution Time"],
+        }),
+      );
+      expect(cursorRows).toBe(contributing);
+      expect(sessionRows).toBeLessThanOrEqual(roots * (childrenPerRoot + 1) + contributing);
+    });
+  }
+}, 180_000);
+
 test("complete totals keep base-table work bounded across deep trees and populated personal state", async () => {
   const identity = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -170,9 +282,8 @@ test("complete totals keep base-table work bounded across deep trees and populat
         console.log(JSON.stringify({ scoped, visits, plan: result[0]?.["QUERY PLAN"] }));
       // Bounds guard physical work rather than wall time or a preferred plan
       // shape. Scanning all sessions once per depth violates this by >10x.
-      // Sessions are read for the roots, the descendant walk, and once per
-      // statement by each child table's hashed visibility probe (pins and
-      // event cursors), so a constant small multiple of the workspace.
+      // Sessions are read for roots/descendants and by keyed child-table
+      // visibility probes, so a constant small multiple of the workspace.
       expect(visits.sessions).toBeLessThan((generatedCount + 1) * 4);
       expect(visits.session_pins).toBeLessThan((generatedCount + 1) * 3);
       expect(visits.personal_state).toBeLessThan((generatedCount + 1) * 4);
