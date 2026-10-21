@@ -67,6 +67,7 @@ import {
   type PreparingProps,
 } from "./turn";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
 
@@ -655,6 +656,7 @@ function TimelineGroupView({
             }
           >
             <TurnRailFrame compact>
+              {group.work.steps ? <TurnStepsLoader steps={group.work.steps} /> : null}
               <FoldedGroups groups={group.work.details} context={context} />
             </TurnRailFrame>
           </TurnSummary>

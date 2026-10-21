@@ -92,6 +92,8 @@ export function readableWorkHasDetails(
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
   options: Pick<ReadableWorkOptions, "startupDetails">,
 ): boolean {
+  // Steps not loaded yet are revealed (and loaded) by opening the row.
+  if (group.work.steps && group.work.steps.state !== "complete") return true;
   return group.work.details.some(
     (detail) =>
       options.startupDetails ||

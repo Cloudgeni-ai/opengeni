@@ -1,6 +1,11 @@
 import {
+  isPresentedSessionToolName,
+  SESSION_EVENT_STEP_TYPES,
   sessionEventStreamCoveredThrough,
   type SessionEvent,
+  type SessionEventListOptions,
+  type SessionEventPage,
+  type SessionEventType,
   type SessionStatus,
   type StreamConnectionState,
 } from "@opengeni/sdk";
@@ -8,7 +13,7 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { createOlderHistoryLoadReceipt, type OlderHistoryLoadReceipt } from "../older-history";
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
-import type { TimelineItem } from "../timeline/types";
+import type { TimelineItem, TurnStepsItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
@@ -28,7 +33,12 @@ export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
 };
 
 export type UseSessionEventsResult = {
-  /** Replayed + live events, ordered by sequence, no gaps, no duplicates. */
+  /**
+   * Loaded events, ordered by sequence, no duplicates. Windowed history holds a
+   * session's conversation; a turn's steps (tool calls and outputs, streamed
+   * reasoning and command output) are included while live and once a reader
+   * opens that turn. Full replay holds every event.
+   */
   events: SessionEvent[];
   /** Renderable timeline, including the bounded navigation witness for a distant queued prompt. */
   timeline: TimelineItem[];
@@ -106,15 +116,13 @@ const OLDEST_FETCH_CAP = 2;
 // additional bounded page to find its user/session boundary without turning a
 // fresh open into an unbounded history walk.
 const BOUNDARY_PAGE_CAP = 1;
-// Foreground reconciliation is intentionally semantic, not merely time-based:
-// tiny raw gaps can stay on SSE; medium raw gaps get one compact probe so a
-// token-heavy single answer is not mistaken for hundreds of visible messages;
-// only a large/complex missed window reloads the latest tail.
-const FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES = 16;
-const FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES = SESSION_HISTORY_PAGE_SIZE;
-const FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS = 128;
-const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
-const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;
+// Rejoining the live tip (first open of a working turn, a return to a hidden
+// tab, catching up from history) replays a tiny raw gap over SSE. A larger gap
+// catches up the conversation only and reads the working turn's latest steps,
+// instead of replaying every step since the last conversation event. Only a
+// gap of more than this many pages of conversation reloads the latest window.
+const DIRECT_REPLAY_MAX_SEQUENCES = 16;
+const CATCHUP_MAX_PAGES = 2;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
 // Durable history remains on the server and is available through bounded
@@ -230,6 +238,194 @@ export function useSessionEvents(
   // new stream identity cannot expose the previous session's event log.
   const [stateStreamKey, setStateStreamKey] = useState(streamKey);
 
+  const historyFilter = fullReplay ? undefined : CONVERSATION_FILTER;
+  // Conversation-first history: a turn's steps live here, per turn, apart
+  // from the contiguous conversation window (see `isConversationHistoryEvent`).
+  const [stepStores, setStepStores] = useState<TurnStepStores>(EMPTY_STEP_STORES);
+  const stepStoresRef = useRef<TurnStepStores>(EMPTY_STEP_STORES);
+  // Retires step reads issued against stores that were since replaced.
+  const stepGenerationRef = useRef(0);
+  // Turns a reader has open: their steps are never trimmed or evicted.
+  const retainedTurnsRef = useRef(new Map<string, number>());
+  const turnStepHandlesRef = useRef(new Map<string, Pick<TurnStepsItem, "load" | "retain">>());
+  // Presented tools (images, published files, Skill and learning writes) stay
+  // in the conversation window with their results.
+  const presentedCallIdsRef = useRef(new Set<string>());
+  const presentedScanRef = useRef<readonly SessionEvent[] | null>(null);
+  const [presentedOutputs, setPresentedOutputs] =
+    useState<ReadonlyMap<string, SessionEvent>>(EMPTY_PRESENTED_OUTPUTS);
+  const presentedRequestedRef = useRef(new Set<string>());
+  // A return to the live tip from history: catch up without replaying steps.
+  const rejoinPendingRef = useRef(false);
+
+  const commitStepStores = useCallback((next: TurnStepStores) => {
+    stepStoresRef.current = next;
+    setStepStores(next);
+  }, []);
+
+  /** Keep only steps that cannot have changed: settled turns in the window. */
+  const pruneStepStores = useCallback(
+    (windowEvents: readonly SessionEvent[]) => {
+      stepGenerationRef.current += 1;
+      const settled = settledTurns(windowEvents);
+      const next = new Map<string, TurnStepStore>();
+      for (const [turnId, store] of stepStoresRef.current) {
+        if (!settled.has(turnId) || store.events.length === 0) continue;
+        // Reads in flight were just retired.
+        next.set(
+          turnId,
+          store.loading || store.error ? { ...store, loading: false, error: false } : store,
+        );
+      }
+      commitStepStores(next);
+    },
+    [commitStepStores],
+  );
+
+  const presentedCallIds = useCallback((event: SessionEvent): ReadonlySet<string> => {
+    const ids = presentedCallIdsRef.current;
+    if (event.type === "agent.toolCall.created") {
+      notePresentedCalls([event], ids);
+    } else if (event.type === "agent.toolCall.output") {
+      const payload = event.payload as Record<string, unknown> | null;
+      const windowEvents = eventWindowRef.current.events;
+      if (
+        typeof payload?.id === "string" &&
+        !ids.has(payload.id) &&
+        presentedScanRef.current !== windowEvents
+      ) {
+        // Presented calls loaded with history: scan once per window.
+        presentedScanRef.current = windowEvents;
+        notePresentedCalls(windowEvents, ids);
+      }
+    }
+    return ids;
+  }, []);
+
+  const appendLiveSteps = useCallback(
+    (steps: readonly SessionEvent[]) => {
+      const windowEvents = eventWindowRef.current.events;
+      const next = new Map(stepStoresRef.current);
+      const now = Date.now();
+      for (const [turnId, events] of groupByTurn(steps)) {
+        const existing = next.get(turnId);
+        const store: TurnStepStore = existing ?? {
+          events: [],
+          bytes: 2,
+          // Earlier steps exist when the window skips sequences between the
+          // turn's start and this first live step.
+          hasOlder: turnHasHiddenSequences(windowEvents, turnId, events[0]!.sequence),
+          loading: false,
+          error: false,
+          touched: now,
+        };
+        let updated: TurnStepStore = { ...store, ...appendStepEvents(store, events), touched: now };
+        if (!retainedTurnsRef.current.get(turnId)) updated = trimLiveStepTail(updated);
+        next.set(turnId, updated);
+      }
+      commitStepStores(boundStepStores(next, retainedTurnsRef.current));
+    },
+    [commitStepStores],
+  );
+
+  /**
+   * Read a turn's newest unloaded steps: the latest page when none are
+   * loaded, else the page before the oldest loaded step. `before` pins the
+   * read's upper bound (the durable head when rejoining a working turn).
+   */
+  const loadTurnSteps = useCallback(
+    (turnId: string, before?: number) => {
+      if (!ownsNavigation() || !sessionId || fullReplay) return;
+      const current = stepStoresRef.current.get(turnId);
+      if (current?.loading) return;
+      if (before === undefined && current && !current.hasOlder && !current.error) return;
+      const bounds = conversationTurnBounds(eventWindowRef.current.events).get(turnId);
+      if (!bounds) return;
+      const upper =
+        before ??
+        current?.events[0]?.sequence ??
+        (bounds.terminal !== null ? bounds.terminal + 1 : Number.MAX_SAFE_INTEGER);
+      const generation = stepGenerationRef.current;
+      const isCurrent = () => ownsNavigation() && generation === stepGenerationRef.current;
+      // A pinned read (rejoining the tip) replaces what was loaded: merging a
+      // newest page into older loaded steps could hide the steps between them.
+      const base: TurnStepStore =
+        before === undefined && current
+          ? current
+          : { events: [], bytes: 2, hasOlder: true, loading: false, error: false, touched: 0 };
+      commitStepStores(
+        new Map(stepStoresRef.current).set(turnId, {
+          ...base,
+          loading: true,
+          error: false,
+          touched: Date.now(),
+        }),
+      );
+      void readEventPage(client, workspaceId, sessionId, {
+        includeTypes: [...SESSION_EVENT_STEP_TYPES],
+        after: Math.max(0, bounds.first - 1),
+        before: upper,
+        direction: "before",
+        limit: SESSION_TURN_STEP_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      }).then(
+        (page) => {
+          if (!isCurrent()) return;
+          const own = page.events.filter((event) => event.turnId === turnId);
+          const latest = stepStoresRef.current.get(turnId) ?? base;
+          const merged = appendStepEvents(latest, own);
+          const next = new Map(stepStoresRef.current).set(turnId, {
+            ...merged,
+            // A page read without a continuation fact (a client without
+            // listEventPage) offers one more page until a read comes back empty.
+            hasOlder: page.hasMore ?? page.events.length > 0,
+            loading: false,
+            error: false,
+            touched: Date.now(),
+          });
+          commitStepStores(boundStepStores(next, retainedTurnsRef.current));
+        },
+        () => {
+          if (!isCurrent()) return;
+          const latest = stepStoresRef.current.get(turnId) ?? base;
+          commitStepStores(
+            new Map(stepStoresRef.current).set(turnId, { ...latest, loading: false, error: true }),
+          );
+        },
+      );
+    },
+    [client, workspaceId, sessionId, fullReplay, ownsNavigation, commitStepStores],
+  );
+  const loadTurnStepsRef = useRef(loadTurnSteps);
+  useEffect(() => {
+    loadTurnStepsRef.current = loadTurnSteps;
+  }, [loadTurnSteps]);
+
+  /** Stable per-turn handles, so an open turn's loader effects run once. */
+  const turnStepHandle = useCallback((turnId: string) => {
+    let handle = turnStepHandlesRef.current.get(turnId);
+    if (!handle) {
+      const retained = retainedTurnsRef.current;
+      handle = {
+        load: () => loadTurnStepsRef.current(turnId),
+        retain: () => {
+          retained.set(turnId, (retained.get(turnId) ?? 0) + 1);
+          let released = false;
+          return () => {
+            if (released) return;
+            released = true;
+            const count = (retained.get(turnId) ?? 1) - 1;
+            if (count > 0) retained.set(turnId, count);
+            else retained.delete(turnId);
+          };
+        },
+      };
+      turnStepHandlesRef.current.set(turnId, handle);
+    }
+    return handle;
+  }, []);
+
   // Navigation belongs to the session/client lifetime, not the transport: an
   // SSE reconnect must never cancel an in-flight history page.
   useEffect(() => {
@@ -282,6 +478,15 @@ export function useSessionEvents(
       setViewMode("live");
       initialWindowLoadedRef.current = false;
       reconcileAfterPageResumeRef.current = false;
+      rejoinPendingRef.current = false;
+      stepGenerationRef.current += 1;
+      stepStoresRef.current = EMPTY_STEP_STORES;
+      setStepStores(EMPTY_STEP_STORES);
+      turnStepHandlesRef.current = new Map();
+      presentedCallIdsRef.current = new Set();
+      presentedScanRef.current = null;
+      presentedRequestedRef.current = new Set();
+      setPresentedOutputs(EMPTY_PRESENTED_OUTPUTS);
     }
     // AbortController is advisory: custom SDK clients and async iterators may
     // ignore it and resolve/yield after cleanup. Fence every effect instance so
@@ -371,8 +576,23 @@ export function useSessionEvents(
       if (status !== undefined) {
         setSessionStatusProjection(status);
       }
+      // Live steps go to their turn's step store; the window stays the
+      // conversation so it is never crowded out by one long turn's steps.
+      let conversation: SessionEvent[] = batch;
+      if (!fullReplay) {
+        const windowNewest = newestSequenceRef.current ?? 0;
+        const steps: SessionEvent[] = [];
+        conversation = [];
+        for (const event of batch) {
+          if (!isConversationHistoryEvent(event, presentedCallIds(event))) steps.push(event);
+          // Rejoining at a durable head never re-applies a windowed event.
+          else if (event.sequence > windowNewest) conversation.push(event);
+        }
+        if (steps.length > 0) appendLiveSteps(steps);
+        if (conversation.length === 0) return;
+      }
       const current = eventWindowRef.current;
-      const next = appendBrowserSessionEventWindow(current, batch);
+      const next = appendBrowserSessionEventWindow(current, conversation);
       const retained = {
         ...next,
         truncated: current.truncated || next.truncated,
@@ -390,64 +610,98 @@ export function useSessionEvents(
       if (!isCurrent()) return;
       flushTimer ??= setTimeout(flush, 16);
     };
+    const installCatchup = (events: SessionEvent[], head: number) => {
+      const current = eventWindowRef.current;
+      const windowNewest = newestSequenceRef.current ?? 0;
+      const fresh = events.filter((event) => event.sequence > windowNewest);
+      const status = observeSessionStatus(fresh, sessionStatusRef);
+      const next = appendBrowserSessionEventWindow(current, fresh);
+      const retained = { ...next, truncated: current.truncated || next.truncated };
+      eventWindowRef.current = retained;
+      oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
+      newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
+      lastSequenceRef.current = Math.max(lastSequenceRef.current, head);
+      streamResumeSequenceRef.current = Math.max(streamResumeSequenceRef.current, head);
+      if (status !== undefined) setSessionStatusProjection(status);
+      if (fresh.length > 0) setEventWindow(retained);
+      if (retained.truncated) {
+        hasOlderRef.current = true;
+        setHasOlder(true);
+      }
+    };
+    /**
+     * Join the live tip without replaying the steps written since the
+     * window's newest conversation event. Small gaps replay over SSE; larger
+     * ones catch up the conversation and read the working turn's latest
+     * steps. Resolves "reload" when the missed conversation is too long to
+     * append (the caller then loads the latest window).
+     */
+    const rejoinLive = async (force: boolean): Promise<"joined" | "reload"> => {
+      const activeTurn = activeConversationTurn(eventWindowRef.current.events);
+      if (!force && !activeTurn) return "joined";
+      const cursor = streamResumeSequenceRef.current;
+      let head: number;
+      let sessionActiveTurn: string | null = null;
+      try {
+        const session = await client.getSession(workspaceId, sessionId, {
+          fresh: true,
+          signal: controller.signal,
+        });
+        head = session.lastSequence;
+        sessionActiveTurn = session.activeTurnId;
+      } catch (cause) {
+        if (controller.signal.aborted) throw cause;
+        // An optimization read: replay from the exact cursor instead.
+        return "joined";
+      }
+      if (!isCurrent()) throw abortError();
+      if (head - cursor <= DIRECT_REPLAY_MAX_SEQUENCES) return "joined";
+      let catchup: SessionEvent[] | null;
+      try {
+        catchup = await loadConversationCatchup(client, workspaceId, sessionId, cursor, head, {
+          signal: controller.signal,
+          isCurrent,
+        });
+      } catch (cause) {
+        if (!isCurrent()) throw cause;
+        return "joined";
+      }
+      if (!isCurrent()) throw abortError();
+      if (catchup === null) return "reload";
+      installCatchup(catchup, head);
+      // Presented results written while away were not in the catch-up.
+      presentedRequestedRef.current.clear();
+      const working = sessionActiveTurn ?? activeConversationTurn(eventWindowRef.current.events);
+      if (working) loadTurnStepsRef.current(working, head + 1);
+      return "joined";
+    };
 
     void (async () => {
       try {
         if (reconcileForegroundResume) {
           setConnectionState("connecting");
-          const cursor = streamResumeSequenceRef.current;
-          let plan: ForegroundCatchupPlan = { kind: "resume" };
-          try {
-            plan = await planForegroundCatchup(t, client, workspaceId, sessionId, cursor, {
-              signal: controller.signal,
-            });
-          } catch {
-            if (controller.signal.aborted) return;
-            // This read is an optimization gate, not a new availability
-            // dependency. If it fails, preserve the SDK's exact cursor replay
-            // rather than blanking a usable timeline or failing the stream.
-            plan = { kind: "resume" };
-          }
-          if (!isCurrent()) return;
-          if (plan.kind === "append") {
-            const current = eventWindowRef.current;
-            assertAppendOrder(current.events, plan.events);
-            const status = observeSessionStatus(plan.events, sessionStatusRef);
-            const next = appendBrowserSessionEventWindow(current, plan.events);
-            const retained = {
-              ...next,
-              truncated: current.truncated || next.truncated,
-            };
-            eventWindowRef.current = retained;
-            oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
-            newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
-            lastSequenceRef.current = Math.max(lastSequenceRef.current, plan.resumeSequence);
-            streamResumeSequenceRef.current = Math.max(
-              streamResumeSequenceRef.current,
-              plan.resumeSequence,
-            );
-            if (status !== undefined) {
-              setSessionStatusProjection(status);
-            }
-            setEventWindow(retained);
-            if (retained.truncated) {
-              hasOlderRef.current = true;
-              setHasOlder(true);
-            }
-          } else if (plan.kind === "reload") {
-            // A large/complex missed window would make the foreground timeline
-            // and pinned camera chase many rapid commits. Keep the last known
-            // complete window visible until the bounded latest replacement is
-            // ready, then install that replacement atomically below.
+          // Steps of turns that were still working are stale; settled turns'
+          // steps cannot change. Reopened turns reload their steps.
+          pruneStepStores(eventWindowRef.current.events);
+          if ((await rejoinLive(true)) === "reload") {
+            // Keep the last known window visible until the bounded latest
+            // replacement is ready, then install that replacement below.
             initialWindowLoadedRef.current = false;
             setError(null);
           }
+        } else if (!fullReplay && initialWindowLoadedRef.current && rejoinPendingRef.current) {
+          rejoinPendingRef.current = false;
+          if ((await rejoinLive(false)) === "reload") {
+            initialWindowLoadedRef.current = false;
+          }
         }
+        rejoinPendingRef.current = false;
         if (!fullReplay && !initialWindowLoadedRef.current) {
           setConnectionState("connecting");
-          // First paint is ONE compact fetch — the newest window, revealed at
-          // the bottom in a few hundred ms. Deeper history loads only when the
-          // reader actually scrolls up (the sentinel drives loadOlder).
+          // First paint is ONE compact fetch of the conversation — the newest
+          // window, revealed at the bottom in a few hundred ms. Deeper history
+          // loads only when the reader scrolls up (the sentinel drives
+          // loadOlder); a turn's steps load when the reader opens it.
           const window = await loadEventWindow(t, client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
             pageSize: SESSION_HISTORY_PAGE_SIZE,
@@ -455,6 +709,7 @@ export function useSessionEvents(
             maxFetches: INITIAL_FETCH_CAP,
             boundaryPageCap: BOUNDARY_PAGE_CAP,
             signal: controller.signal,
+            filter: CONVERSATION_FILTER,
           });
           if (!isCurrent()) {
             return;
@@ -472,12 +727,13 @@ export function useSessionEvents(
           setLoadingNewer(false);
           setLoadingOldest(false);
           eventWindowRef.current = retained;
+          pruneStepStores(retained.events);
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
           newestSequenceRef.current =
             maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
           hasOlderRef.current = window.hasOlder || retained.truncated;
           hasNewerRef.current = false;
-          lastSequenceRef.current = window.newestSequence;
+          lastSequenceRef.current = Math.max(lastSequenceRef.current, window.newestSequence);
           streamResumeSequenceRef.current = window.newestSequence;
           initialWindowLoadedRef.current = true;
           setInitialHistoryReady(true);
@@ -489,6 +745,9 @@ export function useSessionEvents(
           setHasOlder(window.hasOlder || retained.truncated);
           setHasNewer(false);
           setInitialLoading(false);
+          // A working turn: catch up to the durable head and read its latest
+          // steps, rather than replaying every step since its last message.
+          await rejoinLive(false);
         }
         if (fullReplay) {
           setInitialLoading(false);
@@ -587,6 +846,9 @@ export function useSessionEvents(
     viewMode,
     reconcileSession,
     t,
+    pruneStepStores,
+    appendLiveSteps,
+    presentedCallIds,
   ]);
 
   const navigationBusy = (): boolean =>
@@ -621,6 +883,7 @@ export function useSessionEvents(
             targetGroups: OLDER_GROUP_TARGET,
             maxFetches: OLDER_FETCH_CAP,
             isCurrent,
+            filter: historyFilter,
           });
           if (!isCurrent()) {
             return false;
@@ -721,7 +984,7 @@ export function useSessionEvents(
           }
         }
       }),
-    [client, workspaceId, sessionId, ownsNavigation, t],
+    [client, workspaceId, sessionId, ownsNavigation, t, historyFilter],
   );
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
@@ -742,6 +1005,7 @@ export function useSessionEvents(
         targetGroups: OLDEST_GROUP_TARGET,
         maxFetches: OLDEST_FETCH_CAP,
         isCurrent,
+        filter: historyFilter,
       });
       if (!isCurrent()) {
         return false;
@@ -758,6 +1022,7 @@ export function useSessionEvents(
       const retainedOldest = retained.events[0]?.sequence ?? null;
       const retainedNewest = maxResumeSequenceOrNull(retained.events);
       eventWindowRef.current = retained;
+      pruneStepStores(retained.events);
       oldestSequenceRef.current = retainedOldest;
       newestSequenceRef.current = retainedNewest;
       hasOlderRef.current = false;
@@ -795,7 +1060,7 @@ export function useSessionEvents(
         setLoadingOldest(false);
       }
     }
-  }, [client, workspaceId, sessionId, ownsNavigation, t]);
+  }, [client, workspaceId, sessionId, ownsNavigation, t, historyFilter, pruneStepStores]);
 
   const loadNewer = useCallback(async (): Promise<boolean> => {
     if (!ownsNavigation() || !sessionId || navigationBusy() || !hasNewerRef.current) {
@@ -819,6 +1084,7 @@ export function useSessionEvents(
         targetGroups: NEWER_GROUP_TARGET,
         maxFetches: NEWER_FETCH_CAP,
         isCurrent,
+        filter: historyFilter,
       });
       if (!isCurrent()) {
         return false;
@@ -829,6 +1095,7 @@ export function useSessionEvents(
         setHasNewer(false);
         // Caught up with durable history — resume the live tip stream.
         streamResumeSequenceRef.current = afterSequence;
+        rejoinPendingRef.current = true;
         viewModeRef.current = "live";
         setViewMode("live");
         setStreamEpoch((epoch) => epoch + 1);
@@ -871,6 +1138,7 @@ export function useSessionEvents(
       let resumeLive = false;
       if (!newer) {
         streamResumeSequenceRef.current = retainedNewest;
+        rejoinPendingRef.current = true;
         viewModeRef.current = "live";
         resumeLive = true;
       }
@@ -907,7 +1175,7 @@ export function useSessionEvents(
         setLoadingNewer(false);
       }
     }
-  }, [client, workspaceId, sessionId, ownsNavigation, t]);
+  }, [client, workspaceId, sessionId, ownsNavigation, t, historyFilter]);
 
   const jumpToSequence = useCallback(
     async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
@@ -934,10 +1202,20 @@ export function useSessionEvents(
       setLoadingTarget(true);
       let published = false;
       try {
-        const [before, following] = await Promise.all([
-          loadPreviousPage(client, workspaceId, sessionId, sequence + 1, { pageSize: 128 }),
-          loadNextPage(client, workspaceId, sessionId, sequence, { pageSize: 128 }),
-        ]);
+        const around = (filter: HistoryFilter | undefined) =>
+          Promise.all([
+            loadPreviousPage(client, workspaceId, sessionId, sequence + 1, {
+              pageSize: 128,
+              filter,
+            }),
+            loadNextPage(client, workspaceId, sessionId, sequence, { pageSize: 128, filter }),
+          ]);
+        let [before, following] = await around(historyFilter);
+        // A step target (for example a Find match in a tool output) is read
+        // with its neighbouring steps, as before conversation-first history.
+        if (historyFilter && current() && !before.some((event) => event.sequence === sequence)) {
+          [before, following] = await around(undefined);
+        }
         // Close-during-fetch fence: a pending jump must not replace the window
         // after its owner (for example ConversationFind) has gone away. The
         // finally block still settles loadingTarget for this generation.
@@ -958,6 +1236,7 @@ export function useSessionEvents(
         generationRef.current += 1;
         const status = observeSessionStatus(retained.events, sessionStatusRef);
         eventWindowRef.current = retained;
+        pruneStepStores(retained.events);
         oldestSequenceRef.current = retained.events[0]!.sequence;
         newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
         lastSequenceRef.current = Math.max(lastSequenceRef.current, newestSequenceRef.current ?? 0);
@@ -996,7 +1275,7 @@ export function useSessionEvents(
         }
       }
     },
-    [client, workspaceId, sessionId, ownsNavigation],
+    [client, workspaceId, sessionId, ownsNavigation, historyFilter, pruneStepStores],
   );
 
   const jumpToLatestQuestion = useCallback(
@@ -1115,6 +1394,38 @@ export function useSessionEvents(
       : EMPTY_EVENTS;
   const visibleHasOlder = showRetained ? retainedTail.hasOlder : identityMatches && hasOlder;
   const visibleTruncated = showRetained ? retainedTail.truncated : eventWindow.truncated;
+  const liveSteps = identityMatches && !showRetained;
+  const visibleStepStores = liveSteps ? stepStores : EMPTY_STEP_STORES;
+  const visiblePresentedOutputs = liveSteps ? presentedOutputs : EMPTY_PRESENTED_OUTPUTS;
+  // The conversation plus loaded steps and presented results, by sequence.
+  const loadedEvents = useMemo(
+    () => mergeLoadedEvents(visibleEvents, visibleStepStores, visiblePresentedOutputs),
+    [visibleEvents, visibleStepStores, visiblePresentedOutputs],
+  );
+  // Turns whose steps are not all loaded get an expandable, loadable marker.
+  const turnSteps = useMemo(() => {
+    if (fullReplay) return undefined;
+    const markers = new Map<string, Pick<TurnStepsItem, "state" | "load" | "retain">>();
+    for (const [turnId, bounds] of conversationTurnBounds(visibleEvents)) {
+      const store = visibleStepStores.get(turnId);
+      const state: TurnStepsItem["state"] | null = store
+        ? store.loading
+          ? "loading"
+          : store.error
+            ? "error"
+            : store.hasOlder
+              ? "partial"
+              : "complete"
+        : bounds.hidden
+          ? "idle"
+          : null;
+      if (state === null) continue;
+      // A retained view is drawn before its session's own window: its
+      // markers wait, and load once that window replaces them.
+      markers.set(turnId, { state, ...(liveSteps ? turnStepHandle(turnId) : RETAINED_VIEW_STEPS) });
+    }
+    return markers;
+  }, [fullReplay, visibleEvents, visibleStepStores, liveSteps, turnStepHandle]);
   const timeline = useMemo(() => {
     const witness =
       questionEvidence?.client === client &&
@@ -1122,15 +1433,19 @@ export function useSessionEvents(
       visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
         ? questionEvidence.events
         : EMPTY_EVENTS;
-    const timelineOptions = { partialStart: visibleHasOlder || visibleTruncated || after > 0 };
-    if (witness.length === 0) return buildTimeline(t, visibleEvents, timelineOptions);
-    const ids = new Set(visibleEvents.map((event) => event.id));
+    const timelineOptions = {
+      partialStart: visibleHasOlder || visibleTruncated || after > 0,
+      ...(turnSteps ? { turnSteps } : {}),
+    };
+    if (witness.length === 0) return buildTimeline(t, loadedEvents, timelineOptions);
+    const ids = new Set(loadedEvents.map((event) => event.id));
     return buildTimeline(
       t,
-      [...visibleEvents, ...witness.filter((event) => !ids.has(event.id))],
+      [...loadedEvents, ...witness.filter((event) => !ids.has(event.id))],
       timelineOptions,
     );
   }, [
+    loadedEvents,
     visibleEvents,
     visibleHasOlder,
     visibleTruncated,
@@ -1138,11 +1453,80 @@ export function useSessionEvents(
     questionEvidence,
     client,
     streamKey,
+    turnSteps,
     t,
   ]);
 
+  // Presented results (an image, a published file, a Skill change) are primary
+  // output, but their output rows are steps: read each one directly.
+  useEffect(() => {
+    if (fullReplay || !sessionId || !identityMatches || !initialHistoryReady) return;
+    const resolved = new Set<string>(presentedOutputs.keys());
+    const collect = (events: readonly SessionEvent[]) => {
+      for (const event of events) {
+        if (event.type !== "agent.toolCall.output") continue;
+        const id = (event.payload as Record<string, unknown> | null)?.id;
+        if (typeof id === "string") resolved.add(id);
+      }
+    };
+    collect(eventWindow.events);
+    for (const store of stepStores.values()) collect(store.events);
+    const requested = presentedRequestedRef.current;
+    const missing: Array<{ callId: string; sequence: number }> = [];
+    for (const event of eventWindow.events) {
+      if (event.type !== "agent.toolCall.created") continue;
+      const payload = event.payload as Record<string, unknown> | null;
+      const callId = payload?.id;
+      if (
+        typeof callId !== "string" ||
+        resolved.has(callId) ||
+        requested.has(callId) ||
+        !isPresentedSessionToolName(payload?.name)
+      ) {
+        continue;
+      }
+      missing.push({ callId, sequence: event.sequence });
+    }
+    if (missing.length === 0) return;
+    for (const { callId, sequence } of missing.slice(-PRESENTED_OUTPUT_READS_PER_PASS)) {
+      requested.add(callId);
+      void readEventPage(client, workspaceId, sessionId, {
+        includeTypes: ["agent.toolCall.output"],
+        after: sequence,
+        direction: "after",
+        limit: PRESENTED_OUTPUT_LOOKAHEAD,
+        payloadMode: "full",
+      }).then(
+        (page) => {
+          if (!ownsNavigation() || presentedRequestedRef.current !== requested) return;
+          const output = page.events.find(
+            (event) => (event.payload as Record<string, unknown> | null)?.id === callId,
+          );
+          // Not written yet: a working tool's result arrives live.
+          if (!output) return;
+          setPresentedOutputs((current) => new Map(current).set(callId, output));
+        },
+        () => {
+          // A later pass may retry; the tool row still shows its call.
+          if (presentedRequestedRef.current === requested) requested.delete(callId);
+        },
+      );
+    }
+  }, [
+    fullReplay,
+    sessionId,
+    identityMatches,
+    initialHistoryReady,
+    eventWindow,
+    stepStores,
+    presentedOutputs,
+    client,
+    workspaceId,
+    ownsNavigation,
+  ]);
+
   return {
-    events: visibleEvents,
+    events: loadedEvents,
     timeline,
     sessionStatus: showRetained
       ? retainedTail.sessionStatus
@@ -1263,67 +1647,41 @@ function observeSessionStatus(
   return latest.status;
 }
 
-type ForegroundCatchupPlan =
-  | { kind: "resume" }
-  | { kind: "append"; events: SessionEvent[]; resumeSequence: number }
-  | { kind: "reload" };
-
 /**
- * Decide how a sustained hidden-tab suspension rejoins the durable event log.
- *
- * `lastSequence - cursor` is the exact raw durable work missed, but it is not
- * the number of visible messages: one streaming answer can own thousands of
- * adjacent delta rows. Small raw gaps therefore resume directly; medium gaps
- * get one forward compact page and are judged by the browser-visible result;
- * a page that cannot prove complete bounded coverage, or that would add too
- * many rows/groups/bytes, reloads the latest tail instead.
+ * The conversation events after `cursor` through `head`, or null when they
+ * span more than the catch-up cap (the caller then reloads the latest window).
+ * Steps are not replayed: a turn's steps load when a reader opens it.
  */
-async function planForegroundCatchup(
-  t: OpenGeniText,
+async function loadConversationCatchup(
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
   cursor: number,
-  options: { signal?: AbortSignal } = {},
-): Promise<ForegroundCatchupPlan> {
-  if (options.signal?.aborted) throw abortError();
-  const session = await client.getSession(workspaceId, sessionId, {
-    fresh: true,
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
-  if (options.signal?.aborted) throw abortError();
-  const durableHead = Math.max(cursor, session.lastSequence);
-  const rawGap = durableHead - cursor;
-  if (rawGap <= FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES) {
-    return { kind: "resume" };
+  head: number,
+  options: { signal?: AbortSignal; isCurrent: () => boolean },
+): Promise<SessionEvent[] | null> {
+  const events: SessionEvent[] = [];
+  let after = cursor;
+  for (let fetch = 0; fetch < CATCHUP_MAX_PAGES; fetch += 1) {
+    if (options.signal?.aborted) throw abortError();
+    const page = await readEventPage(client, workspaceId, sessionId, {
+      ...CONVERSATION_FILTER,
+      after,
+      before: head + 1,
+      direction: "after",
+      limit: SESSION_HISTORY_PAGE_SIZE,
+      compact: true,
+      payloadMode: "full",
+    });
+    if (!options.isCurrent()) throw abortError();
+    const fresh = page.events.filter((event) => eventResumeSequence(event) > after);
+    if (fresh.length === 0) return events;
+    assertAscending(fresh);
+    events.push(...fresh);
+    after = maxResumeSequence(fresh);
+    if (after >= head || page.hasMore === false) return events;
   }
-  if (rawGap > FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES) {
-    return { kind: "reload" };
-  }
-
-  const page = await loadNextPage(client, workspaceId, sessionId, cursor, {
-    pageSize: rawGap,
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
-  const events = page.filter((event) => eventResumeSequence(event) > cursor);
-  if (events.length === 0) {
-    return { kind: "reload" };
-  }
-  assertAscending(events);
-  const resumeSequence = maxResumeSequence(events);
-  if (resumeSequence < durableHead) {
-    // Byte/count truncation or an incomplete projection means this page cannot
-    // prove that one append reaches the head observed above.
-    return { kind: "reload" };
-  }
-  if (
-    events.length > FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS ||
-    groupCount(t, events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
-    browserJsonBytes(events) > FOREGROUND_COMPACT_CATCHUP_MAX_BYTES
-  ) {
-    return { kind: "reload" };
-  }
-  return { kind: "append", events, resumeSequence };
+  return null;
 }
 
 type LoadedEventWindow = {
@@ -1353,6 +1711,7 @@ async function loadEventWindow(
     boundaryPageCap?: number;
     signal?: AbortSignal;
     isCurrent?: () => boolean;
+    filter?: HistoryFilter | undefined;
   },
 ): Promise<LoadedEventWindow> {
   let cursor = options.before;
@@ -1366,6 +1725,7 @@ async function loadEventWindow(
     }
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,
+      filter: options.filter,
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (options.isCurrent?.() === false) throw abortError();
@@ -1397,6 +1757,7 @@ async function loadEventWindow(
   ) {
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,
+      filter: options.filter,
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (options.isCurrent?.() === false) throw abortError();
@@ -1465,6 +1826,7 @@ async function loadForwardEventWindow(
     maxFetches: number;
     signal?: AbortSignal;
     isCurrent?: () => boolean;
+    filter?: HistoryFilter | undefined;
   },
 ): Promise<LoadedForwardEventWindow> {
   let cursor = options.after;
@@ -1478,6 +1840,7 @@ async function loadForwardEventWindow(
     }
     const page = await loadNextPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,
+      filter: options.filter,
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (options.isCurrent?.() === false) throw abortError();
@@ -1561,6 +1924,7 @@ async function loadPreviousPage(
   options: {
     pageSize: number;
     signal?: AbortSignal;
+    filter?: HistoryFilter | undefined;
   },
 ): Promise<PreviousPage> {
   if (options.signal?.aborted) {
@@ -1571,6 +1935,7 @@ async function loadPreviousPage(
     return Object.assign([], { requested });
   }
   const page = await client.listEvents(workspaceId, sessionId, {
+    ...options.filter,
     before,
     limit: requested,
     compact: true,
@@ -1594,6 +1959,8 @@ async function loadNextPage(
   options: {
     pageSize: number;
     signal?: AbortSignal;
+    filter?: HistoryFilter | undefined;
+    before?: number | undefined;
   },
 ): Promise<PreviousPage> {
   if (options.signal?.aborted) {
@@ -1604,6 +1971,8 @@ async function loadNextPage(
     return Object.assign([], { requested });
   }
   const page = await client.listEvents(workspaceId, sessionId, {
+    ...options.filter,
+    ...(options.before !== undefined ? { before: options.before } : {}),
     after,
     limit: requested,
     compact: true,
@@ -1680,4 +2049,302 @@ function abortError(): Error {
   const error = new Error("The operation was aborted.");
   error.name = "AbortError";
   return error;
+}
+
+/* ----------------------------------------------------------------------------
+   Conversation-first history
+
+   History reads exclude a turn's steps (tool calls and outputs, streamed
+   reasoning and command output), which are most of a long session's rows and
+   bytes. Live steps and steps a reader opens are kept per turn, apart from the
+   contiguous conversation window, and merged only for projection.
+   -------------------------------------------------------------------------- */
+
+const STEP_TYPES: ReadonlySet<string> = new Set(SESSION_EVENT_STEP_TYPES);
+const CONVERSATION_FILTER: HistoryFilter = {
+  excludeTypes: [...SESSION_EVENT_STEP_TYPES],
+  presentedToolCalls: "include",
+};
+// One opened page of a turn's steps, newest first. Inside the server's
+// single-query interactive page so opening a turn is one indexed read.
+export const SESSION_TURN_STEP_PAGE_SIZE = 200;
+// A collapsed live turn only shows its latest step; keep a short tail.
+export const SESSION_TURN_LIVE_STEP_TAIL = 200;
+const SESSION_TURN_LIVE_STEP_TAIL_BYTES = 2 * 1024 * 1024;
+// Steps of turns nobody is viewing; least recently used turns are dropped
+// first and reload when reopened. Opened turns are never evicted.
+export const SESSION_STEP_BROWSER_MAX_BYTES = 16 * 1024 * 1024;
+const TERMINAL_TURN_TYPES: ReadonlySet<string> = new Set([
+  "turn.completed",
+  "turn.failed",
+  "turn.cancelled",
+  "turn.superseded",
+]);
+
+type HistoryFilter = {
+  excludeTypes?: SessionEventType[];
+  includeTypes?: SessionEventType[];
+  presentedToolCalls?: "include";
+};
+
+type TurnStepStore = {
+  /** This turn's loaded steps, ascending, one per event id. */
+  events: SessionEvent[];
+  bytes: number;
+  /** Earlier steps of this turn exist before `events[0]`. */
+  hasOlder: boolean;
+  loading: boolean;
+  error: boolean;
+  /** Recency for eviction of turns nobody is viewing. */
+  touched: number;
+};
+
+type TurnStepStores = ReadonlyMap<string, TurnStepStore>;
+
+const EMPTY_STEP_STORES: TurnStepStores = new Map();
+
+/** @internal Whether an event belongs in the conversation window. */
+export function isConversationHistoryEvent(
+  event: SessionEvent,
+  presentedCallIds: ReadonlySet<string>,
+): boolean {
+  if (!STEP_TYPES.has(event.type) || !event.turnId) return true;
+  const payload = event.payload as Record<string, unknown> | null;
+  if (event.type === "agent.toolCall.created") return isPresentedSessionToolName(payload?.name);
+  if (event.type === "agent.toolCall.output") {
+    return typeof payload?.id === "string" && presentedCallIds.has(payload.id);
+  }
+  return false;
+}
+
+function notePresentedCalls(events: readonly SessionEvent[], ids: Set<string>): void {
+  for (const event of events) {
+    if (event.type !== "agent.toolCall.created") continue;
+    const payload = event.payload as Record<string, unknown> | null;
+    if (typeof payload?.id === "string" && isPresentedSessionToolName(payload.name)) {
+      ids.add(payload.id);
+    }
+  }
+}
+
+type TurnBounds = {
+  /** The turn's first window event (normally `turn.started`). */
+  first: number;
+  /** The turn's settlement, when the window holds it. */
+  terminal: number | null;
+  /** Steps hidden between the turn's window events. */
+  hidden: boolean;
+};
+
+/**
+ * Each turn's extent in the conversation window and whether sequences inside
+ * it are absent: those are steps (or other unread rows) a reader can load.
+ * Compacted events cover `[sequence, coveredThrough]`.
+ */
+export function conversationTurnBounds(events: readonly SessionEvent[]): Map<string, TurnBounds> {
+  const bounds = new Map<string, TurnBounds & { last: number }>();
+  const gaps: number[] = []; // first missing sequence of each gap
+  let expected: number | null = null;
+  for (const event of events) {
+    if (expected !== null && event.sequence > expected) gaps.push(expected);
+    const resume = eventResumeSequence(event);
+    expected = Math.max(expected ?? 0, resume + 1);
+    const turnId = event.turnId;
+    if (!turnId) continue;
+    const current = bounds.get(turnId);
+    if (!current) {
+      bounds.set(turnId, {
+        first: event.sequence,
+        last: resume,
+        terminal: TERMINAL_TURN_TYPES.has(event.type) ? event.sequence : null,
+        hidden: false,
+      });
+    } else {
+      current.last = Math.max(current.last, resume);
+      if (TERMINAL_TURN_TYPES.has(event.type)) current.terminal = event.sequence;
+    }
+  }
+  for (const turn of bounds.values()) {
+    // Any gap that starts after the turn's first event and before its last.
+    let low = 0;
+    let high = gaps.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (gaps[middle]! <= turn.first) low = middle + 1;
+      else high = middle;
+    }
+    turn.hidden = low < gaps.length && gaps[low]! < turn.last;
+  }
+  return bounds;
+}
+
+/** The newest turn in the window that has started but not settled. */
+export function activeConversationTurn(events: readonly SessionEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (!event.turnId) continue;
+    if (TERMINAL_TURN_TYPES.has(event.type)) return null;
+    if (event.type === "turn.started") return event.turnId;
+  }
+  return null;
+}
+
+function settledTurns(events: readonly SessionEvent[]): Set<string> {
+  const settled = new Set<string>();
+  for (const event of events) {
+    if (event.turnId && TERMINAL_TURN_TYPES.has(event.type)) settled.add(event.turnId);
+  }
+  return settled;
+}
+
+const EMPTY_PRESENTED_OUTPUTS: ReadonlyMap<string, SessionEvent> = new Map();
+// Presented results read per pass, and how many later outputs each read scans.
+const PRESENTED_OUTPUT_READS_PER_PASS = 8;
+const PRESENTED_OUTPUT_LOOKAHEAD = 16;
+const RETAINED_VIEW_STEPS: Pick<TurnStepsItem, "load" | "retain"> = {
+  load: () => {},
+  retain: () => () => {},
+};
+
+/** The conversation window with loaded steps and presented results merged in. */
+function mergeLoadedEvents(
+  conversation: SessionEvent[],
+  stores: TurnStepStores,
+  presented: ReadonlyMap<string, SessionEvent>,
+): SessionEvent[] {
+  if (stores.size === 0 && presented.size === 0) return conversation;
+  const ids = new Set(conversation.map((event) => event.id));
+  const extra: SessionEvent[] = [];
+  const add = (event: SessionEvent) => {
+    if (ids.has(event.id)) return;
+    ids.add(event.id);
+    extra.push(event);
+  };
+  for (const store of stores.values()) store.events.forEach(add);
+  presented.forEach(add);
+  if (extra.length === 0) return conversation;
+  return [...conversation, ...extra].sort((left, right) => left.sequence - right.sequence);
+}
+
+function groupByTurn(events: readonly SessionEvent[]): Map<string, SessionEvent[]> {
+  const turns = new Map<string, SessionEvent[]>();
+  for (const event of events) {
+    if (!event.turnId) continue;
+    const list = turns.get(event.turnId);
+    if (list) list.push(event);
+    else turns.set(event.turnId, [event]);
+  }
+  return turns;
+}
+
+/** Add steps once each, ascending, counting only the added bytes. */
+function appendStepEvents(
+  store: Pick<TurnStepStore, "events" | "bytes">,
+  incoming: readonly SessionEvent[],
+): Pick<TurnStepStore, "events" | "bytes"> {
+  if (incoming.length === 0) return { events: store.events, bytes: store.bytes };
+  const ids = new Set(store.events.map((event) => event.id));
+  let bytes = store.bytes;
+  const fresh: SessionEvent[] = [];
+  for (const event of incoming) {
+    if (ids.has(event.id)) continue;
+    ids.add(event.id);
+    fresh.push(event);
+    bytes += browserJsonBytes(event) + (store.events.length + fresh.length > 1 ? 1 : 0);
+  }
+  if (fresh.length === 0) return { events: store.events, bytes: store.bytes };
+  const last = store.events[store.events.length - 1];
+  const events = [...store.events, ...fresh];
+  if (last && fresh.some((event) => event.sequence < last.sequence)) {
+    events.sort((left, right) => left.sequence - right.sequence);
+  } else if (!last) {
+    events.sort((left, right) => left.sequence - right.sequence);
+  }
+  return { events, bytes };
+}
+
+/**
+ * Whether the window skips a sequence between a turn's first window event and
+ * `before`: steps of that turn the browser has not read. A turn the window
+ * does not know is assumed to have some.
+ */
+function turnHasHiddenSequences(
+  events: readonly SessionEvent[],
+  turnId: string,
+  before: number,
+): boolean {
+  const start = events.findIndex((event) => event.turnId === turnId);
+  if (start < 0) return true;
+  let expected = eventResumeSequence(events[start]!) + 1;
+  for (let index = start + 1; index < events.length; index += 1) {
+    const event = events[index]!;
+    if (event.sequence >= before) break;
+    if (event.sequence > expected) return true;
+    expected = Math.max(expected, eventResumeSequence(event) + 1);
+  }
+  return expected < before;
+}
+
+/** Keep the newest steps of a collapsed live turn. */
+function trimLiveStepTail(store: TurnStepStore): TurnStepStore {
+  if (
+    store.events.length <= SESSION_TURN_LIVE_STEP_TAIL &&
+    store.bytes <= SESSION_TURN_LIVE_STEP_TAIL_BYTES
+  ) {
+    return store;
+  }
+  const kept = boundBrowserSessionEventWindow(store.events, {
+    maxCount: SESSION_TURN_LIVE_STEP_TAIL,
+    maxBytes: SESSION_TURN_LIVE_STEP_TAIL_BYTES,
+  });
+  return { ...store, events: kept.events, bytes: kept.bytes, hasOlder: true };
+}
+
+/** Drop the least recently used steps of turns nobody is viewing. */
+function boundStepStores(
+  stores: Map<string, TurnStepStore>,
+  retained: ReadonlyMap<string, number>,
+): Map<string, TurnStepStore> {
+  let total = 0;
+  for (const [turnId, store] of stores) {
+    if (!retained.get(turnId)) total += store.bytes;
+  }
+  if (total <= SESSION_STEP_BROWSER_MAX_BYTES) return stores;
+  const candidates = [...stores]
+    .filter(([turnId, store]) => !retained.get(turnId) && !store.loading)
+    .sort((left, right) => left[1].touched - right[1].touched);
+  for (const [turnId, store] of candidates) {
+    if (total <= SESSION_STEP_BROWSER_MAX_BYTES) break;
+    stores.delete(turnId);
+    total -= store.bytes;
+  }
+  return stores;
+}
+
+type StepPage = { events: SessionEvent[]; hasMore: boolean | null };
+
+type EventPageClient = {
+  listEventPage?: (
+    workspaceId: string,
+    sessionId: string,
+    options: SessionEventListOptions,
+  ) => Promise<SessionEventPage>;
+};
+
+/**
+ * One bounded page. Uses the SDK's page read when the client has it, which
+ * reports whether more rows remain; a compact page's length cannot.
+ */
+async function readEventPage(
+  client: EmbeddedSessionClientLike,
+  workspaceId: string,
+  sessionId: string,
+  options: SessionEventListOptions,
+): Promise<StepPage> {
+  const pageClient = client as EmbeddedSessionClientLike & EventPageClient;
+  if (typeof pageClient.listEventPage === "function") {
+    const page = await pageClient.listEventPage(workspaceId, sessionId, options);
+    return { events: page.events, hasMore: page.hasMore };
+  }
+  return { events: await client.listEvents(workspaceId, sessionId, options), hasMore: null };
 }

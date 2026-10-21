@@ -16563,6 +16563,7 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
 export * from "./session-final-reply";
+export * from "./session-history";
 
 function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)

@@ -55,6 +55,8 @@ export type {
   TimelineItem,
   TimelineAnnotationSourceDescriptor,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
   UserMessageItem,
   WorkerCompletionItem,

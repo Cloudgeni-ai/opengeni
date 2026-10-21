@@ -15,6 +15,7 @@ import {
 import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
+import { TurnStepsAction, TurnStepsLoader } from "../timeline/turn-steps";
 import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
 import {
   isTimelineSearchTarget,
@@ -3593,6 +3594,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               }
             >
               <TurnRailFrame compact>
+                {group.work.steps ? <TurnStepsLoader steps={group.work.steps} /> : null}
                 {renderFoldedGroups(
                   group.work.details,
                   {
@@ -4205,6 +4207,8 @@ export function TimelineRow({
       return <NoticeRow item={item} />;
     case "context-compaction":
       return <CompactionRow item={item} />;
+    case "turn-steps":
+      return <TurnStepsAction steps={item} />;
     case "auth-needed":
       return (
         renderAuthNeeded?.(item) ?? (

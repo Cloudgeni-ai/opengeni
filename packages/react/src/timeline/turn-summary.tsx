@@ -467,21 +467,31 @@ export function TurnSummary({
         {statusLine}
         {liveHeader && !open && !status
           ? liveHeader
-          : facets.map(({ facet, result }, index) => (
-              <FacetRenderBoundary key={facet.id}>
-                <>
-                  {index > 0 || statusLine ? " · " : null}
-                  <span aria-label={result.ariaLabel} title={result.title}>
-                    {result.icon ? (
-                      <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                        {result.icon}
-                      </span>
-                    ) : null}
-                    {result.content}
-                  </span>
-                </>
-              </FacetRenderBoundary>
-            ))}
+          : !statusLine && facets.length === 0 && !failure && outcome !== "cancelled"
+            ? // Steps are not counted; an otherwise empty row still names
+              // what opening it reveals.
+              // Progress notes narrate steps; they are not steps themselves.
+              context.items.some((item) => item.kind === "startup-phase") &&
+              context.items.every(
+                (item) => item.kind === "startup-phase" || item.kind === "agent-message",
+              )
+              ? t("timeline.turnSummary.preparation")
+              : t("timeline.turnSummary.steps")
+            : facets.map(({ facet, result }, index) => (
+                <FacetRenderBoundary key={facet.id}>
+                  <>
+                    {index > 0 || statusLine ? " · " : null}
+                    <span aria-label={result.ariaLabel} title={result.title}>
+                      {result.icon ? (
+                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                          {result.icon}
+                        </span>
+                      ) : null}
+                      {result.content}
+                    </span>
+                  </>
+                </FacetRenderBoundary>
+              ))}
         {failure ? (
           <span className="text-og-status-failed" title={failure.detail}>
             {" "}
