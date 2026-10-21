@@ -3559,10 +3559,16 @@ async function createSessionForRequestInFileScope(
   const firstPartyMcpTools = applySessionAgentConfigWriteThrough({
     config: agentConfig,
     firstPartyMcpTools: creatorFirstPartyMcpTools,
-    // Slack computes its own baseline selection; only a caller's own explicit
-    // list is checked strictly against the capabilities.
+    // Only an agent's own explicit list is checked strictly against the
+    // capabilities: it reads the live tool catalog, so a conflict is its
+    // mistake. An API or SDK client was built against a capability map that
+    // grows (a tool can move under a capability it turns off), so its list is
+    // narrowed to the capabilities like the default selection, never refused.
+    // Slack computes its own baseline selection.
     explicitFirstPartyMcpTools:
-      agentConfigCreator === "slack" ? undefined : payload.firstPartyMcpTools,
+      agentConfigCreator === "slack" || grant.principalKind !== "agent_attempt"
+        ? undefined
+        : payload.firstPartyMcpTools,
     tools: [],
     toolPolicy,
     productServerIds: [],
