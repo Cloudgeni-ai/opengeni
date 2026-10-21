@@ -658,7 +658,8 @@ describe("CUA desktop boundary", () => {
       };
       await expect(backend.dispatch(focus)).rejects.toMatchObject({
         code: "unsupported",
-        message: "Elements cannot be focused on their own here: invoke the element, or set its value",
+        message:
+          "Elements cannot be focused on their own here: invoke the element, or set its value",
       });
     } finally {
       await backend.close();
