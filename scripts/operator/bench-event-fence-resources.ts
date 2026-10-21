@@ -118,7 +118,9 @@ try {
           payload: { text: `exact bytes ${index}` },
         }));
         for (let run = -3; run < Number(process.env.OPENGENI_BENCH_SAMPLES ?? "20"); run++) {
-          for (const projection of run % 2 === 0 ? ["full", "event"] : ["event", "full"]) {
+          for (const projection of run % 2 === 0
+            ? ["full", "event", "checkpoint"]
+            : ["checkpoint", "event", "full"]) {
             const sample: Sample = {
               shape,
               lane: type,
@@ -142,7 +144,11 @@ try {
               attemptId,
               inputs,
               undefined,
-              projection === "full" ? async () => true : undefined,
+              projection === "full"
+                ? async () => true
+                : projection === "checkpoint"
+                  ? { rowProjection: "event", mutate: async () => true }
+                  : undefined,
             );
             sample.ms = performance.now() - started;
             const used = process.cpuUsage(cpu);

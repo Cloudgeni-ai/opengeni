@@ -26,7 +26,7 @@ for (const scenario of [
     });
     const checkpoint = [{ type: "message", role: "user", content: "Run two parallel tools" }];
     const checkpointTx = {} as db.Database;
-    const allowedFence = { allowed: true } as Parameters<db.SessionEventMutation>[1];
+    const allowedFence = { allowed: true } as Parameters<db.SessionEventMutation<"event">>[1];
     const mutationEvents: string[] = [];
     const spies = [
       spyOn(runInput, "turnInput").mockResolvedValue({
@@ -129,7 +129,7 @@ for (const scenario of [
             publish: async (
               events: Array<{ type: string }>,
               _immediate: boolean,
-              mutate?: db.SessionEventMutation,
+              mutate?: db.SessionEventMutation<"event">,
             ) => {
               const output = events.some((event) => event.type === "agent.toolCall.output");
               // Production publishing executes the receipt mutation inside the
@@ -147,7 +147,7 @@ for (const scenario of [
                         session: null,
                         turn: null,
                         attempt: null,
-                      } as Parameters<db.SessionEventMutation>[1])
+                      } as Parameters<db.SessionEventMutation<"event">>[1])
                     : allowedFence;
                 expect(await mutate!(checkpointTx, fence)).toBe(true);
               }
