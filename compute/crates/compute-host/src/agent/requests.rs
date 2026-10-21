@@ -543,13 +543,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Books the first wake of adopted sandbox `record` as its copy's own
-    /// disk needs, `size`, if this host can wake it now: the adopt booked
-    /// it without that disk, which only the claimed copy shows. Otherwise
-    /// the sandbox goes again, leaving the store's copy for another host,
-    /// and the adopt is refused as a wake that would wait here for room
-    /// is, even for disk only the next reading could show.
-    pub(super) fn adopted_room(&mut self, record: &Record, size: Size) -> Result<(), HostError> {
-        let id = record.id;
+    /// disk needs if this host can wake it now: the adopt booked it
+    /// without that disk, which only the claimed copy shows. Otherwise the
+    /// adopt is refused as a wake that would wait here for room is, even
+    /// for disk only the next reading could show.
+    pub(super) fn adopted_room(&mut self, record: &Record) -> Result<(), HostError> {
+        let (id, size) = (record.id, self.record_size(record));
         let room = self
             .core
             .create_room(self.now(), id.0, size, true, DiskSpace::default());
@@ -560,8 +559,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.input(self.first_wake(id, size, true, by_ms));
             return Ok(());
         };
-        self.first_wake_unbooked(id);
-        self.remove_recorded_as(record, None, Vec::new(), None, true);
         Err(HostError::HostFull {
             id,
             resource,

@@ -43,6 +43,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 reply,
                 stale,
             } => self.prepared(id, ordinal, result, reply, stale.as_ref()),
+            Event::CopyClaimed { record, reply } => self.copy_claimed(*record, reply),
             Event::OwnerTaken { id, result, reply } => self.owner_taken(id, result, reply),
             Event::StepDone {
                 id,
@@ -158,15 +159,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.first_wake_unbooked(id);
             return;
         };
-        let size = self.record_size(&record);
-        if record.disk == Disk::Remote
-            && let Err(refused) = self.adopted_room(&record, size)
-        {
-            let _ = reply.send(Err(refused));
-            return;
-        }
         let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
+        let size = self.record_size(&record);
         self.insert(id, paths, spec);
         // A new sandbox is a saved one: a disk, with a memory image when it
         // started from a template. An adopted one is in the store alone.
@@ -831,7 +826,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// [`Self::remove_recorded`], keeping the store's copy if `hand_off`.
-    pub(super) fn remove_recorded_as(
+    fn remove_recorded_as(
         &mut self,
         record: &Record,
         vm: Option<(E::Vm, LiveMemory)>,

@@ -41,8 +41,10 @@ pick a VM.
     claiming the copy shows how long that is, never by this host's base
     image. Once claimed, it is checked with the copy's disk and refused with
     `host_full` if that does not fit, leaving nothing on the host and the
-    store's copy for another host. A repeat of the adopt meanwhile is
-    answered busy, never done, until that check is over.
+    store's copy for another host. Its record is written only after that
+    check, so an agent that restarts meanwhile finds no adopted sandbox,
+    only files it tidies, and a repeat of the adopt meanwhile is answered
+    busy, never done.
   - A claimed ready sandbox's VM already holds memory. Its first wake books
     that memory up to the request, and only what the VM holds beyond the
     request stays counted apart until the sandbox joins the core, so claims

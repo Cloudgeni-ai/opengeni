@@ -378,6 +378,13 @@ enum Event<V> {
         /// longer fits today's inputs.
         stale: Option<Arc<Template>>,
     },
+    /// An adopt claimed the store's copy of `record`'s sandbox and made
+    /// its files; its record is written once its first wake is admitted
+    /// (see [`HostAgent::copy_claimed`]).
+    CopyClaimed {
+        record: Box<Record>,
+        reply: Reply<()>,
+    },
     /// A sandbox about to sleep only for being idle told whether a command
     /// started through its guest's helper still runs (see
     /// [`crate::restore_notice::ask_commands`]).
