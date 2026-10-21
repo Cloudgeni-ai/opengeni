@@ -1835,6 +1835,7 @@ describe("provider-neutral subscription runtime persistence", () => {
               accountId: state.accountId,
               workspaceId: state.workspaceId,
               provider: "codex",
+              health: "stored",
             });
             expect(placementConnections).toHaveLength(1);
             expect(placementConnections[0]).toMatchObject({
@@ -1903,6 +1904,7 @@ describe("provider-neutral subscription runtime persistence", () => {
               accountId: state.accountId,
               workspaceId: state.workspaceId,
               provider: "codex",
+              health: "stored",
             }),
         ),
       );

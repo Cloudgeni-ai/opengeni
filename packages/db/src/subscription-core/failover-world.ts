@@ -413,6 +413,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         provider: id,
         kind: subscriptionCoreConnectionKind(provider),
         now: new Date(input.now),
+        health: "stored",
       });
       // Background work carries each provider's own frozen compatibility
       // pool. A live source change must not widen that accepted ceiling.

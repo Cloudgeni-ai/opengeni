@@ -9,7 +9,14 @@ import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-
 const maintenance = "0730_maintenance_work_probes.sql";
 const personal = "0730_subscription_core_personal_connection_versions.sql";
 const pair = [maintenance, personal];
-const withheld = [...pair, ...strictOwnerMaintenanceMigrationTail];
+// Newer migrations that rewrite what the pair builds on or installs: replayed
+// after the pair's historical assertion. 0884 patches the owner reader the
+// personal version reader is derived from.
+const dependents = [
+  "0884_subscription_core_personal_quarantine_expiry.sql",
+  ...strictOwnerMaintenanceMigrationTail,
+];
+const withheld = [...pair, ...dependents];
 const options = { applicationDatabaseRoles: ["opengeni_app"] };
 const routines = [
   "session_workflow_wakes_due_v1",
@@ -90,7 +97,7 @@ for (const history of ["fresh", "neither", "personal", "maintenance", "both"] as
       // them only after that historical assertion and verify final-state no-op.
       if (history !== "fresh") {
         await owner`DELETE FROM schema_migrations
-          WHERE name = ANY(${strictOwnerMaintenanceMigrationTail}::text[])`;
+          WHERE name = ANY(${dependents}::text[])`;
         await migrate(database.ownerUrl, undefined, options);
       }
       const upgraded = await snapshot(owner);

@@ -361,5 +361,7 @@ export const embeddingMigrationTail = [
   // Patches the interaction reaper by its post-0345/0564/0705 anchors; replay
   // after the fence graph it edits.
   "0883_retired_instance_interactions.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
   ...strictOwnerMaintenanceMigrationTail,
 ];

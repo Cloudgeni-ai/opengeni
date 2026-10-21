@@ -129,6 +129,8 @@ const withheldMigrations = [
   "0872_subscription_usage_call_history_seed.sql",
   // Patches the account-binding fence withheld 0494 installs.
   "0873_mcp_binding_delegation_revocation.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
