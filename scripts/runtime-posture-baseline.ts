@@ -11,7 +11,7 @@ export type RuntimePostureBaseline = {
   release: string | null;
 };
 
-/** Historical production image from the cancelled OPE-822 upgrade rehearsal. */
+/** Historical production image from a cancelled upgrade rehearsal. */
 export const PRE_COMPATIBILITY_PRODUCTION_SOURCE = "bcc60cd80f2fd557e9f64beee38c1562d629de8c";
 
 export function parseRuntimePostureBaseline(value: unknown): RuntimePostureBaseline {
