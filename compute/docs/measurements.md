@@ -267,7 +267,7 @@ round trips and the proxy hop on top.
 | --- | --- | --- | --- | --- |
 | Create: place and reserve, fleet filling up | 500,000 | 0.42 µs | 1.0 µs | 58 µs |
 | Create: place, 98 % of hosts full | 20,000 | 0.17 µs | 0.46 µs | 8 µs |
-| Create: no host has room (every pool walked) | 2,000 | 11 µs | 17 µs | 31 µs |
+| Create: no host has room by the view (every pool walked, then one asked anyway) | 2,000 | 11 µs | 17 µs | 31 µs |
 | Renewal: a host's capacity into the view | 15,000 | 0.50 µs | 0.96 µs | 19 µs |
 | Wake: find the owner | 200,000 | 0.21 µs | 0.50 µs | 105 µs |
 | Recovery: one pass over every host's renewal count | 200 | 90 µs | 163 µs | 343 µs |

@@ -54,11 +54,23 @@ fn only_live_hosts_that_fit_and_were_not_excluded_are_chosen() {
         let placed = fleet.place(&demand(500), &[], &mut rng).unwrap();
         assert_eq!(placed.host, HostId(3));
     }
-    assert_eq!(fleet.place(&demand(500), &[HostId(3)], &mut rng), None);
-    assert_eq!(fleet.place(&demand(5_000), &[], &mut rng), None);
+    // When none fits by the view, a live host is asked anyway, and only
+    // once every live host has refused is nothing left.
+    let asked = fleet.place(&demand(500), &[HostId(3)], &mut rng).unwrap();
+    assert_eq!(asked.host, HostId(0));
+    assert_eq!(
+        fleet.place(&demand(500), &[HostId(3), HostId(0)], &mut rng),
+        None
+    );
+    for _ in 0..50 {
+        let host = fleet.place(&demand(5_000), &[], &mut rng).unwrap().host;
+        assert!(host == HostId(0) || host == HostId(3), "asked {host:?}");
+    }
     let mut disk = demand(500);
     disk.disk_mib = 1_000_000;
-    assert_eq!(fleet.place(&disk, &[], &mut rng), None);
+    assert!(fleet.place(&disk, &[], &mut rng).is_some());
+    // No host's memory could ever hold it.
+    assert_eq!(fleet.place(&demand(100_000), &[], &mut rng), None);
 }
 
 #[test]
@@ -158,9 +170,26 @@ fn huge_page_hosts_need_all_the_guest_memory() {
         ..info(0)
     };
     fleet.upsert(HostId(1), huge, HostState::Live, capacity(1_500));
+    fleet.upsert(HostId(2), info(1), HostState::Live, capacity(1_000));
     let mut rng = Rng::new(5);
-    assert!(fleet.place(&demand(700), &[], &mut rng).is_some());
-    assert!(fleet.place(&demand(800), &[], &mut rng).is_none());
+    // 700 MiB requested, 1400 MiB at most: both fit.
+    assert!(fleet.place(&demand(700), &[HostId(2)], &mut rng).is_some());
+    // 800 MiB requested fits the plain host, but the huge-page one needs
+    // all 1600 MiB.
+    for _ in 0..50 {
+        assert_eq!(
+            fleet.place(&demand(800), &[], &mut rng).unwrap().host,
+            HostId(2)
+        );
+    }
+    // A huge-page host whose memory could never hold all of it is not
+    // asked at all.
+    let small = Capacity {
+        memory_mib: 1_500,
+        ..capacity(1_500)
+    };
+    fleet.update(HostId(1), small);
+    assert_eq!(fleet.place(&demand(800), &[HostId(2)], &mut rng), None);
 }
 
 #[test]
@@ -179,9 +208,10 @@ fn reservations_spread_a_burst_evenly() {
 }
 
 #[test]
-fn what_was_sent_since_a_report_steers_but_never_refuses() {
+fn the_view_steers_but_never_refuses() {
     // One host with room for two by its report: creates and removes in
-    // quick succession leave reservations its next report may not clear.
+    // quick succession leave reservations its next report may not clear,
+    // and a report can still book a sandbox removed since.
     let mut one = fleet(1, 2_000);
     let mut rng = Rng::new(3);
     let wanted = demand(1_000);
@@ -193,8 +223,11 @@ fn what_was_sent_since_a_report_steers_but_never_refuses() {
     assert_eq!(one.get(HostId(0)).unwrap().2.free_memory_mib, 0);
     // The host is still asked; once it refuses, nothing is left.
     assert_eq!(one.place(&wanted, &[HostId(0)], &mut rng), None);
-    // Its report never fit more than it has.
-    assert_eq!(one.place(&demand(3_000), &[], &mut rng), None);
+    // More than its report says it has free: still asked.
+    assert_eq!(
+        one.place(&demand(3_000), &[], &mut rng).unwrap().host,
+        HostId(0)
+    );
 
     // With a host that fits after what was sent, that one is chosen.
     let mut two = fleet(2, 2_000);
