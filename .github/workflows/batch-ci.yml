@@ -1,0 +1,176 @@
+name: Batch CI
+
+on:
+  push:
+    branches: ["queue/**"]
+
+permissions:
+  contents: read
+
+# Immutable candidates never cancel each other or the independent full-main lane.
+concurrency:
+  group: batch-ci-${{ github.ref }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+env:
+  OPENGENI_TEST_MAX_CONCURRENCY: "4"
+  OPENGENI_TYPECHECK_CONCURRENCY: "1"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  plan:
+    name: Batch impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      batch_id: ${{ steps.plan.outputs.batch_id }}
+      unit_count: ${{ steps.plan.outputs.unit_count }}
+      unit_shards: ${{ steps.plan.outputs.unit_shards }}
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - id: plan
+        name: Verify candidate provenance and plan the complete combined tree
+        run: |
+          set -euo pipefail
+          bun scripts/merge-batcher/main.ts inspect --tip "$GITHUB_SHA" --git-dir .git > "$RUNNER_TEMP/batch.json"
+          base="$(jq -er '.baseSha' "$RUNNER_TEMP/batch.json")"
+          echo "batch_id=$(jq -er '.batchId' "$RUNNER_TEMP/batch.json")" >> "$GITHUB_OUTPUT"
+          bun scripts/ci/impact.ts --base "$base" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/impact-plan.json"
+          count="$(jq '.unitTests | length' "$RUNNER_TEMP/impact-plan.json")"
+          shards="$(jq '.unitTests | length | ((. / 240) | ceil | if . > 16 then 16 else . end)' "$RUNNER_TEMP/impact-plan.json")"
+          echo "unit_count=$count" >> "$GITHUB_OUTPUT"
+          echo "unit_shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "unit_matrix=$(jq -nc --argjson n "$shards" '[range(0; (if $n == 0 then 1 else $n end)) | {index: ., total: $n}]')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: batch-plan-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/impact-plan.json
+            ${{ runner.temp }}/batch.json
+          if-no-files-found: error
+
+  source:
+    name: Batch source contracts
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BATCH_ID: ${{ needs.plan.outputs.batch_id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: batch-plan-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/batch-plan
+      - name: Run source contracts and record an exact code verdict
+        run: >-
+          bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json" --
+          bun scripts/ci/batch-source.ts "$RUNNER_TEMP/batch-plan/impact-plan.json"
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: batch-receipt-${{ github.run_attempt }}-source
+          path: ${{ runner.temp }}/receipt-source.json
+          if-no-files-found: ignore
+
+  units:
+    name: Batch unit shard ${{ matrix.index }}/${{ matrix.total }}
+    needs: plan
+    if: ${{ needs.plan.outputs.unit_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
+    env:
+      BATCH_ID: ${{ needs.plan.outputs.batch_id }}
+      OPENGENI_REQUIRE_REAL_DB: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: queue-bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: batch-plan-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/batch-plan
+      # No in-job retry: the controller owns the single unchanged-batch retry.
+      - name: Run all selected unit files with the unchanged per-attempt deadline
+        run: >-
+          bun scripts/ci/batch-result.ts run --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json" --
+          bun scripts/ci/profile-command.ts --name batch-unit-${{ matrix.index }}
+          --output "$RUNNER_TEMP/batch-unit-${{ matrix.index }}.json" --timeout-seconds 1200 --
+          bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/batch-plan/impact-plan.json"
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: batch-receipt-${{ github.run_attempt }}-unit-${{ matrix.index }}
+          path: |
+            ${{ runner.temp }}/receipt-unit-${{ matrix.index }}.json
+            ${{ runner.temp }}/batch-unit-${{ matrix.index }}.json
+          if-no-files-found: ignore
+
+  ready:
+    name: Batch ready
+    needs: [plan, source, units]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BATCH_ID: ${{ needs.plan.outputs.batch_id }}
+      UNIT_SHARDS: ${{ needs.plan.outputs.unit_shards || '0' }}
+      PLAN_RESULT: ${{ needs.plan.result }}
+      SOURCE_RESULT: ${{ needs.source.result }}
+      UNITS_RESULT: ${{ needs.units.result }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - run: mkdir -p "$RUNNER_TEMP/batch-receipts"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: batch-receipt-${{ github.run_attempt }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/batch-receipts
+      - name: Bind receipts to this exact candidate and run attempt
+        if: ${{ always() }}
+        run: >-
+          bun scripts/ci/batch-result.ts aggregate --receipts "$RUNNER_TEMP/batch-receipts"
+          --output "$RUNNER_TEMP/batch-result.json"
+      - uses: actions/upload-artifact@v7.0.1
+        if: ${{ always() }}
+        with:
+          name: batch-result-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/batch-result.json
+          if-no-files-found: ignore
