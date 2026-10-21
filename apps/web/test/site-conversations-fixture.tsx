@@ -10,6 +10,9 @@ import { SiteSessionGroupHeading } from "@opengeni/react/app/components/rail/sit
 import { SiteOriginLink } from "@opengeni/react/app/components/session/site-origin-link";
 import { SiteConversationsPanel } from "@opengeni/react/app/components/artifacts/site-conversations";
 import type { Session } from "@opengeni/react/app/types";
+// The web app backs the shared session UI's links with its router; this
+// fixture renders those components under its own TanStack router the same way.
+import "../src/navigation-host";
 import "../src/styles.css";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
