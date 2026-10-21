@@ -16,6 +16,17 @@ export type QuiescenceRepairWorkPeek = (
   sessionId: string,
 ) => Promise<{ kind: string }>;
 
+/** Peek kinds whose workflow wake performs work: admission of the preserved
+ * turn, or DB-only control settlement. Control settlement never executes the
+ * turn, so it is permitted under Pause: a paused turn whose receipt is durable
+ * but whose projection still says `recovering` is parked idle by exactly this
+ * wake. Every other kind is a durable wait owned by its own unblocking wake. */
+const ACTIONABLE_RECOVERY_PEEK_KINDS = new Set([
+  "runnable",
+  "interruption-pending",
+  "cancellation-wait",
+]);
+
 /**
  * A recovering session whose interrupted attempt never received its physical
  * quiescence receipt is revisited only by a workflow wake. The closing activity
@@ -31,6 +42,10 @@ export type QuiescenceRepairWorkPeek = (
  * proving through Temporal that the activity is gone and rechecking both writer
  * gates. Quiesced turns must pass ordinary peek admission. Discovery is not admission; every predicate is rechecked here
  * under the canonical session locks.
+ *
+ * Discovery (migration 0880) omits quiesced turns parked behind Pause, an
+ * admission block or a sandbox setup marker. Those are legitimate waits whose
+ * unblocking transaction commits its own wake, not lost wakes.
  */
 async function repairCandidate(
   db: Database,
@@ -121,16 +136,19 @@ async function repairCandidate(
       if (!eligible?.eligible) return false;
       // Missing receipts must still be reconciled under Pause. A durable
       // receipt, however, permits execution only through ordinary admission;
-      // do not wake intentionally paused or independently blocked work.
+      // do not wake intentionally paused or independently blocked work. A
+      // paused stale `recovering` projection still needs its DB-only park.
       if (
         !eligible.receipt_missing &&
-        (
-          await peekSessionWork(
-            tx as unknown as Database,
-            candidate.workspaceId,
-            candidate.sessionId,
-          )
-        ).kind !== "runnable"
+        !ACTIONABLE_RECOVERY_PEEK_KINDS.has(
+          (
+            await peekSessionWork(
+              tx as unknown as Database,
+              candidate.workspaceId,
+              candidate.sessionId,
+            )
+          ).kind,
+        )
       )
         return false;
       await registerSessionWorkflowWakeInTransaction(tx as unknown as Database, {
