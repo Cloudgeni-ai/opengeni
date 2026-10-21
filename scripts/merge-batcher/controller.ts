@@ -133,16 +133,43 @@ export class LiveReader implements Reader {
       candidates.push({
         manifest,
         branch,
-        runs: await this.github.observedRuns(
-          manifest,
-          branch,
-          this.config.mode !== "active" ||
-            containedInBase ||
-            ledger.invalidated.includes(manifest.batchId),
-        ),
+        runs: [],
         containedInBase,
       });
     }
+    // Bound historical provider lookups independently of cache cardinality.
+    // Persist a round-robin cursor so restarts do not repeatedly sample only
+    // the oldest refs. Unobserved no-run refs remain conservative reservations.
+    const historical = candidates
+      .filter(
+        (candidate) =>
+          candidate.containedInBase ||
+          ledger.landed.includes(candidate.manifest.batchId) ||
+          ledger.invalidated.includes(candidate.manifest.batchId),
+      )
+      .sort((a, b) => a.branch.localeCompare(b.branch));
+    const cursorKey = `history-cursor:${this.config.repository}:${this.config.branchPrefix}`;
+    const savedCursor = await this.manifestCache.get<number>(cursorKey);
+    const cursor = Number.isSafeInteger(savedCursor) && savedCursor! >= 0 ? savedCursor! : 0;
+    const selected = new Set<string>();
+    for (let i = 0; i < Math.min(8, historical.length); i++)
+      selected.add(historical[(cursor + i) % historical.length]!.manifest.batchId);
+    const archivedIds = new Set(historical.map((candidate) => candidate.manifest.batchId));
+    for (const candidate of candidates) {
+      const archived = archivedIds.has(candidate.manifest.batchId);
+      candidate.runs = await this.github.observedRuns(
+        candidate.manifest,
+        candidate.branch,
+        archived || this.config.mode !== "active",
+        !archived || selected.has(candidate.manifest.batchId),
+      );
+    }
+    if (historical.length)
+      await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
+    if (historical.length > selected.size)
+      observationWarnings.push(
+        `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
+      );
     return {
       now: new Date().toISOString(),
       baseSha,
@@ -171,6 +198,7 @@ export class Controller {
     readonly git: GitStore,
     readonly owner: string,
     readonly executor?: Executor,
+    readonly clock: () => Date = () => new Date(),
   ) {
     this.journal = new ObservationJournal(config);
   }
@@ -220,7 +248,7 @@ export class Controller {
     if (action.kind === "build") {
       try {
         result.manifest = await this.git.build(action.spec);
-        await this.journal.event(result.manifest, "builtAt", new Date().toISOString());
+        await this.journal.event(result.manifest, "builtAt", this.clock().toISOString());
       } catch (error) {
         if (!(error instanceof MergeConflict)) throw error;
         const pull = action.spec.pulls.find((p) => p.number === error.number)!;
@@ -315,7 +343,8 @@ export class Controller {
         if (effect.kind === "publish" || effect.kind === "land") {
           const sample = ledger.stages[effect.manifest.batchId];
           if (sample)
-            sample[effect.kind === "land" ? "landedAt" : "publishedAt"] = new Date().toISOString();
+            sample[effect.kind === "land" ? "landedAt" : "publishedAt"] =
+              this.clock().toISOString();
         }
         ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
         const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);

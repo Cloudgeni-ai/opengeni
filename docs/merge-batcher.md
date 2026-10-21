@@ -381,8 +381,12 @@ operator limitations. Git landing itself remains atomic and restart-reconcilable
 Validated immutable manifests are cached by tip SHA. Verified completed results
 are cached by tip/batch/run/attempt; current run metadata is still reread before
 active landing/retry, so a rerun invalidates earlier green. Historical terminal
-candidates and baseline main outcomes are sampled at most once per 15 minutes.
-This preserves bounded rerun detection without redownloading completed artifacts
+and empty run histories and baseline main outcomes are sampled at most once per
+15 minutes. Landed/invalidated refs share an eight-ref-per-observation rotating
+scan budget, with a persisted cursor; current candidates are observed separately.
+Deferred observations retain cached runs, including queued/running reservations;
+an unknown history stays unknown and reserves capacity unless explicitly released.
+This bounds historical request fan-out without redownloading completed artifacts
 each poll; it is not instantaneous detection of external/manual historical reruns.
 Cache files are disposable and capped at 4,096 entries. Rate-limit headers defer
 HTTP reads, while service failures back off exponentially to 3,600 seconds.
@@ -412,12 +416,15 @@ retained journal or Git samples; cache loss cannot fabricate historical timings.
 Observation gaps reset coverageSince rather than turning elapsed downtime into
 a complete window; retained real latency samples can still trigger the stop signal.
 Use separate writable output directories for replicas; remote Git, not the local
-journal, fences their mutations. External historical reruns can be observed up
-to 15 minutes late and may overlap independently started work.
+journal, fences their mutations. External historical reruns can be observed after
+the 15-minute cache window plus a rotating scan cycle (ceil(historical refs / 8)
+polls); provider backoff adds delay. They may overlap independently started work.
 
 ### Missing workflow admission
 
 A published candidate with no exact workflow initially reserves the hosted slot.
+Head/evidence invalidation and abandonment do not release that reservation;
+only terminal workflow evidence or explicit infrastructure recovery does.
 After BATCHER_MISSING_RUN_SECONDS from known publication or first observation it
 becomes an **abandoned infrastructure hold**, not a PR failure or code-red retry.
 The hold is persisted and visible, with explicit recovery instead of an opaque

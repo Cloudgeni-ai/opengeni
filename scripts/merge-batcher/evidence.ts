@@ -72,6 +72,9 @@ export function admit(input: PullInput): Admission {
     const negative =
       /\b(?:not|never|no)\s+(?:yet\s+)?(?:passed|green|reviewed|tested)|\b(?:pending|awaiting)\s+(?:independent\s+)?review|\b(?:tests?|suites?)\s+(?:failed|failing)/i.test(
         text,
+      ) ||
+      /\breview\s*(?::|[-–—])?\s*(?:(?:is|was|has|still)\s+)*(?:failed|failing|pending|incomplete|blocked|awaiting|did\s+not\s+pass|didn't\s+pass|not\s+(?:yet\s+)?(?:passed|complete|completed|done|successful))\b|\b(?:failed|failing|pending|incomplete|blocked|awaiting|did\s+not\s+pass|didn't\s+pass|not\s+(?:yet\s+)?(?:passed|completed?))\s+(?:the\s+)?(?:independent[\s-]+)?(?:agent[\s-]+)?review\b/i.test(
+        text,
       );
     if (
       vm &&

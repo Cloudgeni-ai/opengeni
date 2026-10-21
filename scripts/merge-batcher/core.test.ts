@@ -182,6 +182,44 @@ describe("readiness and deterministic planning", () => {
   test("recognizes human prose exact-head VM and independent review without formal approval", () => {
     expect(admit(input()).ready?.headSha).toBe(SHA);
   });
+  test.each([
+    "Independent review failed",
+    "Independent review pending",
+    "Independent review did not pass",
+    "Independent review didn't pass",
+    "Independent agent review is still pending",
+    "Failed independent review",
+    "Pending independent agent review",
+    "Awaiting independent review",
+    "Independent review: incomplete",
+    "Independent review has not yet passed",
+    "Did not pass independent review",
+    "Did not pass the independent agent review",
+    "Not yet completed independent review",
+  ])("passing VM evidence does not override %s", (review) => {
+    const p = input();
+    p.comments[0]!.body = `Exact head ${SHA}. VM tests passed. ${review}; reviewer session 12345678-1234-1234-1234-123456789abc.`;
+    expect(admit(p).ready).toBeNull();
+    expect(admit(p).reason).toContain("negative");
+  });
+  test.each(["holding", "abandoned", "released", "unknown", "terminal", "running"])(
+    "invalidated published candidate retains hosted reservation until release or terminal: %s",
+    (status) => {
+      const old = candidate(),
+        o = observation([pull(2)], [old]);
+      o.ledger.invalidated.push(old.manifest.batchId);
+      if (status === "holding" || status === "abandoned" || status === "released")
+        o.ledger.missingRuns[old.manifest.batchId] = { status, firstSeenAt: NOW, updatedAt: NOW };
+      if (status === "terminal" || status === "running") {
+        old.runs = [run(old, "success")];
+        if (status === "running") old.runs[0]!.status = "in_progress";
+      }
+      const action = plan(o, cfg);
+      expect(action.kind).toBe("build");
+      if (action.kind === "build")
+        expect(action.publish).toBe(status === "released" || status === "terminal");
+    },
+  );
   test.each(["missing", "wrong head", "untrusted", "negative", "malformed", "too large"])(
     "evidence exclusion: %s",
     (kind) => {
@@ -1469,6 +1507,126 @@ describe("review regressions: observation, admission and telemetry", () => {
     attempt = 3;
     completed = false;
     expect((await restarted.runs(c.manifest, c.branch)).at(-1)?.attempt).toBe(3);
+  });
+  test("historical scans rotate with a persisted eight-ref budget; empty caches and late runs retain capacity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "merge-batcher-history-"));
+    roots.push(root);
+    const settings = { ...cfg, mode: "active" as const, outputDir: root };
+    const historical = Array.from({ length: 50 }, (_, i) =>
+      candidate([pull(i + 1, digest(i).slice(0, 40))]),
+    );
+    const current = candidate([pull(99, digest(99).slice(0, 40))]);
+    const all = [...historical, current];
+    const byTip = new Map(all.map((c) => [c.manifest.tipSha, c.manifest]));
+    const ledger = emptyLedger();
+    ledger.invalidated = historical.map((c) => c.manifest.batchId);
+    // Released histories are still sampled for unexpectedly late runs.
+    for (const c of historical.slice(0, 25))
+      ledger.missingRuns[c.manifest.batchId] = {
+        firstSeenAt: NOW,
+        updatedAt: NOW,
+        status: "released",
+      };
+    let lists = 0,
+      late = false;
+    const seen = new Set<string>();
+    class FakeGit extends GitStore {
+      override async remoteRefs() {
+        return new Map([
+          ["refs/heads/main", SHA],
+          [settings.stateRef, "b".repeat(40)],
+          ...all.map((c): [string, string] => [`refs/heads/${c.branch}`, c.manifest.tipSha]),
+        ]);
+      }
+      override async fetch() {}
+      override async ancestor() {
+        return false;
+      }
+      override async readLedger() {
+        return ledger;
+      }
+      override async inspect(sha: string) {
+        return byTip.get(sha)!;
+      }
+    }
+    class FakeReader extends GitHubReader {
+      override async ready() {
+        return { ready: [], excluded: [] };
+      }
+      override async mainBusy() {
+        return false;
+      }
+      override async get(path: string) {
+        expect(path.startsWith("actions/workflows/batch-ci.yml/runs?")).toBe(true);
+        const branch = new URL(`https://example.test/${path}`).searchParams.get("branch")!;
+        lists++;
+        seen.add(branch);
+        return {
+          workflow_runs:
+            late && branch === historical[0]!.branch
+              ? [
+                  {
+                    id: 100,
+                    run_attempt: 1,
+                    head_sha: historical[0]!.manifest.tipSha,
+                    head_branch: branch,
+                    path: cfg.workflow,
+                    event: "push",
+                    status: "queued",
+                  },
+                ]
+              : [],
+        };
+      }
+    }
+    const make = () =>
+      new LiveReader(new FakeReader(settings, new GitHubAuth({})), new FakeGit("unused"), settings);
+    for (let i = 0; i < 7; i++) {
+      const before = lists;
+      const o = await make().observe(); // Both reader and cache reload every time.
+      expect(o.candidates).toHaveLength(51);
+      expect(lists - before).toBeLessThanOrEqual(9); // Eight history refs plus current candidate.
+      expect(o.observationWarnings?.some((warning) => warning.includes("sampled 8/50"))).toBe(true);
+    }
+    expect(seen.size).toBe(51);
+    expect(lists).toBe(57); // Each history fetched once, current fetched every observation.
+    const before = lists;
+    await make().observe();
+    expect(lists - before).toBe(1); // Empty archived results back off across restarts.
+
+    // Expire the disposable cache without waiting or changing global Date.
+    const cachePath = make().github.cache.path;
+    const cache = JSON.parse(await readFile(cachePath, "utf8"));
+    for (const entry of Object.values(cache.entries) as { at: number }[]) entry.at = 0;
+    await writeFile(cachePath, JSON.stringify(cache));
+    late = true;
+    let detected = false;
+    for (let i = 0; i < 7; i++) {
+      const start = lists;
+      const o = await make().observe();
+      expect(lists - start).toBeLessThanOrEqual(9);
+      if (
+        o.candidates
+          .find((c) => c.branch === historical[0]!.branch)
+          ?.runs.some((r) => r.status === "queued")
+      )
+        detected = true;
+    }
+    expect(detected).toBe(true);
+    // A deferred snapshot of a queued late run still reserves the released slot.
+    const provider = make().github;
+    const runs = await provider.observedRuns(
+      historical[0]!.manifest,
+      historical[0]!.branch,
+      true,
+      false,
+    );
+    expect(runs[0]?.status).toBe("queued");
+    const o = observation([pull(98)], [{ ...historical[0]!, runs }]);
+    o.ledger = ledger;
+    const action = plan(o, settings);
+    expect(action.kind).toBe("build");
+    if (action.kind === "build") expect(action.publish).toBe(false);
   });
   test("baseline reads are cached and rate limits back off without another HTTP request", async () => {
     const f = await fixture();

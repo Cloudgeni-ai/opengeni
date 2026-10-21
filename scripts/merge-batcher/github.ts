@@ -532,15 +532,21 @@ export class GitHubReader {
     }
     return result;
   }
-  async observedRuns(manifest: Manifest, branch: string, archived: boolean): Promise<Run[]> {
+  async observedRuns(
+    manifest: Manifest,
+    branch: string,
+    archived: boolean,
+    allowRefresh = true,
+  ): Promise<Run[]> {
     const key = `observation:${manifest.tipSha}:${branch}`;
     const cached = await this.cache.get<Run[]>(key, 900_000);
-    // Historical terminal candidates are sampled every 15 minutes. Active
-    // landing always calls runs() directly for fresh provider attempt metadata.
-    if (cached && archived && cached.length && cached.every((r) => r.status === "completed"))
-      return cached;
+    // Empty histories need the same backoff as terminal histories. Retain even
+    // nonterminal snapshots when a historical scan is deferred: stale queued
+    // work must continue reserving capacity, never become an invented success.
+    if (cached && archived && cached.every((r) => r.status === "completed")) return cached;
+    if (!allowRefresh) return (await this.cache.get<Run[]>(key)) ?? [];
     const runs = await this.runs(manifest, branch);
-    if (runs.length && runs.every((r) => r.status === "completed")) await this.cache.set(key, runs);
+    await this.cache.set(key, runs);
     return runs;
   }
   async mainOutcomes(headSha: string): Promise<MainOutcome[]> {

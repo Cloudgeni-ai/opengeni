@@ -117,12 +117,16 @@ export function plan(o: Observation, c: Config): Action {
     )
       return invalid(item.manifest.batchId, "base/predecessor no longer applicable");
   }
-  // Count even invalidated descendants: never cancel CI to recover a slot.
-  const inflight = o.candidates.reduce(
-    (n, x) =>
-      n + x.runs.filter((r) => r.workflow === c.workflow && r.status !== "completed").length,
-    0,
-  );
+  // Publication reserves capacity before the provider exposes its run, even
+  // after composition invalidation. Only terminal evidence or explicit
+  // infrastructure release frees that reservation; abandonment alone does not.
+  const inflight = o.candidates.reduce((n, x) => {
+    const running = x.runs.filter(
+      (r) => r.workflow === c.workflow && r.status !== "completed",
+    ).length;
+    const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
+    return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
+  }, 0);
   const root = live.find((x) => x.manifest.baseSha === o.baseSha);
   if (root) {
     const run = latestRun(root, c);

@@ -213,7 +213,14 @@ async function fixture() {
       clock: () => new Date(clock),
     });
   const controller = (owner = "controller-a") =>
-    new Controller(cfg, new ClockReader(api, git, cfg), git, owner, executor(owner));
+    new Controller(
+      cfg,
+      new ClockReader(api, git, cfg),
+      git,
+      owner,
+      executor(owner),
+      () => new Date(clock),
+    );
   const state = async () => {
     const refs = await git.remoteRefs(origin.dir),
       sha = refs.get(cfg.stateRef);
@@ -772,6 +779,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
   test("missing-run abandonment is Git-backed and explicit recovery releases only infrastructure slot", async () => {
     const f = await fixture(),
       manifest = await f.publish();
+    const published = (await f.state()).ledger.stages[manifest.batchId];
+    expect(published?.builtAt).toBe(NOW);
+    expect(published?.publishedAt).toBe(NOW);
     f.advance(7200);
     await f.controller().step();
     const state = await f.state();
@@ -787,6 +797,52 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     f.api.pulls[0]!.binding.eventId = "explicit-re-ready";
     const next = await f.publish();
     expect(next.batchId).not.toBe(manifest.batchId);
+  });
+  test("missing-run deadline uses the injected publication clock across controller restarts", async () => {
+    const f = await fixture(),
+      manifest = await f.publish();
+    expect(f.cfg.missingRunSeconds).toBe(900);
+    f.advance(899);
+    await f.controller().step();
+    expect((await f.state()).ledger.missingRuns[manifest.batchId]?.status).toBe("holding");
+    f.advance(1);
+    await f.controller().step();
+    expect((await f.state()).ledger.missingRuns[manifest.batchId]?.status).toBe("abandoned");
+    expect((await f.state()).ledger.stages[manifest.batchId]?.publishedAt).toBe(NOW);
+  });
+  test("head invalidation before workflow admission cannot publish a second candidate", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.change();
+    await f.controller().step();
+    expect((await f.state()).ledger.invalidated).toContain(old.batchId);
+    for (let i = 0; i < 3; i++) {
+      const step = await f.controller().step();
+      expect(step.action.kind).toBe("build");
+      if (step.action.kind === "build") expect(step.action.publish).toBe(false);
+    }
+    const branches = [...(await f.git.remoteRefs(f.origin.dir)).keys()].filter((ref) =>
+      ref.startsWith(`refs/heads/${f.cfg.branchPrefix}`),
+    );
+    expect(branches).toHaveLength(1);
+    const late = f.verdict(old, "infrastructure");
+    late.status = "queued";
+    // Refresh the archived sample explicitly rather than waiting out its cache
+    // interval; separate history tests cover expiry and rotating late discovery.
+    await f.api.observedRuns(old, `${f.cfg.branchPrefix}${old.batchId}`, false);
+    const queued = await f.controller().step();
+    expect(queued.action.kind).toBe("build");
+    if (queued.action.kind === "build") expect(queued.action.publish).toBe(false);
+    late.status = "completed";
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect(next.manifest?.batchId).not.toBe(old.batchId);
+    expect(
+      [...(await f.git.remoteRefs(f.origin.dir)).keys()].filter((ref) =>
+        ref.startsWith(`refs/heads/${f.cfg.branchPrefix}`),
+      ),
+    ).toHaveLength(2);
   });
   test("failed landing does not record fabricated measured landed time", async () => {
     const f = await fixture(),
