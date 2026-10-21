@@ -2,7 +2,7 @@
 "@opengeni/sdk": patch
 ---
 
-Record the one-off release-policy decision for PR5165. Bendik (bendik@cloudgeni.ai) approved shipping the existing declaration unchanged—SDK/contracts minor and React patch—at **06:21 UTC on October 21, 2026** (PR5165 comment6309551766; OPE-822). This documentation-only patch entry does not replace or change that declaration. The decision is recorded in the append-only exception log in `docs/design/api-compatibility-policy.md` and resolves the previously pending version-policy decision described in the realtime response compatibility note.
+Record the one-off release-policy decision for PR5165. Bendik (bendik@cloudgeni.ai) approved shipping the existing declaration unchanged—SDK/contracts minor and React patch—at **06:21 UTC on October 21, 2026** (PR5165 comment6309551766). This documentation-only patch entry does not replace or change that declaration. The decision is recorded in the append-only exception log in `docs/design/api-compatibility-policy.md` and resolves the previously pending version-policy decision described in the realtime response compatibility note.
 
 `sessionRealtimeTransportKind` now returns `websocket` rather than the deprecated `gateway` and `xai-subscription` names. Update comparisons and switch branches that depended on those return values. The legacy negotiation helpers and transport starters remain available and deprecated; their continued presence does not preserve the old helper return values or old strict response shape.
 
