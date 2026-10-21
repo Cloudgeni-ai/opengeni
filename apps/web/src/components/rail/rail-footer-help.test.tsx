@@ -14,7 +14,7 @@ beforeEach(() => {
 const docs = "https://docs.example.test/";
 
 describe("rail footer account menu", () => {
-  test("is identity, Appearance, Help & feedback, Desktop app, then the account action", async () => {
+  test("is identity, Appearance, Help & feedback, Desktop app, Excel add-in, then the account action", async () => {
     const unmount = await renderOpenAccountMenu({
       managed: false,
       analytics: true,
@@ -23,13 +23,14 @@ describe("rail footer account menu", () => {
     try {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
-      expect(sequence).toHaveLength(7);
+      expect(sequence).toHaveLength(8);
       expect(sequence[1]).toBe("|");
       expect(sequence[2]).toContain("Appearance");
       expect(sequence[3]).toContain("Help & feedback");
       expect(sequence[4]).toContain("Desktop app");
-      expect(sequence[5]).toBe("|");
-      expect(sequence[6]).toContain("access");
+      expect(sequence[5]).toContain("Excel add-in");
+      expect(sequence[6]).toBe("|");
+      expect(sequence[7]).toContain("access");
     } finally {
       await unmount();
     }
