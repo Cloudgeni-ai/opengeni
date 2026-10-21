@@ -1,5 +1,7 @@
 import type { SubscriptionUsagePool } from "@opengeni/sdk";
 import { SubscriptionUsagePoolView } from "@/components/models/subscription-usage-pool";
+import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
+import { RowList } from "@/components/ui/list-row";
 import { Section, SectionStack } from "@/components/ui/section";
 import { Select } from "@/components/ui/select";
 import { useState } from "react";
@@ -86,11 +88,19 @@ export function pooledLimitsFixture(
 }
 
 export function PooledLimitsPreview() {
-  const [scenario, setScenario] = useState<"normal" | "runout" | "sparse" | "workspace" | "empty">(
-    "normal",
-  );
+  const [scenario, setScenario] = useState<
+    "normal" | "runout" | "sparse" | "partial" | "workspace" | "empty"
+  >("normal");
   const scope = scenario === "workspace" || scenario === "empty" ? "workspace" : "organization";
   const pool = pooledLimitsFixture(scope, scenario === "sparse", scenario === "runout");
+  if (scenario === "partial") {
+    // One account has not reported its limit; the total covers the other two.
+    const weekly = pool.windows.find((window) => window.id === "weekly")!;
+    weekly.accounts = weekly.accounts.map((account, index) =>
+      index === 1 ? { ...account, remainingPercent: null } : account,
+    );
+    weekly.remainingPercent = 61.82;
+  }
   if (scenario === "empty")
     pool.windows.forEach((window) => {
       window.accounts = [];
@@ -106,6 +116,7 @@ export function PooledLimitsPreview() {
           <option value="normal">Organization</option>
           <option value="runout">Runs out</option>
           <option value="sparse">Limited history</option>
+          <option value="partial">One account not reported</option>
           <option value="workspace">Workspace · shared and own accounts</option>
           <option value="empty">Workspace · no available accounts</option>
         </Select>
@@ -114,7 +125,28 @@ export function PooledLimitsPreview() {
         <Section
           title={scope === "organization" ? "Organization · Models" : "Design workspace · Models"}
         >
-          <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
+          <RowList label="Model providers" flush>
+            <li className="col-span-full list-none">
+              <SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />
+            </li>
+            {(pool.windows.find((window) => window.id === "weekly")?.accounts ?? []).map(
+              (account) => (
+                <SubscriptionAccountRow
+                  key={account.id}
+                  provider="codex"
+                  title={account.label}
+                  description={
+                    account.remainingPercent === null
+                      ? "Not reported yet"
+                      : account.remainingPercent === 0
+                        ? "Limit reached"
+                        : `${Math.round(account.remainingPercent)}% left this week`
+                  }
+                  onOpen={() => undefined}
+                />
+              ),
+            )}
+          </RowList>
         </Section>
       </SectionStack>
     </div>
