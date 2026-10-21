@@ -36,11 +36,23 @@ const FIRST_FILES_INODES: u64 = 32;
 /// take it.
 #[derive(Debug)]
 pub(super) enum AfterReading {
-    /// A create whose first files may not fit; its id is reserved
-    /// meanwhile.
+    /// A create whose first files and first wake may not fit; its id is
+    /// reserved meanwhile.
     Create(Id, Box<SandboxConfig>, OwnerEpoch, Reply<()>),
+    /// An adopt whose first wake may not fit, with whether it is from the
+    /// copy's files alone; its id is reserved meanwhile.
+    Adopt(Id, Box<SandboxConfig>, OwnerEpoch, bool, Reply<()>),
     /// The fetch of an image whose file is `length` bytes long.
     Fetch(ImageId, u64),
+}
+
+/// When a new sandbox fits; see [`HostAgent::room_for`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Room {
+    /// Now: it may be taken and its first wake booked.
+    Now,
+    /// Only the next disk reading can tell: it waits for that.
+    AfterReading,
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -107,34 +119,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// What a new sandbox `id`'s first files from `template` may write, to
-    /// be booked with [`Input::Writes`] before they are; `None` while only
-    /// the next reading can tell whether they fit; a refusal if the disk
-    /// cannot take them.
-    pub(super) fn first_files_fit(
-        &self,
-        id: Id,
-        image: Option<ImageId>,
-        template: Option<&Path>,
-    ) -> Result<Option<DiskSpace>, HostError> {
-        let disk = self.first_files_disk(image, template);
-        if let Some((resource, needed, free)) = self.core.disk_shortage(disk) {
-            if self.core.disk_awaits_reading(disk) {
-                return Ok(None);
-            }
-            return Err(HostError::HostFull {
-                id,
-                resource,
-                needed,
-                free,
-            });
-        }
-        Ok(Some(disk))
-    }
-
     /// Has `work` wait for the next disk reading.
     pub(super) fn after_reading(&mut self, work: AfterReading) {
-        if let AfterReading::Create(id, ..) = &work {
+        if let AfterReading::Create(id, ..) | AfterReading::Adopt(id, ..) = &work {
             self.preparing.insert(id.0);
         }
         self.after_reading.push(work);
@@ -148,18 +135,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.preparing.remove(&id.0);
                     self.create_fresh(id, *config, owner, reply);
                 }
+                AfterReading::Adopt(id, config, owner, from_files, reply) => {
+                    self.preparing.remove(&id.0);
+                    self.adopt(id, *config, owner, from_files, reply);
+                }
                 AfterReading::Fetch(image, length) => self.image_sized(image, Ok(Some(length))),
             }
         }
     }
 
     /// Refuses with `error` the work that waits for a disk reading, none of
-    /// which has started: its creates, and those waiting for its fetches.
-    /// It frees their ids.
+    /// which has started: its creates and adopts, and those waiting for
+    /// its fetches. It frees their ids.
     pub(super) fn refuse_after_reading(&mut self, error: &HostError) {
         for work in std::mem::take(&mut self.after_reading) {
             match work {
-                AfterReading::Create(id, _, _, reply) => {
+                AfterReading::Create(id, _, _, reply) | AfterReading::Adopt(id, _, _, _, reply) => {
                     self.preparing.remove(&id.0);
                     let _ = reply.send(Err(error.clone()));
                 }

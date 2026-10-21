@@ -94,7 +94,8 @@ impl Host {
 
     /// Creates sandbox `id` with room to spare and measures, in inodes,
     /// what a new sandbox's first files book until a reading shows them,
-    /// and what its next save books while it runs.
+    /// and what its next save books from its create on, for its first
+    /// wake.
     async fn measure(&self, id: Id) -> (u64, u64) {
         self.read(PLENTY).await;
         self.create(id, None).await.unwrap().unwrap();
@@ -152,10 +153,12 @@ async fn a_registering_host_refuses_work_waiting_for_a_disk_reading() {
     let host = Host::start(Some(gate.clone())).await;
     let (first, save) = host.measure(id(1)).await;
 
-    // One sandbox more leaves room for neither another's first files nor
-    // the image's fetch, until a reading shows what its own wrote.
-    host.read(2 * save + first + 1).await;
+    // Two sandboxes more leave room neither for another's first files and
+    // first wake nor for the image's fetch, until a reading shows what
+    // their first files wrote.
+    host.read(3 * save + 2 * first + 1).await;
     host.create(id(2), None).await.unwrap().unwrap();
+    host.create(id(5), None).await.unwrap().unwrap();
     let create = host.create(id(3), None);
     let fetch = host.create(id(4), Some(host.image));
     sleep(WAITS).await;
@@ -174,7 +177,7 @@ async fn a_registering_host_refuses_work_waiting_for_a_disk_reading() {
     .expect("the list does not wait for work only a reading could decide");
     let mut held: Vec<Id> = listed.sandboxes.iter().map(|held| held.id).collect();
     held.sort_unstable();
-    assert_eq!(held, [id(1), id(2)]);
+    assert_eq!(held, [id(1), id(2), id(5)]);
     for refused in [create.await.unwrap(), fetch.await.unwrap()] {
         assert!(
             matches!(refused, Err(HostError::NotAdmitted)),

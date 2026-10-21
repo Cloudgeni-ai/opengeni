@@ -258,6 +258,42 @@ async fn a_create_every_host_refuses_leaves_no_sandbox_behind() {
     assert_eq!(all, json!([]), "the refused create left a row");
 }
 
+/// The search for a host has no fixed number of tries: a create that
+/// many hosts refuse, each once, still goes to the one with room.
+#[tokio::test]
+async fn a_create_many_hosts_refuse_goes_to_the_one_with_room() {
+    let fleet = Fleet::start().await;
+    let mut full = Vec::new();
+    for name in ["a", "b", "c", "d", "e"] {
+        let host = fleet.host(&format!("host-{name}.example")).await;
+        // Its ready clones make placement try it before the one with room.
+        host.advertise_ready();
+        host.behave(refuse_creates);
+        full.push(host);
+    }
+    let room = fleet.host("host-f.example").await;
+    let view = std::sync::Arc::clone(fleet.running.service.view());
+    until(
+        Duration::from_secs(3),
+        "the view has the ready clones",
+        async || {
+            ["a", "b", "c", "d", "e"].iter().all(|name| {
+                view.named(&format!("host-{name}.example"))
+                    .is_some_and(|known| !known.capacity.ready.is_empty())
+            })
+        },
+    )
+    .await;
+
+    let sandbox = fleet.create(json!({})).await;
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert_eq!(row["host"], "host-f.example");
+    for host in &full {
+        assert_eq!(host.ops(), ["create"], "asked once");
+    }
+    assert_eq!(room.ops(), ["create"]);
+}
+
 #[tokio::test]
 async fn the_service_keeps_its_side_open_until_a_host_answers() {
     let fleet = Fleet::start().await;

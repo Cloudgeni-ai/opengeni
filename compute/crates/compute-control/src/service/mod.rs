@@ -12,7 +12,7 @@ mod moves;
 mod reach;
 mod requests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -105,8 +105,6 @@ pub struct Settings {
     pub terms: LeaseTerms,
     /// Disk in MiB each sandbox is booked for where it is placed.
     pub disk_mib: u64,
-    /// How many hosts a create or adopt tries before it gives up.
-    pub max_tries: u32,
     /// How long a wake or connect may take in all.
     pub wake_within: Duration,
     /// The image a create that names none starts from.
@@ -140,7 +138,6 @@ impl Default for Settings {
         Self {
             terms: LeaseTerms::RECOMMENDED,
             disk_mib: 1024,
-            max_tries: 3,
             wake_within: Duration::from_secs(60),
             image: "base".into(),
             sleep: DEFAULT_SLEEP,
@@ -272,7 +269,7 @@ impl<S: Store> Service<S> {
     }
 
     /// Places `demand` on a host not in `exclude`.
-    fn place(&self, demand: &Demand, exclude: &[HostId]) -> Result<Target, Failure> {
+    fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Target, Failure> {
         let placement = self
             .view
             .place(demand, exclude)
@@ -301,7 +298,6 @@ impl<S: Store> Service<S> {
         id: Id,
         asked: Asked,
         reply: &Answered,
-        tries: u32,
     ) -> Result<(Next, Option<SandboxRow>), Failure> {
         let outcome = reply.outcome();
         let archived = if asked.op == Op::Wake && outcome == Outcome::NotFound {
@@ -322,7 +318,6 @@ impl<S: Store> Service<S> {
                 reply.at(),
                 row.ownership,
                 archived,
-                (tries, self.settings.max_tries),
             );
             match next {
                 Next::AdoptHere(change) => {
@@ -385,11 +380,13 @@ impl<S: Store> Service<S> {
     ) -> Result<SandboxRow, Failure> {
         let (mut row, demand) = self.new_row(id, team, spec, metadata)?;
         let id = row.id;
-        let mut exclude = Vec::new();
+        let mut exclude = HashSet::new();
         let mut inserted = false;
         // The last refusal of a host that holds nothing of it.
         let mut refused = None;
-        for tries in 1..=self.settings.max_tries {
+        // Every host placement can find is tried once: one that refuses
+        // holds nothing of it, and refuses before making anything.
+        loop {
             let target = match self.place(&demand, &exclude) {
                 Ok(target) => target,
                 Err(failure) => {
@@ -415,7 +412,7 @@ impl<S: Store> Service<S> {
                 // Given up on since it was placed: place it elsewhere,
                 // from the row as stored.
                 Write::OwnerLost => {
-                    exclude.push(target.host);
+                    exclude.insert(target.host);
                     if inserted {
                         row = self.store.sandbox(id).await?.ok_or(Failure::NotFound)?;
                     } else {
@@ -447,12 +444,12 @@ impl<S: Store> Service<S> {
                     id,
                     why: error.to_string(),
                 })?;
-            let (next, now) = self.settle(id, asked, &answered, tries).await?;
+            let (next, now) = self.settle(id, asked, &answered).await?;
             row = now.ok_or(Failure::NotFound)?;
             match next {
                 _ if answered.outcome() == Outcome::Done => return Ok(row),
                 Next::PlaceElsewhere => {
-                    exclude.push(target.host);
+                    exclude.insert(target.host);
                     refused = Some(answered);
                 }
                 _ => {
@@ -461,8 +458,6 @@ impl<S: Store> Service<S> {
                 }
             }
         }
-        self.forget_if_refused(&row, refused.as_ref()).await?;
-        Err(Failure::NoCapacity)
     }
 
     /// A new sandbox's row, not yet placed, and what it asks of a host.

@@ -8,10 +8,15 @@
 //!
 //! What a replica sent a host since its last report is counted against it
 //! until the next one, so a burst spreads over the hosts. That count only
-//! steers: removes are not taken off it, and a host's report can repeat
-//! the one before it, so it can run ahead of the host. When it leaves no
-//! host, a host whose own report fits is asked anyway, and the host's
-//! answer decides.
+//! steers, and so does the report under it: removes are not taken off the
+//! count, and a report is up to a second or so old, so it can still book
+//! a sandbox that is gone. Placement never refuses on either. When no
+//! host fits by them, a live host whose memory could hold the sandbox at
+//! all is asked anyway, and the host's answer decides: a host takes a
+//! create or adopt only while it has room to run the sandbox now, and
+//! books that room until the sandbox first runs, so a host that cannot
+//! run it refuses it before making anything, and it goes to the next
+//! host. Only when every such host has refused is there no capacity.
 //!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,
@@ -19,7 +24,7 @@
 //! herding every request onto the single emptiest host, and costs the same
 //! at five thousand hosts as at five.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::ids::{ClassId, HostId, ShapeKey, ZoneId};
 use crate::rng::Rng;
@@ -137,22 +142,8 @@ struct Slot {
     id: HostId,
     info: HostInfo,
     state: HostState,
-    /// As the host last reported it.
-    reported: Capacity,
-    /// That, less what was sent to the host since.
+    /// As the host last reported it, less what was sent to it since.
     capacity: Capacity,
-}
-
-impl Slot {
-    fn new(id: HostId, info: HostInfo, state: HostState, capacity: Capacity) -> Self {
-        Self {
-            id,
-            info,
-            state,
-            reported: capacity.clone(),
-            capacity,
-        }
-    }
 }
 
 /// A set of slot numbers with constant-time insert, remove and random
@@ -227,7 +218,12 @@ impl Fleet {
     pub fn upsert(&mut self, id: HostId, info: HostInfo, state: HostState, capacity: Capacity) {
         if let Some(&slot) = self.by_id.get(&id) {
             self.unindex(slot);
-            self.slots[slot as usize] = Some(Slot::new(id, info, state, capacity));
+            self.slots[slot as usize] = Some(Slot {
+                id,
+                info,
+                state,
+                capacity,
+            });
             self.index(slot);
             return;
         }
@@ -235,7 +231,12 @@ impl Fleet {
             self.slots.push(None);
             u32::try_from(self.slots.len() - 1).expect("fewer than four billion hosts")
         });
-        self.slots[slot as usize] = Some(Slot::new(id, info, state, capacity));
+        self.slots[slot as usize] = Some(Slot {
+            id,
+            info,
+            state,
+            capacity,
+        });
         self.by_id.insert(id, slot);
         self.index(slot);
     }
@@ -245,7 +246,6 @@ impl Fleet {
         if let Some(&slot) = self.by_id.get(&id) {
             self.unindex(slot);
             if let Some(entry) = self.slots[slot as usize].as_mut() {
-                entry.reported = capacity.clone();
                 entry.capacity = capacity;
             }
             self.index(slot);
@@ -316,21 +316,26 @@ impl Fleet {
     }
 
     /// Chooses a live host for `demand`, other than those in `exclude`
-    /// (hosts that already refused it). `None` when no host's own report
-    /// fits it.
-    pub fn place(&self, demand: &Demand, exclude: &[HostId], rng: &mut Rng) -> Option<Placement> {
-        let fits = |slot: u32, reported: bool| {
+    /// (hosts that already refused it): one that fits by the view if any
+    /// does, or else one whose memory could hold it at all. `None` when no
+    /// such host is left.
+    pub fn place(
+        &self,
+        demand: &Demand,
+        exclude: &HashSet<HostId>,
+        rng: &mut Rng,
+    ) -> Option<Placement> {
+        let fits = |slot: u32, now: bool| {
             self.slots[slot as usize].as_ref().is_some_and(|entry| {
-                let capacity = if reported {
-                    &entry.reported
-                } else {
-                    &entry.capacity
-                };
+                let capacity = &entry.capacity;
+                let memory = demand.memory_on(entry.info);
                 entry.state == HostState::Live
                     && !exclude.contains(&entry.id)
-                    && capacity.free_memory_mib >= demand.memory_on(entry.info)
-                    && capacity.free_cpu_millis >= demand.cpu_millis
-                    && capacity.free_disk_mib >= demand.disk_mib
+                    && capacity.memory_mib >= memory
+                    && (!now
+                        || (capacity.free_memory_mib >= memory
+                            && capacity.free_cpu_millis >= demand.cpu_millis
+                            && capacity.free_disk_mib >= demand.disk_mib))
             })
         };
         let class = demand.class().and_then(|class| self.by_class.get(&class));
@@ -341,12 +346,12 @@ impl Fleet {
         ]
         .into_iter()
         .flatten()
-        .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, false), demand, rng))
+        .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, true), demand, rng))
         .or_else(|| {
             [class, Some(&self.live)]
                 .into_iter()
                 .flatten()
-                .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, true), demand, rng))
+                .find_map(|pool| self.best_of_two(pool, &|slot| fits(slot, false), demand, rng))
         })?;
         let entry = self.slots[chosen as usize].as_ref()?;
         Some(Placement {

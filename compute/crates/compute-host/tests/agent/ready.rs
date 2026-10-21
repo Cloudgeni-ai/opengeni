@@ -376,6 +376,44 @@ async fn ready_sandboxes_give_their_room_to_a_wake_and_refill_only_into_free_roo
     lab.assert_clean();
 }
 
+/// Creates that claim ready sandboxes at the same time each book their
+/// claimed VM's memory once, so a host with room for both takes both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_claims_book_each_claimed_vm_once() {
+    let policy = HostPolicy {
+        admission: Some(Admission {
+            budget: 512 << 20,
+            buffer: 0,
+            busy_grace: Duration::from_millis(100),
+        }),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        policy,
+        keeping(2),
+    )
+    .await;
+    wait_filled(&lab, 2).await;
+    let boots = lab.world.boots.load(Ordering::Relaxed);
+    let replies = futures::future::join(create(&lab, id(1)), create(&lab, id(2))).await;
+    assert_eq!(replies, (Reply::Done, Reply::Done));
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        boots,
+        "both claimed a ready sandbox"
+    );
+    for n in 1..=2 {
+        assert!(matches!(lab.wake(id(n)).await, Reply::Woken { .. }));
+    }
+    let capacity = lab.status().await.capacity.unwrap();
+    assert_eq!((capacity.reserved, capacity.awake), (512 << 20, 2));
+    assert!(capacity.occupied <= capacity.total, "{capacity:?}");
+    lab.assert_clean();
+}
+
 /// A fill that finishes while a held sandbox waits for its room is ended
 /// for it: the core may ask for that the moment the fill is ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -392,13 +430,10 @@ async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() 
         restore: Duration::from_secs(1),
         ..Delays::default()
     };
-    let lab = Lab::start_configured(Lab::root(), Arc::default(), delays, policy, keeping(1)).await;
-    lab.wait_until("a fill under way", |status| pool(status) == (0, 1, 1))
-        .await;
-
-    // 384 MiB do not fit next to the fill, which books what its template
-    // holds and 64 MiB more until it is ready: the hold waits.
-    let created = lab
+    // A sandbox made before the host kept a ready one, which ran once and
+    // sleeps, so it holds no room: a new one would hold its first wake's.
+    let before = Lab::new(Delays::default(), policy).await;
+    let created = before
         .client
         .call(&Request::Create {
             id: id(1),
@@ -407,6 +442,16 @@ async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() 
         .await
         .unwrap();
     assert_eq!(created, Reply::Done);
+    assert!(matches!(before.wake(id(1)).await, Reply::Woken { .. }));
+    assert_eq!(before.sleep_to(id(1), LevelName::Saved).await, Reply::Done);
+    before.wait_level(id(1), LevelName::Saved).await;
+    let (root, world) = before.stop().await;
+    let lab = Lab::start_configured(root, world, delays, policy, keeping(1)).await;
+    lab.wait_until("a fill under way", |status| pool(status) == (0, 1, 1))
+        .await;
+
+    // 384 MiB do not fit next to the fill, which books what its template
+    // holds and 64 MiB more until it is ready: the hold waits.
     let hold = Request::Hold {
         id: id(1),
         generation: None,

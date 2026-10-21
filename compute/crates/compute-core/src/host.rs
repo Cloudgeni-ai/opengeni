@@ -15,8 +15,9 @@ mod disk;
 mod spare;
 mod squeeze;
 
+use admission::FirstWake;
 pub(crate) use admission::WakeRoom;
-pub use admission::{Capacity, CpuCapacity, Size};
+pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
 pub(crate) use squeeze::{Balloon, Squeeze};
 
@@ -25,6 +26,8 @@ pub(crate) use squeeze::{Balloon, Squeeze};
 pub enum Input {
     /// Start managing a sandbox, either newly created or found on disk after
     /// the host agent restarted. Ignored if the sandbox is already managed.
+    /// A new sandbox whose create booked its first wake with
+    /// [`Input::Creating`] keeps that booking.
     Add {
         /// The sandbox.
         sandbox: SandboxId,
@@ -39,6 +42,27 @@ pub enum Input {
         /// found on disk, so a restart does not reset how long it has been
         /// idle. A time after now counts as now.
         last_activity: At,
+    },
+    /// A sandbox is being created or adopted here, to be woken soon after:
+    /// from now on it books what its first wake takes, memory and
+    /// processor time as it would awake and the local disk that wake
+    /// books, so creates and wakes after it count that room taken, and its
+    /// first wake takes nothing more. Check that it fits first with
+    /// [`Host::create_room`]. [`Input::Add`] carries the booking over
+    /// to the sandbox; it ends once the sandbox runs, when it is removed,
+    /// or at `until`, whichever comes first. Sent again, it replaces the
+    /// booking; with `until` no later than now, it ends it, as for a
+    /// create that failed.
+    Creating {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// What it may take of host memory.
+        size: Size,
+        /// Whether its first wake fetches it from object storage, as an
+        /// adopted sandbox's does, and so books its fetch too.
+        remote: bool,
+        /// When the booking lapses if the sandbox has not run by then.
+        until: At,
     },
     /// Stop managing a sandbox and delete it. What its VM occupied stays
     /// counted against the admission budget, and the processor time it
@@ -550,6 +574,9 @@ pub struct Host {
     /// until the host agent reports them ended ([`Input::Unmanaged`] with
     /// 0).
     removed_disk: HashMap<SandboxId, DiskSpace>,
+    /// First wakes booked for sandboxes being created or adopted and not
+    /// added yet; see [`Input::Creating`].
+    creating: HashMap<SandboxId, FirstWake>,
 }
 
 impl Host {
@@ -583,6 +610,7 @@ impl Host {
             suspended: false,
             writes: HashMap::new(),
             removed_disk: HashMap::new(),
+            creating: HashMap::new(),
         })
     }
 
@@ -628,6 +656,8 @@ impl Host {
         for input in inputs {
             self.apply(now, input, out);
         }
+        // A create's booking lapses when its sandbox was not added in time.
+        self.creating.retain(|_, booked| booked.until > now);
         if self.suspended {
             self.reconcile_dirty(now, out);
             return;
@@ -655,7 +685,13 @@ impl Host {
     /// When to call [`Host::handle`] with [`Input::Tick`] next.
     #[must_use]
     pub fn next_deadline(&self) -> Option<At> {
-        self.timers.first().map(|(at, _)| *at)
+        let lapses = self.creating.values().map(|booked| booked.until).min();
+        self.timers
+            .first()
+            .map(|(at, _)| *at)
+            .into_iter()
+            .chain(lapses)
+            .min()
     }
 
     /// The state of one sandbox.
@@ -680,7 +716,8 @@ impl Host {
     }
 
     /// Whether sandbox `id` holds its request of the host's memory and
-    /// processor budgets: it is awake, waking, or its wake was let in.
+    /// processor budgets: it is awake, waking, its wake was let in, or it
+    /// is new and its first wake is booked (see [`Input::Creating`]).
     #[must_use]
     pub fn reserves(&self, id: SandboxId) -> bool {
         self.sandboxes.get(&id).is_some_and(Sandbox::reserves)
@@ -733,11 +770,23 @@ impl Host {
                 size,
                 last_activity,
             } => {
-                if let Entry::Vacant(entry) = self.sandboxes.entry(sandbox) {
-                    entry.insert(Sandbox::new(last_activity.min(now), state, policy, size));
-                    self.mark(sandbox);
-                }
+                let slot = Sandbox::new(last_activity.min(now), state, policy, size);
+                self.add(now, sandbox, slot);
             }
+            Input::Creating {
+                sandbox,
+                size,
+                remote,
+                until,
+            } => self.creating(
+                now,
+                sandbox,
+                FirstWake {
+                    size,
+                    remote,
+                    until,
+                },
+            ),
             Input::Remove { sandbox } => self.remove(sandbox, out),
             Input::Spare {
                 sandbox,
@@ -766,19 +815,7 @@ impl Host {
                     self.mark(sandbox);
                 }
             }
-            Input::Busy { sandbox } => {
-                // A checkpoint pauses the VM only while it captures it: its
-                // guest runs, and works, through the rest.
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox)
-                    && slot.state.level == Level::Running
-                    && slot
-                        .in_flight
-                        .is_none_or(|flight| flight.step == Step::Checkpoint)
-                {
-                    slot.touch(now);
-                    self.mark(sandbox);
-                }
-            }
+            Input::Busy { sandbox } => self.busy(now, sandbox),
             Input::Finished {
                 sandbox,
                 op,
@@ -835,6 +872,35 @@ impl Host {
             slot.requested = Level::Running;
             slot.request_wake(priority, now);
             self.mark(sandbox);
+        }
+    }
+
+    /// Takes in [`Input::Busy`].
+    fn busy(&mut self, now: At, sandbox: SandboxId) {
+        // A checkpoint pauses the VM only while it captures it: its guest
+        // runs, and works, through the rest.
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox)
+            && slot.state.level == Level::Running
+            && slot
+                .in_flight
+                .is_none_or(|flight| flight.step == Step::Checkpoint)
+        {
+            slot.touch(now);
+            self.mark(sandbox);
+        }
+    }
+
+    /// Takes in [`Input::Add`] of the sandbox `id`, new as `slot`, which
+    /// keeps the first wake its create booked, if any.
+    fn add(&mut self, now: At, id: SandboxId, mut slot: Sandbox) {
+        let booked = self
+            .creating
+            .remove(&id)
+            .filter(|booked| booked.until > now);
+        if let Entry::Vacant(entry) = self.sandboxes.entry(id) {
+            slot.fresh_until = booked.map(|booked| booked.until);
+            entry.insert(slot);
+            self.mark(id);
         }
     }
 
@@ -1061,16 +1127,18 @@ impl Host {
 
     fn remove(&mut self, id: SandboxId, out: &mut Vec<Action>) {
         let percent = self.compressed_percent();
+        self.creating.remove(&id);
         let Some(slot) = self.sandboxes.remove(&id) else {
             return;
         };
         // Its VM, if any, holds its memory until the host agent has ended
-        // it, after any step still running for it.
-        let held = slot.occupies(percent);
+        // it, after any step still running for it; a first wake booked but
+        // not started holds nothing.
+        let held = slot.vm_occupies(percent);
         let claim = slot.squeeze.claim();
         if held > 0 {
             *self.unmanaged.entry(id).or_default() += held;
-            if slot.reserves() {
+            if slot.awake_or_waking() {
                 // Its VM may go on running until it is ended.
                 *self.unmanaged_cpu.entry(id).or_default() += slot.size.cpu;
             }
@@ -1150,6 +1218,7 @@ impl Host {
             return;
         };
         slot.settle_room();
+        slot.settle_first_wake(now);
         // A checkpoint leaves the VM running, so a sandbox under one is
         // already awake: a use meanwhile wakes nothing.
         if slot.state.level == Level::Running

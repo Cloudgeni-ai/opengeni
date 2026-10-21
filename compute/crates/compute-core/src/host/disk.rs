@@ -82,7 +82,7 @@ impl DiskSpace {
         }
     }
 
-    fn bytes(bytes: u64) -> Self {
+    pub(super) fn bytes(bytes: u64) -> Self {
         Self { bytes, inodes: 0 }
     }
 }
@@ -260,6 +260,10 @@ impl Host {
             .values()
             .chain(self.removed_disk.values())
             .fold(booked, |sum, disk| sum.add(*disk));
+        let booked = self
+            .creating
+            .values()
+            .fold(booked, |sum, first| sum.add(first.disk()));
         Some(DiskCapacity {
             available,
             booked,

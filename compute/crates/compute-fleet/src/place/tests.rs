@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::{
     Capacity, ClassId, Demand, Fleet, HostId, HostInfo, HostState, Prefer, Rng, ShapeKey, ZoneId,
 };
@@ -51,14 +53,40 @@ fn only_live_hosts_that_fit_and_were_not_excluded_are_chosen() {
     fleet.set_state(HostId(2), HostState::Draining);
     let mut rng = Rng::new(1);
     for _ in 0..200 {
-        let placed = fleet.place(&demand(500), &[], &mut rng).unwrap();
+        let placed = fleet
+            .place(&demand(500), &HashSet::new(), &mut rng)
+            .unwrap();
         assert_eq!(placed.host, HostId(3));
     }
-    assert_eq!(fleet.place(&demand(500), &[HostId(3)], &mut rng), None);
-    assert_eq!(fleet.place(&demand(5_000), &[], &mut rng), None);
+    // When none fits by the view, a live host is asked anyway, and only
+    // once every live host has refused is nothing left.
+    let asked = fleet
+        .place(&demand(500), &HashSet::from([HostId(3)]), &mut rng)
+        .unwrap();
+    assert_eq!(asked.host, HostId(0));
+    assert_eq!(
+        fleet.place(
+            &demand(500),
+            &HashSet::from([HostId(3), HostId(0)]),
+            &mut rng
+        ),
+        None
+    );
+    for _ in 0..50 {
+        let host = fleet
+            .place(&demand(5_000), &HashSet::new(), &mut rng)
+            .unwrap()
+            .host;
+        assert!(host == HostId(0) || host == HostId(3), "asked {host:?}");
+    }
     let mut disk = demand(500);
     disk.disk_mib = 1_000_000;
-    assert_eq!(fleet.place(&disk, &[], &mut rng), None);
+    assert!(fleet.place(&disk, &HashSet::new(), &mut rng).is_some());
+    // No host's memory could ever hold it.
+    assert_eq!(
+        fleet.place(&demand(100_000), &HashSet::new(), &mut rng),
+        None
+    );
 }
 
 #[test]
@@ -68,10 +96,34 @@ fn a_host_found_by_walking_the_pool_when_few_fit() {
     let mut rng = Rng::new(9);
     for _ in 0..50 {
         assert_eq!(
-            fleet.place(&demand(1_000), &[], &mut rng).unwrap().host,
+            fleet
+                .place(&demand(1_000), &HashSet::new(), &mut rng)
+                .unwrap()
+                .host,
             HostId(4_321)
         );
     }
+}
+
+/// A search that every host refuses asks each live host once, in time
+/// that grows with the square of the fleet at most: every try walks the
+/// pool once and checks what was tried in constant time.
+#[test]
+fn a_search_every_host_refuses_asks_each_once() {
+    const HOSTS: u64 = 2_000;
+    let fleet = fleet(HOSTS, 100);
+    let mut rng = Rng::new(3);
+    let mut asked = HashSet::new();
+    let started = std::time::Instant::now();
+    while let Some(placed) = fleet.place(&demand(1_000), &asked, &mut rng) {
+        assert!(asked.insert(placed.host), "{:?} asked twice", placed.host);
+    }
+    assert_eq!(asked.len() as u64, HOSTS);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -83,13 +135,13 @@ fn a_host_with_a_ready_clone_is_preferred() {
     let mut wanted = demand(1_000);
     wanted.prefer = Prefer::ReadyClone(SHAPE);
     let mut rng = Rng::new(3);
-    let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+    let placed = fleet.place(&wanted, &HashSet::new(), &mut rng).unwrap();
     assert_eq!(placed.host, HostId(7));
     assert!(placed.ready);
     // Using both clones takes the host out of the ready set.
     fleet.reserve(placed, &wanted);
     fleet.reserve(placed, &wanted);
-    let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+    let placed = fleet.place(&wanted, &HashSet::new(), &mut rng).unwrap();
     assert!(!placed.ready);
     assert_ne!(
         placed.host,
@@ -109,10 +161,12 @@ fn the_class_of_the_memory_image_is_preferred_then_any() {
     let mut wanted = demand(500);
     wanted.prefer = Prefer::Class(ClassId(5));
     let mut rng = Rng::new(4);
-    let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+    let placed = fleet.place(&wanted, &HashSet::new(), &mut rng).unwrap();
     assert_eq!(placed.host, HostId(99));
     assert!(placed.same_class);
-    let placed = fleet.place(&wanted, &[HostId(99)], &mut rng).unwrap();
+    let placed = fleet
+        .place(&wanted, &HashSet::from([HostId(99)]), &mut rng)
+        .unwrap();
     assert!(!placed.same_class);
 }
 
@@ -140,7 +194,7 @@ fn an_adopt_goes_to_its_class_even_past_ready_clones_and_more_memory() {
     wanted.prefer = Prefer::Class(ClassId(5));
     let mut rng = Rng::new(9);
     for _ in 0..50 {
-        let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+        let placed = fleet.place(&wanted, &HashSet::new(), &mut rng).unwrap();
         assert_eq!(
             placed.host,
             HostId(99),
@@ -158,9 +212,36 @@ fn huge_page_hosts_need_all_the_guest_memory() {
         ..info(0)
     };
     fleet.upsert(HostId(1), huge, HostState::Live, capacity(1_500));
+    fleet.upsert(HostId(2), info(1), HostState::Live, capacity(1_000));
     let mut rng = Rng::new(5);
-    assert!(fleet.place(&demand(700), &[], &mut rng).is_some());
-    assert!(fleet.place(&demand(800), &[], &mut rng).is_none());
+    // 700 MiB requested, 1400 MiB at most: both fit.
+    assert!(
+        fleet
+            .place(&demand(700), &HashSet::from([HostId(2)]), &mut rng)
+            .is_some()
+    );
+    // 800 MiB requested fits the plain host, but the huge-page one needs
+    // all 1600 MiB.
+    for _ in 0..50 {
+        assert_eq!(
+            fleet
+                .place(&demand(800), &HashSet::new(), &mut rng)
+                .unwrap()
+                .host,
+            HostId(2)
+        );
+    }
+    // A huge-page host whose memory could never hold all of it is not
+    // asked at all.
+    let small = Capacity {
+        memory_mib: 1_500,
+        ..capacity(1_500)
+    };
+    fleet.update(HostId(1), small);
+    assert_eq!(
+        fleet.place(&demand(800), &HashSet::from([HostId(2)]), &mut rng),
+        None
+    );
 }
 
 #[test]
@@ -169,7 +250,7 @@ fn reservations_spread_a_burst_evenly() {
     let mut rng = Rng::new(6);
     let wanted = demand(256);
     for _ in 0..10_000 {
-        let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+        let placed = fleet.place(&wanted, &HashSet::new(), &mut rng).unwrap();
         fleet.reserve(placed, &wanted);
     }
     let counts: Vec<u32> = fleet.hosts().map(|(_, _, _, c)| c.sandboxes).collect();
@@ -179,22 +260,31 @@ fn reservations_spread_a_burst_evenly() {
 }
 
 #[test]
-fn what_was_sent_since_a_report_steers_but_never_refuses() {
+fn the_view_steers_but_never_refuses() {
     // One host with room for two by its report: creates and removes in
-    // quick succession leave reservations its next report may not clear.
+    // quick succession leave reservations its next report may not clear,
+    // and a report can still book a sandbox removed since.
     let mut one = fleet(1, 2_000);
     let mut rng = Rng::new(3);
     let wanted = demand(1_000);
     for _ in 0..5 {
-        let placed = one.place(&wanted, &[], &mut rng).unwrap();
+        let placed = one.place(&wanted, &HashSet::new(), &mut rng).unwrap();
         assert_eq!(placed.host, HostId(0));
         one.reserve(placed, &wanted);
     }
     assert_eq!(one.get(HostId(0)).unwrap().2.free_memory_mib, 0);
     // The host is still asked; once it refuses, nothing is left.
-    assert_eq!(one.place(&wanted, &[HostId(0)], &mut rng), None);
-    // Its report never fit more than it has.
-    assert_eq!(one.place(&demand(3_000), &[], &mut rng), None);
+    assert_eq!(
+        one.place(&wanted, &HashSet::from([HostId(0)]), &mut rng),
+        None
+    );
+    // More than its report says it has free: still asked.
+    assert_eq!(
+        one.place(&demand(3_000), &HashSet::new(), &mut rng)
+            .unwrap()
+            .host,
+        HostId(0)
+    );
 
     // With a host that fits after what was sent, that one is chosen.
     let mut two = fleet(2, 2_000);
@@ -209,7 +299,10 @@ fn what_was_sent_since_a_report_steers_but_never_refuses() {
         );
     }
     for _ in 0..100 {
-        assert_eq!(two.place(&wanted, &[], &mut rng).unwrap().host, HostId(1));
+        assert_eq!(
+            two.place(&wanted, &HashSet::new(), &mut rng).unwrap().host,
+            HostId(1)
+        );
     }
     // A report resets what was counted.
     two.update(HostId(0), capacity(2_000));
@@ -227,7 +320,13 @@ fn the_two_candidates_come_from_different_zones() {
     }
     let mut rng = Rng::new(8);
     let big = (0..1_000)
-        .filter(|_| fleet.place(&demand(100), &[], &mut rng).unwrap().host == HostId(0))
+        .filter(|_| {
+            fleet
+                .place(&demand(100), &HashSet::new(), &mut rng)
+                .unwrap()
+                .host
+                == HostId(0)
+        })
         .count();
     // It is picked whenever it is drawn at all.
     assert!(big > 250, "picked {big} times in 1000");
@@ -245,13 +344,18 @@ fn removed_and_replaced_hosts_leave_no_trace_in_the_indexes() {
     wanted.prefer = Prefer::ReadyClone(SHAPE);
     let mut rng = Rng::new(2);
     for _ in 0..100 {
-        let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+        let placed = fleet.place(&wanted, &HashSet::new(), &mut rng).unwrap();
         assert!(!placed.ready);
         assert_ne!(placed.host, HostId(3));
     }
     // The freed slot is reused by the next host.
     fleet.upsert(HostId(77), info(0), HostState::Live, ready);
-    assert!(fleet.place(&wanted, &[], &mut rng).unwrap().ready);
+    assert!(
+        fleet
+            .place(&wanted, &HashSet::new(), &mut rng)
+            .unwrap()
+            .ready
+    );
     assert!(fleet.ready.values().all(|pool| pool.len() > 0));
     fleet.set_state(HostId(77), HostState::Lost);
     assert!(fleet.ready.is_empty());

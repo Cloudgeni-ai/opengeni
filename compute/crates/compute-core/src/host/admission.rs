@@ -73,11 +73,12 @@ impl Size {
 pub struct Capacity {
     /// Bytes of guest memory the host can hold at once.
     pub budget: u64,
-    /// Bytes requested by sandboxes awake or waking: what they are
-    /// guaranteed.
+    /// Bytes requested by sandboxes awake or waking, and by new ones whose
+    /// first wake is booked: what they are guaranteed.
     pub reserved: u64,
     /// Bytes counted against the budget: what awake sandboxes reserve or
-    /// use beyond that, and what paused ones hold.
+    /// use beyond that, what new ones book for their first wake, and what
+    /// paused ones hold.
     pub occupied: u64,
     /// Sandboxes awake or waking.
     pub awake: u32,
@@ -128,6 +129,45 @@ impl CpuCapacity {
 /// policy says: typical of zswap on guest memory.
 const COMPRESSED_PERCENT: u8 = 25;
 
+/// The first wake a create booked for a sandbox not added yet; see
+/// [`crate::Input::Creating`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FirstWake {
+    /// What the sandbox may take of host memory.
+    pub(super) size: Size,
+    /// Whether that wake fetches it from object storage.
+    pub(super) remote: bool,
+    /// When the booking lapses.
+    pub(super) until: At,
+}
+
+impl FirstWake {
+    /// What the wake books on local disk, as the sandbox does once added:
+    /// its next save, what its disk may grow by, and from object storage
+    /// its local copy.
+    pub(super) fn disk(&self) -> DiskSpace {
+        let mut disk = DiskSpace::save(self.size.save).add(DiskSpace::bytes(self.size.disk));
+        if self.remote {
+            disk = disk.add(DiskSpace::save(self.size.fetch));
+        }
+        disk
+    }
+}
+
+/// Whether a host can take a new sandbox now; see [`Host::create_room`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreateRoom {
+    /// Its first wake fits now, with what is written for it before.
+    Fits,
+    /// Only local disk is short, and by no more than what bookings that
+    /// ended since the last reading stood for (see
+    /// [`Host::disk_awaits_reading`]): the next reading decides it. Says
+    /// what of the disk is short, what it needs and what is free now.
+    AwaitsReading(Resource, u64, u64),
+    /// The resource that is short, what it needs and what is free.
+    Short(Resource, u64, u64),
+}
+
 /// Where a sandbox's wake stands with admission.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WakeRoom {
@@ -155,13 +195,31 @@ pub(super) const fn needs_memory(step: Step) -> bool {
 }
 
 impl Sandbox {
-    /// Whether it is awake or waking: whether it holds its reservation.
+    /// Whether it holds its reservation: it is awake or waking, or it is
+    /// new and its first wake is booked.
     pub(super) fn reserves(&self) -> bool {
+        self.awake_or_waking() || self.fresh_until.is_some()
+    }
+
+    /// Whether it is awake or waking, or its wake was let in.
+    pub(super) fn awake_or_waking(&self) -> bool {
         self.state.level == Level::Running
             || self.room == WakeRoom::Admitted
             || self
                 .in_flight
                 .is_some_and(|flight| needs_memory(flight.step))
+    }
+
+    /// Ends the booking of its first wake once it runs, once it cannot
+    /// run here any more, or at the end of the booking.
+    pub(super) fn settle_first_wake(&mut self, now: At) {
+        let ran = self.state.level == Level::Running && self.in_flight.is_none();
+        if self
+            .fresh_until
+            .is_some_and(|until| until <= now || ran || self.is_broken())
+        {
+            self.fresh_until = None;
+        }
     }
 
     /// Ends the room its wake owned once it runs, or once nothing waits
@@ -181,6 +239,17 @@ impl Sandbox {
     /// Bytes of the budget it takes now.
     pub(super) fn occupies(&self, compressed_percent: u8) -> u64 {
         if self.reserves() {
+            self.awake_bytes()
+        } else {
+            self.occupies_at(self.state.level, compressed_percent)
+        }
+    }
+
+    /// Bytes of the budget its VM takes now, if it has one, or is about
+    /// to: as [`Self::occupies`], less the booking of a first wake that has
+    /// not started.
+    pub(super) fn vm_occupies(&self, compressed_percent: u8) -> u64 {
+        if self.awake_or_waking() {
             self.awake_bytes()
         } else {
             self.occupies_at(self.state.level, compressed_percent)
@@ -248,8 +317,14 @@ impl Host {
             capacity.occupied += slot.occupies(percent);
             if slot.reserves() {
                 capacity.reserved += slot.size.request;
+            }
+            if slot.awake_or_waking() {
                 capacity.awake += 1;
             }
+        }
+        for booked in self.creating.values() {
+            capacity.occupied += booked.size.request;
+            capacity.reserved += booked.size.request;
         }
         capacity.occupied += self.unmanaged.values().sum::<u64>() + self.spares.held();
         Some(capacity)
@@ -265,10 +340,105 @@ impl Host {
             .filter(|slot| slot.reserves())
             .map(|slot| slot.size.cpu)
             .sum();
+        let creating: u64 = self.creating.values().map(|booked| booked.size.cpu).sum();
         Some(CpuCapacity {
             budget,
-            reserved: awake + self.unmanaged_cpu.values().sum::<u64>() + self.spares.filling_cpu(),
+            reserved: awake
+                + creating
+                + self.unmanaged_cpu.values().sum::<u64>()
+                + self.spares.filling_cpu(),
         })
+    }
+
+    /// Whether the new sandbox `sandbox` of `size` can be created or
+    /// adopted here and woken at once. Its first wake must fit as a wake
+    /// queued behind those already queued would: memory counting the
+    /// instant relief a wake may wait for, processor time, and the local
+    /// disk the wake books, from object storage with `remote`, together
+    /// with `files`, what is written for it before it joins the core (its
+    /// first files). What it books already with [`crate::Input::Creating`]
+    /// counts as free for it.
+    #[must_use]
+    pub fn create_room(
+        &self,
+        now: At,
+        sandbox: SandboxId,
+        size: Size,
+        remote: bool,
+        files: DiskSpace,
+    ) -> CreateRoom {
+        let percent = self.compressed_percent();
+        let own = self.creating.get(&sandbox);
+        let queued: Vec<&Sandbox> = Step::ALL
+            .into_iter()
+            .filter(|step| needs_memory(*step))
+            .flat_map(|step| self.queues[step.index()].iter())
+            .filter_map(|key| self.sandboxes.get(&key.sandbox))
+            .collect();
+        let free = |headroom: i128, own: u64, wanted: i128| {
+            u64::try_from(headroom + i128::from(own) - wanted).unwrap_or(0)
+        };
+        if let Some(cpu) = self.cpu_capacity() {
+            let wanted = queued.iter().map(|slot| i128::from(slot.cpu_need())).sum();
+            let free = free(cpu.headroom(), own.map_or(0, |own| own.size.cpu), wanted);
+            if size.cpu > free {
+                return CreateRoom::Short(Resource::Cpu, size.cpu, free);
+            }
+        }
+        let mut awaits_reading = None;
+        if let Some(mut room) = self.disk_room() {
+            for slot in &queued {
+                // What a wake already queued cannot book does not change
+                // whether this one can.
+                let _ = room.take(slot.disk_need());
+            }
+            if let Some(own) = own {
+                room.give_back(own.disk());
+            }
+            let disk = FirstWake {
+                size,
+                remote,
+                until: now,
+            }
+            .disk()
+            .add(files);
+            if let Err(short) = room.take(disk) {
+                if !room.may_take(disk, self.disk_spent) {
+                    return CreateRoom::Short(short.resource, short.needed, short.free);
+                }
+                awaits_reading = Some(short);
+            }
+        }
+        if let Some(capacity) = self.capacity() {
+            let (dropping, droppable) = self.instant_room(now, sandbox);
+            let wanted: u64 = queued.iter().map(|slot| slot.wake_need(percent)).sum();
+            let headroom = capacity.headroom() + i128::from(dropping) + i128::from(droppable);
+            let free = free(
+                headroom,
+                own.map_or(0, |own| own.size.request),
+                i128::from(wanted),
+            );
+            if size.request > free {
+                return CreateRoom::Short(Resource::Memory, size.request, free);
+            }
+        }
+        awaits_reading.map_or(CreateRoom::Fits, |short| {
+            CreateRoom::AwaitsReading(short.resource, short.needed, short.free)
+        })
+    }
+
+    /// Takes in [`crate::Input::Creating`].
+    pub(super) fn creating(&mut self, now: At, sandbox: SandboxId, booked: FirstWake) {
+        if booked.until > now {
+            self.creating.insert(sandbox, booked);
+            return;
+        }
+        self.creating.remove(&sandbox);
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox)
+            && slot.fresh_until.take().is_some()
+        {
+            self.mark(sandbox);
+        }
     }
 
     /// Takes in [`crate::Input::CpuBudget`].
@@ -811,11 +981,13 @@ fn droppable_now(slot: &Sandbox, now: At, grace: Duration) -> bool {
 }
 
 /// Whether `slot` may be pushed deeper to free memory at `now`: nothing
-/// needs it awake, nothing is waking it, it is not busy, and it is sound.
+/// needs it awake, nothing is waking it, it is not new with its first wake
+/// booked, it is not busy, and it is sound.
 pub(super) fn pushable(slot: &Sandbox, now: At, grace: Duration) -> bool {
     !slot.is_broken()
         && !slot.wants_awake()
         && !slot.in_flight.is_some_and(|flight| flight.step.wakes())
+        && slot.fresh_until.is_none()
         && now.saturating_since(slot.last_activity) >= grace
 }
 

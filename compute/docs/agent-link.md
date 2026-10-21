@@ -48,7 +48,9 @@ Opengeni creates a sandbox with the native API (`POST /v1/sandboxes`,
   A `504` or a lost answer is retried with the same id. The service forgets
   a request id seven days after its sandbox is deleted.
 - The answer, `201` for the first create and for each replay, is the
-  sandbox's view once its guest has kept the init. The view names the agent
+  sandbox's view once its guest has kept the init. A create without a
+  `request_id` whose init fails removes its sandbox; with one, its sandbox
+  stays for the retry, which gives the init again. The view names the agent
   as `"agent": {"workspace": "...", "agent": "..."}`; it never shows the
   ticket.
 - `init.agent` holds no secret. The relay's address and token come from the

@@ -73,6 +73,10 @@ pub(crate) struct Sandbox {
     pub size: Size,
     /// Where its wake stands with admission.
     pub room: WakeRoom,
+    /// Until when the room for its first wake stays booked, for a new
+    /// sandbox whose create booked it (see [`crate::Input::Creating`]):
+    /// `None` once it ran, or never booked.
+    pub fresh_until: Option<At>,
     /// What the host asks of its running VM's balloon, if anything.
     pub balloon: Option<Balloon>,
     /// Bytes its VM's balloon was last set to take; `None` when not known,
@@ -155,6 +159,7 @@ impl Sandbox {
             resident: state.level.has_process().then_some(size.limit),
             size,
             room: WakeRoom::Open,
+            fresh_until: None,
             balloon: None,
             balloon_sent: None,
             balloon_taken: None,
@@ -484,7 +489,7 @@ impl Sandbox {
         };
         let balloon = self.balloon_retry.map(|(at, _)| at);
         let checkpoint = self.checkpoint_at();
-        [retry, lease, idle, balloon, checkpoint]
+        [retry, lease, idle, balloon, checkpoint, self.fresh_until]
             .into_iter()
             .flatten()
             .filter(|at| *at > now)

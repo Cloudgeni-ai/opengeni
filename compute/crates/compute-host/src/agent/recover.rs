@@ -564,13 +564,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // The core plans once it has all of these: a sandbox added alone
         // could start a step its holds or an unsavable VM rule out, such
         // as forgetting the memory of one a caller holds awake.
-        let mut inputs = vec![Input::Add {
+        let mut inputs = Vec::new();
+        // A new sandbox whose first wake the agent before booked and that
+        // has not woken since keeps that room booked until its deadline,
+        // so what this agent admits first cannot take it, even after a
+        // failed try at that wake.
+        if state.level != Level::Running
+            && let Some(by_ms) = record.first_wake_by_ms.filter(|by| *by > unix_ms_now())
+        {
+            inputs.push(self.first_wake(id, size, record.disk == Disk::Remote, by_ms));
+        }
+        inputs.push(Input::Add {
             sandbox: id.0,
             state,
             policy,
             size,
             last_activity,
-        }];
+        });
         if unsavable {
             // It still runs and wakes, but is never saved.
             inputs.push(Input::Unsavable { sandbox: id.0 });

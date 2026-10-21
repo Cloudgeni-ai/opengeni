@@ -8,7 +8,7 @@
 //! registration that has since changed is refused by the host and sent
 //! again, and ownership is always read from the store.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -226,7 +226,7 @@ impl View {
 
     /// Places `demand` on a live host not in `exclude` and books it there
     /// until the host next reports.
-    pub fn place(&self, demand: &Demand, exclude: &[HostId]) -> Option<Placement> {
+    pub fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Option<Placement> {
         let mut inner = self.write();
         let inner = &mut *inner;
         let placement = inner.fleet.place(demand, exclude, &mut inner.rng)?;
