@@ -46,7 +46,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "52c9133f8a808d5a5a79d9f0cf19de2117c306ee039e452a26f9901950f9855d"
+      "sha256": "ce5eedb9f060034199a789f724445ef2967324ad6108906b268930ac11c44290"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -1295,7 +1295,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "windows",
       "step": "Check",
-      "sha256": "24c9feeaadfd5f52ab1a3bb0aab71eabdaef29161b350225620cfd2fe2df85d0"
+      "sha256": "79bc5e882b398aa48e21a12d99fe3325f056c2bd0e0ba04c42bf2e1845a66315"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
