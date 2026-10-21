@@ -2679,6 +2679,73 @@ describe("interaction attempt tools", () => {
     expect(await act()).toContain("No element changed since");
   });
 
+  test("a browser action's outline shows only what changed since the outline the model last saw", async () => {
+    const target = browserTarget();
+    const links = Array.from({ length: 8 }, (_, index) => ({
+      ref: `e${index + 2}`,
+      role: "link",
+      name: `Section ${index}`,
+      states: [],
+      actions: ["click"],
+    }));
+    const reading = (value: string): BrowserObservation => ({
+      ...browserObservation(target),
+      semantic: {
+        kind: "snapshot",
+        roots: [
+          {
+            ref: "e1",
+            role: "textbox",
+            name: "How can we help you?",
+            value,
+            states: [],
+            actions: ["fill"],
+          },
+          ...links,
+        ],
+        nodeCount: links.length + 1,
+      },
+    });
+    const readings = [reading(""), reading("Agents at scale")];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, value) =>
+          browserReceipt(value.operationId, readings.shift()!),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    const act = async (caller: "model" | "codemode" = "model") => {
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          action: { type: "fill", locator: "e1", value: "Agents at scale" },
+        },
+        { operationId: randomUUID(), caller: { kind: caller, subjectId: `${caller}:test` } },
+      );
+      return (result.content[0] as { text: string }).text;
+    };
+    // Nothing read yet in this attempt: the whole outline.
+    expect(await act()).toContain('link "Section 7" [e9]');
+    // Then only the field that changed; the links keep their refs.
+    const second = await act();
+    expect(second).toContain("elements not listed are unchanged and keep their refs");
+    expect(second).toContain('textbox "How can we help you?" [e1] value="Agents at scale"');
+    expect(second).not.toContain("Section");
+    // And an action that changed nothing says so.
+    readings.push(reading("Agents at scale"));
+    expect(await act()).toContain("No element changed since your last reading of this page");
+    // A Code Mode program's result is not something the model read: it keeps
+    // the whole outline and does not move the model's baseline.
+    readings.push(reading("Other"));
+    expect(await act("codemode")).toContain('link "Section 7" [e9]');
+    readings.push(reading("Agents at scale"));
+    expect(await act()).toContain("No element changed since your last reading of this page");
+  });
+
   test("runs a Computer batch in order, fencing each action by the observation the one before it returned", async () => {
     const target = computerTarget();
     const initial = computerObservation(target);
