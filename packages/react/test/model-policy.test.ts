@@ -66,7 +66,7 @@ describe("model-policy", () => {
     expect(projectPickerRows(englishText, models).map((row) => row.fundingHint)).toEqual([
       "Free credits",
       "Uses credits",
-      "Needs credits",
+      "Not covered by your credits",
     ]);
   });
   test.each([

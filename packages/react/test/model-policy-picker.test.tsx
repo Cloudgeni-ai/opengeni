@@ -835,7 +835,7 @@ describe("ModelPolicyPicker", () => {
       const trigger = container.querySelector<HTMLButtonElement>(
         'button[aria-label="Model and effort"]',
       )!;
-      for (const hint of ["Free credits", "Uses credits", "Needs credits"]) {
+      for (const hint of ["Free credits", "Uses credits", "Not covered by your credits"]) {
         await act(async () => mounted!.root.render(render(hint)));
         expect(trigger.textContent).not.toContain("credits");
         expect(trigger.title).not.toContain("credits");

@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import type { PickerModelRow } from "./model-policy";
 import { failedSessionCopy } from "./failed-session-copy";
-import { coveredModelChoice, freeCreditGap, freeCreditGapReason } from "./free-credit-gap";
+import {
+  coveredModelChoice,
+  creditRefusalGap,
+  freeCreditGap,
+  freeCreditGapReason,
+} from "./free-credit-gap";
 
 type Funding = "promotional" | "general" | "unavailable" | undefined;
 function row(id: string, label: string, creditFunding: Funding, selectable = true) {
@@ -112,4 +117,30 @@ test("the one-click switch keeps the composer policy sendable", () => {
     latencyMode: "standard",
   });
   expect(coveredModelChoice({ ...sol, selectable: false }, "high", "standard")).toBeNull();
+});
+
+test("a credit refusal names its model even while the catalog still says it is funded", () => {
+  // The catalog was read before general credit ran out: Argon still reads "general".
+  const stale = [row("vertex-gateway/gemini-4-argon", "Gemini 4 Argon", "general"), ...rows];
+  expect(freeCreditGap(stale, "vertex-gateway/gemini-4-argon")).toBeNull();
+  expect(
+    creditRefusalGap(stale, "vertex-gateway/gemini-4-argon", {
+      selectedModel: "vertex-gateway/gemini-4-argon",
+      preferredModel: "azure-sol/gpt-6.1-sol",
+    }),
+  ).toEqual({
+    modelLabel: "Gemini 4 Argon",
+    covered: [
+      { id: "azure-sol/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { id: "gpt-6-luna", label: "GPT-6 Luna" },
+    ],
+    selectionUsable: false,
+  });
+});
+
+test("a credit refusal without covered models still names the model", () => {
+  const gap = creditRefusalGap([rows[0]!, rows[5]!], "claude-opus", { selectedModel: "connected" });
+  expect(gap).toEqual({ modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: true });
+  // A model missing from the catalog falls back to its display name.
+  expect(creditRefusalGap([], "gpt-6-sol").modelLabel).toBe("GPT-6 Sol");
 });

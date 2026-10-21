@@ -70,7 +70,7 @@ test("opening the conversation picker refreshes credit funding without closing t
     expect(trigger.textContent).not.toContain("Free credits");
     for (const [nextFunding, hint] of [
       ["general", "Uses credits"],
-      ["unavailable", "Needs credits"],
+      ["unavailable", "Not covered by your credits"],
       ["promotional", "Free credits"],
     ] as const) {
       funding = nextFunding;
