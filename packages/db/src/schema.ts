@@ -9697,6 +9697,11 @@ export const sessionEvents = pgTable(
       columns: [table.workspaceId, table.turnAttemptId],
       foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
     }).onDelete("restrict"),
+    // A deleted attempt's FK probe has no session_id. Avoid scanning every
+    // event in its workspace once for each attempt in the deleted chat.
+    attemptReference: index("session_events_workspace_attempt_idx")
+      .on(table.workspaceId, table.turnAttemptId)
+      .where(sql`${table.turnAttemptId} is not null`),
     sessionSequence: uniqueIndex("session_events_workspace_session_sequence_idx").on(
       table.workspaceId,
       table.sessionId,
