@@ -33010,7 +33010,10 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{ needsYouCount: number; groups: SessionListTotals["groups"] }>(
     db,
     sql`
-    with recursive personal_state as materialized (
+    -- Inline this subject's state so each lateral lookup can use the session
+    -- key. A materialized workspace range has no index: generic estimates can
+    -- choose to rescan the whole range once per root or descendant.
+    with recursive personal_state as not materialized (
       select workspace_id, subject_id, session_id, pinned, archived,
         acknowledged_sequence, manually_unread_through, actively_working
       from ${schema.sessionPins}
@@ -33032,8 +33035,12 @@ async function sessionListTotalsInScope(
           else root_personal.acknowledged_sequence end, 0) as acknowledged_sequence,
         coalesce(root_personal.actively_working, false) as actively_working
       from ${schema.sessions}
-      left join personal_state root_personal on root_personal.session_id = ${schema.sessions.id}
-      left join personal_state root_archive on root_archive.session_id = ${schema.sessions.rootSessionId}
+      left join lateral (
+        select * from personal_state where session_id = ${schema.sessions.id} offset 0
+      ) root_personal on true
+      left join lateral (
+        select * from personal_state where session_id = ${schema.sessions.rootSessionId} offset 0
+      ) root_archive on true
       where ${rootFilters}
     ), visible_children as materialized (
       -- Immutable root lineage excludes trees that cannot enter this recursion.
@@ -33047,7 +33054,9 @@ async function sessionListTotalsInScope(
           else personal.acknowledged_sequence end, 0) as acknowledged_sequence,
         coalesce(personal.actively_working, false) as actively_working
       from ${schema.sessions} child
-      left join personal_state personal on personal.session_id = child.id
+      left join lateral (
+        select * from personal_state where session_id = child.id offset 0
+      ) personal on true
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
