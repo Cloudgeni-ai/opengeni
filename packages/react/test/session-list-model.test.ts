@@ -68,6 +68,7 @@ describe("session-list-model", () => {
 
   test("relative time labels", () => {
     expect(relativeTimeLabel(englishText, "2026-10-03T11:59:30Z", now)).toBe("now");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:10Z", now)).toBe("1m");
     expect(relativeTimeLabel(englishText, "2026-10-03T11:55:00Z", now)).toBe("5m");
     expect(relativeTimeLabel(englishText, "2026-10-03T09:00:00Z", now)).toBe("3h");
     expect(relativeTimeLabel(englishText, "2026-10-01T12:00:00Z", now)).toBe("2d");

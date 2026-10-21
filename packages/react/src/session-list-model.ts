@@ -281,7 +281,8 @@ export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = ne
   if (diffSeconds < 45) {
     return "now";
   }
-  const minutes = Math.floor(diffSeconds / 60);
+  // 45 to 59 seconds reads as a minute, never "0m".
+  const minutes = Math.max(1, Math.floor(diffSeconds / 60));
   if (minutes < 60) {
     return `${minutes}m`;
   }
