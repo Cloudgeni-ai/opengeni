@@ -113,11 +113,68 @@ export function unindexedTextByElement(
   return texts;
 }
 
+type CuaElement = z.infer<typeof Element>;
+
+/**
+ * The macOS elements that belong to web content, by element_index: an
+ * AXWebArea and everything CUA lists under it. WebKit and Chromium report
+ * AXShowMenu on every element of a page; it opens the page's context menu,
+ * not a menu of the control, so offering it there names an action on every
+ * line and makes a page's plain text look operable.
+ */
+function webContentIndexes(elements: readonly CuaElement[]): Set<number> {
+  const byIndex = new Map(elements.map((element) => [element.element_index, element]));
+  const known = new Map<number, boolean>();
+  const inWeb = (start: CuaElement): boolean => {
+    const path: number[] = [];
+    let current: CuaElement | undefined = start;
+    let result = false;
+    while (current && path.length <= elements.length) {
+      const cached = known.get(current.element_index);
+      if (cached !== undefined) {
+        result = cached;
+        break;
+      }
+      path.push(current.element_index);
+      if (current.role === "AXWebArea") {
+        result = true;
+        break;
+      }
+      current = current.parent_index === undefined ? undefined : byIndex.get(current.parent_index);
+    }
+    for (const index of path) known.set(index, result);
+    return result;
+  };
+  return new Set(elements.filter(inWeb).map((element) => element.element_index));
+}
+
+/**
+ * Static text that only repeats the label of the element it sits in (a
+ * link's or button's own text). The label already reads it, and the second
+ * copy doubles every link of a page.
+ */
+function repeatsParentLabel(
+  element: CuaElement,
+  byIndex: ReadonlyMap<number, CuaElement>,
+): boolean {
+  if (element.role !== "AXStaticText" || element.focused || element.actions.includes("AXPress"))
+    return false;
+  const text = (element.label ?? (typeof element.value === "string" ? element.value : "")).trim();
+  if (!text || element.parent_index === undefined) return false;
+  return byIndex.get(element.parent_index)?.label?.trim() === text;
+}
+
 export function projectElements(
-  elements: z.infer<typeof Element>[],
+  allElements: CuaElement[],
   platform: Platform = "macos",
   childTexts: ReadonlyMap<number, readonly string[]> = new Map(),
 ): InteractionSemanticNodeValue[] {
+  const byIndex = new Map(allElements.map((element) => [element.element_index, element]));
+  const elements =
+    platform === "macos"
+      ? allElements.filter((element) => !repeatsParentLabel(element, byIndex))
+      : allElements;
+  const webContent = platform === "macos" ? webContentIndexes(allElements) : new Set<number>();
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
@@ -134,7 +191,12 @@ export function projectElements(
           : element.actions.includes(platform === "windows" ? "invoke" : "AXPress")
       )
         actions.push("invoke");
-      if (platform === "macos" && element.actions.includes("AXShowMenu")) actions.push("show_menu");
+      if (
+        platform === "macos" &&
+        element.actions.includes("AXShowMenu") &&
+        !webContent.has(element.element_index)
+      )
+        actions.push("show_menu");
       if (
         platform === "linux"
           ? ["text", "entry", "password text", "combo box", "slider"].includes(element.role)

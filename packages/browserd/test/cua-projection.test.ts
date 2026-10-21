@@ -131,3 +131,67 @@ test("unindexed secure fields and their contents add no row text", () => {
   ].join("\n");
   expect([...unindexedTextByElement(markdown, "macos").entries()]).toEqual([[1, ["Password"]]]);
 });
+
+test("web pages on macOS read without context-menu actions or repeated link text", () => {
+  const nodes = projectElements(
+    [
+      {
+        element_index: 0,
+        element_token: "s:0",
+        role: "AXWindow",
+        label: "Wiki",
+        actions: ["AXRaise"],
+      },
+      {
+        element_index: 1,
+        element_token: "s:1",
+        parent_index: 0,
+        role: "AXPopUpButton",
+        label: "Tabs",
+        actions: ["AXPress", "AXShowMenu"],
+      },
+      {
+        element_index: 2,
+        element_token: "s:2",
+        parent_index: 0,
+        role: "AXWebArea",
+        label: "Wiki",
+        actions: ["AXShowMenu"],
+      },
+      {
+        element_index: 3,
+        element_token: "s:3",
+        parent_index: 2,
+        role: "AXLink",
+        label: "Donate",
+        actions: ["AXPress", "AXShowMenu"],
+      },
+      {
+        element_index: 4,
+        element_token: "s:4",
+        parent_index: 3,
+        role: "AXStaticText",
+        label: "Donate",
+        actions: ["AXShowMenu"],
+      },
+      {
+        element_index: 5,
+        element_token: "s:5",
+        parent_index: 2,
+        role: "AXStaticText",
+        label: "Computer accessibility refers to",
+        actions: ["AXShowMenu"],
+      },
+    ],
+    "macos",
+  );
+  expect(nodes.map((node) => [node.ref, node.role, node.name, node.actions])).toEqual([
+    ["s:0", "window", "Wiki", []],
+    // Native controls keep their context menu.
+    ["s:1", "combobox", "Tabs", ["invoke", "show_menu", "set_value", "focus"]],
+    ["s:2", "AXWebArea", "Wiki", []],
+    ["s:3", "link", "Donate", ["invoke", "focus"]],
+    // The link's own text is not listed again; other page text is plain text.
+    ["s:5", "text", "Computer accessibility refers to", []],
+  ]);
+});
