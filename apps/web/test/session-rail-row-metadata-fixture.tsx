@@ -13,6 +13,7 @@ import {
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
 import { sessionStateLabel } from "@opengeni/react/app/lib/session-rail";
 import { RowQuickActions } from "@opengeni/react/app/components/rail/session-list";
@@ -24,6 +25,15 @@ import type { Session } from "@opengeni/react/app/types";
 import "../src/styles.css";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
+
+// The header and rows only render inside the app shell, which always provides
+// the app context; their chat actions (copy link, pin) run through it. The
+// fixture runs none of them, so any read of the context fails loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    throw new Error(`The session rail fixture's app context has no ${String(key)}`);
+  },
+});
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
 const longTitle =
   "Now I am testing your workspace rail and this title should use every available pixel";
@@ -243,4 +253,8 @@ function SessionRailRowMetadataFixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<SessionRailRowMetadataFixture />);
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={appContext}>
+    <SessionRailRowMetadataFixture />
+  </AppContext.Provider>,
+);
