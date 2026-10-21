@@ -9,10 +9,13 @@ const PREINSTALLED = [
   "certifi",
   "matplotlib",
   "numpy",
+  "openpyxl",
   "pandas",
   "psycopg",
   "psycopg-binary",
   "pytest",
+  "python-docx",
+  "python-pptx",
   "requests",
 ];
 
@@ -126,7 +129,7 @@ describe("sandbox Python toolchain", () => {
       "python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}",
     );
     expect(block).toContain(
-      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'`,
+      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'`,
     );
   });
 

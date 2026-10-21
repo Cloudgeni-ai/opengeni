@@ -13319,7 +13319,9 @@ export const hostExportOutbox = pgTable(
         'openai', 'azure', 'codex-subscription', 'supergrok-subscription',
         'opengeni-gateway', 'workspace-gateway', 'organization-gateway',
         'openrouter', 'workspace-openrouter', 'organization-openrouter',
-        'opper', 'workspace-opper', 'organization-opper', 'registry'
+        'opper', 'workspace-opper', 'organization-opper', 'organization-openai',
+        'organization-azure-openai',
+        'registry'
       ))
       and (${table.toolFamily} is null or ${table.toolFamily} ~
         '^(custom|integration:[a-z0-9]([a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$')`,
@@ -15231,10 +15233,14 @@ export const organizationModelProviderConnections = pgTable(
         | "claude_subscription"
         | "opper"
         | "elevenlabs"
+        | "openai"
+        | "azure_openai"
       >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    /** Azure OpenAI only: non-secret `https://<resource>.openai.azure.com/openai/v1`. */
+    endpoint: text("endpoint"),
     claudeUsageSnapshot:
       jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
@@ -15256,7 +15262,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15273,6 +15279,10 @@ export const organizationModelProviderConnections = pgTable(
     actorCheck: check(
       "organization_model_provider_connections_actor_chk",
       sql`octet_length(${table.updatedBySubjectId}) between 1 and 1024`,
+    ),
+    endpointCheck: check(
+      "organization_model_provider_connections_endpoint_chk",
+      sql`(${table.providerKind} = 'azure_openai') = (${table.endpoint} is not null) and (${table.endpoint} is null or ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
     ),
   }),
 );
@@ -15292,12 +15302,15 @@ export const organizationModelProviderConnectionOperations = pgTable(
         | "claude_subscription"
         | "opper"
         | "elevenlabs"
+        | "openai"
+        | "azure_openai"
       >()
       .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
     resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
     resultVersion: integer("result_version").notNull(),
+    resultEndpoint: text("result_endpoint"),
     resultCreatedAt: timestamp("result_created_at", {
       withTimezone: true,
     }).notNull(),
@@ -15314,7 +15327,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",
@@ -15328,6 +15341,10 @@ export const organizationModelProviderConnectionOperations = pgTable(
       "organization_model_provider_connection_operations_request_hash_chk",
       sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`,
     ),
+    endpointCheck: check(
+      "organization_model_provider_connection_operations_endpoint_chk",
+      sql`(${table.providerKind} = 'azure_openai') = (${table.resultEndpoint} is not null) and (${table.resultEndpoint} is null or ${table.resultEndpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+    ),
   }),
 );
 
@@ -15339,7 +15356,15 @@ export const organizationModelProviderCustomModels = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
@@ -15365,7 +15390,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",

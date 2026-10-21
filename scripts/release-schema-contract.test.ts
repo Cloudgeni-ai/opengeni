@@ -2341,6 +2341,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0899_ordered_turn_history_pages.sql",
+      "0898_organization_direct_openai_model_providers.sql",
       "0897_workspace_owner_administers_subscriptions.sql",
       "0896_shared_child_turn_context_authority.sql",
       "0895_organization_voice_defaults.sql",

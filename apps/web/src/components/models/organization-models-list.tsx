@@ -85,7 +85,11 @@ import { SettingNavRow, SettingRow, SettingRowGroup } from "@opengeni/react/ui/s
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { billingClassForModel } from "@opengeni/react/app/lib/model-policy";
-import { accountKey, type GatewayId } from "@opengeni/react/app/lib/models-route";
+import {
+  accountKey,
+  type GatewayId,
+  type WorkspaceGatewayId,
+} from "@opengeni/react/app/lib/models-route";
 import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
@@ -100,13 +104,22 @@ import { MODEL_SETTINGS_STALE_TIME_MS, useSharedQuery } from "@opengeni/react/ap
    workspaces use, read-only: only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
-export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "opper", "vercel"];
+export const GATEWAYS: readonly GatewayId[] = [
+  "anthropic",
+  "azure_openai",
+  "openai",
+  "openrouter",
+  "opper",
+  "vercel",
+];
 
 /** The catalog provider id of an organization key's models. */
 const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
   vercel: "organization-gateway",
   openrouter: "organization-openrouter",
   opper: "organization-opper",
+  openai: "organization-openai",
+  azure_openai: "organization-azure-openai",
   anthropic: "organization-anthropic",
   claude_subscription: "organization-claude-subscription",
 };
@@ -115,6 +128,8 @@ const ORGANIZATION_KIND = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  openai: "openai",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 } as const;
@@ -152,7 +167,7 @@ export interface WorkspaceModelsSnapshot {
   grokShared: SuperGrokAccount[];
   claudeOwn: ClaudeSubscriptionAccount[];
   claudeShared: ClaudeSubscriptionAccount[];
-  keysOwn: GatewayId[];
+  keysOwn: WorkspaceGatewayId[];
   keysShared: { id: GatewayId; models: number }[];
   /** "GPT-6 Astra · Codex", or null when it can't be read. */
   defaultModel: string | null;
@@ -207,12 +222,15 @@ async function readWorkspaceModels(
     grokShared: grokInherited ? (grokData?.accounts ?? []) : [],
     claudeOwn: claudeData?.source === "organization" ? [] : (claudeData?.accounts ?? []),
     claudeShared: claudeData?.source === "organization" ? (claudeData?.accounts ?? []) : [],
-    keysOwn: gateways.filter((id) =>
-      own.some(
-        (connection) =>
-          connection.status === "active" &&
-          isProviderConnection(connection, PROVIDER_CONNECTION_CONFIGS[id]),
-      ),
+    keysOwn: gateways.filter(
+      (id): id is WorkspaceGatewayId =>
+        id !== "openai" &&
+        id !== "azure_openai" &&
+        own.some(
+          (connection) =>
+            connection.status === "active" &&
+            isProviderConnection(connection, PROVIDER_CONNECTION_CONFIGS[id]),
+        ),
     ),
     keysShared: gateways
       .map((id) => ({ id, models: readyOrganizationKeyModels(models, id) }))

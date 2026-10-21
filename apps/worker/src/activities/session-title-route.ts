@@ -90,6 +90,8 @@ const providerKinds = {
   "opper-organization": "opper",
   "anthropic-workspace": "anthropic",
   "anthropic-organization": "anthropic",
+  "direct-openai-organization": "openai",
+  "direct-azure-organization": "azure_openai",
 } as const;
 
 /** Pin the exact materialized customer-key connection, never merely its provider. */
@@ -120,7 +122,7 @@ export async function sessionTitleApiConnectionId(input: {
   }
   const kind = providerKinds[provider.kind as keyof typeof providerKinds];
   if (provider.credentialSource.kind === "workspace_connection") {
-    if (!kind)
+    if (!kind || kind === "openai" || kind === "azure_openai")
       throw new SessionTitleRouteUnavailableError("Title workspace provider is unsupported");
     const metadata = await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind);
     const spec = workspaceProviderApiKeyConnectionSpec(kind);
