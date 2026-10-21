@@ -50,8 +50,8 @@ pub struct Capacity {
     /// what it keeps spare.
     pub free_memory_mib: u64,
     /// Processor time in millicores it can still promise to sandboxes
-    /// that wake; `None` when it does not say, so it is not checked.
-    pub free_cpu_millis: Option<u64>,
+    /// that wake.
+    pub free_cpu_millis: u64,
     /// Disk in MiB it can still promise.
     pub free_disk_mib: u64,
     /// Ready clones it holds, by shape.
@@ -288,9 +288,7 @@ impl Fleet {
             capacity.free_memory_mib = capacity
                 .free_memory_mib
                 .saturating_sub(demand.memory_on(entry.info));
-            if let Some(free) = capacity.free_cpu_millis.as_mut() {
-                *free = free.saturating_sub(demand.cpu_millis);
-            }
+            capacity.free_cpu_millis = capacity.free_cpu_millis.saturating_sub(demand.cpu_millis);
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
             if placement.ready
@@ -311,10 +309,7 @@ impl Fleet {
                 entry.state == HostState::Live
                     && !exclude.contains(&entry.id)
                     && entry.capacity.free_memory_mib >= demand.memory_on(entry.info)
-                    && entry
-                        .capacity
-                        .free_cpu_millis
-                        .is_none_or(|free| free >= demand.cpu_millis)
+                    && entry.capacity.free_cpu_millis >= demand.cpu_millis
                     && entry.capacity.free_disk_mib >= demand.disk_mib
             })
         };

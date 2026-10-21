@@ -563,10 +563,7 @@ pub enum Request {
     /// lost, and its memory image would bring back programs at a point
     /// they had already run past: the host deletes the image from the
     /// store's copy as it claims it, and the next wake boots from the
-    /// copy's files, as after a crash. So a service from before the field
-    /// never has a copy's memory restored; a host from before it ignores
-    /// the field and always restores memory, so hosts are upgraded before
-    /// the service.
+    /// copy's files, as after a crash.
     Adopt {
         /// Its id.
         id: Id,

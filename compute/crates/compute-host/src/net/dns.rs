@@ -13,11 +13,6 @@
 //!
 //! Because the address is the same everywhere, a guest restored on another
 //! host, from a template or after a move, still has the right name server.
-//! A guest told another one, by a host from before guests were told their
-//! gateway or by its own image, still reaches this one if that name server
-//! is somewhere it may not go: each namespace's firewall sends queries for
-//! any unreachable address's port 53 here ([`super`]), and the answers come
-//! back from the address the guest asked.
 //! The listeners belong to the sandbox's network, not its VM, so they stay
 //! while it sleeps at any level; a restarted agent opens them again when it
 //! checks each network.

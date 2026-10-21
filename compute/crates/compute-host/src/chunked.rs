@@ -227,12 +227,6 @@ impl Chunked {
         }
     }
 
-    /// Refuses a store this release cannot read every copy in; see
-    /// [`ChunkStore::refuse_unstamped_pointers`].
-    pub async fn refuse_unreadable(&self) -> Result<(), StorageError> {
-        self.chunks.refuse_unstamped_pointers().await
-    }
-
     /// Deletes the chunks and manifests no sandbox's stored copy names any
     /// more, or with `delete` false only reports them (see
     /// [`compute_storage::sweep`]).
@@ -809,19 +803,6 @@ impl Store for Chunked {
             receipt: receipt_of(&bytes),
             memory: head.memory.is_some(),
         })))
-    }
-
-    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
-        const OP: &str = "disk_len";
-        let Some(head) = self.head(OP, id).await? else {
-            return Ok(None);
-        };
-        let manifest = self
-            .chunks
-            .get_manifest(&head.disk)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
-        Ok(Some(manifest.disk_len))
     }
 
     async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {

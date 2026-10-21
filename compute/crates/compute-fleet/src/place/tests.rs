@@ -16,7 +16,7 @@ fn capacity(free_mib: u64) -> Capacity {
     Capacity {
         memory_mib: 64 * 1024,
         free_memory_mib: free_mib,
-        free_cpu_millis: None,
+        free_cpu_millis: 64_000,
         free_disk_mib: 100_000,
         ready: Vec::new(),
         sandboxes: 0,

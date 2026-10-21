@@ -396,8 +396,8 @@ impl Fleet {
 pub fn roomy() -> Capacity {
     Capacity {
         memory_free_mib: 64 * 1024,
-        cpu_millis: None,
-        cpu_free_millis: None,
+        cpu_millis: 64_000,
+        cpu_free_millis: 64_000,
         disk_free_mib: 1 << 20,
         ready: Vec::new(),
         awake: 0,
@@ -714,7 +714,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             profile: "nested".into(),
             cpu_template: "none".into(),
             memory_mib: 64 * 1024,
-            cpu_millis: None,
+            cpu_millis: 64_000,
             disk_mib: 1 << 20,
         },
         capacity: inner.capacity.lock().unwrap().clone(),

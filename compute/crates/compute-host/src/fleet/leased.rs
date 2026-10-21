@@ -76,10 +76,6 @@ impl<S: Store> Store for Leased<S> {
         self.store.claim(id, own).await
     }
 
-    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
-        self.store.disk_len(id).await
-    }
-
     async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {
         self.store.image_len(image).await
     }
@@ -120,7 +116,5 @@ mod tests {
         let copy = dir.path().join("copy.ext4");
         assert!(leased.fetch_image(image, &copy).await.unwrap());
         assert_eq!(std::fs::read(&copy).unwrap(), b"an image");
-        let id = Id(compute_core::SandboxId(1));
-        assert_eq!(leased.disk_len(id).await.unwrap(), None);
     }
 }
