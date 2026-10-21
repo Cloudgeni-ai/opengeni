@@ -86411,7 +86411,7 @@ export async function appendSessionEventsForTurnAttempt(
     executionGeneration,
     attemptId,
     inputs,
-    mutate ?? (async () => true),
+    mutate,
     observer,
   );
   return {
@@ -86562,7 +86562,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-  mutate: SessionEventMutation,
+  mutate: SessionEventMutation | undefined,
   observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
@@ -86603,21 +86603,37 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               // second inverted the order of every prefix holder that then
               // locks the same row (a Codemode re-submit or claim), which
               // deadlocked POST /codemode/calls in production (40P01).
-              const fence = await runSessionEventAppendPhase(
+              const admission = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "turn_attempt_fence" },
-                async () =>
-                  await lockTurnAttemptWriteFenceTx(tx, {
+                async () => {
+                  const input = {
                     workspaceId,
                     sessionId,
                     turnId,
                     executionGeneration,
                     attemptId,
                     sessionLock:
-                      semanticActivity || !rawLaneEnabled ? "no_key_update" : "key_share",
-                  }),
-                (fenceResult) => (fenceResult.allowed ? "ok" : "rejected"),
+                      semanticActivity || !rawLaneEnabled
+                        ? ("no_key_update" as const)
+                        : ("key_share" as const),
+                  };
+                  // Preserve the full-row callback contract. An event-only
+                  // batch uses the same locks and decisions without copying
+                  // frozen configuration and authority catalogs across the wire.
+                  if (mutate) {
+                    const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+                    return { fence, applyMutation: () => mutate(tx, fence) };
+                  }
+                  const fence = await lockTurnAttemptWriteFenceTx(tx, {
+                    ...input,
+                    rowProjection: "event",
+                  });
+                  return { fence, applyMutation: async () => true };
+                },
+                ({ fence }) => (fence.allowed ? "ok" : "rejected"),
               );
+              const fence = admission.fence;
               const session = fence.session;
               if (!session) throw new Error(`Session not found: ${sessionId}`);
               if (!semanticActivity && !fence.allowed) {
@@ -86626,7 +86642,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               const mutationApplied = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "mutation" },
-                async () => await mutate(tx, fence),
+                admission.applyMutation,
                 (applied) => (applied ? "ok" : "mutation_skipped"),
               );
               if (!mutationApplied) {
