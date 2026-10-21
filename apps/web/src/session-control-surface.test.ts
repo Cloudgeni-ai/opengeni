@@ -359,7 +359,9 @@ describe("session control surface architecture", () => {
       list.indexOf("function EmptySessions", overflowStart),
     );
 
-    expect(row).toContain("<ContextMenu>");
+    // The row's menu closes its hover preview when it opens (#5368), so the
+    // root takes props; match the root element, not ContextMenuTrigger etc.
+    expect(row).toMatch(/<ContextMenu[\s>]/);
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
     expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
@@ -546,8 +548,10 @@ describe("session control surface architecture", () => {
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("onClick={openSearchDialog}");
+    // Search opens the command menu, whose "Search messages" action leads to
+    // full-history search; the menu returns focus to its opener itself.
     expect(list).toContain(
-      "requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget)",
+      "const openSearchDialog = useCallback(() => requestCommandMenu(windowEvents), [windowEvents]);",
     );
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
