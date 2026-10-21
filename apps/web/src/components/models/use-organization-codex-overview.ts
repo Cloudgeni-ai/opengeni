@@ -31,7 +31,7 @@ export function useOrganizationCodexUsage(
   const data: CodexUsage | null = usage
     ? { status: usage.error ? "error" : (usage.value?.status ?? "no-data"), usage: usage.value }
     : null;
-  return { ...query, data, source: usage?.source };
+  return { ...query, data, source: usage?.source, resetCredits: query.data?.resetCredits };
 }
 
 /** Mounted with list rows: opening a detail reuses these exact retained keys. */

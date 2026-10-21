@@ -1926,96 +1926,146 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("an organization account's page lists its usage limit resets and redeems them in the browser", async () => {
-    organizationAdmin = true;
-    const resetAccount = codexAccount({
-      id: "org-1",
-      label: "Company plan",
-      source: "organization",
-      resetCreditAvailableCount: 2,
-    });
-    const credit = (id: string, title: string) => ({
-      id,
-      resetType: "codexRateLimits" as const,
-      status: "available" as const,
-      grantedAt: 1_700_000_000,
-      expiresAt: null,
-      title,
-      description: null,
-      actionable: true,
-    });
-    const overviewPath = "/v1/organizations/organization-a/codex/accounts/org-1/overview";
-    const orgOverview = {
-      ...overviewFor("org-1", 40).accounts["org-1"]!,
-      resetCredits: {
-        source: "provider",
-        fetchedAt: new Date().toISOString(),
-        stale: false,
-        error: null,
-        detailState: "detailed",
-        detailsComplete: true,
-        availableCount: 2,
-        credits: [credit("credit-a", "Weekly reset"), credit("credit-b", "Bonus reset")],
-      },
-      canRedeem: true,
-      canResumeRedemption: true,
-      redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
-    };
-    client.requestJson.mockImplementation(async (method: string, path: string) => {
-      if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
-        return { ...orgAccounts, accounts: [resetAccount] };
+  test.each([
+    { defaults: false, count: 0 },
+    { defaults: true, count: 0 },
+    { defaults: false, count: null },
+    { defaults: true, count: null },
+  ])(
+    "organization reset counts preserve zero and fall back only when unknown: %j",
+    async ({ defaults, count }) => {
+      organizationAdmin = true;
+      organizationList = defaults;
+      const resetAccount = codexAccount({
+        id: "org-1",
+        label: "Company plan",
+        source: "organization",
+        resetCreditAvailableCount: 3,
+      });
+      const orgOverview = overviewFor("org-1", 40).accounts["org-1"]!;
+      orgOverview.resetCredits.availableCount = count;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [resetAccount] };
+        }
+        if (method === "GET" && path.endsWith("/org-1/overview")) return orgOverview;
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      const view = await render();
+      try {
+        const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+          (candidate) => candidate.textContent?.includes("Company plan"),
+        )!;
+        if (count === 0) expect(row.textContent).not.toContain("usage limit reset");
+        else expect(row.textContent).toContain("3 usage limit resets");
+      } finally {
+        await cleanup(view);
       }
-      if (method === "GET" && path === overviewPath) return orgOverview;
-      if (method === "GET") throw new Error(`unexpected read ${path}`);
-      return {};
-    });
-    const sent: { url: string; init: RequestInit }[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      sent.push({ url, init });
-      return new Response(
-        JSON.stringify({
-          attemptId: JSON.parse(String(init.body)).attemptId,
-          confirmationToken: "signed",
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          resumable: false,
-          recoveryStatus: null,
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }) as typeof fetch;
-    const view = await render();
-    try {
-      // The row says how many are waiting, though no workspace has to use it.
-      const orgRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
-        (row) => row.textContent?.includes("Company plan"),
-      )!;
-      expect(orgRow.textContent).toContain("2 usage limit resets");
-      await act(async () => orgRow.querySelector<HTMLElement>("[data-row-action]")!.click());
-      await flush();
-      await flush();
-      const text = view.container.textContent ?? "";
-      expect(text).toContain("Usage limit resets (2)");
-      expect(text).toContain("Owners and admins of the organization can redeem them here.");
-      expect(text).not.toContain("Connect for this workspace");
-      expect(client.requestJson).toHaveBeenCalledWith("GET", overviewPath);
-      await act(async () => button(view.container, "Redeem Weekly reset")!.click());
-      await flush();
-      // Prepared on the organization's route with the browser cookie only.
-      expect(sent).toHaveLength(1);
-      expect(sent[0]!.url).toContain(
-        "/v1/organizations/organization-a/codex/accounts/org-1/reset-credits/prepare",
-      );
-      expect(sent[0]!.init.credentials).toBe("include");
-      expect(new Headers(sent[0]!.init.headers).get("authorization")).toBeNull();
-      expect(JSON.parse(String(sent[0]!.init.body))).toMatchObject({ creditId: "credit-a" });
-      expect(document.body.textContent).toContain("Redeem this usage limit reset?");
-    } finally {
-      globalThis.fetch = originalFetch;
-      await cleanup(view);
-    }
-  });
+    },
+  );
+
+  test.each([false, true])(
+    "an organization account's row and page use the current resets rather than the cached count (defaults=%s)",
+    async (defaults) => {
+      organizationAdmin = true;
+      organizationList = defaults;
+      const resetAccount = codexAccount({
+        id: "org-1",
+        label: "Company plan",
+        source: "organization",
+        resetCreditAvailableCount: 3,
+      });
+      const credit = (id: string, title: string) => ({
+        id,
+        resetType: "codexRateLimits" as const,
+        status: "available" as const,
+        grantedAt: 1_700_000_000,
+        expiresAt: null,
+        title,
+        description: null,
+        actionable: true,
+      });
+      const overviewPath = "/v1/organizations/organization-a/codex/accounts/org-1/overview";
+      const orgOverview = {
+        ...overviewFor("org-1", 40).accounts["org-1"]!,
+        resetCredits: {
+          source: "provider",
+          fetchedAt: new Date().toISOString(),
+          stale: false,
+          error: null,
+          detailState: "detailed",
+          detailsComplete: true,
+          availableCount: 2,
+          credits: [
+            credit(`credit-a-${defaults}`, "Weekly reset"),
+            credit(`credit-b-${defaults}`, "Bonus reset"),
+          ],
+        },
+        canRedeem: true,
+        canResumeRedemption: true,
+        redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [resetAccount] };
+        }
+        if (method === "GET" && path === overviewPath) return orgOverview;
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      const sent: { url: string; init: RequestInit }[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        sent.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            attemptId: JSON.parse(String(init.body)).attemptId,
+            confirmationToken: "signed",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            resumable: false,
+            recoveryStatus: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch;
+      const view = await render();
+      try {
+        // The row says how many are waiting, though no workspace has to use it.
+        const orgRow = [
+          ...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+        ].find((row) => row.textContent?.includes("Company plan"))!;
+        expect(orgRow.textContent).toContain("2 usage limit resets");
+        expect(orgRow.textContent).not.toContain("3 usage limit resets");
+        await act(async () => orgRow.querySelector<HTMLElement>("[data-row-action]")!.click());
+        await flush();
+        await flush();
+        const text = view.container.textContent ?? "";
+        expect(text).toContain("Usage limit resets (2)");
+        expect(text).toContain("Owners and admins of the organization can redeem them here.");
+        expect(text).not.toContain("Connect for this workspace");
+        expect(client.requestJson).toHaveBeenCalledWith("GET", overviewPath);
+        await act(async () => button(view.container, "Redeem Weekly reset")!.click());
+        await flush();
+        // Prepared on the organization's route with the browser cookie only.
+        expect(sent).toHaveLength(1);
+        expect(sent[0]!.url).toContain(
+          "/v1/organizations/organization-a/codex/accounts/org-1/reset-credits/prepare",
+        );
+        expect(sent[0]!.init.credentials).toBe("include");
+        expect(new Headers(sent[0]!.init.headers).get("authorization")).toBeNull();
+        expect(JSON.parse(String(sent[0]!.init.body))).toMatchObject({
+          creditId: `credit-a-${defaults}`,
+        });
+        expect(document.body.textContent).toContain("Redeem this usage limit reset?");
+      } finally {
+        globalThis.fetch = originalFetch;
+        await cleanup(view);
+      }
+    },
+  );
 
   test("Connect provider connects for the organization, every workspace by default", async () => {
     organizationAdmin = true;

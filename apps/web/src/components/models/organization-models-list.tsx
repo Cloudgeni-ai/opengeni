@@ -1009,7 +1009,7 @@ function OrganizationCodexRow({
       meta={[
         organizationReachLabel(labels, access.data),
         planLabel(account.plan, "ChatGPT"),
-        resetsLabel(account.resetCreditAvailableCount),
+        resetsLabel(live.resetCredits?.availableCount ?? account.resetCreditAvailableCount),
       ]}
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (

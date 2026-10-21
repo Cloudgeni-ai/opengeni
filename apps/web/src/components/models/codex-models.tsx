@@ -1,5 +1,6 @@
 import type { CodexAccount } from "@opengeni/sdk";
 import { ModelSettingsPlaceholder } from "./model-settings-placeholder";
+import { useOrganizationCodexOverview } from "./use-organization-codex-overview";
 import { EnableAccountRow, SubscriptionAccountRow } from "./subscription-account-ui";
 import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -512,6 +513,13 @@ function SharedCodexSetAsideRow({
   menu: ReactNode;
   onKeptForPeople?: KeptForPeopleReporter | undefined;
 }) {
+  const overview = useOrganizationCodexOverview(
+    organization.codex.client,
+    organization.codex.organizationId,
+    account,
+  );
+  const resetCount =
+    overview.data?.resetCredits?.availableCount ?? account.resetCreditAvailableCount;
   const access = useConnectionAccess({
     client: organization.codex.client,
     organizationId: organization.codex.organizationId,
@@ -561,14 +569,14 @@ function SharedCodexSetAsideRow({
             ? [
                 <ModelSettingsPlaceholder key="reach" />,
                 planLabel(account.plan, "ChatGPT"),
-                resetsLabel(account.resetCreditAvailableCount),
+                resetsLabel(resetCount),
               ]
             : [
                 organizationReachLabel(places.scope, access.data),
                 // Before the plan, so it stays readable on a phone.
                 reason,
                 planLabel(account.plan, "ChatGPT"),
-                resetsLabel(account.resetCreditAvailableCount),
+                resetsLabel(resetCount),
               ]
       }
       cells={forPeople || pending ? undefined : { usage: NOT_IN_USE }}

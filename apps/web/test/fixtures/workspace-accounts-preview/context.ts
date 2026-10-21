@@ -84,7 +84,8 @@ const organizationAccounts = [
   account(RESEARCH_PLAN, "Research team plan", "research@example.com", 44, false),
   ...(full
     ? [
-        { ...account(FULL_IDS.ops, null, "ops@example.com", 93, false), resetCreditAvailableCount: 2 },
+        // Deliberately stale: the shared overview below reports only two available resets.
+        { ...account(FULL_IDS.ops, null, "ops@example.com", 93, false), resetCreditAvailableCount: 3 },
         { ...account(FULL_IDS.paused, null, "spare@example.com", 100, false), allocatorEnabled: false },
         {
           ...account(FULL_IDS.signedOut, null, "old-plan@example.com", 50, false),
@@ -338,6 +339,12 @@ function workspaceRules(workspaceId: string) {
 }
 
 const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
+  async getOrganizationSubscriptionUsagePools() {
+    return { pools: [] };
+  },
+  async getWorkspaceSubscriptionUsagePools() {
+    return { pools: [] };
+  },
   async requestJson(method: string, path: string, body?: unknown) {
     if (method === "GET" && path === `/v1/organizations/${ORG}/codex/accounts`) {
       return {
@@ -356,6 +363,7 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
     }
     if (method === "GET" && path.endsWith("/overview")) {
       const id = path.split("/").at(-2)!;
+      const hasResets = id === FULL_IDS.ops;
       const remaining = id === ACME_PRO ? 62 : id === RESEARCH_PLAN ? 44 : 81;
       return {
         accountId: id,
@@ -374,14 +382,25 @@ const methods: Record<string, (...args: never[]) => Promise<unknown>> = {
           },
         },
         resetCredits: {
-          source: "none",
-          fetchedAt: null,
+          source: hasResets ? "provider" : "none",
+          fetchedAt: hasResets ? new Date().toISOString() : null,
           stale: false,
           error: null,
-          detailState: "unknown",
-          detailsComplete: false,
-          availableCount: null,
-          credits: [],
+          detailState: hasResets ? "detailed" : "unknown",
+          detailsComplete: hasResets,
+          availableCount: hasResets ? 2 : null,
+          credits: hasResets
+            ? ["Weekly reset", "Bonus reset"].map((title, index) => ({
+                id: `preview-reset-${index}`,
+                resetType: "codexRateLimits",
+                status: "available",
+                grantedAt: 1_700_000_000,
+                expiresAt: null,
+                title,
+                description: null,
+                actionable: true,
+              }))
+            : [],
         },
         canRedeem: false,
         canResumeRedemption: false,
