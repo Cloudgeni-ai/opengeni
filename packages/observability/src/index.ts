@@ -1068,6 +1068,12 @@ export class Observability {
       labels: {
         method: input.method,
         route: input.route,
+        // Keep successful latency separate from fast denials without adding
+        // one histogram family per exact status code.
+        status_class:
+          Number.isInteger(input.status) && input.status >= 100 && input.status < 600
+            ? `${Math.floor(input.status / 100)}xx`
+            : "unknown",
         component: this.options.component,
       },
     });
