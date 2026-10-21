@@ -66,6 +66,48 @@ describe("observability", () => {
     }
   });
 
+  test("fast errors cannot hide slow successful HTTP requests", async () => {
+    const obs = createObservability(settings, { component: "api" });
+    const request = { method: "GET", route: "/v1/workspaces/:workspaceId/sessions/:id" };
+    obs.recordHttpRequest({ ...request, status: 200, durationSeconds: 0.4 });
+    obs.recordHttpRequest({ ...request, status: 204, durationSeconds: 2 });
+    for (let index = 0; index < 100; index += 1) {
+      obs.recordHttpRequest({ ...request, status: 404, durationSeconds: 0.01 });
+    }
+    const metrics = (await obs.prometheusMetrics()).split("\n");
+    const sample = (suffix: string, statusClass: string, bucket?: string) => {
+      const line = metrics.find(
+        (value) =>
+          value.startsWith(`opengeni_http_request_duration_seconds_${suffix}{`) &&
+          value.includes(`status_class="${statusClass}"`) &&
+          (bucket === undefined || value.includes(`le="${bucket}"`)),
+      );
+      expect(line).toBeDefined();
+      return Number(line?.split(" ").at(-1));
+    };
+    expect(sample("count", "2xx")).toBe(2);
+    expect(sample("bucket", "2xx", "0.5")).toBe(1);
+    expect(sample("sum", "2xx")).toBeCloseTo(2.4);
+    expect(sample("count", "4xx")).toBe(100);
+    expect(sample("bucket", "4xx", "0.5")).toBe(100);
+  });
+
+  test("HTTP duration status classes have a closed vocabulary", async () => {
+    const obs = createObservability(settings, { component: "api" });
+    for (const status of [100, 199, 200, 299, 300, 399, 400, 499, 500, 599, 99, 600, 200.5, NaN]) {
+      obs.recordHttpRequest({ method: "GET", route: "/healthz", status, durationSeconds: 0.01 });
+    }
+    const counts = (await obs.prometheusMetrics())
+      .split("\n")
+      .filter((line) => line.startsWith("opengeni_http_request_duration_seconds_count{"));
+    expect(counts).toHaveLength(6);
+    for (const statusClass of ["1xx", "2xx", "3xx", "4xx", "5xx", "unknown"]) {
+      const count = counts.find((line) => line.includes(`status_class="${statusClass}"`));
+      expect(count).toBeDefined();
+      expect(Number(count?.split(" ").at(-1))).toBe(statusClass === "unknown" ? 4 : 2);
+    }
+  });
+
   test("per-space heap statistics are kept on a runtime where they are cheap", () => {
     const registry = new Registry();
     collectDefaultMetrics({ register: registry, prefix: "x_" });
