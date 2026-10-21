@@ -8,6 +8,8 @@ import {
   matchesChord,
   type Chord,
 } from "./chords";
+import type { ChatRecord } from "./chat-directory";
+import { isSwitcherKey, openChatSwitcher, stepChatSwitcher, SWITCHER_LIMIT } from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
 import { APP_ACTIONS } from "./registry";
 
@@ -166,5 +168,82 @@ describe("ranking", () => {
     const byKeyword = rankWithKeywords("Copy link", ["share", "url"], "share")!;
     expect(byKeyword).not.toBeNull();
     expect(byKeyword).toBeLessThan(direct);
+  });
+});
+
+describe("chat switcher", () => {
+  const record = (id: string, extra: Partial<ChatRecord> = {}): ChatRecord => ({
+    id,
+    workspaceId: "w",
+    title: id,
+    updatedAt: 1,
+    pinned: false,
+    archived: false,
+    row: null,
+    ...extra,
+  });
+  const directory = (recent: string[], records: ChatRecord[] = recent.map((id) => record(id))) => ({
+    recent,
+    rows: new Map(records.map((item) => [item.id, item])),
+  });
+
+  test("a press from a chat goes to the previous chat, and back again", () => {
+    const first = openChatSwitcher(directory(["a", "b", "c"]), "a", false)!;
+    expect(first.ids).toEqual(["a", "b", "c"]);
+    expect(first.ids[first.index]).toBe("b");
+    // Opening b moves it to the front, so the next press returns to a.
+    const second = openChatSwitcher(directory(["b", "a", "c"]), "b", false)!;
+    expect(second.ids[second.index]).toBe("a");
+  });
+
+  test("holding Control and pressing Tab walks down and wraps; Shift walks back", () => {
+    let state = openChatSwitcher(directory(["a", "b", "c"]), "a", false)!;
+    state = stepChatSwitcher(state, 1);
+    expect(state.ids[state.index]).toBe("c");
+    expect(state.visible).toBe(true);
+    state = stepChatSwitcher(state, 1);
+    expect(state.ids[state.index]).toBe("a");
+    state = stepChatSwitcher(state, -1);
+    expect(state.ids[state.index]).toBe("c");
+  });
+
+  test("Shift+Control+Tab starts at the oldest chat", () => {
+    const state = openChatSwitcher(directory(["a", "b", "c"]), "a", true)!;
+    expect(state.ids[state.index]).toBe("c");
+  });
+
+  test("away from a chat the most recent chat is the target", () => {
+    const state = openChatSwitcher(directory(["a", "b"]), null, false)!;
+    expect(state.ids[state.index]).toBe("a");
+  });
+
+  test("the open chat leads even before its visit is recorded", () => {
+    const state = openChatSwitcher(directory(["a", "b"]), "x", false)!;
+    expect(state.ids).toEqual(["x", "a", "b"]);
+    expect(state.ids[state.index]).toBe("a");
+  });
+
+  test("archived and subagent chats are left out, and nothing opens with nowhere to go", () => {
+    const rows = [
+      record("a"),
+      record("old", { archived: true }),
+      record("child", { row: { parentSessionId: "a" } as ChatRecord["row"] }),
+    ];
+    expect(openChatSwitcher(directory(["a", "old", "child"], rows), "a", false)).toBeNull();
+    expect(openChatSwitcher(directory([]), null, false)).toBeNull();
+  });
+
+  test("the list stops at ten chats", () => {
+    const ids = Array.from({ length: 15 }, (_, index) => `c${index}`);
+    expect(openChatSwitcher(directory(ids), "c0", false)!.ids).toHaveLength(SWITCHER_LIMIT);
+  });
+
+  test("only Control+Tab opens it", () => {
+    const tab = { code: "Tab", ctrlKey: true, metaKey: false, altKey: false };
+    expect(isSwitcherKey(tab)).toBe(true);
+    expect(isSwitcherKey({ ...tab, metaKey: true })).toBe(false);
+    expect(isSwitcherKey({ ...tab, altKey: true })).toBe(false);
+    expect(isSwitcherKey({ ...tab, ctrlKey: false })).toBe(false);
+    expect(isSwitcherKey({ ...tab, code: "KeyQ" })).toBe(false);
   });
 });
