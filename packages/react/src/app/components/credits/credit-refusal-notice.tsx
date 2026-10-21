@@ -4,6 +4,7 @@ import { CreditCardIcon } from "lucide-react";
 import { Button } from "../../../ui/button";
 import { Notice } from "../../../ui/notice";
 import { analyticsAction } from "../../../ui/analytics-actions";
+import { apiErrorFacts } from "../../../ui/api-error";
 import { modelListSummary } from "../../lib/credit-coverage";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
 
@@ -39,6 +40,8 @@ export function CreditRefusalNotice({
       ? `Your credits cover ${modelListSummary(gap.covered.map((model) => model.label))}.`
       : null;
   const connect = canConnectModel && gap.covered.length === 0 && !gap.selectionUsable;
+  // The server's sentence, without the SDK's "API 402:" prefix or the reference.
+  const reason = message ? apiErrorFacts(message).serverMessage : undefined;
   return (
     <Notice
       tone="failed"
@@ -47,7 +50,7 @@ export function CreditRefusalNotice({
       {...(onDismiss ? { onDismiss } : {})}
     >
       <span data-testid="credit-refusal-notice">
-        {message ? <span className="block">{message}</span> : null}
+        {reason ? <span className="block">{reason}</span> : null}
         {coverage ? <span className="block">{coverage}</span> : null}
       </span>
       {switchTo || canBuyCredits || connect ? (
