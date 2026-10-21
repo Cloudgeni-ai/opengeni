@@ -54,6 +54,11 @@ use crate::{
 };
 
 const AX_MESSAGE_TIMEOUT_SECONDS: f32 = 0.5;
+/// Restoring a minimized window animates it out of the Dock for about half a
+/// second. Its end is awaited no longer than this, so a missed notification
+/// never holds the restore.
+const DEMINIATURIZE_SETTLE: Duration = Duration::from_secs(2);
+const AX_WINDOW_DEMINIATURIZED_NOTIFICATION: &str = "AXWindowDeminiaturized";
 const AX_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(6);
 const AX_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const AX_WORKER_POLL: Duration = Duration::from_millis(20);
@@ -1318,7 +1323,7 @@ pub(super) fn restore_window_behind(
         let _ = application.unhide();
     }
     if presence == MacWindowPresence::Minimized {
-        set_bool_attribute(&window, kAXMinimizedAttribute, false)?;
+        deminiaturize(query.process_id, &window)?;
     }
     if let Some(front) = front_window {
         // The window is back either way; a front window that cannot be raised
@@ -1326,6 +1331,33 @@ pub(super) fn restore_window_behind(
         let _ = front.raise_if_supported();
     }
     Ok(presence)
+}
+
+/// Restores a minimized window and waits for its animation to end: the window
+/// server orders the window to the front only then, so the person's window is
+/// raised over it afterwards, and a read finds it settled.
+fn deminiaturize(process_id: u32, window: &AxElement) -> Result<(), MacFfiError> {
+    let pid = i32::try_from(process_id).map_err(|_| {
+        MacFfiError::Invalid("window process id exceeds the macOS pid range".to_string())
+    })?;
+    let (sender, receiver) = mpsc::sync_channel(MAX_PENDING_AX_NOTIFICATIONS);
+    let mut observer =
+        AxObserver::open(pid, &AxElement::application(pid), sender, Arc::default()).ok();
+    let watching = observer
+        .as_mut()
+        .and_then(|observer| observer.register(window, AX_WINDOW_DEMINIATURIZED_NOTIFICATION))
+        .is_some();
+    set_bool_attribute(window, kAXMinimizedAttribute, false)?;
+    let settle_by = Instant::now() + DEMINIATURIZE_SETTLE;
+    while watching && Instant::now() < settle_by {
+        let _ = CFRunLoop::run_in_mode(kCFRunLoopDefaultMode, Duration::from_millis(20), true);
+        while let Ok((element, notification)) = receiver.try_recv() {
+            if notification == AX_WINDOW_DEMINIATURIZED_NOTIFICATION && element.0 == *window {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Finds a window the window server lists among its application's

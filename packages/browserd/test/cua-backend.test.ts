@@ -1760,6 +1760,118 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("macOS lists only windows a person can see and brings minimized ones back to read", async () => {
+    // A minimized window, a headless browser's page window (on no Space), a
+    // popover its app keeps ordered out, and a full-screen window on another
+    // Space, as CUA lists them.
+    class MacFixture extends Fixture {
+      minimized = true;
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        if (name === "get_window_state" && this.minimized)
+          return { ...result({}, true), structuredJson: null, text: "No content" } as never;
+        const response = await super.callTool(name, argumentsJson);
+        if (name !== "list_windows") return response;
+        const bounds = { x: 0, y: 1079, width: 1280, height: 720 };
+        response.structuredJson = JSON.stringify({
+          windows: [
+            {
+              ...JSON.parse(response.structuredJson!).windows[0],
+              is_on_screen: !this.minimized,
+              space_ids: [1],
+              on_current_space: true,
+            },
+            { pid: 60, window_id: 2, title: "Dashboard", app_name: "Google Chrome", bounds },
+            { pid: 61, window_id: 3, title: "", app_name: "Safari", bounds },
+            { pid: 62, window_id: 4, title: "Notes", app_name: "TextEdit", bounds },
+          ].map((window, index) =>
+            index === 0
+              ? window
+              : {
+                  ...window,
+                  is_on_screen: false,
+                  space_ids: [null, [1], [801]][index - 1],
+                  on_current_space: [null, true, false][index - 1],
+                },
+          ),
+        });
+        return response;
+      }
+    }
+    const fixture = new MacFixture();
+    const asked: number[][] = [];
+    const restored: unknown[] = [];
+    let presenceFails = false;
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      macWindows: {
+        async presence(windows) {
+          if (presenceFails) throw new Error("helper unavailable");
+          asked.push(windows.map((window) => window.processId));
+          return windows.map((window) =>
+            window.processId === 61
+              ? "not_shown"
+              : window.processId === 42 && fixture.minimized
+                ? "minimized"
+                : "unknown",
+          );
+        },
+        async restore(window) {
+          restored.push(window);
+          const before = fixture.minimized ? "minimized" : "unknown";
+          fixture.minimized = false;
+          return before;
+        },
+      },
+    });
+    try {
+      const targets = await backend.targets();
+      // The browser's page window and the popover are never seen, so never
+      // listed; the minimized window is listed as readable; only the window
+      // on another Space is marked.
+      expect(targets.map((target) => [target.id, target.offScreen ?? false])).toEqual([
+        ["cua:window:42:1", false],
+        ["cua:window:62:4", true],
+      ]);
+      // Only windows on this Space are asked about, and a never-shown window
+      // only once.
+      expect(asked).toEqual([[42, 61]]);
+      await backend.targets();
+      expect(asked).toEqual([[42, 61], [42]]);
+
+      // Reading the minimized window restores it first, then reads it.
+      expect((await backend.observe("cua:window:42:1")).nodeCount).toBeGreaterThan(0);
+      expect(restored).toEqual([
+        { processId: 42, title: "Fixture", bounds: { x: 50, y: 50, width: 200, height: 100 } },
+      ]);
+      // A window on another Space is refused without restoring anything.
+      await expect(backend.observe("cua:window:62:4")).rejects.toMatchObject({
+        code: "unsupported",
+        message: expect.stringContaining("not on screen"),
+      });
+      expect(restored).toHaveLength(1);
+
+      // Minimized again, but a restore that does not happen leaves it unread.
+      fixture.minimized = true;
+      await backend.targets();
+      const restore = backend["macWindows"]!.restore;
+      backend["macWindows"]!.restore = async () => "unknown";
+      await expect(backend.observe("cua:window:42:1")).rejects.toMatchObject({
+        code: "unsupported",
+      });
+      backend["macWindows"]!.restore = restore;
+
+      // Without the helper's answer, windows keep their listing: off screen.
+      presenceFails = true;
+      expect(
+        (await backend.targets()).map((target) => [target.id, target.offScreen ?? false]),
+      ).toEqual([
+        ["cua:window:42:1", true],
+        ["cua:window:62:4", true],
+      ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("Windows and Linux still read a window listed off screen", async () => {
     for (const [platform, fixture] of [
       ["windows", new WindowsFixture()],

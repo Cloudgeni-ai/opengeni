@@ -33,9 +33,8 @@ export function computerNativeMacWindows(binaryPath: string): MacWindows {
       return presences;
     },
     async restore(window) {
-      return z
-        .object({ presence: Presence })
-        .parse(await run(binaryPath, "restore", { window })).presence;
+      return z.object({ presence: Presence }).parse(await run(binaryPath, "restore", { window }))
+        .presence;
     },
   };
 }
