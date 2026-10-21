@@ -44,6 +44,18 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain("motion-reduce:animate-none");
   });
 
+  test("a session parked until it wakes shows a still clock, not the working spinner", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata
+        summary={{ kind: "waiting", count: 1, total: 1, label: "1 waiting to resume" }}
+      />,
+    );
+
+    expect(markup).toContain("lucide-alarm-clock");
+    expect(markup).toContain('title="1 waiting to resume"');
+    expect(markup).not.toContain("animate-spin");
+  });
+
   test("uses the dedicated teal token for unread chats and following up", () => {
     const unread = renderToStaticMarkup(
       <RailTrailingMetadata summary={{ kind: "unread", count: 1, total: 1, label: "1 unread" }} />,

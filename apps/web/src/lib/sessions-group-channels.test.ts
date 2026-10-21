@@ -122,6 +122,29 @@ test("complete project summaries replace loaded counts and clear empty groups", 
   ).toBe(80);
 });
 
+test("project totals split parked waits out of the server's working count", () => {
+  const group = {
+    channelId: "channel-security",
+    total: 3,
+    attention: 0,
+    attentionSince: null,
+    failed: 0,
+    active: 2,
+    queued: 0,
+    unread: 0,
+    activeWork: 0,
+  };
+  const totals = (waiting?: number) =>
+    sessionProjectTotals(
+      { needsYouCount: 0, groups: [{ ...group, ...(waiting === undefined ? {} : { waiting }) }] },
+      ["channel-security"],
+    ).get("channel-security")!;
+  expect(summarizeRailStatusCounts(totals(2))).toMatchObject({ kind: "waiting", count: 2 });
+  expect(summarizeRailStatusCounts(totals(1))).toMatchObject({ kind: "active", count: 1 });
+  // An older server without the field keeps the previous working marker.
+  expect(summarizeRailStatusCounts(totals())).toMatchObject({ kind: "active", count: 2 });
+});
+
 describe("channelRailSections", () => {
   test("puts projects in channel order before unfiled Default", () => {
     const forest = buildRailForest([

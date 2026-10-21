@@ -96,14 +96,23 @@ describe("durable session waits in the rail", () => {
     unread: true,
     inputWait: { deadlineAt: "2099-09-08T14:00:00Z", reason: "Awaiting CI" },
   });
-  test("waiting work takes precedence over unread without changing personal acknowledgment", () => {
+  test("a parked wait shows as waiting, not working, and still outranks unread", () => {
     const value = waiting();
     expect(groupSessionsForRail(t, [value]).running.map((row) => row.id)).toEqual(["waiting"]);
     expect(
       summarizeRailNodes([{ session: value, children: [], hasActiveDescendant: false }]),
-    ).toMatchObject({ kind: "active", label: "1 working" });
+    ).toMatchObject({ kind: "waiting", label: "1 waiting to resume" });
     expect(value.unread).toBe(true);
     expect(sessionStateLabel(value)).toStartWith("Waiting · ");
+  });
+  test("a running descendant outranks a parked wait", () => {
+    const running = { ...session("running"), status: "running" as const };
+    expect(
+      summarizeRailNodes([
+        { session: waiting(), children: [], hasActiveDescendant: false },
+        { session: running, children: [], hasActiveDescendant: false },
+      ]),
+    ).toMatchObject({ kind: "active", count: 1 });
   });
   test("an elapsed deadline says due rather than claiming a turn is running", () => {
     expect(sessionWaitLabel("2026-09-08T14:00:00Z", Date.parse("2026-09-08T14:01:00Z"))).toBe(
@@ -120,7 +129,7 @@ describe("durable session waits in the rail", () => {
       expect(sessionStateLabel(value)).not.toStartWith("Waiting");
     }
   });
-  test("unloaded waiting children keep their collapsed parent working", () => {
+  test("unloaded waiting children mark their collapsed parent as waiting", () => {
     const parent = {
       ...session("parent"),
       treeStats: {
@@ -137,7 +146,7 @@ describe("durable session waits in the rail", () => {
     };
     expect(
       summarizeRailNodes([{ session: parent, children: [], hasActiveDescendant: true }]),
-    ).toMatchObject({ kind: "active", count: 1 });
+    ).toMatchObject({ kind: "waiting", count: 1 });
   });
 });
 

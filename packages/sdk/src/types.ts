@@ -2032,6 +2032,8 @@ export type SessionListTotals = {
     queued: number;
     unread: number;
     activeWork: number;
+    /** Idle sessions parked on their own wake-up; already included in `active`. */
+    waiting?: number;
   }>;
 };
 
