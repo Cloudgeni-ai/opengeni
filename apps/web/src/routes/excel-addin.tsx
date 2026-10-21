@@ -9,6 +9,7 @@ import { DownloadIcon, SheetIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import {
+  MAC_EXCEL_DOCUMENTS,
   excelManifestUrl,
   excelPlatformFor,
   macInstallCommand,
@@ -49,6 +50,27 @@ function Step(props: { n: number; title: ReactNode; children?: ReactNode }) {
 
 function Menu(props: { children: ReactNode }) {
   return <span className="font-medium text-fg">{props.children}</span>;
+}
+
+/** The same install as one command, for people who would rather paste it. */
+function CommandAlternative(props: {
+  label: string;
+  shell: string;
+  value: string;
+  replaces: string;
+  note?: string;
+}) {
+  return (
+    <li className="list-none">
+      <details className="group rounded-lg border border-border px-3 py-2">
+        <summary className="cursor-pointer text-sm text-fg-subtle select-none group-open:mb-2">
+          Prefer {props.shell}? One command instead of {props.replaces}.
+        </summary>
+        <CopyField variant="field" wrap label={props.label} value={props.value} />
+        {props.note ? <p className="mt-2 text-xs text-fg-subtle">{props.note}</p> : null}
+      </details>
+    </li>
+  );
 }
 
 function SignInStep(props: { n: number }) {
@@ -125,17 +147,31 @@ export function ExcelAddinRoute() {
             </Steps>
           ) : platform === "mac" ? (
             <Steps>
-              <Step n={1} title="Run this in Terminal.">
-                <CopyField
-                  variant="field"
-                  wrap
-                  label="Mac install command"
-                  value={macInstallCommand(manifestUrl)}
-                />
+              <Step n={1} title="Download the add-in file.">
+                {download}
               </Step>
-              <Step n={2} title="Quit Excel and open it again." />
+              <Step
+                n={2}
+                title={
+                  <>
+                    In Finder, choose <Menu>Go › Go to Folder</Menu>, paste this and press Return.
+                  </>
+                }
+              >
+                <CopyField variant="field" label="Excel folder" value={MAC_EXCEL_DOCUMENTS} />
+              </Step>
               <Step
                 n={3}
+                title={
+                  <>
+                    Open the <Menu>wef</Menu> folder there (make a new folder named <Menu>wef</Menu>{" "}
+                    if there isn't one) and drag the downloaded file into it.
+                  </>
+                }
+              />
+              <Step n={4} title="Quit Excel and open it again." />
+              <Step
+                n={5}
                 title={
                   <>
                     Choose <Menu>Home › Add-ins</Menu> and pick <Menu>Opengeni</Menu> under
@@ -143,29 +179,71 @@ export function ExcelAddinRoute() {
                   </>
                 }
               />
-              <SignInStep n={4} />
+              <SignInStep n={6} />
+              <CommandAlternative
+                label="Mac install command"
+                shell="Terminal"
+                value={macInstallCommand(manifestUrl)}
+                replaces="steps 1 to 3"
+              />
             </Steps>
           ) : platform === "windows" ? (
             <Steps>
-              <Step n={1} title="Run this in PowerShell.">
-                <CopyField
-                  variant="field"
-                  wrap
-                  label="Windows install command"
-                  value={windowsInstallCommand(manifestUrl)}
-                />
+              <Step n={1} title="Download the add-in file.">
+                {download}
               </Step>
-              <Step n={2} title="Close every Excel window and open Excel again." />
+              <Step
+                n={2}
+                title={
+                  <>
+                    Make a folder for it, for example <Menu>Excel add-ins</Menu> in Documents, and
+                    move the file there.
+                  </>
+                }
+              />
               <Step
                 n={3}
                 title={
                   <>
-                    Choose <Menu>Home › Add-ins</Menu> and pick <Menu>Opengeni</Menu> under
-                    Developer Add-ins. After that it has its own button on the Home tab.
+                    Right-click the folder and choose <Menu>Properties › Sharing › Share</Menu>,
+                    then <Menu>Share</Menu> with just yourself. Copy the network path it shows, like{" "}
+                    <Menu>\\YOUR-PC\Excel add-ins</Menu>.
                   </>
                 }
               />
-              <SignInStep n={4} />
+              <Step
+                n={4}
+                title={
+                  <>
+                    In Excel, choose{" "}
+                    <Menu>
+                      File › Options › Trust Center › Trust Center Settings › Trusted Add-in
+                      Catalogs
+                    </Menu>
+                    , paste the path as the Catalog Url, choose <Menu>Add catalog</Menu>, tick{" "}
+                    <Menu>Show in Menu</Menu> and select <Menu>OK</Menu>.
+                  </>
+                }
+              />
+              <Step n={5} title="Close every Excel window and open Excel again." />
+              <Step
+                n={6}
+                title={
+                  <>
+                    Choose <Menu>Home › Add-ins › Advanced</Menu> (<Menu>More Add-ins</Menu> in some
+                    versions), then <Menu>Shared Folder</Menu>, pick <Menu>Opengeni</Menu> and
+                    select <Menu>Add</Menu>.
+                  </>
+                }
+              />
+              <SignInStep n={7} />
+              <CommandAlternative
+                label="Windows install command"
+                shell="PowerShell"
+                value={windowsInstallCommand(manifestUrl)}
+                replaces="steps 1 to 4"
+                note="Opengeni then shows under Developer Add-ins in Home › Add-ins, not Shared Folder."
+              />
             </Steps>
           ) : (
             <>
