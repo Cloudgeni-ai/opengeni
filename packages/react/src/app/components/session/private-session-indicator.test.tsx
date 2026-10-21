@@ -29,6 +29,8 @@ test("the header mark says Private and explains who can and can't see the chat",
   const mark = container.querySelector("[aria-label]")!;
   expect(mark.textContent).toBe("Private");
   expect(mark.getAttribute("aria-label")).toBe(`Private. ${PRIVATE_SESSION_EXPLANATION}`);
+  // ARIA prohibits aria-label on a role-less span; the mark needs a role to be named.
+  expect(mark.getAttribute("role")).toBe("img");
   expect(container.querySelector("svg.lucide-lock")).not.toBeNull();
   // Truthful to the tenancy model: admins get no access; billing sees amounts only.
   expect(PRIVATE_SESSION_EXPLANATION).toContain("Organization admins can't open it");
