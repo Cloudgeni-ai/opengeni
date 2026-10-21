@@ -4,7 +4,13 @@
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { t } from "@/lib/console-text";
-import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
+import { useSessionListHintRefresh } from "@/lib/use-session-list-hint-refresh";
+import { useChannels, useOpenGeni, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
+import {
+  emptySessionListDirtyScopes,
+  invalidateSessionListScopes,
+  sessionListGroupRevision,
+} from "@/lib/session-list-dirty-scopes";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
@@ -323,6 +329,13 @@ function findSessionTreeNode(
 export function SessionList() {
   const rail = useRail();
   const context = useAppContext();
+  const { workspaceSessionListEvent, workspaceControlEvent } = useOpenGeni();
+  const listHintsAvailable =
+    workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
+    workspaceSessionListEvent.available;
+  const [dirtyScopes, setDirtyScopes] = useState(emptySessionListDirtyScopes);
+  const knownListSessions = useRef<ReadonlyMap<string, Session>>(new Map());
+  useEffect(() => setDirtyScopes(emptySessionListDirtyScopes()), [rail.workspaceId]);
   const sessionClient = context.client;
   const setContextSession = context.setSession;
   const navigate = useNavigate();
@@ -424,7 +437,7 @@ export function SessionList() {
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     archiveStatus: browseStatus,
     ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
-    pollIntervalMs: 15_000,
+    pollIntervalMs: listHintsAvailable ? undefined : 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
   // Pins are shortcuts and may point anywhere in a workstream. Fetch their
@@ -436,13 +449,13 @@ export function SessionList() {
     limit: 1,
     pinsOnly: true,
     includeTotals: !hierarchyMode || browseStatus === "archived",
-    pollIntervalMs: 15_000,
+    pollIntervalMs: listHintsAvailable ? undefined : 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
-  // Workspace-shared channels back the user-facing workstreams. Unfiled roots
-  // live in Recents even before the first workstream is created. The list is
-  // tiny and churn is rare, so it polls gently.
-  const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
+  // Channel edits send a full reconciliation hint. Older servers retain the
+  // existing gentle fallback poll.
+  const channelsQuery = useChannels({ pollIntervalMs: listHintsAvailable ? undefined : 60_000 });
+  const refreshChannels = channelsQuery.refresh;
   const channels = channelsQuery.channels;
   const {
     create: requestCreateChannel,
@@ -480,12 +493,30 @@ export function SessionList() {
   // The hierarchy and its global pinned shortcuts come from separate queries.
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
-  const refreshSessionPages = useCallback(async () => {
-    // Cross-document invalidations must not restart suspended list polling.
-    // Visibility/focus reconciliation below re-reads durable state on return.
-    if (document.visibilityState === "hidden") return;
-    await Promise.all([refresh(), refreshGlobalPins()]);
-  }, [refresh, refreshGlobalPins]);
+  const refreshSessionPages = useCallback(
+    async (sessionIds: string[] | null = null) => {
+      // Cross-document invalidations must not restart suspended list polling.
+      // Visibility/focus reconciliation below re-reads durable state on return.
+      if (document.visibilityState === "hidden") return;
+      setDirtyScopes((current) =>
+        invalidateSessionListScopes(current, sessionIds, knownListSessions.current),
+      );
+      await Promise.all([
+        refresh(),
+        refreshGlobalPins(),
+        ...(sessionIds === null ? [refreshChannels()] : []),
+      ]);
+    },
+    [refresh, refreshGlobalPins, refreshChannels],
+  );
+  useEffect(() => {
+    if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
+    if (workspaceSessionListEvent.available)
+      void refreshSessionPages(workspaceSessionListEvent.sessionIds);
+  }, [workspaceSessionListEvent, rail.workspaceId, refreshSessionPages]);
+  useEffect(() => {
+    if (workspaceControlEvent) void refreshSessionPages();
+  }, [workspaceControlEvent, refreshSessionPages]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns the shared discovery page. Projects share a workspace
   // continuation; filtered browsing and Archived retain their own cursors.
@@ -766,9 +797,17 @@ export function SessionList() {
   const lineageChannelProjectionOwner = useRef({});
   const moveChannelProjectionOwner = useRef({});
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
-    pollIntervalMs: 30_000,
+    pollIntervalMs: listHintsAvailable ? undefined : 30_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
+  const lineageDirtyRevision = Math.max(
+    dirtyScopes.all,
+    dirtyScopes.branches.get(context.session?.rootSessionId ?? context.session?.id ?? "") ?? 0,
+  );
+  const refreshLineage = activeLineage.refresh;
+  useEffect(() => {
+    if (listHintsAvailable && lineageDirtyRevision > 0) void refreshLineage();
+  }, [listHintsAvailable, lineageDirtyRevision, refreshLineage]);
   const lineageChannelAuthoritySessions = useMemo(
     () => activeLineage.lineage?.ancestors ?? [],
     [activeLineage.lineage?.ancestors],
@@ -1141,6 +1180,7 @@ export function SessionList() {
   }, [rail.workspaceId]);
   const branchParentsById = useRef<ReadonlyMap<string, Session>>(new Map());
   branchParentsById.current = new Map(allSessions.map((session) => [session.id, session]));
+  knownListSessions.current = branchParentsById.current;
 
   useEffect(() => {
     setAttentionOverrides(new Map());
@@ -1911,6 +1951,13 @@ export function SessionList() {
     setManualExpanded(new Set());
     setManualCollapsed(new Set());
   }, [rail.workspaceId]);
+  const branchReadRevision = useCallback(
+    (parentId: string) =>
+      listHintsAvailable
+        ? Math.max(dirtyScopes.all, dirtyScopes.branches.get(parentId) ?? 0)
+        : rootReadRevision,
+    [listHintsAvailable, dirtyScopes, rootReadRevision],
+  );
   const loadChildPage = useCallback(
     async (
       parentSessionId: string,
@@ -1926,7 +1973,7 @@ export function SessionList() {
         if (parent) {
           branchSummaryKeys.current.set(
             parentSessionId,
-            sessionBranchSummaryKey(parent, rootReadRevision),
+            sessionBranchSummaryKey(parent, branchReadRevision(parentSessionId)),
           );
         }
       }
@@ -1980,7 +2027,7 @@ export function SessionList() {
       context.client,
       context.sessionChannelProjectionAuthority,
       rail.workspaceId,
-      rootReadRevision,
+      branchReadRevision,
       browseSortBy,
       browseStatus,
     ],
@@ -2034,8 +2081,8 @@ export function SessionList() {
     nodesById,
   ]);
 
-  // Root pages are polled server truth and carry bounded descendant summaries.
-  // Accepted root reads also refresh observation-only changes in loaded branches.
+  // Root pages carry bounded descendant summaries. Commit hints refresh only
+  // dirty branches; legacy polling refreshes observation-only changes as before.
   // When a loaded branch's summary changes (notably directChildren after an
   // orchestrator spawn), refresh that exact branch instead of retaining its old
   // child list forever. This preserves root-only pagination and lazy hierarchy
@@ -2050,7 +2097,7 @@ export function SessionList() {
     for (const [parentId, page] of childPages) {
       const parent = parentsById.get(parentId);
       if (!parent) continue;
-      const nextKey = sessionBranchSummaryKey(parent, rootReadRevision);
+      const nextKey = sessionBranchSummaryKey(parent, branchReadRevision(parentId));
       const previousKey = branchSummaryKeys.current.get(parentId);
       const decision = sessionBranchSummaryDecision({
         previousKey,
@@ -2077,7 +2124,7 @@ export function SessionList() {
         return next;
       });
     }
-  }, [allSessions, childPages, context.session, expanded, loadChildPage, rootReadRevision]);
+  }, [allSessions, childPages, context.session, expanded, loadChildPage, branchReadRevision]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -2333,7 +2380,6 @@ export function SessionList() {
         requestGeneration,
       );
       if (current.nextCursor === null && !refreshWindow) return;
-      if (refreshWindow && current.failed) return;
       if (
         groupLoadingRef.current.get(group.key) === requestGeneration &&
         (refreshWindow || !groupRefreshing.current.has(group.key))
@@ -2546,7 +2592,6 @@ export function SessionList() {
         return { exhausted: page.nextCursor === null, added: newlyLoaded, failed: false };
       } catch {
         if (!requestIsCurrent()) return;
-        if (refreshWindow) return;
         setGroupContinuations((states) => {
           if (!requestIsCurrent()) return states;
           const latest = activeSessionContinuation(
@@ -2555,7 +2600,7 @@ export function SessionList() {
           );
           return new Map(states).set(group.key, { ...latest, failed: true });
         });
-        if (announce)
+        if (announce && !refreshWindow)
           setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
         return { exhausted: false, added: 0, failed: true };
       } finally {
@@ -2564,10 +2609,11 @@ export function SessionList() {
           nextLoading.delete(group.key);
           groupLoadingRef.current = nextLoading;
           groupRefreshing.current.delete(group.key);
-          if (!refreshWindow)
-            setGroupLoadingGenerations(
-              new Map([...nextLoading].filter(([key]) => !groupRefreshing.current.has(key))),
-            );
+          // A dirty hint may have arrived while this quiet refresh was busy.
+          // Publish settlement even without a spinner so it cannot be lost.
+          setGroupLoadingGenerations(
+            new Map([...nextLoading].filter(([key]) => !groupRefreshing.current.has(key))),
+          );
         }
       }
     },
@@ -2634,16 +2680,81 @@ export function SessionList() {
 
   const refreshGroupWindow = useRef(loadMoreInGroup);
   refreshGroupWindow.current = loadMoreInGroup;
+  const groupReadRevisions = useRef(new Map<string, string>());
   useEffect(() => {
     for (const [key, window] of loadedGroupWindows.current) {
-      if (window.generation !== pageGeneration) loadedGroupWindows.current.delete(key);
+      if (window.generation !== pageGeneration) {
+        loadedGroupWindows.current.delete(key);
+        groupReadRevisions.current.delete(key);
+      }
     }
   }, [pageGeneration]);
   useEffect(() => {
     for (const window of loadedGroupWindows.current.values()) {
-      if (window.generation === pageGeneration) void refreshGroupWindow.current(window.group, true);
+      if (window.generation !== pageGeneration) continue;
+      const revision = listHintsAvailable
+        ? `hint:${sessionListGroupRevision(dirtyScopes, window.group)}`
+        : `poll:${rootReadRevision}`;
+      if (groupReadRevisions.current.get(window.group.key) === revision) continue;
+      // A hint arriving during a read remains dirty until that read settles.
+      if (groupLoadingRef.current.get(window.group.key) === pageGeneration) continue;
+      groupReadRevisions.current.set(window.group.key, revision);
+      void refreshGroupWindow.current(window.group, true);
     }
-  }, [rootReadRevision, pageGeneration]);
+  }, [
+    rootReadRevision,
+    pageGeneration,
+    listHintsAvailable,
+    dirtyScopes,
+    groupContinuations,
+    groupLoadingGenerations,
+  ]);
+
+  // Successful scopes stay idle. A failed read remains dirty and retries on
+  // the existing cadence even if no further database changes occur.
+  useEffect(() => {
+    if (!listHintsAvailable || document.visibilityState === "hidden") return;
+    const failedChildren = [...childPages].filter(([, page]) => page.failed);
+    const failedGroups = [...groupContinuations].filter(([, page]) => page.failed);
+    if (
+      !error &&
+      !globalPinsError &&
+      !channelsQuery.error &&
+      !activeLineage.error &&
+      !failedChildren.length &&
+      !failedGroups.length
+    )
+      return;
+    const retry = window.setTimeout(() => {
+      if (error) void refresh();
+      if (globalPinsError) void refreshGlobalPins();
+      if (channelsQuery.error) void refreshChannels();
+      if (activeLineage.error) void refreshLineage();
+      for (const [parentId] of failedChildren)
+        void loadChildPage(parentId, undefined, { feedbackVisible: false });
+      for (const [key] of failedGroups) {
+        const window = loadedGroupWindows.current.get(key);
+        if (window?.generation === pageGeneration)
+          void refreshGroupWindow.current(window.group, true);
+      }
+    }, 15_000);
+    return () => window.clearTimeout(retry);
+  }, [
+    listHintsAvailable,
+    documentForeground,
+    childPages,
+    groupContinuations,
+    error,
+    globalPinsError,
+    channelsQuery.error,
+    activeLineage.error,
+    refresh,
+    refreshGlobalPins,
+    refreshChannels,
+    refreshLineage,
+    loadChildPage,
+    pageGeneration,
+  ]);
 
   const groupPageState = (
     group: SessionPaginationGroup,
@@ -2973,8 +3084,8 @@ export function SessionList() {
         )
       : undefined;
 
-  // Cross-tab invalidation and lifecycle reconciliation. Cross-device changes
-  // arrive on the 15s poll; returning to a tab or reconnecting refreshes now.
+  // Cross-tab invalidation and lifecycle reconciliation. Cross-device commit
+  // hints arrive within the existing 15s cadence; focus/online reconcile now.
   useEffect(
     () => subscribeToSessionPinChanges(rail.workspaceId, () => void refreshSessionPages()),
     [rail.workspaceId, refreshSessionPages],
@@ -4863,11 +4974,16 @@ function EmptySessions({ archived = false }: { archived?: boolean }) {
  */
 export function CollapsedSessionsButton() {
   const rail = useRail();
-  const { sessions, loading, error } = useWorkspaceSessions({
+  const { workspaceSessionListEvent } = useOpenGeni();
+  const hintsAvailable =
+    workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
+    workspaceSessionListEvent.available;
+  const { sessions, loading, error, refresh } = useWorkspaceSessions({
     projection: "summary",
     limit: 50,
-    pollIntervalMs: 15_000,
+    pollIntervalMs: hintsAvailable ? undefined : 15_000,
   });
+  useSessionListHintRefresh(refresh, error);
   const runningCount = useMemo(() => groupSessionsForRail(t, sessions).running.length, [sessions]);
   // The collapsed rail can't render the expanded list's loading/error copy, so
   // it mirrors those states: a failed load shows a failed-tone marker + tooltip

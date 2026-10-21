@@ -18,6 +18,10 @@ import {
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 import { startDatabaseTiming } from "./database-timing";
+import {
+  createSessionListChangeSource,
+  type SessionListChangeSource,
+} from "./session-list-notifications";
 
 // Structural cross-driver query port. Opengeni passes explicit tables to its
 // builders; it never uses Drizzle's schema-registered relational `query` API.
@@ -221,6 +225,8 @@ export type UserProfileLookup = (
 ) => Promise<ManagedUserProfile[]>;
 
 export type CreateDbOptions = {
+  /** Direct or session-pooled PostgreSQL URL for API list invalidations. Lazy; never a transaction pooler. */
+  notificationDatabaseUrl?: string;
   /**
    * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
    * UNSET → today's behavior: NO `search_path` startup parameter is sent, so the
@@ -272,9 +278,15 @@ type DbBinding = {
   rlsStrategy: RlsStrategy;
   userLookup?: UserLookup;
   userProfileLookup?: UserProfileLookup;
+  sessionListChanges?: SessionListChangeSource;
 };
 
 const dbBindings = new WeakMap<object, DbBinding>();
+
+/** Absent for externally constructed handles or transaction-only connections. */
+export function sessionListChangesFor(db: Database): SessionListChangeSource | undefined {
+  return dbBindings.get(db as object)?.sessionListChanges;
+}
 
 /** The strategy bound to a handle (or the `"force"` default). */
 export function rlsStrategyFor(db: Database): RlsStrategy {
@@ -516,14 +528,21 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   // Registering the full schema eagerly allocates one relational query builder
   // per table on every transaction/savepoint, even for a single raw SQL query.
   const db = drizzle(preparedStatements ? preparingUnsafe(client) : client);
+  const sessionListChanges = options.notificationDatabaseUrl
+    ? createSessionListChangeSource(options.notificationDatabaseUrl, {
+        ...(options.searchPath ? { searchPath: options.searchPath } : {}),
+      })
+    : undefined;
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
     ...(options.userProfileLookup ? { userProfileLookup: options.userProfileLookup } : {}),
+    ...(sessionListChanges ? { sessionListChanges } : {}),
   });
   return {
     db,
     close: async () => {
+      await sessionListChanges?.close();
       await client.end();
     },
   };

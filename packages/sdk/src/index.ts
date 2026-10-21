@@ -515,6 +515,7 @@ export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-
 export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
 export type {
   WorkspaceLiveEvent,
+  WorkspaceSessionListEvent,
   WorkspaceLiveStreamOptions,
   WorkspaceLiveStreamTransport,
 } from "./workspace-live-stream";

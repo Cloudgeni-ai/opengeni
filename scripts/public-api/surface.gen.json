@@ -24752,6 +24752,7 @@
         "$.groups[].queued": "integer!",
         "$.groups[].total": "integer!",
         "$.groups[].unread": "integer!",
+        "$.groups[].waiting": "integer?",
         "$.needsYouCount": "integer!"
       }
     },
@@ -32650,6 +32651,7 @@
       "WorkspaceRevisionDegradedPayload": "type",
       "WorkspaceSandboxImages": "type",
       "WorkspaceSessionDefaults": "type",
+      "WorkspaceSessionListEvent": "type",
       "WorkspaceSettings": "type",
       "WorkspaceSlackReactionSummonSettings": "type",
       "WorkspaceStateAttemptGovernance": "type",

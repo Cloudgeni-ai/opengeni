@@ -1335,6 +1335,7 @@ import {
 } from "./database";
 export {
   createDb,
+  sessionListChangesFor,
   databaseReconnectBackoffSeconds,
   defaultDatabasePreparedStatements,
   isTransactionHandle,
@@ -1377,6 +1378,11 @@ export {
   withSessionRlsActorContext,
 } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
+export type {
+  SessionListChangeSource,
+  SessionListDatabaseChange,
+  SessionListNotification,
+} from "./session-list-notifications";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,
   brokeredCredentialBundleProblem,
@@ -33763,6 +33769,76 @@ export async function listSessionEntriesForSubject(
   return page;
 }
 
+type SessionListReadAuthority = Pick<
+  ListSessionsForSubjectOptions,
+  "subjectId" | "authorizationScope" | "personalWorkspaceOwnerException"
+>;
+
+/** Apply the same removal fence to pages and their transient invalidation hints. */
+async function requireSessionListReadAuthorityInScope(
+  tx: Database,
+  workspaceId: string,
+  options: SessionListReadAuthority,
+): Promise<void> {
+  // READ COMMITTED observes a removal that held the exclusive fence first.
+  await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
+  const [membership] = await tx
+    .select({ id: schema.workspaceMemberships.id })
+    .from(schema.workspaceMemberships)
+    .where(
+      and(
+        eq(schema.workspaceMemberships.workspaceId, workspaceId),
+        eq(schema.workspaceMemberships.subjectId, options.subjectId),
+      ),
+    )
+    .limit(1);
+  // Non-user credentials legitimately have no membership. Managed personal
+  // owners require the route's verified provenance AND current canonical grant.
+  if (
+    !membership &&
+    options.subjectId.startsWith("user:") &&
+    !(
+      options.personalWorkspaceOwnerException === true &&
+      (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: await accountIdInRlsScope(tx),
+        workspaceId,
+        subjectId: options.subjectId,
+      }))
+    )
+  )
+    throw new SessionListAccessError();
+}
+
+/** No configuration, parent IDs or inaccessible IDs cross the hint boundary. */
+export async function listVisibleSessionInvalidationIds(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authority: SessionListReadAuthority,
+): Promise<string[]> {
+  if (!sessionIds.length) return [];
+  return await withWorkspaceSubjectRls(
+    db,
+    workspaceId,
+    authority.subjectId,
+    async (tx) => {
+      await requireSessionListReadAuthorityInScope(tx, workspaceId, authority);
+      const rows = await tx
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            inArray(schema.sessions.id, sessionIds),
+            ...sessionFilters({ ...authority, archiveStatus: "all" }),
+          ),
+        );
+      return rows.map((row) => row.id);
+    },
+    { isolationLevel: "read committed" },
+  );
+}
+
 async function readSessionListForSubject(
   db: Database,
   workspaceId: string,
@@ -33779,59 +33855,7 @@ async function readSessionListForSubject(
       workspaceId,
       options.subjectId,
       async (tx) => {
-        // READ COMMITTED is deliberate: if removal already owns the exclusive
-        // advisory fence, this transaction waits before checking membership and
-        // then observes the committed deletion in a fresh statement snapshot.
-        // The shared fence keeps every personal pin row stable across the page's
-        // ordinary/pinned queries while allowing concurrent list readers.
-        await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
-        // Authorization is resolved before this helper by the API, but that
-        // grant can be stale by the time this transaction starts. The subject
-        // fence above makes removal and listing deterministic: listing first lets
-        // removal clean its committed snapshot, while removal first makes this
-        // fresh membership read observe the deletion and do no writes.
-        const [membership] = await tx
-          .select({ id: schema.workspaceMemberships.id })
-          .from(schema.workspaceMemberships)
-          .where(
-            and(
-              eq(schema.workspaceMemberships.workspaceId, workspaceId),
-              eq(schema.workspaceMemberships.subjectId, options.subjectId),
-            ),
-          )
-          .limit(1);
-        // A missing membership only means "denied" for user subjects — people
-        // are authorized exclusively through memberships, so absence here is a
-        // removal that the route-level grant hasn't observed yet. Non-user
-        // principals (workspace-scoped `api_key:*`, delegated service subjects)
-        // are authorized by requireAccessGrant from their own credential row and
-        // may legitimately have no membership; they list without the removal
-        // serialization. That is sound: member-removal cleanup already purges a
-        // removed subject's pins and snapshots, and any snapshot a never-member
-        // subject writes is bounded by TTL expiry.
-        //
-        // The one human who is authorized WITHOUT a membership row is the owner
-        // of a managed personal workspace: migration 0219 raises if that
-        // workspace ever gets one, so the pointer on their own organization
-        // membership is the whole grant. Ask the canonical resolver rather than
-        // re-deriving that rule here — it runs on this same transaction handle,
-        // so the shared personal-state fence above still serializes it against
-        // member removal. Gated on the caller's canonical managed-cookie
-        // assertion; see PersonalWorkspaceOwnerException.
-        if (
-          !membership &&
-          options.subjectId.startsWith("user:") &&
-          !(
-            options.personalWorkspaceOwnerException === true &&
-            (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
-              accountId: await accountIdInRlsScope(tx),
-              workspaceId,
-              subjectId: options.subjectId,
-            }))
-          )
-        ) {
-          throw new SessionListAccessError();
-        }
+        await requireSessionListReadAuthorityInScope(tx, workspaceId, options);
 
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
