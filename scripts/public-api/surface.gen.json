@@ -36105,7 +36105,6 @@
       "ContextMenuItem": "value",
       "ContextMenuLabel": "value",
       "ContextMenuSeparator": "value",
-      "ContextMenuShortcut": "value",
       "ContextMenuTrigger": "value"
     },
     "@opengeni/react/ui/copy-field": {
