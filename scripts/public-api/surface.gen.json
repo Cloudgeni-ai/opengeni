@@ -35578,6 +35578,7 @@
       "groupSessionsByProject": "value",
       "groupSessionsForRail": "value",
       "hasActiveEffectiveControl": "value",
+      "homeSessionSections": "value",
       "isCodexProductModel": "value",
       "isEffectivelyRunning": "value",
       "isRunningStatus": "value",
