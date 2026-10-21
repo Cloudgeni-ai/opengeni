@@ -5549,6 +5549,12 @@ describe("runtime event normalization", () => {
     ).toBeUndefined();
   });
 
+  test("gives sandbox agents base instructions that look for AGENTS.md only in a repository", () => {
+    // The SDK renders a sandbox agent's base instructions ahead of its own.
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any;
+    expect(agent.baseInstructions).toContain("In a code repository, look for AGENTS.md files");
+  });
+
   test("includes read-only attachment guidance in agent instructions", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(agent.instructions).toContain(
