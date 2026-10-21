@@ -798,10 +798,16 @@ impl Store for Chunked {
             Err(error) => return Err(storage_error(OP, error)),
         };
         let head = parse_head(OP, &bytes)?;
+        let disk = self
+            .chunks
+            .get_manifest(&head.disk)
+            .await
+            .map_err(|error| storage_error(OP, error))?;
         Ok(Owned::Done(Some(Claimed {
             save: stamp.save,
             receipt: receipt_of(&bytes),
             memory: head.memory.is_some(),
+            disk_bytes: disk.disk_len,
         })))
     }
 

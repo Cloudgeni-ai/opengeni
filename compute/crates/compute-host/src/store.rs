@@ -147,6 +147,9 @@ pub struct Claimed {
     pub receipt: Receipt,
     /// Whether it holds a memory image.
     pub memory: bool,
+    /// The length of the disk it holds, which the new owner books and
+    /// grows the sandbox's disk from.
+    pub disk_bytes: u64,
 }
 
 /// Where a fetch puts what it brings back.
@@ -673,10 +676,12 @@ impl Store for Directory {
                 line.split_once(' ')
                     .is_some_and(|(name, _)| name == "memory")
             });
+            let disk_bytes = fs::metadata(stored.join("disk"))?.len();
             Ok(Owned::Done(Some(Claimed {
                 save: 0,
                 receipt: Receipt(blake3::hash(listed.as_bytes()).to_hex().to_string()),
                 memory,
+                disk_bytes,
             })))
         })
         .await

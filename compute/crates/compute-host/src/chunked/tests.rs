@@ -97,6 +97,7 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
             save: 3,
             receipt: receipt.clone(),
             memory: true,
+            disk_bytes: CHUNK_BYTES,
         }
     );
     assert!(

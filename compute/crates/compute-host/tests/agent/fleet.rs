@@ -132,6 +132,37 @@ async fn a_sandbox_handed_off_by_one_host_wakes_on_another_with_its_files_and_pr
     two.assert_clean();
 }
 
+/// An adopted sandbox's record keeps the length of the disk it was handed
+/// off with, so what its wake books is its own disk's, never the adopting
+/// host's base image, however much shorter that is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_sandbox_keeps_the_length_of_the_disk_it_was_handed_off_with() {
+    const GROWN: u64 = 1 << 20;
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(4);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["write on-disk"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(one.sandbox_dir(sandbox).join("root/disk.ext4"))
+        .unwrap()
+        .set_len(GROWN)
+        .unwrap();
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let base = std::fs::metadata(two.root.join("base.img")).unwrap().len();
+    assert!(base < GROWN, "the adopting host's base image is shorter");
+    assert_eq!(two.record(sandbox)["allocation"]["disk_bytes"], GROWN);
+    let woken = two.wake(sandbox).await;
+    assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
+    assert_eq!(two.record(sandbox)["allocation"]["disk_bytes"], GROWN);
+    one.assert_clean();
+    two.assert_clean();
+}
+
 /// A guest's memory keeps the latest restore notice it applied, and moves
 /// with the sandbox; the new host's record of it starts afresh, with a
 /// fence lower than the old host's. Its notices still come after the old

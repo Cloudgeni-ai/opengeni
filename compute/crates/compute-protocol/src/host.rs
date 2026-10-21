@@ -615,7 +615,6 @@ pub enum Reply {
         /// The execution that is running. It changes only when the sandbox
         /// boots afresh, which ends every program in it; pass it to later
         /// requests that rely on programs started now.
-        #[serde(default)]
         generation: u64,
     },
     /// The stream to the guest port follows this line.
@@ -625,7 +624,6 @@ pub enum Reply {
         /// Microseconds spent reaching the guest port after waking.
         connect_us: u64,
         /// The execution the stream reached, as in [`Reply::Woken`].
-        #[serde(default)]
         generation: u64,
     },
     /// The host's state.
@@ -635,7 +633,6 @@ pub enum Reply {
         /// What went wrong.
         message: String,
         /// What kind of failure, for callers that act on it.
-        #[serde(default)]
         code: ErrorCode,
     },
 }
@@ -695,7 +692,6 @@ pub struct SandboxStatus {
     pub generation: u64,
     /// The ownership of it this host holds (see [`Request::Adopt`]); 1
     /// outside a fleet.
-    #[serde(default = "first_owner")]
     pub owner_epoch: u64,
     /// How many times its record has been written.
     pub revision: u64,
@@ -706,7 +702,6 @@ pub struct SandboxStatus {
     /// When the store's latest copy of it was made, in milliseconds since
     /// the Unix epoch: what losing this host would go back to. A sandbox
     /// that stays busy is not archived, so this can be long ago.
-    #[serde(default)]
     pub backed_up_ms: Option<u64>,
     /// Whether its running programs survive (a memory image or live VM).
     pub memory_saved: bool,
@@ -717,14 +712,12 @@ pub struct SandboxStatus {
     /// VM processes started for it, boots and restores alike, since the
     /// host agent started: every one the engine saw running, including
     /// those that then failed to boot or restore.
-    #[serde(default)]
     pub launches: u64,
     /// Host memory it holds, when a VM process exists.
     pub resident_bytes: Option<u64>,
     /// Whether no copy of its VM process can be trusted, such as when its
     /// disk may have lost writes: it keeps running and pausing, but sleeps
     /// no deeper than compressed until its VM process is replaced.
-    #[serde(default)]
     pub unsavable: bool,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
@@ -753,10 +746,6 @@ pub struct SandboxStatus {
     /// save that could not be written for want of disk; it is retried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<FailedStep>,
-}
-
-fn first_owner() -> u64 {
-    1
 }
 
 /// A step that failed, with what went wrong.
@@ -830,17 +819,14 @@ pub struct HostStatus {
     pub available_memory: Option<u64>,
     /// Host memory that ending idle, saved VM processes would free at once
     /// without losing anything. Placement can count it as available.
-    #[serde(default)]
     pub reclaimable_memory: u64,
     /// Sandboxes the host cannot manage: their record could not be read,
     /// their recovery or removal failed. Their ids are refused for new
     /// sandboxes and their files and any VM left alone; removing one retries
     /// when its record is readable.
-    #[serde(default)]
     pub blocked: Vec<BlockedSandbox>,
     /// How much memory is promised to sandboxes; `None` on a host that
     /// does not limit what it takes on.
-    #[serde(default)]
     pub capacity: Option<CapacityStatus>,
     /// How much processor time is promised to sandboxes; `None` on a host
     /// that does not guarantee it.
@@ -848,10 +834,8 @@ pub struct HostStatus {
     pub cpu: Option<CpuStatus>,
     /// How much of the local disk saves have booked; `None` on a host that
     /// does not book disk.
-    #[serde(default)]
     pub disk: Option<DiskStatus>,
     /// The warm templates new sandboxes start from, one per shape.
-    #[serde(default)]
     pub templates: Vec<TemplateStatus>,
     /// How long, in milliseconds, memory waking from object storage has
     /// been failing to arrive, because the store does not answer or its
@@ -863,10 +847,8 @@ pub struct HostStatus {
     /// Running sandboxes whose processor use and traffic could not be read
     /// lately. They count as busy, so none falls asleep unseen; a number
     /// above zero means the host's sensing is failing.
-    #[serde(default)]
     pub unseen_activity: usize,
     /// What the host runs.
-    #[serde(default)]
     pub about: About,
 }
 
@@ -924,22 +906,17 @@ pub struct DiskStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct About {
     /// The agent's build: the start of a hash of its executable.
-    #[serde(default)]
     pub build: String,
     /// What memory images made here depend on, such as the VMM's version
     /// and the processor.
-    #[serde(default)]
     pub runtime: String,
     /// How guest memory is backed.
-    #[serde(default)]
     pub memory_profile: String,
     /// The disk image new sandboxes start from: its path, size and last
     /// change.
-    #[serde(default)]
     pub base_image: String,
     /// Whether it checkpoints running sandboxes that ask for it: it has a
     /// store, and files under its state root share extents.
-    #[serde(default)]
     pub checkpoints: bool,
 }
 
@@ -954,16 +931,12 @@ pub struct TemplateStatus {
     pub state: TemplateState,
     /// Ready sandboxes of the shape: restored, warm and paused, waiting
     /// for a create to claim one.
-    #[serde(default)]
     pub ready: u32,
     /// What the ready sandboxes of the shape hold in memory.
-    #[serde(default)]
     pub ready_resident_bytes: u64,
     /// How many ready sandboxes the host keeps of the shape.
-    #[serde(default)]
     pub target: u32,
     /// Ready sandboxes of the shape being filled.
-    #[serde(default)]
     pub filling: u32,
 }
 

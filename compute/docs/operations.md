@@ -711,10 +711,14 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 ## Upgrades
 
 - **Order.** Upgrade every host before the control service. Hosts refuse
-  what they do not know in the service's messages, so a newer service
-  could send an older host something it refuses; the service ignores
-  what it does not know in a host's description and capacity, so newer
-  hosts work with the older service meanwhile.
+  requests they do not know, and fields they do not know in the
+  service's answers to registration and lease renewal, its rulings and
+  sleep settings; they ignore other unknown fields of a request they
+  know.
+  So a newer service could send an older host something it refuses, or
+  a setting it silently ignores. The service ignores what it does not
+  know in a host's description and capacity, so newer hosts work with
+  the older service meanwhile.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
   `install.sh` (without `--config`, the installed configuration stays):

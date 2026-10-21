@@ -29,6 +29,7 @@ use tokio::time::{Instant, sleep};
 
 mod admission;
 mod checkpoint;
+mod disk_lengths;
 mod disk_reading;
 mod fleet;
 mod images;
