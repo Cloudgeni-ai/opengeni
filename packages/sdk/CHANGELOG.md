@@ -1,5 +1,121 @@
 # @opengeni/sdk
 
+## 4.3.1
+
+### Minor Changes
+
+- 49f2177: Agents can record a browser flow as a video. The new `browser_record` tool starts a recording of a managed or attached browser tab and stops it into an MP4 in the chat's workspace, with a log of when each action happened beside it, and publishes the MP4 so it plays in the chat. Frames are captured only when the page changes, so recording costs almost nothing while a page is still, and the video is encoded on the server, so browser hosts need no video encoder. The SDK adds `startBrowserRecording`, `getBrowserRecording` and `saveBrowserRecording`.
+- 03947ed: Keep idle session sidebars quiet using authorized commit-level invalidations on
+  the existing workspace live stream. Web and desktop refresh dirty loaded scopes
+  within the existing 15-second cadence and reconcile on reconnect/focus. Private
+  session IDs are filtered with the same RLS and membership fence as list reads.
+
+  Database hosts using a transaction pooler may configure a separate direct/session
+  notification URL. Older servers, external host ACLs, injected database handles
+  without a listener, and finite HTTP/1 streams keep their polling fallback. The new
+  SDK workspace event is transient and does not advance either durable stream cursor.
+
+- 2963eca: App-shots in the desktop app. When turned on in Settings → Machines, a shortcut (both Command keys on macOS by default) attaches the window you are looking at in another app to the chat you are using: a screenshot plus the window's app, title and the text it shows, including text scrolled out of view. Nothing is sent until you send it, and the attachment can be removed first. The agent receives the window's text as untrusted data inside that message only, so earlier turns stay unchanged. When your computer is connected to the workspace, the agent also learns which machine and window it was, so it can keep working in that window with computer tools; for a browser window it also gets the page address and the browser profile connected through the Opengeni extension, so it can continue in that tab with browser tools. Uploads accept an optional `appShot` description for image files (`uploadFile` in the SDK), and `useFileAttachments` gains `addAppShot`. macOS only for now; Windows and Linux plug into the same capture boundary.
+- 579239a: Sites can be duplicated: `POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate` (SDK `duplicateWorkspaceArtifact`) copies a Site's current version (HTML, source and requested tools) into a new Site owned by the caller, with the original's visibility. The copy is titled "… (copy)" unless a title is given; its publication, Site Data and history stay with the original. The copy references the original's immutable stored content instead of copying bytes, and a retry with the same key replays only a copy of the same Site.
+- ffe09c2: An embedding product can give its agent a few of its own tools from the first request: `toolServer.eager` (and `eager` on a session's `mcpServers` entry or tool reference) now takes a list of tool names. Listed tools are visible from the start and stay visible; the server's other tools remain behind tool search.
+- 1b57d74: Eleven Realtime now listens and replies in the person's language instead of guessing. The voice conversation follows the app language (or the browser's) by default, and the voice model menu has a Language page to pick another one. Realtime controllers accept `getLanguage`, the WebSocket connect request takes an optional BCP 47 `language`, catalog entries for models that need a fixed conversation language list their `languages`, and `@opengeni/react` exports `useRealtimeLanguagePreference`, `realtimeConversationLanguage` and `realtimeAppLanguage`.
+- 277c99c: Add Eleven Realtime voice models (v1 max and v1 mini) on the shared WebSocket voice path. Workspaces connect their own ElevenLabs API key under Settings > Models > Voice, and the voice model hands work to the Opengeni session through the same delegation tool as the other voices. The SDK exports `SESSION_REALTIME_MODELS` and `isSessionRealtimeModel`, and the WebSocket answer may set `transcriptAudioTags` so clients strip expressive audio tags from transcripts.
+- 16781e5: Agents in embedding products no longer see or repeat another product's name.
+
+  - Bundled Skills have neutral names and ids: `builtin:documents`, `builtin:spreadsheets`, `builtin:presentations`, `builtin:sites`, `builtin:visualize`, `builtin:secrets`, `builtin:schedules`, `builtin:projects`, `builtin:skill-management` and `builtin:video-generation`. The former `builtin:opengeni-*` ids stay accepted in requests and stored selections and resolve to the new ids; the SDK keeps them as the deprecated `LegacyBundledSkillId`. `builtin:opengeni-help` and `builtin:opengeni-client` keep their names because they document the platform itself.
+  - Agent instructions, Skill descriptions, tool descriptions and the errors and notices agents and people read describe the workspace rather than naming the platform, for example "Insufficient workspace credits." instead of "Insufficient Opengeni credits.".
+
+- 9976132: Add pooled weekly subscription utilization, estimated plan-size weighting and reset-aware forecasts with one total remaining bar. Retain observed limit history; organization pools cover organization accounts and workspace pools cover all visible accounts available to that workspace, using each account's total usage. Show five-hour limits only when blocking an account; keep individual account details in the account list.
+- 724b529: Session list totals now report an optional `waiting` count of idle sessions parked until they are woken by input or a timer. These sessions remain included in `active` for compatibility. The web console uses the count to show a still clock instead of the working spinner for sessions that are only waiting.
+- 4fadd37: Realtime voice settings are configurable. Each voice model offers what its provider supports: Eleven Realtime takes its built-in voices or any voice in the ElevenLabs account's My Voices by voice ID, a conversation language and turn eagerness; AI Gateway and SuperGrok models take their built-in voices. A workspace saves settings per model in the new `realtimeVoice` workspace setting (Settings > Models > Voice, or `updateWorkspaceSettings`), and an embedding app can set them per session with `voiceSettings` on the stock voice control, `useSessionRealtime` and `prestartSessionRealtime`, or `getVoiceSettings` on SDK realtime controllers. The realtime model catalog lists each model's `voices`, `customVoice`, `turnEagerness` and `voiceDefaults` and the workspace's saved `workspaceVoiceSettings`, the WebSocket connect request takes `voiceSettings`, and the SDK exports `RealtimeVoiceSettings` and `RealtimeTurnEagerness`. Nothing changes until a setting is chosen.
+- 9508318: Live voice models reached over a WebSocket (AI Gateway voices and SuperGrok) now share one path. `POST …/realtime/websocket` and `client.negotiateRealtimeWebsocket` return the provider socket URL, its subprotocols, the wire dialect and the complete provider session configuration, and `createRealtimeWebsocketTransportStarter` opens any of them; the browser no longer carries per-provider configuration. `sessionRealtimeTransportKind` now returns `websocket` for every such model; `gateway` and `xai-subscription` stay in `SessionRealtimeTransportKind` as deprecated names that are no longer returned. `negotiateGatewayRealtime`, `negotiateXaiSubscriptionRealtime` and the two older transport starters keep working and are deprecated.
+- b95784c: Support multiple personal Slack identities with exact-account reconnect, selected-workspace bot availability, and the same bot posting capabilities in scheduled and interactive work. Preserve existing schedule destinations as defaults without adding excluded tools.
+
+  Keep role provisioning compatible with database schemas that predate selected-workspace bot access.
+
+  Add workspace default machines for new chats and schedules that follow the workspace. Preserve accepted execution placement across retries and report unavailable machines without silently choosing another computer.
+
+- 83a467d: Opening a turn's steps now reads large tool outputs as bounded previews instead of whole payloads, so a long turn's steps load in a fraction of the bytes. A row reads its full output once, when it is expanded or when its renderer needs the exact result (screenshots, images, receipts, search results, and custom renderers). Until then its body says the full output is loading, and if that read fails it says the body is a preview and offers Retry. Presented results such as images, published files and Skill or Knowledge writes are still read in full. `listEventPage` and `listEvents` accept `toolOutputs: "preview"`; servers that predate it return exact outputs. `ToolCallItem.outputPreview` and the `ToolOutputPreview` type are new and additive.
+
+  `useSessionEvents().events` now carries those previews for opened turns until a row's exact output is read. A previewed `agent.toolCall.output` payload is marked with `outputPreview` (`truncated: true`, `shape`, `originalBytes`, `previewBytes`); with `shape: "text"` its `output` is the head and tail of the output's text rather than the original value. Code that reads tool outputs from `events` should treat a payload with `outputPreview` as partial, and read the exact event with `listEventPage` when it needs it.
+
+- 67262de: Adds the Ultrafast speed for GPT-6 Astra and GPT-6.1 Sol. When a model offers it, the model picker replaces the Fast toggle with a Speed choice (Standard, Fast, Ultrafast) and shows what the faster speeds cost: 8× usage on a ChatGPT/Codex plan, or the rate multiple on metered routes. A Codex account offers Ultrafast only when its own model list advertises the tier, so the picker shows it only when some account serving the workspace can run it, and an Ultrafast turn is placed only on such an account. Ultrafast requests use `service_tier: "ultrafast"`, and a response served at a lower tier is not counted as Ultrafast. Turns accepted before a model declared Ultrafast keep running unchanged.
+
+### Patch Changes
+
+- bf39d5e: Show ambiguous Connected Machine command outcomes as uncertain instead of successful, including when command details are hidden. Preserve the existing warning to inspect effects before retrying; command execution and retry behavior are unchanged.
+- fda625e: Upgrade the Bun runtime, bundler, test runner and package-manager pins to 1.4.3,
+  and use exact-pinned tsrs for CLI typechecks while retaining stable TypeScript
+  for declaration emission and editor/tooling compatibility. Preserve strict
+  protobuf partial-constructor checks under TypeScript 7.1 without changing the
+  wire codec, and make existing source annotations compatible with the new checker.
+  Regenerate the checked-in Site browser runtime with the pinned Bun bundler.
+- b20c9b2: Retain bounded agent-update blocker categories/counts and show their report age
+  and elapsed holds in Machines and fleet, without disclosing private session IDs. Distinguish controller work
+  from native request admission without changing update safety, killing work or
+  adding command deadlines. Older agents that cannot identify a blocker remain
+  explicitly unspecified. These diagnostics do not establish the cause of an earlier
+  hold whose admission snapshot was not retained.
+- 70f0522: A chat whose sandbox workspace cannot be restored is no longer stranded: the current archive can be retried on a new attempt, a cold workspace follows the session's selected sandbox backend, and a person can explicitly continue with an empty workspace. The agent then sees a filesystem-discontinuity notice on every later turn, appended at the end of its history.
+- c236847: Live voice connects and answers faster. The microphone is requested alongside the begin request, WebSocket voices prepare capture while the provider session is minted, and microphone audio leaves the browser in 20 ms AudioWorklet frames instead of ~170 ms blocks. `prestartSessionRealtime` lets a host start voice for a session it has just created while it navigates; the session view's `useSessionRealtime` adopts that call. A delegated turn's spoken result is fetched as soon as the session reports the turn's outcome rather than on the next one-second sync.
+- 23fed2a: Chat history no longer depends on the server and `@opengeni/react` being released in a particular order. The events API now says when it applies the conversation filter (`X-OpenGeni-Conversation-Filter: 2`, read as `SessionEventPage.conversationFilter`). When a server does not say so, the React history reads keep tool calls in and drop the ones that are not presented in the browser, so an older server that ignores `presentedToolCalls` no longer makes images, published files or Skill cards vanish from history.
+
+  A long turn's model bookkeeping also stops filling the history window: each model call's `agent.model.request` and `agent.model.usage` rows load with the turn's steps. The server keeps the request rows up to a turn's first model response, which draw its startup phase, and every bookkeeping row of a turn that has no other steps, so what the conversation shows is unchanged. `createEmbeddedSessionClient` now keeps `listEventPage` when the base client has it.
+
+- 427f2a5: Leave existing standalone agents untouched when the desktop app opens. Explicit
+  signed-in setup reuses their service and signed installation, preserving macOS
+  privacy grants. Service-backed pause/resume persists across logins; quitting the
+  desktop does not stop the service. Permission guidance uses the running agent's
+  reported grants rather than probing the desktop app. Existing agents require
+  the matching native release with structured service inspection before management.
+- 2058cd3: Record the one-off release-policy decision for PR5165. Bendik (bendik@cloudgeni.ai) approved shipping the existing declaration unchanged—SDK/contracts minor and React patch—at **06:21 UTC on October 21, 2026** (PR5165 comment6309551766). This documentation-only patch entry does not replace or change that declaration. The decision is recorded in the append-only exception log in `docs/design/api-compatibility-policy.md` and resolves the previously pending version-policy decision described in the realtime response compatibility note.
+
+  `sessionRealtimeTransportKind` now returns `websocket` rather than the deprecated `gateway` and `xai-subscription` names. Update comparisons and switch branches that depended on those return values. The legacy negotiation helpers and transport starters remain available and deprecated; their continued presence does not preserve the old helper return values or old strict response shape.
+
+  The rationale is that the bounded audit found **no known incompatible production consumer**, not proof of zero usage. Historical Gateway counters exist, callers remain unidentified, and deployed client bundles were not proven. This is an explicit one-off exception to the usual major-version/retained-behaviour sequence, not a security exception or permission to weaken future compatibility review.
+
+  The existing response compatibility disclosure remains applicable: validators must allow `protocol`, `protocols`, and nullable `sessionUpdate`; new clients require compatible server responses and do not gain an old-server 404 downgrade. Published Site embedded chat remains HTTP/SSE, with Site voice pre-existing unsupported and outside this release's scope. This note does not qualify bidirectional rollout/rollback or grant release clearance; independent review and normal release gates remain required.
+
+- 3915617: Document the realtime WebSocket response compatibility boundary. Negotiation responses, including the legacy Gateway and SuperGrok route aliases, now include `protocol` (the wire dialect), `protocols` (WebSocket subprotocols), and `sessionUpdate` (the initial client event, or `null` when the mint already configured the session). Consumers must handle nullable `sessionUpdate` rather than always sending an event.
+
+  Older exported strict response validators reject the added fields. Update custom validators to the current response contract, including these fields and their allowed values; retaining a legacy route or method name does not make its response satisfy the old strict schema. Controlled tests of the old official SDK handshake accepted the added metadata because those methods do not apply that strict response parser. This is not a guarantee for every cached or third-party client, live audio, or deployed authentication path.
+
+  New clients require a compatible server. The new SDK requests `/realtime/websocket` without a 404 downgrade, and the new transport still requires the new response metadata when using an older negotiation method. Serve new client assets only with compatible server responses; rolling back the server while new clients remain loaded is not a qualified compatibility path.
+
+  The bounded consumer audit found no known incompatible production consumer, not zero usage: historical Gateway counters exist, callers remain unidentified, and deployed client bundles were not proven. Validate your own consumers before upgrading.
+
+  Published Site embedded chat remains HTTP/SSE. Site voice was already unsupported and is outside this release's scope; this change does not add Site voice or a Site WebSocket proxy.
+
+  This is a documentation-only clarification. It does not change the transport-kind behavior or settle the separate release-version decision for that change.
+
+- 908c0d3: Dispose warmed audio capture and stop all captured media tracks when realtime WebSocket startup fails, including synchronous socket construction, negotiation and asynchronous opening failures. Successful connection and normal stop ownership are unchanged.
+- b603f10: Tool review details now list a Gmail selection by subject and sender instead of bare message IDs. `ToolReviewDetailsPage` items gain an optional `detail` line, which `ToolActionReviewDetails` renders under each row.
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [d81c315]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [23fed2a]
+- Updated dependencies [16781e5]
+- Updated dependencies [9976132]
+- Updated dependencies [724b529]
+- Updated dependencies [3915617]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/contracts@4.3.0
+  - @opengeni/connect@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes
