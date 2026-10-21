@@ -7409,6 +7409,11 @@ type McpPublicErrorFields = {
   serverId?: string;
   status?: number;
   retryable?: boolean;
+  /** Error class name, SDK or numeric error code and validation violation; never message text. */
+  causeName?: string;
+  causeCode?: string;
+  causeNumber?: number;
+  violation?: string;
   origin: "runtime";
 };
 
@@ -7461,6 +7466,28 @@ function mcpErrorFields(
     }
   } catch {
     // Retry classification is also a public projection and must remain inert.
+  }
+  try {
+    if (error && typeof error === "object") {
+      const name = (error as { name?: unknown }).name;
+      if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) {
+        fields.causeName = name;
+      }
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code)) {
+        fields.causeCode = code;
+      } else if (typeof code === "number" && Number.isInteger(code)) {
+        fields.causeNumber = code;
+      }
+      const data = (error as { data?: unknown }).data;
+      const violation =
+        data && typeof data === "object" ? (data as { violation?: unknown }).violation : undefined;
+      if (typeof violation === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(violation)) {
+        fields.violation = violation;
+      }
+    }
+  } catch {
+    // The cause projection is diagnostic only and must remain inert.
   }
   return fields;
 }
