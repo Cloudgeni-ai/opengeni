@@ -701,7 +701,29 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         if (fixture.name === "markdown-long") {
           const find = conversationFind(page);
           const scroller = page.locator("[data-og-timeline-scroller]");
-          const beforeClose = await scroller.evaluate((node) => node.scrollTop);
+          // The open Find strip sits above the timeline, so closing it gives the
+          // timeline that height back. The reader's place must not move on
+          // screen: the passage keeps its position and the timeline scrolls by
+          // exactly the height it gained, no more.
+          const readingPoint = () =>
+            scroller.evaluate((node) => {
+              const walker = node.ownerDocument.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+              let passageTop: number | null = null;
+              while (walker.nextNode()) {
+                // While Find is open the match sits in its own highlight node.
+                if (!walker.currentNode.textContent?.includes("final passage")) continue;
+                const range = node.ownerDocument.createRange();
+                range.selectNodeContents(walker.currentNode);
+                passageTop = range.getBoundingClientRect().top;
+              }
+              return {
+                passageTop,
+                scrollTop: node.scrollTop,
+                timelineTop: node.getBoundingClientRect().top,
+              };
+            });
+          const beforeClose = await readingPoint();
+          expect(beforeClose.passageTop).not.toBeNull();
           await find
             .getByRole("button", { name: "Close conversation search", exact: true })
             .click();
@@ -710,8 +732,17 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
             // Closing Find retains the bounded source excerpt. Verify both
             // scroll position and the reading point, not only scrollTop.
             await expectTextInTimelineView(page, /farneedle final passage/);
+            const afterClose = await readingPoint();
+            expect(afterClose.passageTop).not.toBeNull();
+            expect(Math.abs(afterClose.passageTop! - beforeClose.passageTop!)).toBeLessThanOrEqual(
+              2,
+            );
             expect(
-              Math.abs((await scroller.evaluate((node) => node.scrollTop)) - beforeClose),
+              Math.abs(
+                afterClose.scrollTop -
+                  beforeClose.scrollTop -
+                  (afterClose.timelineTop - beforeClose.timelineTop),
+              ),
             ).toBeLessThanOrEqual(2);
             expect(
               await page.evaluate(() => {
