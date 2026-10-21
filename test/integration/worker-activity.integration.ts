@@ -4000,6 +4000,8 @@ describe("worker activities integration", () => {
       metadata: {},
     });
     const workflowWakes: unknown[] = [];
+    const model = new ScriptedModel([{ outputText: "should not run" }]);
+    const balanceBefore = await getBillingBalance(dbClient.db, grant.accountId);
     const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -4010,12 +4012,11 @@ describe("worker activities integration", () => {
       wakeSessionWorkflow: async (input) => {
         workflowWakes.push(input);
       },
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "ok" }]),
-      }),
+      runtime: createProductionAgentRuntime({ model }),
     });
     const producerKey = `paused-fire:${crypto.randomUUID()}`;
     const sessionsBefore = await listSessions(dbClient.db, grant.workspaceId);
+    expect(sessionsBefore).toEqual([]);
 
     const first = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
@@ -4023,6 +4024,8 @@ describe("worker activities integration", () => {
       triggerType: "scheduled",
       producerKey,
     });
+    const firstRuns = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(firstRuns).toHaveLength(1);
     const retry = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId: task.id,
@@ -4039,11 +4042,49 @@ describe("worker activities integration", () => {
     expect(await listSessions(dbClient.db, grant.workspaceId)).toHaveLength(sessionsBefore.length);
     expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
       expect.objectContaining({
+        id: firstRuns[0]!.id,
+        producerKey,
         status: "skipped",
         error: "scheduled_workspace_paused",
         sessionId: null,
+        triggerEventId: null,
       }),
     ]);
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) => {
+      const [state] = await db.execute(dbSql`
+        select workspace_state,
+          (select count(*)::int from session_turns
+            where workspace_id = ${grant.workspaceId}::uuid) as turns,
+          (select count(*)::int from session_events
+            where workspace_id = ${grant.workspaceId}::uuid) as events,
+          (select count(*)::int from session_system_updates
+            where workspace_id = ${grant.workspaceId}::uuid) as updates
+        from workspace_inference_controls
+        where workspace_id = ${grant.workspaceId}::uuid
+      `);
+      expect(state).toMatchObject({ workspace_state: "paused", turns: 0, events: 0, updates: 0 });
+    });
+    expect((await requireScheduledTask(dbClient.db, grant.workspaceId, task.id)).status).toBe(
+      "active",
+    );
+    expect(model.calls).toBe(0);
+    expect((await getBillingBalance(dbClient.db, grant.accountId)).balanceMicros).toBe(
+      balanceBefore.balanceMicros,
+    );
+    const usage = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 100,
+    });
+    expect(
+      usage.filter((event) =>
+        ["agent_run.created", "model.tokens", "model.cost"].includes(event.eventType),
+      ),
+    ).toEqual([]);
+    // Occurrence bookkeeping is retained exactly once; it is not model spend.
+    const fired = usage.filter((event) => event.eventType === "scheduled_task.fired");
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toMatchObject({ sourceResourceId: firstRuns[0]!.id, quantity: 1 });
   });
 
   test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
