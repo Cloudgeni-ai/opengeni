@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`ffae8ecee2999a7c650c6b3fb7398b40919a8eb9`: upstream `cua-driver-rs-v0.37.0`
+`2007730a65f0685968f92298e9bb662a5694bbd8`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -11,7 +11,11 @@ acting on a lookalike found again by role and label, or re-sending a refused
 menu-bar token click as `invoke_menu`, and a macOS launch of an app that is
 already running that sends a reopen (`aevt/rapp`) instead of a second open
 event, so a running document app with no window shows its window or Open panel
-again, in the background. `@trycua/cua-driver` 0.37.0
+again, in the background. On macOS it also focuses an element on its own (a
+`click` with `action:"focus"` sets `AXFocused` and reads it back, refusing with
+`focus_refused`), and lists app windows at the floating and modal-panel levels
+(3 and 8) as well as normal windows, so a first-run modal dialog is visible.
+`@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
 A `computer_act` batch runs as one `run_steps` call only where the worker offers
@@ -118,7 +122,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/ffae8ecee2999a7c650c6b3fb7398b40919a8eb9/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/2007730a65f0685968f92298e9bb662a5694bbd8/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
