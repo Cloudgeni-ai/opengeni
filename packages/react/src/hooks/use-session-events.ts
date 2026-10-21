@@ -988,8 +988,10 @@ export function useSessionEvents(
     // REJOIN_STALL_TIMEOUT_MS, and a late result is fenced out of the view
     // (reads without a signal can only be outwaited). A `strict` attempt
     // that failed transiently or stalled resolves the cause so the caller
-    // retries; any other failure resolves "joined", which replays exactly
-    // from where the view stands.
+    // retries; a lenient one that stalled resolves "joined", which replays
+    // exactly from where the view stands. Read failures are translated where
+    // they happen, so anything else is a bug applying the result: it throws
+    // rather than passing for a rejoin.
     const boundedRejoin = async (
       strict: boolean,
       join: (scope: RejoinScope) => Promise<RejoinOutcome>,
@@ -1032,7 +1034,7 @@ export function useSessionEvents(
             : "joined";
         }
         if (strict && isRetryableStreamError(cause)) return { retry: cause };
-        return "joined";
+        throw cause;
       } finally {
         clearTimeout(timer);
         controller.signal.removeEventListener("abort", abortAttempt);
@@ -1062,15 +1064,35 @@ export function useSessionEvents(
       if (!isCurrent()) throw abortError();
       const strict = strictFailures < STRICT_REJOIN_ATTEMPTS;
       const mark = sessionDetailReadMark();
-      const result = await boundedRejoin(strict, async (scope) => {
-        if ((await rejoinLive(true, { strict, mark, scope })) === "joined") return "joined";
-        if (!(await loadLatestWindow(scope))) throw abortError();
-        // The fresh window's own gap is short: join its head the same way.
-        if ((await rejoinLive(true, { strict, mark, scope })) === "reload" && strict) {
-          throw new TypeError("the session outran a fresh window while rejoining it");
-        }
-        return "joined";
-      });
+      let result: RejoinOutcome | { retry: unknown };
+      try {
+        result = await boundedRejoin(strict, async (scope) => {
+          if ((await rejoinLive(true, { strict, mark, scope })) === "joined") return "joined";
+          let loaded: boolean;
+          try {
+            loaded = await loadLatestWindow(scope);
+          } catch (cause) {
+            if (!scope.isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
+            // A window that cannot be read: replay exactly instead.
+            return "joined";
+          }
+          if (!loaded) throw abortError();
+          // The fresh window's own gap is short: join its head the same way.
+          if ((await rejoinLive(true, { strict, mark, scope })) === "reload" && strict) {
+            throw new TypeError("the session outran a fresh window while rejoining it");
+          }
+          return "joined";
+        });
+      } catch (cause) {
+        if (!isCurrent()) throw abortError();
+        // Not a read failure: end the stream visibly instead of letting the
+        // SDK retry it forever.
+        if (!isRetryableStreamError(cause)) throw cause;
+        throw new Error(
+          `rejoining the live session failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          { cause },
+        );
+      }
       if (!isCurrent()) throw abortError();
       if (typeof result === "object") {
         strictFailures += 1;
