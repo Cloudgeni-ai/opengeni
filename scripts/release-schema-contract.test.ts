@@ -2325,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0884_subscription_core_personal_quarantine_expiry.sql",
       "0883_retired_instance_interactions.sql",
       "0882_continuable_core_capacity_waits.sql",
       "0881_knowledge_scope_expression.sql",
