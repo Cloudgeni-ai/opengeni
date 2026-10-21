@@ -5,6 +5,79 @@ const workflow = (name: string) =>
 const queue = workflow("merge-queue");
 const ci = workflow("ci");
 
+type JobResult = "success" | "failure" | "cancelled" | "skipped";
+type RunScenario = {
+  event: string;
+  ref: string;
+  workflowCancelled: boolean;
+  mode: string;
+  results: Record<string, JobResult>;
+};
+
+/** Transitive `needs` ancestry of one job in the parsed workflow. */
+function ancestry(jobs: Record<string, any>, job: string): Set<string> {
+  const seen = new Set<string>();
+  const visit = (name: string) => {
+    const needs = jobs[name]?.needs ?? [];
+    for (const need of Array.isArray(needs) ? needs : [needs]) {
+      if (!jobs[need]) throw new Error(`${name} needs unknown job ${need}`);
+      if (!seen.has(need)) {
+        seen.add(need);
+        visit(need);
+      }
+    }
+  };
+  visit(job);
+  return seen;
+}
+
+/** Top-level `&&` atoms of a job condition; anything outside the modelled grammar throws. */
+function conditionAtoms(condition: string): string[] {
+  const body = /^\$\{\{ (.+) \}\}$/su.exec(condition)?.[1];
+  if (!body) throw new Error(`Condition is not one expression: ${condition}`);
+  const unmodelled = body.replace(/!?\b(?:success|always|cancelled|failure)\(\)/gu, "");
+  if (/\|\||[()]/u.test(unmodelled)) throw new Error(`Unmodelled condition grammar: ${condition}`);
+  return body.split("&&").map((atom) => atom.trim());
+}
+
+/**
+ * Models GitHub's documented job-condition semantics for the atoms used here:
+ * without an explicit status function GitHub prepends success(), and success()
+ * requires every transitive ancestor to have succeeded, so a skipped ancestor
+ * skips the job. Unknown atoms or contexts fail the test instead of passing.
+ */
+function jobRuns(jobs: Record<string, any>, job: string, condition: string, run: RunScenario) {
+  const atoms = conditionAtoms(condition);
+  const statusAtoms = atoms.filter((atom) =>
+    /^!?(?:success|always|cancelled|failure)\(\)$/u.test(atom),
+  );
+  const effective = statusAtoms.length ? atoms : ["success()", ...atoms];
+  const value = (path: string) => {
+    if (path === "github.event_name") return run.event;
+    if (path === "github.ref") return run.ref;
+    if (path === "needs.plan.outputs.mode") return run.mode;
+    const result = /^needs\.([\w-]+)\.result$/u.exec(path)?.[1];
+    if (
+      result &&
+      (Array.isArray(jobs[job].needs) ? jobs[job].needs : [jobs[job].needs]).includes(result)
+    )
+      return run.results[result];
+    throw new Error(`Unmodelled context ${path}`);
+  };
+  return effective.every((atom) => {
+    if (atom === "!cancelled()") return !run.workflowCancelled;
+    if (atom === "always()") return true;
+    if (atom === "success()")
+      return (
+        !run.workflowCancelled &&
+        [...ancestry(jobs, job)].every((name) => run.results[name] === "success")
+      );
+    const comparison = /^([\w.-]+) == '([^']*)'$/u.exec(atom);
+    if (!comparison) throw new Error(`Unmodelled condition atom ${atom}`);
+    return value(comparison[1]!) === comparison[2];
+  });
+}
+
 test("queue checks cover PR entry and the exact combined merge group", () => {
   expect(queue.on.pull_request.branches).toEqual(["main"]);
   expect(queue.on.merge_group.types).toEqual(["checks_requested"]);
@@ -87,13 +160,78 @@ test("main full CI cannot be cancelled by a new push and publishes only full exa
     "images",
     "merge-content",
   ]);
-  expect(ci.jobs["full-green"].if).toContain("success()");
-  expect(ci.jobs["full-green"].if).toContain("needs.plan.outputs.mode == 'full'");
-  expect(ci.jobs["full-green"].if).toContain("github.ref == 'refs/heads/main'");
   expect(ci.jobs["full-green"].permissions).toEqual({ contents: "read", statuses: "write" });
   expect(workflow("merge-content").concurrency).toBeUndefined();
   expect(ci.jobs["merge-content"].steps.at(-1).run).toContain("--since-full-green");
   expect(ci.jobs["full-green"].steps[0].run).toContain("/attempts/$GITHUB_RUN_ATTEMPT");
+});
+
+test("full-green publishes only for a non-cancelled full main push whose direct needs all succeeded", () => {
+  const job = ci.jobs["full-green"];
+  const needs: string[] = job.needs;
+  const atoms = conditionAtoms(job.if);
+  expect(atoms).toContain("!cancelled()");
+  expect(atoms).not.toContain("success()");
+  expect(atoms).not.toContain("always()");
+  for (const need of needs) expect(atoms).toContain(`needs.${need}.result == 'success'`);
+  for (const predicate of [
+    "github.event_name == 'push'",
+    "github.ref == 'refs/heads/main'",
+    "needs.plan.outputs.mode == 'full'",
+  ])
+    expect(atoms).toContain(predicate);
+
+  // A full main push: every ancestor succeeds except the dispatch-only
+  // Version admission job, which is always skipped on push.
+  const ancestors = ancestry(ci.jobs, "full-green");
+  expect(ancestors.has("automation-admission")).toBe(true);
+  expect(ci.jobs["automation-admission"].if).toBe(
+    "${{ github.event_name == 'workflow_dispatch' }}",
+  );
+  const results = Object.fromEntries([...ancestors].map((name) => [name, "success"])) as Record<
+    string,
+    JobResult
+  >;
+  results["automation-admission"] = "skipped";
+  const green: RunScenario = {
+    event: "push",
+    ref: "refs/heads/main",
+    workflowCancelled: false,
+    mode: "full",
+    results,
+  };
+  const runs = (patch: Partial<RunScenario>) =>
+    jobRuns(ci.jobs, "full-green", job.if, { ...green, ...patch });
+
+  expect(runs({})).toBe(true);
+  // The former gate never published from a push because of that skipped ancestor.
+  const former =
+    "${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}";
+  expect(jobRuns(ci.jobs, "full-green", former, green)).toBe(false);
+  expect(
+    jobRuns(ci.jobs, "full-green", former, {
+      ...green,
+      results: { ...results, "automation-admission": "success" },
+    }),
+  ).toBe(true);
+
+  for (const need of needs)
+    for (const result of ["failure", "cancelled", "skipped"] as const)
+      expect([need, result, runs({ results: { ...results, [need]: result } })]).toEqual([
+        need,
+        result,
+        false,
+      ]);
+  expect(runs({ workflowCancelled: true })).toBe(false);
+  for (const event of ["pull_request", "workflow_dispatch", "schedule", "merge_group"])
+    expect([event, runs({ event })]).toEqual([event, false]);
+  for (const ref of [
+    "refs/heads/production",
+    "refs/heads/changeset-release/main",
+    "refs/heads/queue/x",
+  ])
+    expect([ref, runs({ ref })]).toEqual([ref, false]);
+  for (const mode of ["impact", "docs", ""]) expect([mode, runs({ mode })]).toEqual([mode, false]);
 });
 
 test("queue source retains committed runtime and outstanding release-plan contracts", () => {

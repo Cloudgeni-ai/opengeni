@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "2cd8a9448b7a4c2837f5e43aad74fc3f9dec602ebeccb58070c56e0b15ade424"
+      "sha256": "cb8f9aa72be70cdf78a3ead50ead5e63c58cb8f9fe96442bc6c6fb4d56933da6"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
