@@ -1,5 +1,5 @@
-import { capabilityCuration, domainFromUrl } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import { capabilityCuration, domainFromUrl } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    Product words for catalog connections. The catalog stores what the backend

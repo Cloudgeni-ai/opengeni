@@ -1,24 +1,24 @@
 import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
-} from "../src/components/repository-picker";
-import { FollowUpRepositoryMenuBody } from "../src/components/follow-up-repository-menu-body";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+} from "@opengeni/react/app/components/repository-picker";
+import { FollowUpRepositoryMenuBody } from "@opengeni/react/app/components/follow-up-repository-menu-body";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   SessionSecretsMenuBody,
   draftSecretsRows,
   sessionSecretsSummary,
-} from "../src/components/secrets/session-secrets-panel";
-import type { GitHubRepository } from "../src/types";
-import type { SessionToolSelection } from "../src/components/pickers";
+} from "@opengeni/react/app/components/secrets/session-secrets-panel";
+import type { GitHubRepository } from "@opengeni/react/app/types";
+import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
 import type { AgentLearningOverrides, VaultPolicy, VaultSummary } from "@opengeni/sdk";
 import "../src/styles.css";
 
 const AgentLearningSettingsEditor = lazy(() =>
-  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+  import("@opengeni/react/app/components/knowledge/agent-learning-settings").then((module) => ({
     default: module.AgentLearningSettingsEditor,
   })),
 );

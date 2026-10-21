@@ -17,7 +17,7 @@ if (process.argv.includes("--check")) {
 // Preview/export copies are generated from the same source as the chat renderer.
 const skillAssets = resolve(
   import.meta.dir,
-  "../packages/runtime/src/bundled_default_skills/opengeni-visualize/assets",
+  "../packages/runtime/src/bundled_default_skills/visualize/assets",
 );
 for (const [name, content] of [
   ["base.css", css],

@@ -145,7 +145,16 @@ describe("session-only entry", () => {
     );
     // Retained conversation views for a reopen, on the shared-query store.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
-    expect(reactSources.length).toBe(39);
+    // Custom layouts mark an open conversation read through the shared hook and its pure model.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/hooks/use-session-read-acknowledgement.ts")),
+    ).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/session-attention-model.ts"))).toBe(true);
+    // Dependency-free turnless-output gap signal the live history shares with the terminal.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/turnless-output-gaps.ts"))).toBe(true);
+    // Exact reads of tool outputs a turn's step page delivered as previews.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/tool-output-reads.ts"))).toBe(true);
+    expect(reactSources.length).toBe(44);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

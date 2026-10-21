@@ -49,6 +49,7 @@ import {
 } from "@opengeni/runtime";
 import {
   listFleet,
+  buildFleetContextForSession,
   provisionSandbox,
   runOnSandbox,
   swapActiveSandbox,
@@ -527,6 +528,27 @@ async function seedPersonalMachineChat(sandboxBackend: "none" | "selfhosted") {
 }
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
+  test("command custody remains independent of a personal-machine human subject", async () => {
+    if (!available) return;
+    const { ctx } = await seedFleet();
+    const commandAttempt = {
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+    };
+    const built = await buildFleetContextForSession(
+      { db },
+      {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId,
+        commandAttempt,
+      },
+    );
+    expect(built.commandAttempt).toEqual(commandAttempt);
+    expect(built.subjectId).toBeUndefined();
+    expect(built.attemptAuthority).toBeUndefined();
+  });
   test("a personal Connected Machine remains operational from another authorized workspace", async () => {
     if (!available) return;
     const {
@@ -550,6 +572,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       code: "personal_machine_permission_required",
     });
     expect(refused.reason).toContain("its owner has not allowed this chat");
+    expect(refused.reason).toContain("capability_authorization_request");
     expect(refused.reason).not.toContain("Failed query");
     const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
       kind: "exec",
@@ -557,6 +580,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
     expect(refusedRun.ok).toBe(false);
     expect(refusedRun.reason).toContain("its owner has not allowed this chat");
+    expect(refusedRun.code).toBe("personal_machine_permission_required");
     await allowThisChat();
     const withoutAttempt: FleetContext = {
       accountId: ctx.accountId,

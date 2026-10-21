@@ -24,7 +24,9 @@ import {
   type ComputerImageFrame,
   type ComputerSupervisorDriver,
   type ComputerSupervisorDriverContext,
+  type ControllerFailureContext,
 } from "../src";
+import { InteractionControllerError } from "@opengeni/interaction";
 
 const adminToken = `admin.${"a".repeat(48)}`;
 const controlToken = `control.${"c".repeat(48)}`;
@@ -334,6 +336,40 @@ describe("Computer routes on the placement interaction server", () => {
       );
     },
   );
+
+  test("a driver failure tells operators its class and function, never its variable text", async () => {
+    const reported: Array<{ error: unknown; context: ControllerFailureContext }> = [];
+    await withServer(
+      async ({ server, reference, getDriver }) => {
+        const created = await request(server, "/v1/computer-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const message = "CUA list_windows did not return a valid result: Payroll 2026 - Numbers";
+        getDriver().listTargetsError = new InteractionControllerError("driver_failed", message);
+        const failed = await request(
+          server,
+          `/v1/computer-sessions/${reference.computerSessionId}/targets`,
+          { token: viewToken },
+        );
+        expect(failed.status).toBe(500);
+        const body = await json(failed);
+        // The caller's error is unchanged; the diagnostic rides beside it.
+        expect(body.error).toEqual({ code: "driver_failed", message, retryable: false });
+        expect(body.diagnostic.errorClass).toBe("InteractionControllerError");
+        expect(JSON.stringify(body.diagnostic)).not.toContain("Payroll");
+        expect(reported).toHaveLength(1);
+        expect(reported[0]?.context).toEqual({
+          method: "GET",
+          pathname: `/v1/computer-sessions/${reference.computerSessionId}/targets`,
+          kind: "driver_failed",
+        });
+      },
+      { onUnexpectedError: (error, context) => reported.push({ error, context }) },
+    );
+  });
 
   test("share Browser authority, fencing, media, rotation, and lifecycle semantics", async () => {
     await withServer(async ({ server, reference }) => {
@@ -899,7 +935,10 @@ async function withServer(
     reference: { computerSessionId: string; controllerGeneration: string };
     getDriver: () => FixtureComputerDriver;
   }) => Promise<void>,
-  options: { rfbPort?: number } = {},
+  options: {
+    rfbPort?: number;
+    onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+  } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/og-computer-server-");
   const browserSupervisor = await BrowserSupervisor.open({
@@ -923,6 +962,7 @@ async function withServer(
     computerSupervisor,
     adminToken,
     port: 0,
+    ...(options.onUnexpectedError ? { onUnexpectedError: options.onUnexpectedError } : {}),
   });
   try {
     await callback({
@@ -963,7 +1003,10 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     private readonly includeScreen = false,
   ) {}
 
+  listTargetsError: Error | null = null;
+
   async listTargets(): Promise<ComputerTarget[]> {
+    if (this.listTargetsError) throw this.listTargetsError;
     return this.includeScreen
       ? [this.buildTarget(), this.buildScreenTarget()]
       : [this.buildTarget()];

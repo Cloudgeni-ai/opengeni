@@ -2,7 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 
 import { OrganizationCreditBalance } from "../../../src/components/organization-credit-balance";
-import type { BillingSummary } from "../../../src/types";
+import type { BillingSummary } from "@opengeni/react/app/types";
 import "../../../src/styles.css";
 
 const sample = (balanceMicros: number): BillingSummary =>

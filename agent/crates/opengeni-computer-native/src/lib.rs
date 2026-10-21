@@ -16,6 +16,7 @@ mod linux_pointer;
 mod model;
 mod rpc;
 mod tree;
+mod window_command;
 #[cfg(any(target_os = "linux", test))]
 mod window_input_fences;
 
@@ -32,6 +33,9 @@ pub use adapter::{
 pub use model::*;
 pub use rpc::{run_native_rpc, NativeRpcServerError, NATIVE_RPC_PROTOCOL_VERSION};
 pub use tree::{RawSemanticNode, SemanticSnapshotIndex};
+pub use window_command::{
+    answer_window_command, run_window_command, WindowBounds, WindowPresence, WindowQuery,
+};
 
 /// Opens the native adapter for the current desktop seat.
 ///

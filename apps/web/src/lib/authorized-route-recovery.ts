@@ -1,6 +1,6 @@
-import type { AccessContext, Workspace } from "@/types";
+import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
-import { workspaceSessionsPath } from "./routes";
+import { workspaceSessionsPath } from "@opengeni/react/app/lib/routes";
 
 export type RouteRecoveryLocation = Pick<Location, "pathname" | "search" | "hash">;
 

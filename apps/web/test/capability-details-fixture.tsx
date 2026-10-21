@@ -6,7 +6,7 @@ import "@opengeni/react/connect.css";
 import {
   CapabilityDetailSheet,
   DetailBody,
-} from "../src/components/capabilities/capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import { CatalogItemPage } from "../src/components/capabilities/catalog-item-page";
 import { IntegrationSheet } from "../src/components/capabilities/integration-sheet";
 import "../src/styles.css";

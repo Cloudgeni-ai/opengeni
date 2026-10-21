@@ -2,6 +2,7 @@ import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { QuoteIcon } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { usePortalContainer } from "../ui/portal-container";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import type { TimelineAnnotationSourceDescriptor } from "../timeline";
 import {
@@ -167,6 +168,7 @@ export function TimelineAnnotationSelection({
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const initialSelectionObservedRef = useRef(false);
   const pointerOriginRef = useRef<"unset" | "inside" | "outside">("unset");
+  const portalContainer = usePortalContainer();
   const portalStyle = usePortalTokenStyle(rootRef.current);
 
   useEffect(() => {
@@ -268,7 +270,7 @@ export function TimelineAnnotationSelection({
         </span>
       </span>
     </button>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 

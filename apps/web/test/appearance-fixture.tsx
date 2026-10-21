@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
-import { AppearanceProvider } from "../src/lib/appearance";
+import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import { AppearanceMenu } from "../src/components/appearance-menu";
 import {
   DropdownMenu,
@@ -8,8 +8,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "../src/components/ui/dropdown-menu";
-import { Toaster } from "../src/components/ui/sonner";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Toaster } from "@opengeni/react/app/components/toaster";
 import { toast } from "sonner";
 import "../src/styles.css";
 

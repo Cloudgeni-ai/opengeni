@@ -666,7 +666,7 @@ describe("CodemodeClient", () => {
               error: {
                 status: 503,
                 code: "upstream_unavailable",
-                message: "Opengeni is temporarily unavailable. Retry shortly.",
+                message: "The workspace is temporarily unavailable. Retry shortly.",
                 retryable: true,
                 outcomeUnknown: true,
               },

@@ -15,7 +15,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { agentActingAsPerson } from "../http/acting-person";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { managedCookieHuman } from "./supergrok";
 
 /** The database rechecks current organization membership/key authority at commit. */

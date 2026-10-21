@@ -1,5 +1,53 @@
 # Modular prompt changelog
 
+A Word, Excel, PDF or PowerPoint file the user sends to be changed is now
+edited in the sandbox with ordinary tools (python-docx, openpyxl, pandoc,
+LibreOffice), checked and published, and so is a new file the user asks for in
+such a format unless the artifact export tool lists that format. Before, the
+routing sentence sent "a document or file (for example a DOCX or PDF)" to native
+document artifacts and forbade a sandbox DOCX, but stock deployments export only
+spreadsheet XLSX, and deployments without the artifact materializer export
+nothing. An agent asked for a Word or Excel file built a native artifact and
+then reported that export was unavailable, and a sent DOCX or XLSX the importer
+could not read was returned unchanged. In the everyday-task benchmark these
+cases failed on every run, while the comparison agent passed them with
+python-docx and openpyxl. Native artifacts still serve requested documents,
+edits to existing artifacts and long deliverables. The `documents`,
+`spreadsheets` and `presentations` Skills gain a short procedure for these
+files, and the goal continuation's report clause excludes them from the native
+report contract. Both compositions change identically; legacy prompt digests
+are refreshed for this reviewed change.
+
+Written pieces the person asks for (briefs, letters, plans, reports) are
+answered in chat. A document Artifact is created only when the person asks for
+a document or file (for example a DOCX or PDF), asks to edit an existing
+document, or the result is too long to read comfortably in chat (several
+pages). The earlier "or clearly meant to be kept or shared" let agents build a
+document for any requested brief, which took several times longer than a chat
+answer and left only a link in the conversation. The `documents` Skill
+description and its routing paragraph, and the goal continuation's report
+clause, say the same. Both compositions change identically; legacy prompt
+digests are refreshed for this reviewed change.
+
+The `goal_set` tool description now opens with when a goal is warranted: a
+long-running objective that needs several turns or continued autonomous work,
+while a short or single-step request is answered directly. The old opening,
+"Create a goal when this session has none", read as a rule to create a goal
+whenever none existed, so agents wrapped one-step edits in goal_set and
+goal_complete. The rest of the description, the goals instruction module and
+both compositions are unchanged.
+
+Agent-facing text no longer names the product, so an embedding product's agent
+only ever sees and repeats its own product's name. Bundled Skills take neutral
+names (`documents`, `spreadsheets`, `presentations`, `sites`, `visualize`,
+`secrets`, `schedules`, `projects`, `skill-management`, `video-generation`), and
+the instructions that point at them use those names. "Inline in the Opengeni
+console" is now "inline in the chat", and the native-capability check asks
+whether the workspace already provides a capability. Both compositions change
+identically; legacy prompt digests are refreshed for this reviewed change. The
+default identity, provenance markers such as `[Opengeni internal updates]`,
+the `opengeni__` tool namespace and Codemode identifiers are unchanged.
+
 The CAPTCHA rule moved from the secrets doctrine into the descriptions of the
 two interaction entry tools, `browser_open` and `computer_open`. The secrets
 block renders only with the `secrets` capability and runtime reference
@@ -255,7 +303,7 @@ through connected tools, create the account with a generated password when
 account creation is allowed), never ask for secret values in chat, use the
 ready ask card from a missing-secret error, and hand the browser over only for
 push approvals or hardware keys. It is at most six
-lines under its heading; playbooks live in the `opengeni-secrets` Skill. Clause
+lines under its heading; playbooks live in the `secrets` Skill. Clause
 gating: the `secret_search` sentence and the Skill pointer need
 `secret_search` (the Skill pointer also needs Skills); the 2FA-enrollment and
 account-creation rungs need `secret_save`; the ask-card sentence needs the
@@ -272,7 +320,7 @@ so "never request credentials in chat" comes with the supported alternative.
 + Never ask for passwords, keys or codes in chat or in a plain text question.
 + Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.
 + Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.
-+ For playbooks, read the `opengeni-secrets` skill.
++ For playbooks, read the `secrets` Skill.
 + For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.
 ```
 

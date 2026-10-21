@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod";
 
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
+import { registerSubscriptionUsagePoolRoutes } from "./routes/subscription-usage-pool";
 import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
@@ -72,8 +73,6 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveAgentToolFamilies,
-  resolveWorkspaceMemoryEnabled,
-  resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   WorkspaceVoiceInputSettings,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
@@ -112,10 +111,8 @@ import {
   dbSql,
   getManagedAuthSessionSetSnapshot,
   getWorkspace,
-  getWorkspaceSettings,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
-  resolveSessionMemoryAgentScope,
   resolveSessionAdminAuthority,
   rlsContextForWorkspace,
 } from "@opengeni/db";
@@ -381,6 +378,7 @@ import {
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
@@ -790,6 +788,9 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Chunk-Sha256",
       "X-OpenGeni-Chunk-Start-Milliseconds",
       "X-OpenGeni-Correlation-Id",
+      // Set by the console inside a desktop app; only changes where a finished
+      // browser sign-in returns.
+      "X-OpenGeni-Desktop-App",
       "X-OpenGeni-Session-Csrf",
       // Session scope for a session proxy; the API itself ignores it.
       "X-OpenGeni-Session-Id",
@@ -810,6 +811,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
+      "X-OpenGeni-Conversation-Filter",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Covered-First",
       "X-OpenGeni-Covered-Last",
@@ -1104,7 +1106,7 @@ export function createAppComposition(deps: AppDependencies): {
       return c.json(
         {
           code: "API_CONTRACT_CHANGED",
-          message: "Opengeni updated. Reload this client before changing state.",
+          message: "The service was updated. Reload this client before changing state.",
           apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         },
         409,
@@ -1813,7 +1815,7 @@ export function createAppComposition(deps: AppDependencies): {
     const grant = authorization.grant;
     // MCP handshakes (initialize, ping, notifications) read and disclose
     // nothing scoped. A session-bound agent attempt still proves it is the
-    // live attempt, but skips the workspace, catalog, Memory and admin reads
+    // live attempt, but skips the catalog and admin reads
     // that building the tool surface costs on every tools/* POST.
     if (
       c.req.method === "POST" &&
@@ -1882,34 +1884,15 @@ export function createAppComposition(deps: AppDependencies): {
             await Promise.allSettled([mcp.close(), prepared.close()]);
           }
         }
-        // The tool surface is four independent reads: workspace settings, the
-        // model catalog, the session's frozen Memory selector and its admin
-        // access. Read them together, alongside the bound-session check, which
-        // still decides before any of them reaches the response.
-        const [, [workspaceSettings, mcpDeps, sessionMemory, sessionAdminAuthority]] =
-          await alongsideAuthorization(authorizeBoundSession(), () =>
+        // Only the current model catalog and admin access shape this surface.
+        // Legacy Memory settings/selectors no longer register tools; Knowledge
+        // resolves its own scope at execution. Keep the bound-session check
+        // alongside these reads and before anything reaches the response.
+        const [, [mcpDeps, sessionAdminAuthority]] = await alongsideAuthorization(
+          authorizeBoundSession(),
+          () =>
             Promise.all([
-              getWorkspaceSettings(routeDeps.db, workspaceId),
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
-              // The bound session's frozen Memory selector (migration 0427)
-              // decides which Memory tools the attempt receives and which typed
-              // layers they read and write. A missing row resolves to no Memory
-              // tools.
-              typeof boundSessionId === "string"
-                ? resolveSessionMemoryAgentScope(
-                    routeDeps.db,
-                    workspaceId,
-                    boundSessionId,
-                    grant.metadata,
-                  ).then(
-                    (scope) =>
-                      scope ?? {
-                        mode: "off" as const,
-                        userSubjectId: null,
-                        rootSessionId: null,
-                      },
-                  )
-                : null,
               // Checked live: allowed by the organization, given to this
               // session, and the person who gave it is still an owner or admin.
               typeof boundSessionId === "string"
@@ -1920,12 +1903,8 @@ export function createAppComposition(deps: AppDependencies): {
                   })
                 : false,
             ]),
-          );
-        reads.handOffToToolDispatch();
-        const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(
-          workspaceSettings ?? undefined,
         );
-        const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
+        reads.handOffToToolDispatch();
         const sessionAdminAccess = sessionAdminAuthority
           ? {
               origin: new URL(c.req.url).origin,
@@ -1936,9 +1915,6 @@ export function createAppComposition(deps: AppDependencies): {
           : null;
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
-          workspaceMemoryEnabled,
-          workspaceMemoryPromptMode,
-          sessionMemory,
           sessionAdminAccess,
         });
         // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
@@ -2281,6 +2257,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerUsageAllowanceRoutes(app, routeDeps);
+  registerOfficeWorkbookRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerInsightsUsageRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
@@ -2343,6 +2320,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerClaudeSubscriptionAccountRoutes(app, routeDeps);
+  registerSubscriptionUsagePoolRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerChatCompletionRoutes(app, { ...routeDeps, modelCalls });
   registerEditableArtifactRoutes(app, routeDeps);
@@ -2930,10 +2908,10 @@ function publicErrorMessage(error: unknown, status: number): string {
     return "Connection setup changed or is still in progress. Reload its current status before retrying.";
   if (error instanceof ConnectAttemptNotFoundError) return "Connection setup not found.";
   if (status === 502 || status === 503 || status === 504) {
-    return "Opengeni is temporarily unavailable — retry.";
+    return "The workspace is temporarily unavailable — retry.";
   }
   if (status >= 500) {
-    return "Opengeni could not complete the request.";
+    return "The workspace could not complete the request.";
   }
   if (error instanceof HTTPException) {
     return boundedPublicMessage(error.message) ?? "Request failed.";

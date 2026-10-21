@@ -1,7 +1,8 @@
-import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
+import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { ArrowRightIcon, CheckIcon, SearchIcon, ZapIcon } from "lucide-react";
 import { useRef, useState, type RefObject, type CSSProperties } from "react";
 import { Popover, RadioGroup } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { cn } from "../lib/cn";
 import {
   MENU_CHECK_CLASS,
@@ -24,6 +25,8 @@ import {
 } from "./model-policy-picker";
 import { ModelMark } from "./model-mark";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const PopoverContainedPortal = containedPortal(Popover.Portal);
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
 /** Model selection stays flat; reasoning never becomes a navigation destination. */
@@ -293,28 +296,32 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
   const efforts = thinking.efforts;
   const showThinking = thinking.showThinking;
   const showFast = thinking.showFast;
+  const speeds = thinking.speeds;
+  const selectedSpeed = speeds?.find((speed) => speed.id === props.latencyMode) ?? speeds?.[0];
   return (
     <div className="space-y-2 text-og-control" data-testid="model-picker-reasoning">
-      <div className="flex min-h-7 items-center justify-between gap-3">
-        {showThinking ? <span className="text-og-fg-subtle">{messages.thinking}</span> : <span />}
-        {showFast ? (
-          <button
-            type="button"
-            data-testid="model-picker-fast"
-            disabled={props.disabled || thinking.disabled}
-            aria-pressed={props.latencyMode === "fast"}
-            title={messages.fast + " · " + messages.fastRateHint}
-            onClick={() =>
-              props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
-            }
-            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
-          >
-            <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
-            {messages.fast}
-            <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
-          </button>
-        ) : null}
-      </div>
+      {showThinking || showFast ? (
+        <div className="flex min-h-7 items-center justify-between gap-3">
+          {showThinking ? <span className="text-og-fg-subtle">{messages.thinking}</span> : <span />}
+          {showFast ? (
+            <button
+              type="button"
+              data-testid="model-picker-fast"
+              disabled={props.disabled || thinking.disabled}
+              aria-pressed={props.latencyMode === "fast"}
+              title={messages.fast + " · " + messages.fastRateHint}
+              onClick={() =>
+                props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
+              }
+              className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+            >
+              <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
+              {messages.fast}
+              <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {showThinking ? (
         <RadioGroup.Root
           aria-label={messages.thinkingEffort}
@@ -337,6 +344,45 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
           ))}
         </RadioGroup.Root>
       ) : null}
+      {speeds && selectedSpeed ? (
+        <div className="space-y-2 pt-1" data-testid="model-picker-speed">
+          <div className="flex min-h-7 items-center justify-between gap-3">
+            <span className="text-og-fg-subtle">{messages.speed}</span>
+            {selectedSpeed.hint ? (
+              <span className="text-og-fg-subtle">{selectedSpeed.hint}</span>
+            ) : null}
+          </div>
+          <RadioGroup.Root
+            aria-label={messages.speed}
+            value={selectedSpeed.id}
+            disabled={props.disabled || thinking.disabled}
+            onValueChange={(value) => props.onLatencyModeChange(value as LatencyMode)}
+            orientation="horizontal"
+            className="flex flex-wrap gap-0.5 rounded-og-md bg-og-surface-2 p-0.5"
+          >
+            {speeds.map((speed) => (
+              <RadioGroup.Item
+                key={speed.id}
+                value={speed.id}
+                aria-label={speed.hint ? `${speed.label} · ${speed.hint}` : speed.label}
+                title={speed.hint ? `${speed.label} · ${speed.hint}` : speed.label}
+                className="flex min-h-8 min-w-10 flex-1 cursor-pointer items-center justify-center gap-1 whitespace-nowrap rounded-og-sm px-1.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 data-[state=checked]:bg-og-surface-1 data-[state=checked]:text-og-fg data-[state=checked]:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {speed.id === "standard" ? null : (
+                  <ZapIcon
+                    aria-hidden
+                    className={cn(
+                      "size-3.5 shrink-0",
+                      speed.id === selectedSpeed.id && "fill-current",
+                    )}
+                  />
+                )}
+                {speed.label}
+              </RadioGroup.Item>
+            ))}
+          </RadioGroup.Root>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -354,7 +400,7 @@ export function ModelPolicyPickerPopover(
   return (
     <Popover.Root open onOpenChange={(open) => props.onOpenChange?.(open)}>
       <Popover.Anchor virtualRef={props.anchor} />
-      <Popover.Portal>
+      <PopoverContainedPortal>
         <Popover.Content
           id={props.contentId}
           aria-label={messages.label}
@@ -380,7 +426,7 @@ export function ModelPolicyPickerPopover(
         >
           <ModelPolicyPickerMenu {...props} />
         </Popover.Content>
-      </Popover.Portal>
+      </PopoverContainedPortal>
     </Popover.Root>
   );
 }

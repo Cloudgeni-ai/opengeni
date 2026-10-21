@@ -30,9 +30,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { BrandMark } from "@/components/brand-mark";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { BrandMark } from "@opengeni/react/app/components/brand-mark";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@opengeni/react/ui/tooltip";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { KitErrorBoundary, KitNote, KitPaneContext, KitSectionHeader, type KitPane } from "./kit";
 import {
   formatPicksForExport,

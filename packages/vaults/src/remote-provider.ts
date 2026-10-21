@@ -291,7 +291,7 @@ export function remoteVaultOperations(
 }
 
 const SAFE_MESSAGES: Record<VaultProviderErrorCode, string> = {
-  provider_auth_invalid: "The remote vault rejected Opengeni's credentials.",
+  provider_auth_invalid: "The remote vault rejected the workspace's credentials.",
   provider_auth_expired: "The remote vault needs to be reconnected.",
   provider_rate_limited: "The remote vault is rate limiting requests. Try again later.",
   provider_unavailable: "The remote vault is unavailable.",

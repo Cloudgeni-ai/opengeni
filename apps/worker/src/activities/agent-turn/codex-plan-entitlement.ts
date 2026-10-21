@@ -82,7 +82,7 @@ export function codexPlanEntitlementFailurePayload(input: {
   const model = input.modelId ? productLabelForModelId(input.modelId) : "this model";
   const lead = accountPhrase(input.accountLabel);
   const next = input.waiting
-    ? "Opengeni is waiting for another connected account to become available."
+    ? "Waiting for another connected account to become available."
     : "Upgrade it, use another connected account, or choose another model.";
   const error = plan
     ? `${lead} ${input.planChanged ? "is now" : "is"} on the ${plan} plan, which doesn't include ${model}. ${next}`
@@ -114,8 +114,8 @@ export function codexRequestRejectedFailurePayload(input: {
     input.planChecked === false
       ? ""
       : plan
-        ? `${lead} still reports the ${plan} plan, so Opengeni did not switch accounts. `
-        : `Opengeni could not confirm the current plan of ${lead.charAt(0).toLowerCase()}${lead.slice(1)}, so it did not switch accounts. `;
+        ? `${lead} still reports the ${plan} plan, so accounts were not switched. `
+        : `The current plan of ${lead.charAt(0).toLowerCase()}${lead.slice(1)} could not be confirmed, so accounts were not switched. `;
   return {
     error:
       `The Codex backend rejected this request (HTTP ${input.rejection.status}) without an error message. ` +

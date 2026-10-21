@@ -9,7 +9,7 @@ const list = mock(async (_workspace: string, _request: unknown) => ({ entries: [
 const client = { listKnowledgeEntries: list };
 let permissions = ["documents:manage", "documents:search"];
 let subjectId = "user:manager";
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     client,
     accessContext: {

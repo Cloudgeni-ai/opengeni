@@ -3,8 +3,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { ConnectionHealth } from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { ConnectionHealth } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 
 import { CapabilityTile } from "./capability-tile";
 import { FeaturedConnectorTile } from "./featured-connectors";

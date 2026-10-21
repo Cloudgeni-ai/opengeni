@@ -2,14 +2,14 @@ import { createRoot } from "react-dom/client";
 import { OpenGeniProvider } from "@opengeni/react";
 import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { Toaster } from "sonner";
-import { SessionList } from "../src/components/rail/session-list";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { SessionList } from "@opengeni/react/app/components/rail/session-list";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { client, workspaceId, evidence } from "./project-rename-context";
 import "../src/styles.css";
 import {
   sessionBrowsePreferenceStorageId,
   writeSessionBrowsePreferences,
-} from "../src/lib/session-browse-preferences";
+} from "@opengeni/react/app/lib/session-browse-preferences";
 
 writeSessionBrowsePreferences(sessionBrowsePreferenceStorageId("rename-qa", workspaceId), {
   groupBy: "project",

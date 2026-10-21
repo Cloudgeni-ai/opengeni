@@ -48,15 +48,15 @@ let Dialog: ComponentType<{
   onOpenChange: (open: boolean) => void;
 }>;
 beforeAll(async () => {
-  mock.module("@/context", () => ({
+  mock.module("@opengeni/react/app/app-context", () => ({
     useAppContext: () => ({ client, accessContext: { subjectId: "reader" } }),
   }));
-  mock.module("@tanstack/react-router", () => ({
+  mock.module("@opengeni/react/app/lib/navigation", () => ({
     useNavigate: () => (options: { search: Record<string, unknown> }) => {
       navigations.push(options);
     },
   }));
-  Dialog = (await import("./session-search-dialog")).default;
+  Dialog = (await import("@opengeni/react/app/components/session/session-search-dialog")).default;
 });
 
 afterAll(() => mock.restore());

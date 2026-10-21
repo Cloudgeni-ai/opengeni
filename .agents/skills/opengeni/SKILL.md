@@ -116,7 +116,7 @@ Then open the smallest source files that answer the question:
   Slack sessions can retain their stored explicit-save restriction.
 - GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured Opengeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
-- Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
+- Web usage examples: `apps/web/src/api.ts`, `packages/react/src/app/types.tsx` (the shared session app layer under `packages/react/src/app/`), relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
 - React hooks + styled components: `packages/react/src/` (hooks on the SDK, timeline projection, ChatComposer/MessageTimeline/SessionStatus/FleetTile, CSS-variable design tokens in `packages/react/styles/`) and `packages/react/README.md`; runnable harness under `packages/react/demo/`.
 - Standalone product integration: `docs/product-integration.md` is canonical for
@@ -404,6 +404,12 @@ activation guards belong to the maintenance cutover, not a permanent fallback.
 
 For tools and MCP work, distinguish:
 
+Required first-party MCP setup outages use paced same-turn recovery without a
+retry cutoff; only runtime-verified connect/list transport failures qualify.
+Inspect `provider-recovery-policy.ts`, the DB provider-recovery clock, and
+`docs/run-lifecycle.md` before changing that boundary. External tools, protocol
+rejections, and uncertain tool mutations must not inherit setup-wait policy.
+
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
 - Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.
@@ -432,8 +438,19 @@ Find current MCP behavior in config parsing, tool validation, runtime `prepareTo
 
 ## Scheduling Discovery
 
+Scheduled bot posting uses ordinary selected capabilities and instructions, not a
+separate schedule-only approval field. Slack installation availability, incoming
+channel routing and workspace automation settings have distinct owners; see
+`docs/slack-bot.md` before changing them. Personal Add and Reconnect preserve
+separate Slack team/user identities.
+
+Workspace default machines apply to fresh sessions and schedules that explicitly
+follow the workspace default. Accepted runs and existing chats retain their
+placement; missing or unavailable selected machines never silently fall back.
+See `docs/connected-machines.md` for resolution and replay boundaries.
+
 The stock Schedules chat shortcut sends the request and time zone. Its setup
-procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
+procedure lives in `packages/runtime/src/bundled_schedule_skills/schedules/SKILL.md`,
 selected through the worker's configured bundled-Skill rules.
 
 For queueing or scheduling work:

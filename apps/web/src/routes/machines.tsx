@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
 // Machines: the workspace's bring-your-own-compute fleet — enrolled selfhosted
 // machines, each with its connection-status pill, state badges, latest metrics
 // (CPU/load/mem/disk/GPU), and an enroll affordance. The session-scoped attach/
@@ -28,18 +28,22 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
-import { DesktopThisComputerPanel } from "@/components/desktop/this-computer";
-import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
+import { DesktopThisComputerPanel } from "@opengeni/react/app/components/desktop/this-computer";
+import { AppShotsSettings } from "@/components/desktop/app-shots-settings";
+import { ConnectMachineDialog } from "@opengeni/react/app/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ContentPage } from "@/components/ui/content-layout";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { useAppContext } from "@/context";
-import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  apiErrorTechnicalFacts,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */
@@ -236,15 +240,22 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
       <div className="pt-6">
         {!machines.canRead ? (
-          <Notice tone="muted" title="Machines are managed by your workspace admin">
-            You do not have permission to view connected machines in this workspace. Ask a workspace
-            admin for access.
-          </Notice>
+          <>
+            {/* App-shots are this app's own setting, so they never depend on machine access. */}
+            <AppShotsSettings className="mb-6" />
+            <Notice tone="muted" title="Machines are managed by your workspace admin">
+              You do not have permission to view connected machines in this workspace. Ask a
+              workspace admin for access.
+            </Notice>
+          </>
         ) : featureUnavailable ? (
-          <Notice tone="muted">
-            Connected machines aren't enabled on this deployment. Sessions run on the managed
-            sandbox.
-          </Notice>
+          <>
+            <AppShotsSettings className="mb-6" />
+            <Notice tone="muted">
+              Connected machines aren't enabled on this deployment. Sessions run on the managed
+              sandbox.
+            </Notice>
+          </>
         ) : selectedMachine ? (
           <MachineDetail
             machine={selectedMachine}
@@ -299,6 +310,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           <>
             {/* Inside the desktop app: this computer, ahead of the rest. */}
             <DesktopThisComputerPanel className="mb-6" />
+            <AppShotsSettings className="mb-6" />
             <MachinesDashboard
               machines={machines.machines}
               activeSandboxId={machines.activeSandboxId}

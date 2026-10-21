@@ -2,11 +2,11 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
 
-import type { ModelsView } from "../../../src/lib/models-route";
+import type { ModelsView } from "@opengeni/react/app/lib/models-route";
 import { WorkspaceModelsPage } from "../../../src/components/models/workspace-models-page";
 import { organizationSettingsDescription } from "../../../src/components/settings/organization-settings-pages";
-import { PageHeader, PageHeaderStyleProvider } from "../../../src/components/ui/page-header";
-import { SectionVariantProvider } from "../../../src/components/ui/section-variant";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
 import "../../../src/styles.css";
 import { ORGANIZATION_ID, WORKSPACES } from "./context";
 import { setNavigate } from "./router";

@@ -6,11 +6,11 @@ import { toast } from "sonner";
 import { rigHealth } from "@/components/rigs/rig-health";
 import { CheckList, SetupScript } from "@/components/rigs/rig-versions-timeline";
 import { VerificationLog } from "@/components/rigs/verification-log";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { StatusDot } from "@/components/ui/status-dot";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { StatusDot } from "@opengeni/react/ui/status-dot";
 import { versionHasChecks } from "@/lib/rig-status";
-import type { Rig, RigChange, RigChangeVerification } from "@/types";
+import type { Rig, RigChange, RigChangeVerification } from "@opengeni/react/app/types";
 
 export function RigOverview({
   rig,

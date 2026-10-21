@@ -538,11 +538,16 @@ describe("compact session view on the live local workspace route (API fixture)",
   }, 45_000);
 
   const invalidate = async () => {
-    await page.evaluate(async (targetWorkspaceId) => {
-      const modulePath = "/src/lib/session-list-invalidation.ts";
-      const { notifySessionListChanged } = await import(modulePath);
-      notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
-    }, workspaceId);
+    // The listener set is module state, so import the same URL the dev server
+    // gave the app: Vite serves this workspace package from its real path.
+    const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
+    await page.evaluate(
+      async ({ targetWorkspaceId, moduleUrl }) => {
+        const { notifySessionListChanged } = await import(moduleUrl);
+        notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
+      },
+      { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
+    );
   };
   const settleRead = async () => {
     await page.waitForLoadState("networkidle");
@@ -718,6 +723,9 @@ describe("compact session view on the live local workspace route (API fixture)",
         await invalidate();
         await settleRead();
         expect(await matchingChildren.count()).toBe(0);
+        // A failed quiet refresh must leave cached disclosure and its cursor
+        // usable, not turn them into a failed request for older sessions.
+        expect(await rail.getByRole("button", { name: /^Retry sessions in/ }).count()).toBe(0);
         await rail.getByText("Unrelated 00", { exact: true }).waitFor();
         for (let visible = 8; visible <= 48; visible += 4) {
           await disclosure.click();

@@ -68,9 +68,9 @@ describe("console composer in a split desktop pane", () => {
   });
 
   test("production console source wires pane measurement", () => {
-    expect(readFileSync(`${root}/apps/web/src/components/Composer.tsx`, "utf8")).toContain(
-      'responsiveBasis="container"',
-    );
+    expect(
+      readFileSync(`${root}/packages/react/src/app/components/Composer.tsx`, "utf8"),
+    ).toContain('responsiveBasis="container"');
   });
 
   test("rendered fixture measures its composer container", async () => {

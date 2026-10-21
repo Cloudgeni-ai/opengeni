@@ -193,6 +193,12 @@ pub struct UpdateConfig {
     /// release before this agent's automatic-rollout cohort is selected.
     /// Automatic checks leave this false.
     pub allow_staged_rollout_opt_in: bool,
+    /// Fetch the signed manifest of exactly this release
+    /// (`<base>/agent/v<version>/manifest.json`) instead of following the
+    /// channel pointer. A control-plane request names its target version, and
+    /// during a rolling deployment the channel pointer can still name the
+    /// previous release.
+    pub pinned_version: Option<String>,
 }
 
 impl UpdateConfig {
@@ -213,15 +219,16 @@ impl UpdateConfig {
             pubkey: PINNED_MINISIGN_PUBKEY.to_string(),
             allow_same_version: false,
             allow_staged_rollout_opt_in: false,
+            pinned_version: None,
         }
     }
 
     fn manifest_url(&self) -> String {
-        format!(
-            "{}/agent/{}/manifest.json",
-            self.base_url.trim_end_matches('/'),
-            self.channel
-        )
+        let base = self.base_url.trim_end_matches('/');
+        match &self.pinned_version {
+            Some(version) => format!("{base}/agent/v{version}/manifest.json"),
+            None => format!("{base}/agent/{}/manifest.json", self.channel),
+        }
     }
 }
 
@@ -368,8 +375,12 @@ impl PendingUpdate {
 
 #[cfg(target_os = "macos")]
 fn reject_bundle_binary_replacement(install_path: &Path) -> UpdateResult<()> {
+    let resolved = install_path
+        .canonicalize()
+        .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?;
     if install_path
         .ancestors()
+        .chain(resolved.ancestors())
         .any(|path| path.extension().is_some_and(|ext| ext == "app"))
     {
         return Err(UpdateError::HealthCheck(

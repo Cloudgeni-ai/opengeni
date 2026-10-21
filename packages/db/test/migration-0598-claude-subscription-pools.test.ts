@@ -15,6 +15,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -105,6 +106,18 @@ const subscriptionCoreMigrations = [
   "0807_subscription_rls_admin_once_per_statement.sql",
   // Empties that table and rewrites the 0807 reclaim routine on it.
   "0838_reclaim_exited_backend_runtime_capabilities.sql",
+  // Replaces the admin helper created by withheld 0642; replay after its original.
+  "0847_read_only_runtime_probes.sql",
+  // Usage history routines live in the subscription schema from withheld core
+  // migrations; the seed reads them. Replay both after them.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
+  // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
+  ...strictOwnerMaintenanceMigrationTail,
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

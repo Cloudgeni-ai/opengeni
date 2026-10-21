@@ -1,23 +1,29 @@
 import type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { ErrorMessage, TechnicalDetails } from "@/components/ui/error-message";
-import { CheckboxField, FieldStack } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
-import { SettingNavRow, SettingRow } from "@/components/ui/setting-row";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { ErrorMessage, TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { CheckboxField, FieldStack } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingNavRow, SettingRow } from "@opengeni/react/ui/setting-row";
+import {
+  notifyModelConnectionsChanged,
+  MODEL_SETTINGS_STALE_TIME_MS,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
+import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
 import {
   apiErrorAdvice,
   apiErrorDetails,
   apiErrorTechnicalFacts,
   isPermissionDenied,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 
 /* ----------------------------------------------------------------------------
    What one model connection can serve: its models, and at organization scope
@@ -46,9 +52,6 @@ export interface ConnectionAccessTarget {
 
 export function useConnectionAccess(props: ConnectionAccessTarget) {
   const { client } = props;
-  const [data, setData] = useState<ModelConnectionAccessResponse | null>(null);
-  const [error, setError] = useState<Error | null>(null);
-  const generation = useRef(0);
   const target = useMemo(
     () => ({
       scope: props.organizationId ? ("organizations" as const) : ("workspaces" as const),
@@ -58,36 +61,16 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
     }),
     [props.organizationId, props.workspaceId, props.kind, props.connectionId],
   );
-  const load = useCallback(async () => {
-    const current = ++generation.current;
-    setError(null);
-    try {
-      const result = await client.getModelConnectionAccess(target);
-      if (generation.current !== current) return;
-      setData(result);
-    } catch (caught) {
-      if (generation.current === current)
-        setError(
-          caught instanceof Error
-            ? caught
-            : new Error("Couldn't load what this account can serve", { cause: caught }),
-        );
-    }
-  }, [target, client]);
   const enabled = props.enabled ?? true;
-  // A newer read, or leaving, makes any read still in flight stale.
-  const invalidate = useCallback(() => {
-    generation.current++;
-  }, []);
-  useEffect(() => {
-    setData(null);
-    if (enabled) void load();
-    return invalidate;
-  }, [load, enabled, invalidate]);
+  const query = useSharedQuery<ModelConnectionAccessResponse>(
+    client,
+    ["model-settings", "access", target.scope, target.scopeId, target.kind, target.connectionId],
+    () => client.getModelConnectionAccess(target),
+    { enabled, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
   /** Saves and re-reads. Throws the failure; an API error keeps its facts for Technical details. */
   const save = useCallback(
     async (draft: ModelConnectionAccessPolicy) => {
-      const current = generation.current;
       try {
         await client.updateModelConnectionAccess(target, draft);
       } catch (caught) {
@@ -95,18 +78,19 @@ export function useConnectionAccess(props: ConnectionAccessTarget) {
           ? caught
           : new Error("Couldn't save. Nothing was changed.", { cause: caught });
       }
-      if (generation.current !== current) {
-        // Left meanwhile: other model lists and retained account lists still follow the save.
-        window.dispatchEvent(new Event("model-connections-changed"));
-        return;
-      }
-      await load();
-      window.dispatchEvent(new Event("model-connections-changed"));
+      // Also evicts unmounted detail reads, even when the form was left during save.
+      await notifyModelConnectionsChanged(client);
       toast.success("Saved");
     },
-    [client, load, target],
+    [client, target],
   );
-  return { data, error, loading: enabled && !data && !error, reload: load, save };
+  return {
+    data: query.data,
+    error: query.error,
+    loading: query.loading,
+    reload: query.refresh,
+    save,
+  };
 }
 
 export type ConnectionAccess = ReturnType<typeof useConnectionAccess>;
@@ -218,7 +202,23 @@ export function ConnectionAccessRows({
     );
   }
   const policy = access.data?.policy;
-  if (!policy) return null;
+  if (!policy)
+    return (
+      <>
+        {organization ? (
+          <SettingRow label="Available in" control={<ModelSettingsPlaceholder />} />
+        ) : null}
+        <SettingRow
+          label="Models it can serve"
+          description={
+            organization
+              ? "New models are included until you limit them."
+              : "The workspace's Allowed models still apply."
+          }
+          control={<ModelSettingsPlaceholder />}
+        />
+      </>
+    );
   return (
     <>
       {organization ? (

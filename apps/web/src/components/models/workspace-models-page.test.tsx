@@ -1,3 +1,4 @@
+import "@/app-host";
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type {
@@ -10,7 +11,8 @@ import type {
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { ModelsView } from "@/lib/models-route";
+import type { ModelsView } from "@opengeni/react/app/lib/models-route";
+import { useConsoleSharedQueries } from "@opengeni/react/app/lib/shared-query";
 import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
@@ -242,6 +244,8 @@ const client = {
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
   listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
+  getWorkspaceSubscriptionUsagePools: mock(async (_workspaceId: string) => ({ pools: [] })),
+  getOrganizationSubscriptionUsagePools: mock(async (_organizationId: string) => ({ pools: [] })),
   listOrganizationSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -284,18 +288,21 @@ let navigateTo: (search: {
 }) => void = () => {};
 let lastNavigation: { to?: string; search: Record<string, unknown> } | null = null;
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({
   toast: { success: mock(() => undefined), error: mock(() => undefined) },
 }));
-mock.module("@tanstack/react-router", () => ({
+const navigationMock = () => ({
   useNavigate:
     () => (options: { to?: string; search: { account?: string; view?: ModelsView } }) => {
       lastNavigation = options;
       navigateTo(options.search);
     },
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
-}));
+});
+// The page itself and the shared session pieces it renders both navigate.
+mock.module("@tanstack/react-router", navigationMock);
+mock.module("@opengeni/react/app/lib/navigation", navigationMock);
 mock.module("@/components/default-session-model", () => ({
   DefaultSessionModelPreferenceRow: ({
     describePayer,
@@ -317,7 +324,7 @@ mock.module("@/components/default-session-model", () => ({
   ),
 }));
 // Menus and confirms as plain buttons: the real ones are Radix portals.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -327,7 +334,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     title,
@@ -521,7 +528,7 @@ beforeAll(() => undefined);
 
 beforeEach(async () => {
   // Account lists are retained per client between mounts; every test starts cold.
-  const { clearSharedQueries } = await import("@/lib/shared-query");
+  const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
   clearSharedQueries(client);
   organizationAdmin = false;
   organizationList = false;
@@ -587,6 +594,7 @@ let organizationList = false;
 let workspaceSettingsAdmin: boolean | undefined;
 
 function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
+  useConsoleSharedQueries(client);
   const [search, setSearch] = useState<{ account?: string; view?: ModelsView; workspace?: string }>(
     organizationList ? {} : { workspace: "workspace-a" },
   );
@@ -639,6 +647,13 @@ async function render(
 async function cleanup({ container, root }: { container: HTMLElement; root: Root }) {
   await act(async () => root.unmount());
   container.remove();
+}
+
+/** Start an explicitly cold mock scenario without relying on teardown timers. */
+async function renderColdModelsFixture(): ReturnType<typeof render> {
+  const { clearSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
+  clearSharedQueries(client);
+  return render();
 }
 
 /** The description under the section titled `title`, or undefined. */
@@ -748,9 +763,9 @@ describe("Codex rows", () => {
     }
   });
 
-  test("a revisit shows the last accounts and live usage at once while re-reading", async () => {
+  test("a fresh revisit renders retained accounts and live usage without reads; Refresh re-reads", async () => {
     // The console retains reads for its client (OpenGeniProvider retainReadsAcrossMounts).
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     try {
@@ -767,6 +782,7 @@ describe("Codex rows", () => {
         }),
     );
     const overviewReads = client.codexOverview.mock.calls.length;
+    const accountReads = client.listCodexAccounts.mock.calls.length;
     const second = await render();
     try {
       // Back on Models: the account and its last LIVE reading render at once
@@ -774,7 +790,12 @@ describe("Codex rows", () => {
       expect(second.container.textContent).toContain("Team plan");
       expect(second.container.textContent).toContain("75% left");
       expect(second.container.textContent).not.toContain("10% left");
+      expect(client.codexOverview.mock.calls.length).toBe(overviewReads);
+      expect(client.listCodexAccounts.mock.calls.length).toBe(accountReads);
+      expect(second.container.textContent).toContain("Updated just now");
+      await act(async () => button(second.container, "Refresh")!.click());
       expect(client.codexOverview.mock.calls.length).toBe(overviewReads + 1);
+      expect(client.listCodexAccounts.mock.calls.length).toBe(accountReads + 1);
       await act(async () => resolve(overviewFor("acct-1", 40)));
       await flush();
       expect(second.container.textContent).toContain("40% left");
@@ -784,8 +805,52 @@ describe("Codex rows", () => {
     }
   });
 
-  test("a revisit whose live read fails says Usage unavailable, not the older reading", async () => {
-    const { retainSharedQueries } = await import("@/lib/shared-query");
+  test("a reset redemption completion after unmount evicts retained inventory before revisit", async () => {
+    const { useCodexSubscriptions } = await import("@/components/codex-connection");
+    const { retainSharedQueries, peekSharedQuery } =
+      await import("@opengeni/react/app/lib/shared-query");
+    const release = retainSharedQueries(client);
+    let remaining = 1;
+    client.codexOverview.mockImplementation(async () => {
+      const value = overviewFor("acct-1", remaining ? 0 : 100);
+      value.accounts["acct-1"]!.resetCredits.availableCount = remaining;
+      return value;
+    });
+    let afterRedemption!: () => Promise<void>;
+    function Reader() {
+      const codex = useCodexSubscriptions({
+        client: client as never,
+        workspaceId: "workspace-a",
+        canManage: true,
+      });
+      afterRedemption = codex.refreshUsage;
+      return <span>{codex.overviewMap["acct-1"]?.resetCredits.availableCount ?? "loading"}</span>;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("1");
+      await act(async () => root.render(null));
+      // The provider's redemption settles only after the account page was left.
+      remaining = 0;
+      await act(async () => afterRedemption());
+      expect(
+        peekSharedQuery(client, ["model-settings", "codex-overview", "workspace-a"]),
+      ).toBeNull();
+      await act(async () => root.render(<Reader />));
+      await flush();
+      expect(container.textContent).toBe("0");
+      expect(client.codexOverview).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      release();
+    }
+  });
+
+  test("an explicit live refresh failure says Usage unavailable, not the older reading", async () => {
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     try {
@@ -804,6 +869,7 @@ describe("Codex rows", () => {
     try {
       // While this visit's read runs, the last live reading stands in.
       expect(second.container.textContent).toContain("75% left");
+      await act(async () => button(second.container, "Refresh")!.click());
       await act(async () => reject(new Error("Provider unavailable")));
       await flush();
       // The read failed: the row no longer presents the old reading as current.
@@ -818,7 +884,7 @@ describe("Codex rows", () => {
 
   test("an account change elsewhere is never shown stale on the next visit", async () => {
     const { invalidateSharedQueries, peekSharedQuery, retainSharedQueries } =
-      await import("@/lib/shared-query");
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const first = await render();
     await cleanup(first);
@@ -828,10 +894,31 @@ describe("Codex rows", () => {
     expect(peekSharedQuery(client, ["codex-accounts", "workspace-a"])).toBeNull();
     const second = await render();
     try {
-      // A cold read on mount, then the usual re-read after the live usage read.
-      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 2);
+      // Only the invalidated account list is cold; the live overview is still fresh.
+      expect(client.listCodexAccounts.mock.calls.length).toBe(reads + 1);
     } finally {
       await cleanup(second);
+      release();
+    }
+  });
+
+  test("a retained live overview older than five minutes revalidates on revisit", async () => {
+    const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
+    const release = retainSharedQueries(client);
+    const first = await render();
+    await cleanup(first);
+    const reads = client.codexOverview.mock.calls.length;
+    const originalNow = Date.now;
+    const later = originalNow() + 5 * 60_000 + 1;
+    Date.now = () => later;
+    let second: Awaited<ReturnType<typeof render>> | undefined;
+    try {
+      second = await render();
+      expect(client.codexOverview.mock.calls.length).toBe(reads + 1);
+      expect(second.container.textContent).toContain("75% left");
+    } finally {
+      Date.now = originalNow;
+      if (second) await cleanup(second);
       release();
     }
   });
@@ -1464,8 +1551,9 @@ describe("Connect Codex", () => {
   }
 
   test("a sign-in that finishes after leaving Settings refreshes every Codex list for the workspace", async () => {
-    const { codexAccountsQueryKey, peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
-      await import("@/lib/shared-query");
+    const { codexAccountsQueryKey } = await import("@opengeni/react/app/lib/codex-usage-query");
+    const { peekSharedQuery, retainSharedQueries, sharedQueryWriter } =
+      await import("@opengeni/react/app/lib/shared-query");
     const release = retainSharedQueries(client);
     const originalOpen = window.open;
     window.open = (() => null) as typeof window.open;
@@ -1529,7 +1617,7 @@ describe("Opengeni credits", () => {
     }));
   });
 
-  test("leads the Accounts list and counts as a payer, opening Billing for billing admins", async () => {
+  test("heads the pay-as-you-go group and counts as a payer, opening Billing for billing admins", async () => {
     noAccounts();
     creditsDeployment(["billing:manage"]);
     (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
@@ -1549,6 +1637,27 @@ describe("Opengeni credits", () => {
     expect(lastNavigation?.search.fromLabel).toBe("Design preview · Models");
     expect(lastNavigation?.search.from).toBe("/workspaces/workspace-a/settings?section=models");
     await cleanup(view);
+  });
+
+  test("subscriptions come first and credits open the pay-as-you-go group below them", async () => {
+    creditsDeployment([]);
+    const view = await render(false, "organization-a");
+    try {
+      await flush();
+      const headings = [...view.container.querySelectorAll("h3")].map((h) => h.textContent);
+      expect(headings).toContain("Subscriptions");
+      expect(headings).toContain("Pay as you go");
+      const text = view.container.textContent ?? "";
+      const subscriptions = text.indexOf("Subscriptions");
+      const codexRow = text.indexOf("Team plan");
+      const payAsYouGo = text.lastIndexOf("Pay as you go", text.indexOf("Opengeni credits"));
+      expect(subscriptions).toBeGreaterThanOrEqual(0);
+      expect(codexRow).toBeGreaterThan(subscriptions);
+      expect(payAsYouGo).toBeGreaterThan(codexRow);
+      expect(text.indexOf("Opengeni credits")).toBeGreaterThan(payAsYouGo);
+    } finally {
+      await cleanup(view);
+    }
   });
 
   test("is a plain row without the balance for people who can't read billing", async () => {
@@ -1728,7 +1837,7 @@ describe("One Models page for the organization and the workspace", () => {
     client.getModelConnectionAccess.mockImplementation(async () => {
       throw new Error("Connection request failed");
     });
-    const failedView = await render();
+    const failedView = await renderColdModelsFixture();
     try {
       await flush();
       const failedRow = [
@@ -1823,96 +1932,146 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("an organization account's page lists its usage limit resets and redeems them in the browser", async () => {
-    organizationAdmin = true;
-    const resetAccount = codexAccount({
-      id: "org-1",
-      label: "Company plan",
-      source: "organization",
-      resetCreditAvailableCount: 2,
-    });
-    const credit = (id: string, title: string) => ({
-      id,
-      resetType: "codexRateLimits" as const,
-      status: "available" as const,
-      grantedAt: 1_700_000_000,
-      expiresAt: null,
-      title,
-      description: null,
-      actionable: true,
-    });
-    const overviewPath = "/v1/organizations/organization-a/codex/accounts/org-1/overview";
-    const orgOverview = {
-      ...overviewFor("org-1", 40).accounts["org-1"]!,
-      resetCredits: {
-        source: "provider",
-        fetchedAt: new Date().toISOString(),
-        stale: false,
-        error: null,
-        detailState: "detailed",
-        detailsComplete: true,
-        availableCount: 2,
-        credits: [credit("credit-a", "Weekly reset"), credit("credit-b", "Bonus reset")],
-      },
-      canRedeem: true,
-      canResumeRedemption: true,
-      redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
-    };
-    client.requestJson.mockImplementation(async (method: string, path: string) => {
-      if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
-        return { ...orgAccounts, accounts: [resetAccount] };
+  test.each([
+    { defaults: false, count: 0 },
+    { defaults: true, count: 0 },
+    { defaults: false, count: null },
+    { defaults: true, count: null },
+  ])(
+    "organization reset counts preserve zero and fall back only when unknown: %j",
+    async ({ defaults, count }) => {
+      organizationAdmin = true;
+      organizationList = defaults;
+      const resetAccount = codexAccount({
+        id: "org-1",
+        label: "Company plan",
+        source: "organization",
+        resetCreditAvailableCount: 3,
+      });
+      const orgOverview = overviewFor("org-1", 40).accounts["org-1"]!;
+      orgOverview.resetCredits.availableCount = count;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [resetAccount] };
+        }
+        if (method === "GET" && path.endsWith("/org-1/overview")) return orgOverview;
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      const view = await render();
+      try {
+        const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+          (candidate) => candidate.textContent?.includes("Company plan"),
+        )!;
+        if (count === 0) expect(row.textContent).not.toContain("usage limit reset");
+        else expect(row.textContent).toContain("3 usage limit resets");
+      } finally {
+        await cleanup(view);
       }
-      if (method === "GET" && path === overviewPath) return orgOverview;
-      if (method === "GET") throw new Error(`unexpected read ${path}`);
-      return {};
-    });
-    const sent: { url: string; init: RequestInit }[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      sent.push({ url, init });
-      return new Response(
-        JSON.stringify({
-          attemptId: JSON.parse(String(init.body)).attemptId,
-          confirmationToken: "signed",
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          resumable: false,
-          recoveryStatus: null,
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }) as typeof fetch;
-    const view = await render();
-    try {
-      // The row says how many are waiting, though no workspace has to use it.
-      const orgRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
-        (row) => row.textContent?.includes("Company plan"),
-      )!;
-      expect(orgRow.textContent).toContain("2 usage limit resets");
-      await act(async () => orgRow.querySelector<HTMLElement>("[data-row-action]")!.click());
-      await flush();
-      await flush();
-      const text = view.container.textContent ?? "";
-      expect(text).toContain("Usage limit resets (2)");
-      expect(text).toContain("Owners and admins of the organization can redeem them here.");
-      expect(text).not.toContain("Connect for this workspace");
-      expect(client.requestJson).toHaveBeenCalledWith("GET", overviewPath);
-      await act(async () => button(view.container, "Redeem Weekly reset")!.click());
-      await flush();
-      // Prepared on the organization's route with the browser cookie only.
-      expect(sent).toHaveLength(1);
-      expect(sent[0]!.url).toContain(
-        "/v1/organizations/organization-a/codex/accounts/org-1/reset-credits/prepare",
-      );
-      expect(sent[0]!.init.credentials).toBe("include");
-      expect(new Headers(sent[0]!.init.headers).get("authorization")).toBeNull();
-      expect(JSON.parse(String(sent[0]!.init.body))).toMatchObject({ creditId: "credit-a" });
-      expect(document.body.textContent).toContain("Redeem this usage limit reset?");
-    } finally {
-      globalThis.fetch = originalFetch;
-      await cleanup(view);
-    }
-  });
+    },
+  );
+
+  test.each([false, true])(
+    "an organization account's row and page use the current resets rather than the cached count (defaults=%s)",
+    async (defaults) => {
+      organizationAdmin = true;
+      organizationList = defaults;
+      const resetAccount = codexAccount({
+        id: "org-1",
+        label: "Company plan",
+        source: "organization",
+        resetCreditAvailableCount: 3,
+      });
+      const credit = (id: string, title: string) => ({
+        id,
+        resetType: "codexRateLimits" as const,
+        status: "available" as const,
+        grantedAt: 1_700_000_000,
+        expiresAt: null,
+        title,
+        description: null,
+        actionable: true,
+      });
+      const overviewPath = "/v1/organizations/organization-a/codex/accounts/org-1/overview";
+      const orgOverview = {
+        ...overviewFor("org-1", 40).accounts["org-1"]!,
+        resetCredits: {
+          source: "provider",
+          fetchedAt: new Date().toISOString(),
+          stale: false,
+          error: null,
+          detailState: "detailed",
+          detailsComplete: true,
+          availableCount: 2,
+          credits: [
+            credit(`credit-a-${defaults}`, "Weekly reset"),
+            credit(`credit-b-${defaults}`, "Bonus reset"),
+          ],
+        },
+        canRedeem: true,
+        canResumeRedemption: true,
+        redemptionAccess: { ownership: "current_human", canClaimUnownedViaReconnect: false },
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [resetAccount] };
+        }
+        if (method === "GET" && path === overviewPath) return orgOverview;
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      const sent: { url: string; init: RequestInit }[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        sent.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            attemptId: JSON.parse(String(init.body)).attemptId,
+            confirmationToken: "signed",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            resumable: false,
+            recoveryStatus: null,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch;
+      const view = await render();
+      try {
+        // The row says how many are waiting, though no workspace has to use it.
+        const orgRow = [
+          ...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+        ].find((row) => row.textContent?.includes("Company plan"))!;
+        expect(orgRow.textContent).toContain("2 usage limit resets");
+        expect(orgRow.textContent).not.toContain("3 usage limit resets");
+        await act(async () => orgRow.querySelector<HTMLElement>("[data-row-action]")!.click());
+        await flush();
+        await flush();
+        const text = view.container.textContent ?? "";
+        expect(text).toContain("Usage limit resets (2)");
+        expect(text).toContain("Owners and admins of the organization can redeem them here.");
+        expect(text).not.toContain("Connect for this workspace");
+        expect(client.requestJson).toHaveBeenCalledWith("GET", overviewPath);
+        await act(async () => button(view.container, "Redeem Weekly reset")!.click());
+        await flush();
+        // Prepared on the organization's route with the browser cookie only.
+        expect(sent).toHaveLength(1);
+        expect(sent[0]!.url).toContain(
+          "/v1/organizations/organization-a/codex/accounts/org-1/reset-credits/prepare",
+        );
+        expect(sent[0]!.init.credentials).toBe("include");
+        expect(new Headers(sent[0]!.init.headers).get("authorization")).toBeNull();
+        expect(JSON.parse(String(sent[0]!.init.body))).toMatchObject({
+          creditId: `credit-a-${defaults}`,
+        });
+        expect(document.body.textContent).toContain("Redeem this usage limit reset?");
+      } finally {
+        globalThis.fetch = originalFetch;
+        await cleanup(view);
+      }
+    },
+  );
 
   test("Connect provider connects for the organization, every workspace by default", async () => {
     organizationAdmin = true;
@@ -2607,6 +2766,58 @@ describe("One Models page for the organization and the workspace", () => {
       }
     });
 
+    test("retains successful access across navigation but reads a deliberately cold error fixture", async () => {
+      const { retainSharedQueries } = await import("@opengeni/react/app/lib/shared-query");
+      const release = retainSharedQueries(client);
+      organizationAdmin = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      let view: Awaited<ReturnType<typeof render>> | undefined;
+      try {
+        view = await render();
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(view.container.textContent).toContain("Selected people");
+        const reads = client.getModelConnectionAccess.mock.calls.length;
+        expect(reads).toBeGreaterThan(0);
+        await cleanup(view);
+        view = undefined;
+
+        client.getModelConnectionAccess.mockImplementation(async () => {
+          throw new Error("Connection request failed");
+        });
+        // Replacing a loader is not an invalidation: a fresh retained read
+        // still serves ordinary navigation without making another request.
+        view = await render();
+        await flush();
+        expect(view.container.textContent).toContain("Selected people");
+        expect(view.container.textContent).not.toContain("Couldn't check who can use it");
+        expect(client.getModelConnectionAccess.mock.calls.length).toBe(reads);
+        await cleanup(view);
+        view = undefined;
+
+        // Holding retention makes this boundary deterministic: without the
+        // explicit clear the failing loader is never called, even on remount.
+        view = await renderColdModelsFixture();
+        await flush();
+        expect(client.getModelConnectionAccess.mock.calls.length).toBeGreaterThan(reads);
+        expect(view.container.textContent).toContain("Couldn't check who can use it");
+        expect(view.container.textContent).not.toContain("Selected people");
+      } finally {
+        if (view) await cleanup(view);
+        release();
+      }
+    });
+
     test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's, in use for those people where placement serves them", async () => {
       organizationAdmin = true;
       accounts = {
@@ -2656,7 +2867,7 @@ describe("One Models page for the organization and the workspace", () => {
         source: { ...source, mode: "workspace" as const, effectiveSource: "workspace" as const },
       };
       accounts = workspaceSource;
-      const workspaceOnly = await render();
+      const workspaceOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
@@ -2672,7 +2883,7 @@ describe("One Models page for the organization and the workspace", () => {
       // With no other account of its own, new work starts only for those people,
       // not "can't start … none are connected".
       accounts = { ...workspaceSource, accounts: [], activeAccountId: null };
-      const keptOnly = await render();
+      const keptOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
@@ -2702,7 +2913,7 @@ describe("One Models page for the organization and the workspace", () => {
             held.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
           }),
       );
-      const pendingView = await render();
+      const pendingView = await renderColdModelsFixture();
       try {
         expect(pendingView.container.textContent).not.toContain("New Codex work");
         // Nor a guessed tag or "Not in use" on the row still reading.
@@ -2722,9 +2933,13 @@ describe("One Models page for the organization and the workspace", () => {
       client.getModelConnectionAccess.mockImplementation(async () => {
         throw new Error("Connection request failed");
       });
-      const failedView = await render();
+      const accessReadsBeforeFailure = client.getModelConnectionAccess.mock.calls.length;
+      const failedView = await renderColdModelsFixture();
       try {
         await flush();
+        expect(client.getModelConnectionAccess.mock.calls.length).toBeGreaterThan(
+          accessReadsBeforeFailure,
+        );
         expect(failedView.container.textContent).not.toContain("New Codex work");
         // Its row says so, with the way to read it again.
         const failedRow = rowsNamed(failedView.container, "Team plan")[0]!;
@@ -2764,7 +2979,7 @@ describe("One Models page for the organization and the workspace", () => {
             ? new Promise((resolve) => heldLists.push(() => resolve(callList(...args))))
             : callList(...args),
       );
-      const listPending = await render();
+      const listPending = await renderColdModelsFixture();
       try {
         await flush();
         expect(heldLists.length).toBeGreaterThan(0);
@@ -2786,7 +3001,7 @@ describe("One Models page for the organization and the workspace", () => {
         return callList(...args);
       });
       // Its error row (with Try again) keeps the list from reading "No model providers connected".
-      const listFailed = await render();
+      const listFailed = await renderColdModelsFixture();
       try {
         await flush();
         expect(listFailed.container.textContent).toContain(
@@ -2829,7 +3044,7 @@ describe("One Models page for the organization and the workspace", () => {
             );
           }),
       );
-      const twoKept = await render();
+      const twoKept = await renderColdModelsFixture();
       try {
         await flush();
         expect(rowsNamed(twoKept.container, "Zeta plan")).toHaveLength(1);
@@ -2864,7 +3079,7 @@ describe("One Models page for the organization and the workspace", () => {
             heldOrg.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
           }),
       );
-      const organizationPending = await render();
+      const organizationPending = await renderColdModelsFixture();
       try {
         await flush();
         expect(organizationPending.container.textContent).toContain(
@@ -2880,7 +3095,7 @@ describe("One Models page for the organization and the workspace", () => {
         ...workspaceSource,
         source: { ...source, mode: "automatic" as const, effectiveSource: "workspace" as const },
       };
-      const automatic = await render();
+      const automatic = await renderColdModelsFixture();
       try {
         await flush();
         expect(automatic.container.textContent).toContain(
@@ -2901,7 +3116,7 @@ describe("One Models page for the organization and the workspace", () => {
           : access;
       });
       accounts = workspaceSource;
-      const noOne = await render();
+      const noOne = await renderColdModelsFixture();
       try {
         await flush();
         expect(noOne.container.textContent).toContain(
@@ -2924,7 +3139,7 @@ describe("One Models page for the organization and the workspace", () => {
           effectiveSource: "organization" as const,
         },
       };
-      const organizationOnly = await render();
+      const organizationOnly = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(organizationOnly.container, "Team plan")[0]!;
@@ -2947,7 +3162,7 @@ describe("One Models page for the organization and the workspace", () => {
           : access;
       });
       accounts = workspaceSource;
-      const notKept = await render();
+      const notKept = await renderColdModelsFixture();
       try {
         await flush();
         const row = rowsNamed(notKept.container, "Team plan")[0]!;
@@ -3285,9 +3500,8 @@ describe("One Models page for the organization and the workspace", () => {
         return {};
       });
       let resolveAccess: (value: unknown) => void = () => undefined;
-      client.getModelConnectionAccess.mockImplementation(
-        () => new Promise((resolve) => (resolveAccess = resolve)),
-      );
+      const pendingAccess = new Promise((resolve) => (resolveAccess = resolve));
+      client.getModelConnectionAccess.mockImplementation(() => pendingAccess);
       const view = await render();
       try {
         await flush();

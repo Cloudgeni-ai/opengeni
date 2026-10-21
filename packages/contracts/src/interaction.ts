@@ -1807,6 +1807,100 @@ export const BrowserDownloadExportReceipt = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportReceipt>;
 
+/** One browser recording as its controller reports it. */
+export const BrowserRecordingSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      state: z.enum(["recording", "stopped"]),
+      startedAt: z.string().datetime({ offset: true }),
+      stoppedAt: z.string().datetime({ offset: true }).nullable(),
+      stopReason: z.enum(["requested", "duration_limit", "size_limit", "session_ended"]).nullable(),
+      durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      frameCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      frameBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      actionCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      bundle: z
+        .object({
+          sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          sha256: sha256Hex,
+        })
+        .strict()
+        .nullable(),
+      streamError: z.string().max(2_048).nullable(),
+    })
+    .strict(),
+);
+export type BrowserRecordingSummary = z.infer<typeof BrowserRecordingSummary>;
+
+export const BrowserRecordingStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ targetId: boundedOpaqueId }).strict(),
+);
+export type BrowserRecordingStartRequest = z.infer<typeof BrowserRecordingStartRequest>;
+
+/** Controller-private, narrow object authority for uploading one stopped
+ * recording's frame bundle. */
+export const BrowserRecordingExportRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      upload: z
+        .object({
+          url: boundedHttpUrl,
+          requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
+          expiresAt: z.string().datetime({ offset: true }),
+        })
+        .strict(),
+    })
+    .strict(),
+);
+export type BrowserRecordingExportRequest = z.infer<typeof BrowserRecordingExportRequest>;
+
+export const BrowserRecordingExportReceipt = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recordingId: z.string().uuid(),
+      sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      sha256: sha256Hex,
+    })
+    .strict(),
+);
+export type BrowserRecordingExportReceipt = z.infer<typeof BrowserRecordingExportReceipt>;
+
+/** Stops a recording and saves it as an MP4 (plus its action log) in the
+ * browser's source session workspace, published as a retained artifact. */
+export const BrowserRecordingSaveRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      /** Where the MP4 goes; the action log is saved beside it as .actions.json. */
+      destinationPath: workspaceRelativeFilePath.optional(),
+    })
+    .strict(),
+);
+export type BrowserRecordingSaveRequest = z.infer<typeof BrowserRecordingSaveRequest>;
+
+export const BrowserRecordingSaveResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      recording: BrowserRecordingSummary,
+      video: z
+        .object({
+          path: workspaceRelativeFilePath,
+          artifactId: z.string().uuid(),
+          sizeBytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          durationMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+          width: z.number().int().positive().max(100_000),
+          height: z.number().int().positive().max(100_000),
+          frameCount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        })
+        .strict(),
+      actionLogPath: workspaceRelativeFilePath,
+    })
+    .strict(),
+);
+export type BrowserRecordingSaveResponse = z.infer<typeof BrowserRecordingSaveResponse>;
+
 export const InteractionRect = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3239,6 +3333,8 @@ export const ComputerSessionCapabilities = /* @__PURE__ */ defineSchema(() =>
       backgroundActions: z.boolean(),
       /** Raw window input stays in the background. Absent means foreground-only. */
       backgroundInput: z.boolean().optional(),
+      /** Accepts a ComputerActionBatch as one operation. */
+      actionBatches: z.boolean().optional(),
       parallelApps: z.boolean(),
     })
     .strict(),
@@ -3337,6 +3433,9 @@ export const ComputerTarget = /* @__PURE__ */ defineSchema(() =>
       title: z.string().max(4_096),
       bounds: InteractionRect.nullable(),
       focused: z.boolean(),
+      /** Present on a window the platform cannot capture or read while it is
+       * off screen (macOS: minimized, hidden, or on another Space or display). */
+      offScreen: z.literal(true).optional(),
     })
     .strict(),
 );
@@ -3360,37 +3459,53 @@ export const ComputerObservation = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerObservation = z.infer<typeof ComputerObservation>;
 
+/** Module-private: ComputerAction keeps these variants inline in the public
+ * API surface; the batch reuses them. */
+const ComputerSemanticAction = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("semantic"),
+      locator: ComputerLocator,
+      action: z.enum([
+        "invoke",
+        "focus",
+        "set_value",
+        "increment",
+        "decrement",
+        "select",
+        "deselect",
+        "expand",
+        "collapse",
+        "show_menu",
+        "scroll_into_view",
+      ]),
+      value: z.union([z.string().max(1_000_000), z.number().finite(), z.boolean()]).optional(),
+    })
+    .strict()
+    .superRefine((action, context) => {
+      if ((action.action === "set_value") !== (action.value !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["value"],
+          message: "value is required exactly for set_value",
+        });
+      }
+    }),
+);
+
+const ComputerKeyboardAction = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("keyboard"),
+      action: z.enum(["type", "press"]),
+      value: z.string().max(1_000_000),
+    })
+    .strict(),
+);
+
 export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("type", [
-    z
-      .object({
-        type: z.literal("semantic"),
-        locator: ComputerLocator,
-        action: z.enum([
-          "invoke",
-          "focus",
-          "set_value",
-          "increment",
-          "decrement",
-          "select",
-          "deselect",
-          "expand",
-          "collapse",
-          "show_menu",
-          "scroll_into_view",
-        ]),
-        value: z.union([z.string().max(1_000_000), z.number().finite(), z.boolean()]).optional(),
-      })
-      .strict()
-      .superRefine((action, context) => {
-        if ((action.action === "set_value") !== (action.value !== undefined)) {
-          context.addIssue({
-            code: "custom",
-            path: ["value"],
-            message: "value is required exactly for set_value",
-          });
-        }
-      }),
+    ComputerSemanticAction,
     z
       .object({
         type: z.literal("pointer"),
@@ -3452,13 +3567,7 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           });
         }
       }),
-    z
-      .object({
-        type: z.literal("keyboard"),
-        action: z.enum(["type", "press"]),
-        value: z.string().max(1_000_000),
-      })
-      .strict(),
+    ComputerKeyboardAction,
     z
       .object({
         type: z.literal("clipboard"),
@@ -3494,6 +3603,32 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
 );
 export type ComputerAction = z.infer<typeof ComputerAction>;
 
+/** Semantic and keyboard actions run in order on one target as one
+ * operation: each acts on the state the one before it left, the batch stops at
+ * the first failure, and the receipt observes the target once, after the last
+ * action. Pointer actions need one exact screenshot's pixels, so they are not
+ * batched. Sent only to a session whose capabilities include actionBatches. */
+export const ComputerActionBatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("batch"),
+      actions: z
+        .array(z.discriminatedUnion("type", [ComputerSemanticAction, ComputerKeyboardAction]))
+        .min(1)
+        .max(INTERACTION_MAX_ACTIONS_PER_BATCH),
+    })
+    .strict(),
+);
+export type ComputerActionBatch = z.infer<typeof ComputerActionBatch>;
+
+/** What an action request may carry: any ComputerAction, or a batch. A named
+ * superset of ComputerAction, so adding the batch is an additive request
+ * change. */
+export const ComputerActionRequestAction = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [...ComputerAction.options, ComputerActionBatch]),
+);
+export type ComputerActionRequestAction = z.infer<typeof ComputerActionRequestAction>;
+
 export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -3506,15 +3641,16 @@ export const ComputerActionCommand = /* @__PURE__ */ defineSchema(() =>
       expectedObservationId: boundedOpaqueId.nullable(),
       expectedFrameId: opaqueGeneration.nullable(),
       actor: InteractionActor,
-      action: ComputerAction,
+      action: z.union([ComputerAction, ComputerActionBatch]),
       /** Controller-private; see BrowserActionCommand.secretValues. */
       secretValues: InteractionSecretValues.optional(),
     })
     .strict()
     .superRefine((command, context) => {
       if (
-        command.action.type === "semantic" &&
-        command.action.locator.kind === "ref" &&
+        (command.action.type === "batch" ? command.action.actions : [command.action]).some(
+          (action) => action.type === "semantic" && action.locator.kind === "ref",
+        ) &&
         command.expectedObservationId === null
       ) {
         context.addIssue({
@@ -3698,13 +3834,14 @@ export const ComputerActionRequest = /* @__PURE__ */ defineSchema(() =>
       expectedTargetGeneration: opaqueGeneration,
       expectedObservationId: boundedOpaqueId.nullable(),
       expectedFrameId: opaqueGeneration.nullable(),
-      action: ComputerAction,
+      action: ComputerActionRequestAction,
     })
     .strict()
     .superRefine((request, context) => {
       if (
-        request.action.type === "semantic" &&
-        request.action.locator.kind === "ref" &&
+        (request.action.type === "batch" ? request.action.actions : [request.action]).some(
+          (action) => action.type === "semantic" && action.locator.kind === "ref",
+        ) &&
         request.expectedObservationId === null
       ) {
         context.addIssue({
@@ -3910,8 +4047,10 @@ export function materializeBrowserActionSecrets(
 }
 
 /** The text fields of a computer action that may carry secret references. */
-export function computerActionSecretTexts(action: ComputerAction): string[] {
+export function computerActionSecretTexts(action: ComputerAction | ComputerActionBatch): string[] {
   switch (action.type) {
+    case "batch":
+      return action.actions.flatMap((entry) => computerActionSecretTexts(entry));
     case "keyboard":
       return action.action === "type" ? [action.value] : [];
     case "semantic":
@@ -3927,11 +4066,22 @@ export function computerActionSecretTexts(action: ComputerAction): string[] {
 
 export function materializeComputerActionSecrets(
   command: Pick<ComputerActionCommand, "action" | "secretValues">,
-): ComputerAction {
+): ComputerAction | ComputerActionBatch {
   const values = command.secretValues;
   const action = command.action;
   if (values === undefined) return action;
   switch (action.type) {
+    case "batch":
+      return {
+        ...action,
+        actions: action.actions.map(
+          (entry) =>
+            materializeComputerActionSecrets({
+              action: entry,
+              secretValues: values,
+            }) as (typeof action.actions)[number],
+        ),
+      };
     case "keyboard":
       return action.action === "type"
         ? { ...action, value: substituteSecretText(action.value, values) }
@@ -3981,26 +4131,78 @@ export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
 
 /** Identifier-like keys keep their strings untouched (generations, refs,
  * digests, image payloads, timestamps): redacting inside them would corrupt
- * the result rather than protect anything. */
-const NON_TEXT_KEY = /^(id|ref|data|url|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
+ * the result rather than protect anything. URLs are text: a page can put a
+ * typed value into its address. */
+const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
+
+/** The forms a value takes in page text and addresses. */
+function secretNeedles(secretValues: InteractionSecretValues): string[] {
+  const needles = new Set<string>();
+  for (const value of Object.values(secretValues)) {
+    if (value.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) continue;
+    needles.add(value);
+    // Tools trim the text they report and keep its first line, so a value's
+    // trimmed form and each line of a multi-line value are searched too.
+    for (const part of [value.trim(), ...value.split(/\r?\n|\r/u).map((line) => line.trim())])
+      if (part.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS) needles.add(part);
+    try {
+      needles.add(encodeURIComponent(value));
+      needles.add(encodeURIComponent(value).replaceAll("%20", "+"));
+    } catch {
+      // A lone surrogate has no URI form; the raw value is still searched.
+    }
+    // Submitted forms and URLSearchParams encode more characters (for
+    // example "!" as "%21") than encodeURIComponent does.
+    needles.add(new URLSearchParams({ v: value }).toString().slice(2));
+  }
+  return [...needles].sort((left, right) => right.length - left.length);
+}
+
+/** Length of the longest start of `needle` that `text` ends with, when it is
+ * long enough to matter: text clipped to a length can end partway through a
+ * value, and that partial value is still the secret's start. */
+function clippedSecretTail(text: string, needle: string): number {
+  const probe = text.slice(-INTERACTION_MIN_REDACTED_SECRET_CHARS);
+  if (probe.length < INTERACTION_MIN_REDACTED_SECRET_CHARS) return 0;
+  let best = 0;
+  for (let at = needle.indexOf(probe); at !== -1; at = needle.indexOf(probe, at + 1)) {
+    const length = at + probe.length;
+    if (length < needle.length && length > best && text.endsWith(needle.slice(0, length)))
+      best = length;
+  }
+  return best;
+}
+
+/** Where text may have been cut: its end, and each truncation mark a tool
+ * leaves where it clipped a longer text before adding more after it. */
+const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
 
 /** Deep copy with every occurrence of a supplied secret value in a text
- * string replaced by `[secret]`. Used on results a driver returns after
- * dispatching materialized values (CUA tools echo typed text; desktop
- * accessibility trees expose field values). */
+ * string (raw or percent-encoded) replaced by `[secret]`, including a value's
+ * start left at the end of a clipped string or before a truncation mark.
+ * Used on results a driver returns after dispatching materialized values (CUA
+ * tools echo typed text; desktop accessibility trees and page fields expose
+ * values). */
 export function redactInteractionSecretValues<T>(
   value: T,
   secretValues: InteractionSecretValues | undefined,
 ): T {
   if (secretValues === undefined) return value;
-  const needles = [...new Set(Object.values(secretValues))]
-    .filter((needle) => needle.length >= INTERACTION_MIN_REDACTED_SECRET_CHARS)
-    .sort((left, right) => right.length - left.length);
+  const needles = secretNeedles(secretValues);
   if (needles.length === 0) return value;
   const redactText = (text: string): string => {
     let out = text;
     for (const needle of needles) {
       if (out.includes(needle)) out = out.split(needle).join(INTERACTION_REDACTED_SECRET);
+    }
+    const cuts = [...out.matchAll(TRUNCATION_MARK)].map((match) => match.index);
+    // From the last cut back, so the earlier positions stay valid.
+    for (const cut of [out.length, ...cuts.reverse()]) {
+      const before = out.slice(0, cut);
+      let tail = 0;
+      for (const needle of needles) tail = Math.max(tail, clippedSecretTail(before, needle));
+      if (tail > 0)
+        out = before.slice(0, cut - tail) + INTERACTION_REDACTED_SECRET + out.slice(cut);
     }
     return out;
   };

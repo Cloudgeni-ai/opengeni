@@ -2,9 +2,9 @@ import type {
   IntegrationChip,
   IntegrationMark,
   IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { InstalledSourceSkill } from "@/components/capabilities/source-import-flow";
-import type { CapabilityCatalogItem, PluginInstallationSummary } from "@/types";
+import type { CapabilityCatalogItem, PluginInstallationSummary } from "@opengeni/react/app/types";
 
 export type BundleKind = "skill" | "plugin";
 

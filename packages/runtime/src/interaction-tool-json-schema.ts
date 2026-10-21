@@ -92,6 +92,39 @@ export function browserActModelInputSchema(schema: AttemptToolJsonSchema): Attem
   } as AttemptToolJsonSchema;
 }
 
+/**
+ * computer_act's model view: a batch item takes the same fields as action,
+ * described once, with only the action types a batch runs.
+ */
+export function computerActModelInputSchema(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
+  const top = isNode(schema.properties) ? schema.properties : null;
+  const action = top && isNode(top.action) ? top.action : null;
+  const fields = action && isNode(action.properties) ? action.properties : null;
+  const actions = fields && isNode(fields.actions) ? fields.actions : null;
+  if (!top || !action || !fields || !actions) return schema;
+  return {
+    ...schema,
+    properties: {
+      ...top,
+      action: {
+        ...action,
+        properties: {
+          ...fields,
+          actions: {
+            ...actions,
+            items: {
+              type: "object",
+              properties: { type: { type: "string", enum: ["semantic", "keyboard"] } },
+              required: ["type"],
+              description: "One semantic or keyboard action with the same fields as action.",
+            },
+          },
+        },
+      },
+    },
+  } as AttemptToolJsonSchema;
+}
+
 function locatorObject(schema: unknown): JsonSchemaNode | null {
   if (!isNode(schema)) return null;
   if (Array.isArray(schema.anyOf)) {

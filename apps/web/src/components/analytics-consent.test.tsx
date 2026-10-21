@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import {
   openAnalyticsPreferences,
   setAnalyticsConsentDecisionSender,
-} from "@/lib/analytics-consent";
+} from "@opengeni/react/app/lib/analytics-consent";
 
 import { AnalyticsManager, analyticsClickEvent } from "./analytics-consent";
 

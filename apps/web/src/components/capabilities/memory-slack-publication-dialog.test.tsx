@@ -8,7 +8,7 @@ import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-b
 import type { MemorySlackPublicationConfiguration } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { ConnectionMetadata } from "@/types";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const connectionId = "22222222-2222-4222-8222-222222222222";
@@ -59,7 +59,7 @@ const client = {
   },
 };
 
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({ client }) }));
 
 if (!globalThis.document) GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =

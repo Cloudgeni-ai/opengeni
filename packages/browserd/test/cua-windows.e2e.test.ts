@@ -55,6 +55,7 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
       { stdout: "inherit", stderr: "inherit" },
     );
     let supervisor: ComputerSupervisor | undefined;
+    let launchedPid: number | undefined;
     const reference = { computerSessionId: randomUUID(), controllerGeneration: randomUUID() };
     try {
       // A cold PowerShell start that loads WinForms can take several seconds.
@@ -138,8 +139,33 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
       );
       expect(await supervisor.action(click)).toMatchObject({ state: "completed" });
       await until((state) => state.clicks === 1, "button click");
+
+      // Apps launch in the background by full path. The app must open a
+      // window and keep running (a console tool such as whoami.exe exits;
+      // Notepad on Windows 11 hands off to a packaged app).
+      expect(session.capabilities.appLaunch).toBe(true);
+      observed = await supervisor.observe(reference, target.id);
+      const launched = await supervisor.action(
+        command(observed, {
+          type: "launch",
+          applicationId: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "charmap.exe"),
+        }),
+      );
+      launchedPid = launched.observation?.target.processId ?? undefined;
+      // An elevated CUA driver starts apps only with a standard-user token,
+      // which it cannot do for a restored background launch (hosted CI
+      // runners are elevated). That launch must fail with CUA's own reason,
+      // never silently or as a bare protocol error.
+      if (elevated()) {
+        expect(launched.state).not.toBe("completed");
+        expect(JSON.stringify(launched.error)).toContain("Driver is elevated");
+      } else {
+        expect(launched).toMatchObject({ state: "completed" });
+      }
     } finally {
       await supervisor?.close();
+      // Only the process this test launched.
+      if (launchedPid !== undefined) Bun.spawnSync(["taskkill", "/F", "/PID", String(launchedPid)]);
       fixture.kill();
       await fixture.exited;
       await rm(root, { recursive: true, force: true });
@@ -147,3 +173,26 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
   },
   120_000,
 );
+
+/** Whether this process runs elevated, which the CUA driver it starts
+ * inherits and checks for itself. An administrator's token is a member of the
+ * Administrators role only when elevated (UAC filters it otherwise). */
+function elevated(): boolean {
+  const probe = Bun.spawnSync([
+    join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+  ]);
+  const answer = probe.stdout.toString().trim();
+  if (probe.exitCode !== 0 || (answer !== "True" && answer !== "False"))
+    throw new Error(`elevation probe failed: ${answer} ${probe.stderr.toString().trim()}`);
+  return answer === "True";
+}

@@ -6,6 +6,7 @@ import {
   evaluateSessionWriteAdmissionControl,
   assertSessionAuthoritySnapshot,
   sessionAuthoritySnapshotMatchesSession,
+  type SessionEventWriteFenceLocks,
 } from "./session-control";
 
 export type TurnAttemptFenceRejectReason =
@@ -18,22 +19,35 @@ export type TurnAttemptFenceRejectReason =
   | "turn_terminal"
   | "not_found";
 
-type TurnAttemptFenceResult =
-  | {
-      allowed: true;
-      workspace: typeof schema.workspaces.$inferSelect;
-      session: typeof schema.sessions.$inferSelect;
-      turn: typeof schema.sessionTurns.$inferSelect;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
-    }
-  | {
-      allowed: false;
-      reason: TurnAttemptFenceRejectReason;
-      workspace: typeof schema.workspaces.$inferSelect | null;
-      session: typeof schema.sessions.$inferSelect | null;
-      turn: typeof schema.sessionTurns.$inferSelect | null;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
-    };
+type FenceRows = {
+  workspace: NonNullable<SessionEventWriteFenceLocks["workspace"]>;
+  session: SessionEventWriteFenceLocks["sessions"][number];
+  turn: SessionEventWriteFenceLocks["turns"][number];
+  attempt: SessionEventWriteFenceLocks["attempts"][number];
+};
+type FenceResult<Rows extends FenceRows> =
+  | ({ allowed: true } & Rows)
+  | ({ allowed: false; reason: TurnAttemptFenceRejectReason } & {
+      [Key in keyof Rows]: Rows[Key] | null;
+    });
+
+export type TurnAttemptEventFenceResult = FenceResult<FenceRows>;
+export type TurnAttemptFenceResult = FenceResult<{
+  workspace: typeof schema.workspaces.$inferSelect;
+  session: typeof schema.sessions.$inferSelect;
+  turn: typeof schema.sessionTurns.$inferSelect;
+  attempt: typeof schema.sessionTurnAttempts.$inferSelect;
+}>;
+
+type TurnAttemptWriteFenceInput = {
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  executionGeneration: number;
+  attemptId: string;
+  sessionLock?: "no_key_update" | "key_share";
+  rowProjection?: "full" | "event";
+};
 
 /**
  * Lock order for every activity write fence: workspace control -> actual
@@ -46,20 +60,22 @@ type TurnAttemptFenceResult =
  * one workspace behind a single row and turned streaming into a workspace-wide
  * lock queue.
  */
+export function lockTurnAttemptWriteFenceTx(
+  tx: Database,
+  input: TurnAttemptWriteFenceInput & { rowProjection: "event" },
+): Promise<TurnAttemptEventFenceResult>;
+export function lockTurnAttemptWriteFenceTx(
+  tx: Database,
+  input: TurnAttemptWriteFenceInput & { rowProjection?: "full" },
+): Promise<TurnAttemptFenceResult>;
 export async function lockTurnAttemptWriteFenceTx(
   tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    executionGeneration: number;
-    attemptId: string;
-    sessionLock?: "no_key_update" | "key_share";
-  },
-): Promise<TurnAttemptFenceResult> {
+  input: TurnAttemptWriteFenceInput,
+): Promise<TurnAttemptEventFenceResult> {
   const locks = await lockSessionEventWriteRows(tx, {
     workspaceId: input.workspaceId,
     controlLock: "share",
+    rowProjection: input.rowProjection ?? "full",
     sessionLock: input.sessionLock ?? "no_key_update",
     sessionIds: [input.sessionId],
     turnIds: [input.turnId],

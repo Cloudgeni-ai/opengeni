@@ -3,15 +3,15 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobeIcon, LockKeyholeIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { LoadingPanel } from "@/components/common";
+import { LoadingPanel } from "@opengeni/react/app/components/common";
 import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FormPage } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { useAppContext } from "@/context";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import { useNativeSignInContext } from "@/lib/native-sign-in-context";
 import {
   isFramedWindow,
@@ -20,7 +20,7 @@ import {
   siteAuthRequest,
   type SiteAuthSearch,
 } from "@/lib/site-auth";
-import { sitesClientConfig } from "@/lib/site-publishing";
+import { sitesClientConfig } from "@opengeni/react/app/lib/site-publishing";
 
 /* ----------------------------------------------------------------------------
    /site-auth/authorize: a published Site asks the signed-in person to open

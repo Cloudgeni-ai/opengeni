@@ -1,9 +1,12 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
+  // Session list notifications reference the final imported/archive/site fields.
+  "0888_session_list_invalidation.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -276,6 +279,8 @@ export const embeddingMigrationTail = [
   "0769_private_visibility_never_blocks.sql",
   "0763_queue_steer_admission_recheck_repair.sql",
   "0764_interrupted_turn_recovery.sql",
+  // Replaces the recovery inventory 0764 rewrote; replay after it.
+  "0880_quiescence_repair_skips_parked_waits.sql",
   // Reads shared-core tables and the own-membership helper from withheld 0729.
   "0757_subscription_people_picker_reads.sql",
   // Rewrites the visibility transition and fork routines from withheld 0501
@@ -283,6 +288,8 @@ export const embeddingMigrationTail = [
   "0738_private_sessions_share_sandboxes.sql",
   // Replaces the 0585 cursor trigger routine over its withheld column.
   "0775_session_usage_limit_attention_cursor.sql",
+  // Patches the semantic projection in the cursor trigger restored by 0775.
+  "0877_single_semantic_event_projection.sql",
   // Reads subscription_connections and the owner-capability routine from
   // withheld 0645/0707 and later subscription-core migrations.
   "0777_workspace_admin_subscription_connections.sql",
@@ -320,5 +327,43 @@ export const embeddingMigrationTail = [
   "0842_site_session_access.sql",
   // Patches the withheld provenance fences and subscription compatibility readers.
   "0843_indexed_inbox_lineage.sql",
+  // Both extend the scoped-credit constraint from withheld 0613 and plan
+  // routines from withheld 0797; replay only after those prerequisites.
+  "0844_free_plan_credit_scope.sql",
+  "0845_signup_eligibility_without_bonus.sql",
   "0846_independent_session_titles.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
+  // Temporarily disables the sessions fence trigger installed by withheld 0345.
+  "0853_connected_machine_root_working_dirs.sql",
+  // Replaces the file ownership trigger from withheld 0461 and reads the file
+  // read-capability table from withheld 0499.
+  "0854_file_visibility.sql",
+  // Rewrites the fork routines that withheld 0738 rewrites; replay after it.
+  "0855_session_fork_agent_parity.sql",
+  // Patches 0855's fork routines and temporarily disables the sessions fence
+  // trigger installed by withheld 0345.
+  "0856_session_fork_workflow_identity.sql",
+  // Replaces the Slack message routine and alters the access table created by
+  // withheld 0622; replay after it.
+  "0864_scheduled_bot_capability.sql",
+  // Replaces the seat trigger created by withheld 0797; replay after it.
+  "0870_invitation_binding_seat_scope.sql",
+  // Usage history routines live in the subscription schema from withheld
+  // shared-core migrations; the seed reads them. Replay both after them.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
+  // Patches the account-binding fence as rewritten by withheld 0501 and the
+  // trigger from withheld 0836; replay after both.
+  "0873_mcp_binding_delegation_revocation.sql",
+  // Rewrites the resolver installed by withheld 0478; replay after it.
+  "0876_connection_validation_shared_locks.sql",
+  // Reads the shared-core waiter table from withheld 0642; replay after it.
+  "0882_continuable_core_capacity_waits.sql",
+  // Patches the interaction reaper by its post-0345/0564/0705 anchors; replay
+  // after the fence graph it edits.
+  "0883_retired_instance_interactions.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
+  ...strictOwnerMaintenanceMigrationTail,
 ];

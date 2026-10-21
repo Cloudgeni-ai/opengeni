@@ -1,0 +1,147 @@
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import type { WorkspaceRealtimeModelCatalogItem } from "@opengeni/sdk";
+
+// Register the DOM before React DOM and Radix load.
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+const { act } = await import("react");
+const { createRoot } = await import("react-dom/client");
+
+const WORKSPACE_ID = "workspace-voice";
+const ELEVEN = "workspace-elevenlabs/eleven_realtime_v1_max";
+
+let models: WorkspaceRealtimeModelCatalogItem[] = [];
+const updateWorkspaceSettings = mock(async (_workspaceId: string, _patch: unknown) => ({}));
+const context = {
+  client: {
+    getWorkspaceRealtimeModelCatalog: async () => ({ models }),
+    updateWorkspaceSettings,
+  },
+};
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
+
+const { RealtimeVoiceSettingsRows } = await import("./realtime-voice-settings");
+
+function catalogModel(
+  overrides: Partial<WorkspaceRealtimeModelCatalogItem> &
+    Pick<WorkspaceRealtimeModelCatalogItem, "id">,
+): WorkspaceRealtimeModelCatalogItem {
+  return {
+    label: overrides.id,
+    provider: "Your Gateway",
+    description: "Voice",
+    available: true,
+    unavailableReason: null,
+    recommended: false,
+    ...overrides,
+  };
+}
+
+let root: ReturnType<typeof createRoot>, container: HTMLDivElement;
+beforeEach(() => {
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  updateWorkspaceSettings.mockClear();
+});
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+});
+afterAll(() => GlobalRegistrator.unregister());
+
+async function settle() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+  }
+}
+
+test("lists the voice settings of each available model that offers some, and saves a custom voice id", async () => {
+  models = [
+    catalogModel({
+      id: ELEVEN,
+      label: "Eleven Realtime v1 max",
+      provider: "Your ElevenLabs",
+      languages: ["en", "no", "sv"],
+      voices: [
+        { id: "brian", label: "Brian" },
+        { id: "lily", label: "Lily" },
+      ],
+      customVoice: true,
+      turnEagerness: ["low", "medium", "high"],
+      voiceDefaults: { voice: "brian", turnEagerness: "high" },
+      workspaceVoiceSettings: { voice: "my-voices-id", language: "no" },
+    }),
+    catalogModel({
+      id: "workspace-gateway/openai/gpt-realtime-mini",
+      label: "GPT Realtime Mini",
+      voices: [{ id: "marin", label: "Marin" }],
+    }),
+    // Nothing to choose, or not usable here: not listed.
+    catalogModel({ id: "gpt-live-1-boulder-alpha", label: "Codex Live" }),
+    catalogModel({
+      id: "workspace-gateway/openai/gpt-realtime-2.1",
+      label: "GPT Realtime 2.1",
+      voices: [{ id: "marin", label: "Marin" }],
+      available: false,
+      unavailableReason: "Connect a workspace AI Gateway key",
+    }),
+  ];
+  await act(async () =>
+    root.render(<RealtimeVoiceSettingsRows workspaceId={WORKSPACE_ID} canManage />),
+  );
+  await settle();
+  const text = container.textContent ?? "";
+  expect(text).toContain("Eleven Realtime v1 max");
+  expect(text).toContain("Voice: my-voices-id · Norwegian · Quick turn-taking");
+  expect(text).toContain("GPT Realtime Mini");
+  expect(text).toContain("Default voice");
+  expect(text).not.toContain("Codex Live");
+  expect(text).not.toContain("GPT Realtime 2.1");
+
+  const edit = [...container.querySelectorAll("button")].find(
+    (button) => button.textContent === "Edit",
+  )!;
+  await act(async () => edit.click());
+  await settle();
+  // A saved voice that isn't listed opens as "Another voice by ID", with its id filled in.
+  expect(document.body.textContent).toContain("Another voice by ID");
+  const voiceInput = document.querySelector<HTMLInputElement>('input[value="my-voices-id"]')!;
+  expect(voiceInput).not.toBeNull();
+  await act(async () => {
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setValue.call(voiceInput, "other-voices-id");
+    voiceInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const save = [...document.querySelectorAll("button")].find(
+    (button) => button.textContent === "Save",
+  )!;
+  await act(async () => save.click());
+  await settle();
+  expect(updateWorkspaceSettings).toHaveBeenCalledTimes(1);
+  expect(updateWorkspaceSettings.mock.calls[0]).toEqual([
+    WORKSPACE_ID,
+    { realtimeVoice: { [ELEVEN]: { voice: "other-voices-id", language: "no" } } },
+  ]);
+});
+
+test("shows the settings read-only to people who cannot change them", async () => {
+  models = [
+    catalogModel({
+      id: ELEVEN,
+      label: "Eleven Realtime v1 max",
+      customVoice: true,
+      voiceDefaults: { voice: "brian" },
+    }),
+  ];
+  await act(async () =>
+    root.render(<RealtimeVoiceSettingsRows workspaceId={`${WORKSPACE_ID}-2`} canManage={false} />),
+  );
+  await settle();
+  expect(container.textContent).toContain("Voice: Brian (default)");
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Edit")).toBe(
+    false,
+  );
+});

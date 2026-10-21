@@ -145,6 +145,10 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["sessions:control", "files:upload"],
   },
+  browser_record: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "files:upload"],
+  },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
   interaction_request_human: {
     sessionRequired: true,
@@ -158,6 +162,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
+  excel_run: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
   secret_search: { sessionRequired: true, allOf: ["secrets:list"] },
   secret_save: { sessionRequired: true, allOf: ["secrets:write"] },

@@ -1,5 +1,5 @@
-import { formatMoneyMicros } from "@/lib/format";
-import type { BillingSummary } from "@/types";
+import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
+import type { BillingSummary } from "@opengeni/react/app/types";
 import { CreditScopeDetails } from "@/components/credits/credit-scope-details";
 
 /** The credit balance, large, with one line on what it means. */

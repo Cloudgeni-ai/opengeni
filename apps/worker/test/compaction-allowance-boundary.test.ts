@@ -30,6 +30,8 @@ test("stream component retains the completed compaction checkpoint before refusi
     action: "continue",
   } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>);
   const position = spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2);
+  // No explicit workspace recovery adds a discontinuity notice here.
+  const recoveryNotice = spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null);
   // The completed checkpoint contains no stored programmatic operations.
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
   const allowance = spyOn(db, "checkWorkspaceAllowance").mockImplementation(async (_db, input) => {
@@ -111,6 +113,7 @@ test("stream component retains the completed compaction checkpoint before refusi
     prepared.mockRestore();
     suffix.mockRestore();
     position.mockRestore();
+    recoveryNotice.mockRestore();
     operations.mockRestore();
     allowance.mockRestore();
   }

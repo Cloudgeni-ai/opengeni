@@ -1,16 +1,20 @@
-import type { ModelAccountPreferences } from "@opengeni/sdk";
 import { ArrowDownIcon, ArrowUpIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { RowButton } from "@/components/ui/page-actions";
-import { ModelPicker } from "@/components/pickers";
-import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import {
+  invalidateSharedQueries,
+  sharedQueryWriter,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
 
 /** Edit one exact preferred-model mapping. Never infer model equivalence. */
 export function FallbackOrderControl({
@@ -167,51 +171,49 @@ export function PersonalFallbackPreference(props: {
   const subject = useAppContext().authSession?.user.id;
   // Organization service credentials never stand in for a person's preference.
   return subject ? (
-    <HumanPersonalFallbackPreference key={`${subject}:${props.organizationId}`} {...props} />
+    <HumanPersonalFallbackPreference
+      key={`${subject}:${props.organizationId}`}
+      subject={subject}
+      {...props}
+    />
   ) : null;
 }
 
 function HumanPersonalFallbackPreference({
+  subject,
   organizationId,
   allowed,
 }: {
+  subject: string;
   organizationId: string | undefined;
   allowed: boolean;
 }) {
   const { client } = useAppContext();
-  const [loaded, setLoaded] = useState<{
-    organizationId: string;
-    value: ModelAccountPreferences;
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const key = ["model-settings", "personal-fallback-preference", subject, organizationId ?? null];
+  const {
+    data: value,
+    error,
+    refresh,
+  } = useSharedQuery(client, key, () => client.getModelAccountPreferences(organizationId!), {
+    enabled: Boolean(organizationId),
+    staleTimeMs: 300_000,
+  });
   const [saving, setSaving] = useState(false);
-  const [reload, setReload] = useState(0);
   const generation = useRef(0);
   const savingRef = useRef(false);
   useEffect(() => {
-    const current = ++generation.current;
+    generation.current += 1;
     savingRef.current = false;
     setSaving(false);
-    setLoaded(null);
-    setError(null);
-    if (organizationId)
-      void client.getModelAccountPreferences(organizationId).then(
-        (value) => {
-          if (current === generation.current) setLoaded({ organizationId, value });
-        },
-        () => {
-          if (current === generation.current) setError("Couldn’t load your account preference.");
-        },
-      );
     return () => {
       generation.current += 1;
     };
-  }, [client, organizationId, reload]);
+  }, [client, organizationId, subject]);
   if (!organizationId) return null;
-  const value = loaded?.organizationId === organizationId ? loaded.value : null;
   const save = async (personalFallbackOptIn: boolean) => {
     if (!value || (personalFallbackOptIn && !allowed) || savingRef.current) return;
     const current = generation.current;
+    const write = sharedQueryWriter(client);
     savingRef.current = true;
     setSaving(true);
     try {
@@ -219,11 +221,13 @@ function HumanPersonalFallbackPreference({
         personalFallbackOptIn,
         expectedVersion: value.version,
       });
-      if (current === generation.current) setLoaded({ organizationId, value: saved });
+      // Record only in the originating human/organization key. The writer
+      // also rejects results from before the client cache was cleared.
+      write(key, saved);
     } catch {
+      void invalidateSharedQueries(client, key);
       if (current !== generation.current) return;
       toast.error("Couldn’t save your account preference. Reload and try again.");
-      setReload((previous) => previous + 1);
     } finally {
       if (current === generation.current) {
         savingRef.current = false;
@@ -235,10 +239,8 @@ function HumanPersonalFallbackPreference({
     <Section title="Your account preference">
       {error ? (
         <ErrorMessage
-          title={error}
-          action={
-            <RowButton onClick={() => setReload((previous) => previous + 1)}>Try again</RowButton>
-          }
+          title="Couldn’t load your account preference."
+          action={<RowButton onClick={() => void refresh()}>Try again</RowButton>}
         />
       ) : (
         <SettingRowGroup>

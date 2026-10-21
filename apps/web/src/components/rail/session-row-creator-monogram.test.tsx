@@ -2,13 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { CreatorMonogram } from "@/components/creator-monogram";
+import { CreatorMonogram } from "@opengeni/react/app/components/creator-monogram";
 
 import {
   RailTrailingMetadata,
   SessionRowContent,
   sessionRowAccessibleName,
-} from "./session-row-content";
+} from "@opengeni/react/app/components/rail/session-row-content";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -219,7 +219,9 @@ describe("SessionRowContent", () => {
   });
 
   test("keeps the title fade inside its column without extending into metadata", async () => {
-    const styles = await Bun.file(new URL("../../styles.css", import.meta.url)).text();
+    const styles = await Bun.file(
+      new URL("../../../../../packages/react/styles/app.css", import.meta.url),
+    ).text();
     expect(styles).toContain(
       "mask-image: linear-gradient(to right, #000 calc(100% - 1rem), transparent)",
     );

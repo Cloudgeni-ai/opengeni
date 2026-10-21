@@ -1,4 +1,5 @@
 import {
+  isConnectedMachineOutcomeUnknownOutput,
   parseCustomMcpSetupRequest,
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
@@ -33,6 +34,7 @@ import {
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { presentTurnFailureText } from "./compaction-copy";
+import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -52,7 +54,9 @@ import type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
   ToolCallItem,
+  ToolOutputPreview,
   ToolCallTruncation,
   UserMessageItem,
   WorkerItem,
@@ -159,10 +163,27 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+export type BuildTimelineOptions = {
+  partialStart?: boolean;
+  /**
+   * Turns whose steps are not all loaded, keyed by turn id. Each becomes a
+   * `turn-steps` item placed at the turn's start (its `turn.started`, or its
+   * first event), so the readable grouping gives the turn an expandable work
+   * row even when none of its steps are in the browser.
+   */
+  turnSteps?: ReadonlyMap<string, Pick<TurnStepsItem, "state" | "load" | "retain">>;
+  /**
+   * Exact reads of tool outputs a step page delivered as previews, by output
+   * event. A previewed tool row carries its read's state and loader in
+   * `outputPreview`; without a reader it is still marked as a preview.
+   */
+  toolOutputs?: ToolOutputReader | undefined;
+};
+
 export function buildTimeline(
   t: OpenGeniText,
   events: SessionEvent[],
-  options: { partialStart?: boolean } = {},
+  options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
   const allowanceNotices = new Set<string>();
@@ -274,6 +295,10 @@ export function buildTimeline(
     });
   };
   const queuedAtByTurn = new Map<string, string>();
+  // When the session's previous turn ended. A prompt queued behind running
+  // work waits for that turn by the person's choice, so its queue span starts
+  // only once the session was free to run it.
+  let previousTurnEndedAt: string | null = null;
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
   let startupEvent: SessionEvent;
@@ -427,7 +452,15 @@ export function buildTimeline(
     }
   };
 
+  const turnStepsByAnchor = turnStepsAnchors(ordered, options.turnSteps);
+  let pendingTurnSteps: TurnStepsItem | null = null;
   for (const event of ordered) {
+    // A turn's steps marker follows its anchor event, before anything later.
+    if (pendingTurnSteps) {
+      items.push(pendingTurnSteps);
+      pendingTurnSteps = null;
+    }
+    pendingTurnSteps = turnStepsByAnchor.get(event.id) ?? null;
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
     resolveCapacityWaits(event, payload);
@@ -519,6 +552,16 @@ export function buildTimeline(
         blockedReason,
       );
       continue;
+    }
+
+    if (
+      event.turnId &&
+      (event.type === "turn.completed" ||
+        event.type === "turn.failed" ||
+        event.type === "turn.cancelled" ||
+        event.type === "turn.superseded")
+    ) {
+      previousTurnEndedAt = event.occurredAt;
     }
 
     switch (event.type) {
@@ -936,6 +979,22 @@ export function buildTimeline(
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
         const truncation = toolCallTruncation(payload);
+        const previewFact = toolOutputPreviewFact(payload);
+        const previewRead = previewFact
+          ? options.toolOutputs?.(event.id, event.sequence, event.turnId ?? null)
+          : undefined;
+        // An exact read that landed replaced this event; a forged fact on an
+        // exact output must not ask again.
+        const outputPreview: ToolOutputPreview | null =
+          previewFact && previewRead?.state !== "loaded"
+            ? {
+                shape: previewFact.shape,
+                originalBytes: previewFact.originalBytes,
+                previewBytes: previewFact.previewBytes,
+                state: previewRead?.state ?? "preview",
+                ...(previewRead ? { load: previewRead.load } : {}),
+              }
+            : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
@@ -943,12 +1002,14 @@ export function buildTimeline(
             ? payload.preview
             : payload.output;
         target.truncation = truncation;
+        target.outputPreview = outputPreview;
         const sourceText = timelineAnnotationToolOutputText(
           Object.prototype.hasOwnProperty.call(payload, "output")
             ? payload.output
             : payload.preview,
         );
-        if (sourceText !== null) {
+        // Annotations anchor in the exact text, which a preview is not.
+        if (sourceText !== null && !outputPreview) {
           target.annotationSource = {
             kind: "tool_output",
             eventId: event.id,
@@ -1002,14 +1063,20 @@ export function buildTimeline(
         // the first admission only, so consume the queued timestamp after its
         // first projection instead of manufacturing another queue span.
         queuedAtByTurn.delete(turnId);
+        const queueStart =
+          previousTurnEndedAt &&
+          Date.parse(previousTurnEndedAt) > Date.parse(queuedAt) &&
+          Date.parse(previousTurnEndedAt) <= Date.parse(event.occurredAt)
+            ? previousTurnEndedAt
+            : queuedAt;
         closeStreamingTail();
         settleStartupPhase(
           "queue",
           "complete",
-          elapsedDurationMs(queuedAt, event.occurredAt),
+          elapsedDurationMs(queueStart, event.occurredAt),
           null,
           0,
-          queuedAt,
+          queueStart,
           `${turnId}-queue`,
         );
         break;
@@ -1200,6 +1267,18 @@ export function buildTimeline(
             presentationFailures.set(key, failures);
           }
         }
+        break;
+      }
+
+      case "sandbox.recovery.selected": {
+        if (payload.mode === "fresh_workspace" && typeof payload.text === "string")
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text: payload.text,
+            occurredAt: event.occurredAt,
+          });
         break;
       }
 
@@ -1628,9 +1707,12 @@ export function buildTimeline(
 
       case "turn.superseded":
       case "turn.cancelled": {
-        // A retraction of a never-started queued turn is not a turn ending —
-        // the message was withdrawn before any work happened; show nothing.
-        // A null turnId proves nothing, so it keeps the legacy finalize path.
+        // Only an explicit batch receipt proves a supersession never ran:
+        // a partial history may omit a real handover's earlier execution.
+        if (event.type === "turn.superseded" && payload.beforeAttempt === true) {
+          break;
+        }
+        // A withdrawn queued turn must not manufacture an empty response.
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
@@ -1724,7 +1806,7 @@ export function buildTimeline(
           steerBubblesAwaitingHandover = [];
           // A call still waiting for approval or an answer never ran.
           finalizeOpen(turnId, steerReplacedWait ? "cancelled" : "complete", event.occurredAt);
-          items.push(turnEndItem(event, "complete", null));
+          items.push({ ...turnEndItem(event, "complete", null), handedOver: true });
           break;
         }
         steerBubblesAwaitingHandover = [];
@@ -1846,6 +1928,7 @@ export function buildTimeline(
         break;
     }
   }
+  if (pendingTurnSteps) items.push(pendingTurnSteps);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -2177,6 +2260,37 @@ type WorkActivityItem = Exclude<ActivityItem, AgentMessageItem>;
  * decide its grouping, and it narrows `item` to a work item with no cast.
  * Assistant prose stays outside activity clusters.
  */
+/** Each marked turn's anchor: its `turn.started`, else its first event. */
+function turnStepsAnchors(
+  ordered: readonly SessionEvent[],
+  turnSteps: BuildTimelineOptions["turnSteps"],
+): Map<string, TurnStepsItem> {
+  const anchors = new Map<string, TurnStepsItem>();
+  if (!turnSteps || turnSteps.size === 0) return anchors;
+  const chosen = new Map<string, SessionEvent>();
+  for (const event of ordered) {
+    const turnId = event.turnId;
+    if (!turnId || !turnSteps.has(turnId)) continue;
+    const current = chosen.get(turnId);
+    if (!current || (event.type === "turn.started" && current.type !== "turn.started")) {
+      chosen.set(turnId, event);
+    }
+  }
+  for (const [turnId, anchor] of chosen) {
+    const marker = turnSteps.get(turnId)!;
+    anchors.set(anchor.id, {
+      kind: "turn-steps",
+      id: `turn-steps-${turnId}`,
+      turnId,
+      occurredAt: anchor.occurredAt,
+      state: marker.state,
+      load: marker.load,
+      retain: marker.retain,
+    });
+  }
+  return anchors;
+}
+
 function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   switch (item.kind) {
     case "reasoning":
@@ -2246,6 +2360,8 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
     { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
+  // Turns that handed over to a Steer instead of finishing.
+  const handedOverTurns = new Set<string>();
   const messages = new Map<string, AgentMessageItem[]>();
   // Capacity waits per turn: their spans are not work, and a live one is
   // carried by the turn's work row instead of a separate warning.
@@ -2345,7 +2461,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
       }
       return group;
     };
-    if (isActivityItem(item)) {
+    if (item.kind === "turn-steps") {
+      // Not a step: it gives the turn its work row (a turn whose steps are all
+      // unloaded has nothing else) and is rendered by that row.
+      workForTurn().work!.steps = item;
+    } else if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
       const previous = group.work!.details.at(-1);
@@ -2376,6 +2496,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         }
       }
     } else if (item.kind === "turn-end") {
+      if (item.handedOver) handedOverTurns.add(key);
       if (!item.resumedAt) {
         settlements.set(key, {
           endedAt: item.occurredAt,
@@ -2535,6 +2656,25 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
     work.details.push(entry);
     return false;
   });
+  // A turn that handed over to the next Steer before doing anything but start
+  // up did no work of its own: the steered message carries on in the next
+  // turn. Quickly steering several queued messages in a row would otherwise
+  // leave a stack of empty "Worked for" rows between the messages.
+  for (const key of handedOverTurns) {
+    const group = turns.get(key);
+    if (
+      !group ||
+      (messages.get(key)?.length ?? 0) > 0 ||
+      !group.items.every((item) => item.kind === "startup-phase") ||
+      !group.work!.details.every(
+        (detail) =>
+          detail.kind === "activity" && detail.items.every((item) => item.kind === "startup-phase"),
+      )
+    )
+      continue;
+    turns.delete(key);
+    groups = groups.filter((entry) => entry !== group);
+  }
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
   const beforeRows = new Map<TimelineGroup, Work>();
@@ -2983,7 +3123,11 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
         fallbackSeqByTurn.set(turnId, event.sequence);
       }
     }
-    if (turnId && isTurnExecutionEvidence(event.type)) {
+    if (
+      turnId &&
+      isTurnExecutionEvidence(event.type) &&
+      !(event.type === "turn.superseded" && payload.beforeAttempt === true)
+    ) {
       startedTurnIds.add(turnId);
     }
   }
@@ -3724,6 +3868,8 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
     return true;
   }
   const output = payload.output;
+  // Older receipts predate the explicit event error flag.
+  if (isConnectedMachineOutcomeUnknownOutput(output)) return true;
   return (
     !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true
   );

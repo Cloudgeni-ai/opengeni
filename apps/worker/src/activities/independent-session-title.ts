@@ -88,7 +88,7 @@ export async function admitIndependentSessionTitle(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
-  serviceTier?: "fast" | "priority";
+  serviceTier?: "fast" | "priority" | "ultrafast";
 }): Promise<void> {
   if (!input.prompt.trim()) return;
   const key = environmentsEncryptionKeyBytes(input.settings);

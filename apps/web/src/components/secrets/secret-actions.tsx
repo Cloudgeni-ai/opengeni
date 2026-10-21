@@ -3,12 +3,12 @@ import { CheckIcon, CopyIcon, EyeIcon, EyeOffIcon, LinkIcon } from "lucide-react
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { copyText } from "@/components/ui/copy-field";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { copyText } from "@opengeni/react/ui/copy-field";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
+import { cn } from "@opengeni/react/app/lib/utils";
 
-import { vaultErrorText } from "./vault-model";
+import { vaultErrorText } from "@opengeni/react/app/components/secrets/vault-model";
 
 /* ----------------------------------------------------------------------------
    The small icon actions on a secret value: Reveal, Copy, Copy reference.

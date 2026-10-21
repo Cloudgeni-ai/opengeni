@@ -1,6 +1,20 @@
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
+/** Gmail's batch modify limit: one review never selects more messages than this. */
+export const TOOL_REVIEW_SELECTION_LABELS_MAX = 1000;
+/** One selected item described by trusted provider metadata, never by agent arguments. */
+const ToolReviewSelectionLabel = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().max(256),
+      title: z.string().max(256),
+      subtitle: z.string().max(256).optional(),
+      provenance: z.literal("provider_metadata"),
+    })
+    .strict(),
+);
+
 /** Trusted adapter hints, never read from agent arguments or tool output. */
 export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
   z
@@ -34,18 +48,14 @@ export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
         })
         .strict()
         .optional(),
-      samples: z
-        .array(
-          z
-            .object({
-              id: z.string().max(256),
-              title: z.string().max(256),
-              subtitle: z.string().max(256).optional(),
-              provenance: z.literal("provider_metadata"),
-            })
-            .strict(),
-        )
-        .max(3)
+      samples: z.array(ToolReviewSelectionLabel).max(3).optional(),
+      /**
+       * Provider metadata for the whole selection, read when the review was
+       * prepared. Only the details page reads it; entries may be missing.
+       */
+      selectionLabels: z
+        .array(ToolReviewSelectionLabel)
+        .max(TOOL_REVIEW_SELECTION_LABELS_MAX)
         .optional(),
     })
     .strict(),
@@ -236,6 +246,8 @@ export const ToolReviewDetailsPage = /* @__PURE__ */ defineSchema(() =>
           .object({
             label: z.string(),
             value: z.string(),
+            /** A secondary line, such as a selected message's sender and identifier. */
+            detail: z.string().optional(),
             path: z.string().optional(),
             truncated: z.boolean().optional(),
           })

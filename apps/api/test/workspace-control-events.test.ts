@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createEnrollment,
+  createSandbox,
+  type DbClient,
+} from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -49,7 +55,12 @@ beforeAll(async () => {
   bus = new MemoryEventBus();
   const noop = async () => undefined;
   const deps = {
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      sandboxOwnershipEnabled: true,
+      sandboxSelfhostedEnabled: true,
+    }),
     db: client.db,
     bus,
     workflowClient: {
@@ -98,6 +109,44 @@ async function authorization(subjectId = grant.subjectId): Promise<string> {
 }
 
 describe("workspace control event API", () => {
+  test("workspace default accepts a shared machine and rejects an unavailable replacement", async () => {
+    const enrollment = await createEnrollment(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      os: "linux",
+      arch: "x86_64",
+      hasDisplay: false,
+      allowScreenControl: false,
+    });
+    const machine = await createSandbox(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      kind: "selfhosted",
+      name: "Workspace machine",
+      enrollmentId: enrollment.id,
+    });
+    const auth = await authorization();
+    const patch = (target: unknown) =>
+      app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {
+        method: "PATCH",
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify({ defaultExecutionTarget: target }),
+      });
+    const target = { kind: "machine", targetSandboxId: machine.id };
+    const saved = await patch(target);
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ settings: { defaultExecutionTarget: target } });
+    expect((await patch({ kind: "machine", targetSandboxId: crypto.randomUUID() })).status).toBe(
+      422,
+    );
+    expect((await patch({ kind: "machine", targetSandboxId: "not-an-id" })).status).toBe(400);
+    const cleared = await patch(null);
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ settings: { defaultExecutionTarget: null } });
+  });
+
   test("tool defaults save and reset independently without losing concurrent changes", async () => {
     const auth = await authorization();
     const patch = async (body: unknown) => {

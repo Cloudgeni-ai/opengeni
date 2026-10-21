@@ -1,9 +1,13 @@
 import { ChevronDownIcon, MicIcon } from "lucide-react";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ModelMark } from "@opengeni/react";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Button } from "@/components/ui/button";
-import { coveredModelsSummary } from "@/lib/credit-coverage";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
+import { Button } from "@opengeni/react/ui/button";
+import { coveredModelsSummary } from "@opengeni/react/app/lib/credit-coverage";
 
 /** A balance row opens its current coverage without leaving billing. */
 export function CreditScopeDetails({

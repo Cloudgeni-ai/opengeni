@@ -16,9 +16,11 @@ import {
   type CanonicalTurnStartupMilestoneReceipt,
   type Database,
   type SessionEventAppendObserver,
+  type SessionEventMutationInput,
 } from "@opengeni/db";
 import {
   connect,
+  headers as natsHeaders,
   JSONCodec,
   type ConnectionOptions,
   type Msg,
@@ -296,6 +298,7 @@ type SubscriptionContext = {
   label: string;
   kind: NatsSubscriptionKind;
   subject: string;
+  queue?: string;
   logger?: EventLogger | undefined;
   onSubscriptionTerminated?: ((termination: NatsSubscriptionTermination) => void) | undefined;
 };
@@ -464,7 +467,7 @@ function subscribeWithResubscribe(
       if (stopped || connectionShuttingDown(nc)) return;
       let sub: Subscription;
       try {
-        sub = nc.subscribe(context.subject);
+        sub = nc.subscribe(context.subject, context.queue ? { queue: context.queue } : undefined);
       } catch (error) {
         reportSubscriptionTermination(context, "resubscribe", { error });
         schedule();
@@ -474,7 +477,7 @@ function subscribeWithResubscribe(
     }, delayMs);
     (timer as { unref?: () => void }).unref?.();
   };
-  pump(nc.subscribe(context.subject));
+  pump(nc.subscribe(context.subject, context.queue ? { queue: context.queue } : undefined));
   return () => {
     stopped = true;
     if (timer) {
@@ -529,8 +532,9 @@ export interface RequestConnection {
     subject: string,
     payload: Uint8Array,
     /** resendOn opts into identical redelivery on that subject's notifications
-     * and local reconnect. Only safe reads or journaled deliveries may opt in. */
-    opts: { timeout: number; resendOn?: string },
+     * and local reconnect. Only safe reads or journaled deliveries may opt in.
+     * `headers` are the request headers of a plain (non-resending) request. */
+    opts: { timeout: number; resendOn?: string; headers?: Record<string, string> },
   ): Promise<RequestReply>;
 }
 
@@ -669,10 +673,13 @@ export type EventBus = {
    * subject (so it can extract `<ws>`/`<id>`/`<instance>`). Returns an
    * unsubscribe fn. Decoding the AgentEvent is the caller's concern (this leaf
    * does not depend on `@opengeni/agent-proto`).
+   * An optional queue distributes each delivery to one member of that group;
+   * omitting it preserves broadcast delivery to every subscriber.
    */
   subscribeAgentEvents: (
     subject: string,
     handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+    options?: { queue?: string },
   ) => () => void;
   /**
    * The `RequestConnection` accessor the selfhosted `NatsControlRpc` consumes —
@@ -749,7 +756,7 @@ export async function createNatsEventBus(
             requestObservers.add(observer);
             return () => requestObservers.delete(observer);
           })
-        : requestReply(nc, subject, payload, opts.timeout),
+        : requestReply(nc, subject, payload, opts.timeout, opts.headers),
   };
   const opStreamConnection: OpStreamConnection = {
     subscribe: (subject) => nc.subscribe(subject),
@@ -865,7 +872,8 @@ export async function createNatsEventBus(
       ),
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler, options),
-    subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler, options),
+    subscribeAgentEvents: (subject, handler, subscriptionOptions) =>
+      subscribeAgentEvents(nc, subject, handler, options, subscriptionOptions),
     getRequestConnection: () => requestConnection,
     getOpStreamConnection: () => opStreamConnection,
     isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
@@ -966,6 +974,97 @@ export async function createResponderConnection(
   return {
     close: async () => {
       unsubscribe();
+      await nc.drain();
+    },
+  };
+}
+
+/** One NATS message as the agent gateway carries it over a host's link. */
+export type AgentLinkNatsMessage = {
+  subject: string;
+  reply?: string;
+  headers?: Array<[string, string]>;
+  data: Uint8Array;
+};
+
+/**
+ * The NATS connection the compute agent gateway bridges every sandbox agent's
+ * traffic through: plain subscribe and publish, with reply subjects and
+ * headers, on the privileged control-plane identity. The gateway itself
+ * enforces each agent's subject permissions before it calls these.
+ */
+export interface AgentLinkNats {
+  /** The server's max_payload. */
+  maxPayload(): number;
+  subscribe(
+    subject: string,
+    queue: string | undefined,
+    onMessage: (message: AgentLinkNatsMessage) => void,
+  ): () => void;
+  publish(
+    subject: string,
+    data: Uint8Array,
+    options?: { reply?: string; headers?: Array<[string, string]> },
+  ): void;
+  close(): Promise<void>;
+}
+
+export async function createAgentLinkNatsConnection(
+  natsUrl: string,
+  auth: { user: string; pass: string } | undefined,
+  options: { name?: string; logger?: EventLogger; connect?: typeof connect } = {},
+): Promise<AgentLinkNats> {
+  const connectOptions: ConnectionOptions = {
+    servers: natsUrl,
+    name: options.name ?? "opengeni-agent-gateway",
+  };
+  if (auth) {
+    connectOptions.user = auth.user;
+    connectOptions.pass = auth.pass;
+  }
+  const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
+  logConnectionStatus(nc, "agent-gateway", options.logger);
+  return {
+    maxPayload: () => nc.info?.max_payload ?? 1024 * 1024,
+    subscribe: (subject, queue, onMessage) => {
+      const subscription = nc.subscribe(subject, {
+        ...(queue ? { queue } : {}),
+        callback: (error, msg) => {
+          if (error) return;
+          const pairs: Array<[string, string]> = [];
+          if (msg.headers) {
+            for (const key of msg.headers.keys()) {
+              for (const value of msg.headers.values(key)) pairs.push([key, value]);
+            }
+          }
+          onMessage({
+            subject: msg.subject,
+            ...(msg.reply ? { reply: msg.reply } : {}),
+            ...(pairs.length > 0 ? { headers: pairs } : {}),
+            data: msg.data,
+          });
+        },
+      });
+      return () => {
+        try {
+          subscription.unsubscribe();
+        } catch {
+          // A closed connection has no subscription left to end.
+        }
+      };
+    },
+    publish: (subject, data, publishOptions = {}) => {
+      let hdrs: ReturnType<typeof natsHeaders> | undefined;
+      if (publishOptions.headers && publishOptions.headers.length > 0) {
+        hdrs = natsHeaders();
+        for (const [key, value] of publishOptions.headers) hdrs.append(key, value);
+      }
+      nc.publish(subject, data, {
+        ...(publishOptions.reply ? { reply: publishOptions.reply } : {}),
+        ...(hdrs ? { headers: hdrs } : {}),
+      });
+    },
+    close: async () => {
       await nc.drain();
     },
   };
@@ -1100,6 +1199,7 @@ export async function appendAndPublishTurnEventsFenced(
   attemptId: string,
   events: AppendEventInput[],
   observe?: AppendPublishObserver,
+  mutate?: SessionEventMutationInput,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -1115,6 +1215,7 @@ export async function appendAndPublishTurnEventsFenced(
     attemptId,
     events,
     observe?.onAppendPhase ? { onPhase: observe.onAppendPhase } : undefined,
+    mutate,
   );
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;
@@ -1173,8 +1274,17 @@ async function requestReply(
   subject: string,
   payload: Uint8Array,
   timeout: number,
+  requestHeaders?: Record<string, string>,
 ): Promise<RequestReply> {
-  const msg: Msg = await nc.request(subject, payload, { timeout });
+  let sent: ReturnType<typeof natsHeaders> | undefined;
+  for (const [name, value] of Object.entries(requestHeaders ?? {})) {
+    sent ??= natsHeaders();
+    sent.set(name, value);
+  }
+  const msg: Msg = await nc.request(subject, payload, {
+    timeout,
+    ...(sent ? { headers: sent } : {}),
+  });
   return { data: msg.data, ...(msg.headers ? { headers: msg.headers } : {}) };
 }
 
@@ -1231,6 +1341,7 @@ function subscribeAgentEvents(
   subject: string,
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
   busOptions: EventBusOptions,
+  subscriptionOptions?: { queue?: string },
 ): () => void {
   return subscribeWithResubscribe(
     nc,
@@ -1238,6 +1349,7 @@ function subscribeAgentEvents(
       label: "agent-events",
       kind: "agent_events",
       subject,
+      ...(subscriptionOptions?.queue ? { queue: subscriptionOptions.queue } : {}),
       logger: busOptions.logger,
       onSubscriptionTerminated: busOptions.onSubscriptionTerminated,
     },

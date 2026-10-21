@@ -7,8 +7,8 @@ async function source(path: string): Promise<string> {
 describe("session control surface architecture", () => {
   test("all three account-inventory callsites pass the live tri-state read grant", async () => {
     for (const [path, workspace] of [
-      ["routes/session.tsx", "props.session.workspaceId"],
-      ["routes/sessions-index.tsx", "workspaceId"],
+      ["../../../packages/react/src/app/routes/session.tsx", "props.session.workspaceId"],
+      ["../../../packages/react/src/app/routes/sessions-index.tsx", "workspaceId"],
       ["components/schedules/schedule-form-page.tsx", "workspaceId"],
     ] as const) {
       const route = await source(path);
@@ -24,7 +24,7 @@ describe("session control surface architecture", () => {
   });
 
   test("new-session Send stays available when background draft saving conflicts", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     expect(route).toContain("draftConflict: null,");
     expect(route).toContain("newSessionDraft.flushForSend(submittedSnapshot)");
     expect(route).toContain("<NewSessionDraftSyncNotice />");
@@ -43,7 +43,7 @@ describe("session control surface architecture", () => {
   });
 
   test("new-chat outage shows one calm notice instead of raw errors", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     expect(route).toContain("{OPENGENI_UPDATING_NOTICE(t)}");
     expect(route).toContain("newSessionDraft.unavailable || connectionAccounts.unavailable");
     expect(route).toContain(
@@ -55,8 +55,8 @@ describe("session control surface architecture", () => {
   });
 
   test("new and existing composers use the same popover pattern", async () => {
-    const newSession = await source("routes/sessions-index.tsx");
-    const existingSession = await source("routes/session.tsx");
+    const newSession = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
+    const existingSession = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(newSession).not.toContain('expandedPanelPresentation="dialog"');
     expect(newSession).toContain('menuSide="bottom"');
     expect(newSession).toContain("draftChatSettings={{");
@@ -65,8 +65,12 @@ describe("session control surface architecture", () => {
     expect(existingSession).not.toContain('expandedPanelPresentation="dialog"');
     expect(newSession).not.toContain("voiceModel={{");
     expect(newSession).toContain('modelMenu="split"');
-    const plus = await source("components/composer-mobile-plus.tsx");
-    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    const plus = await source(
+      "../../../packages/react/src/app/components/composer-mobile-plus.tsx",
+    );
+    const panel = await source(
+      "../../../packages/react/src/app/components/composer-mobile-plus-panel.tsx",
+    );
     expect(plus).toContain('import("./composer-mobile-plus-panel")');
     expect(plus).toContain("{open ? (");
     expect(panel).toContain('setPanel("settings")');
@@ -75,10 +79,11 @@ describe("session control surface architecture", () => {
   });
 
   test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     // The composer hands the click to the route, which opens the dock...
     expect(route).toContain("onOpen: props.onOpenAgentSettings,");
-    expect(route).toContain("onOpenAgentSettings={openAgentSettings}");
+    // (Only where the dock exists: an embed without it has no Agent tab to open.)
+    expect(route).toContain("onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}");
     expect(route).toContain("openAgentSettingsRequest={");
     // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
     expect(route).toContain('tab: "agent",');
@@ -86,13 +91,15 @@ describe("session control surface architecture", () => {
     expect(route).toContain("learningFocusRequest={agentLearningFocus}");
     expect(route).not.toContain("agentConfig?.enabled");
     // There is no second copy of the per-chat editor in the composer.
-    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    const panel = await source(
+      "../../../packages/react/src/app/components/composer-mobile-plus-panel.tsx",
+    );
     expect(panel).not.toContain("AgentLearningSettingsEditor");
     expect(panel).toContain("props.chatSettings?.onOpen()");
   });
 
   test("renders SessionChrome above the composer", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);
     expect(route).not.toContain("<QueueSurface");
     expect(route).not.toContain("<GoalSurface");
@@ -106,7 +113,7 @@ describe("session control surface architecture", () => {
   });
 
   test("current model pacing is shown above the composer, never on an older history page", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("const modelRecovery = props.hasNewer");
     expect(route).toContain(
       "currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events)",
@@ -116,7 +123,7 @@ describe("session control surface architecture", () => {
   });
 
   test("makes the full chat viewport a file drop target", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("<ChatViewportFileDropTarget");
     expect(route).toContain('data-workspace-scroll-owner="self-managed"');
     expect(route).toContain(
@@ -127,8 +134,8 @@ describe("session control surface architecture", () => {
 
   test("shares one route-level attachment lightbox across the timeline and composer", async () => {
     const [sessionRoute, newSessionRoute, chatComposer] = await Promise.all([
-      source("routes/session.tsx"),
-      source("routes/sessions-index.tsx"),
+      source("../../../packages/react/src/app/routes/session.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index.tsx"),
       source("../../../packages/react/src/components/chat-composer.tsx"),
     ]);
     const providerPattern = /createElement\(\s+LightboxProvider,/g;
@@ -147,26 +154,26 @@ describe("session control surface architecture", () => {
   });
 
   test("wires the authenticated retained screenshot loader into the production timeline", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("createSessionRetainedScreenshotLoader(");
     expect(route).toContain("loadRetainedScreenshot={loadRetainedScreenshot}");
   });
 
   test("keeps host-owned auth recovery out of the native connection broker", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     const hostGuard = route.indexOf('if (item.authoritySource === "host")');
     const nativeRecovery = route.indexOf("if (item.capability)", hostGuard);
     const hostBranch = route.slice(hostGuard, nativeRecovery);
 
     expect(hostGuard).toBeGreaterThan(-1);
     expect(nativeRecovery).toBeGreaterThan(hostGuard);
-    expect(hostBranch).toContain("window.location.assign(item.authorizationUrl)");
+    expect(hostBranch).toContain("page.assign(item.authorizationUrl)");
     expect(hostBranch).not.toContain("listConnections");
     expect(hostBranch).not.toContain("startConnectionOAuth");
   });
 
   test("offers failed-session model recovery to Personal workspace connection owners", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     const recoveryGateStart = route.indexOf("const canConnectModel = hasWorkspacePermission(");
     const recoveryGate = route.slice(recoveryGateStart, recoveryGateStart + 240);
 
@@ -176,7 +183,7 @@ describe("session control surface architecture", () => {
   });
 
   test("failed-session recovery uses an execution control, never a synthetic user message", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).not.toContain("FAILURE_CONTINUATION_MESSAGE");
     expect(route).not.toContain("Continue from the last failure");
     expect(route).toContain("context.client.retrySession(");
@@ -189,16 +196,16 @@ describe("session control surface architecture", () => {
   });
 
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
-    const route = await source("routes/session.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");
     expect(route).not.toContain("downloadSandboxFileArtifact");
   });
 
   test("has no second Agents home in the header or dock", async () => {
     const [header, lineage, route] = await Promise.all([
-      source("components/rail/session-header.tsx"),
-      source("components/session/subagents.tsx"),
-      source("routes/session.tsx"),
+      source("../../../packages/react/src/app/components/rail/session-header.tsx"),
+      source("../../../packages/react/src/app/components/session/subagents.tsx"),
+      source("../../../packages/react/src/app/routes/session.tsx"),
     ]);
     expect(header).not.toContain("agentsSlot");
     expect(lineage).not.toContain("AgentsPanel");
@@ -206,7 +213,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps the folder above the prompt and context actions inside plus on new sessions", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     const controls = route.indexOf("controls={");
     const model = route.indexOf("<SessionModelControl", controls);
     const actions = route.indexOf("actions={", model);
@@ -234,17 +241,17 @@ describe("session control surface architecture", () => {
 
   test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
     const [rail, route, focusRequest, hydration] = await Promise.all([
-      source("components/rail/session-list.tsx"),
-      source("routes/sessions-index.tsx"),
-      source("lib/create-composer-focus.ts"),
-      source("routes/sessions-index-hydration.ts"),
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index.tsx"),
+      source("../../../packages/react/src/app/lib/create-composer-focus.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index-hydration.tsx"),
     ]);
     expect(rail).toContain(
       'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
     );
     expect(rail).toContain("channelId={props.channelId}");
     expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
-    expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
+    expect(rail).toContain("requestCreateComposerFocus(windowEvents, props.channelId)");
     expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
     expect(route).toContain("const requestedChannelId = (");
     expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");
@@ -254,7 +261,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps manual folder selection from retriggering launch selection", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
     const selectionStart = route.indexOf("const selectedChannelIdRef = useRef(selectedChannelId);");
     const selectionEnd = route.indexOf(
       "useEffect(() => {\n    resetSessionView();",
@@ -284,12 +291,14 @@ describe("session control surface architecture", () => {
     expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
     // Machine and folder choices live under "+" > Runs on and go through the
     // explicit compute path, never the launch-selection draft setter.
-    const runsOn = await source("components/session/new-session-settings-menu.tsx");
+    const runsOn = await source(
+      "../../../packages/react/src/app/components/session/new-session-settings-menu.tsx",
+    );
     expect(runsOn).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
-    const route = await source("routes/sessions-index.tsx");
+    const route = await source("../../../packages/react/src/app/routes/sessions-index.tsx");
 
     expect(route).toContain(
       "projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}",
@@ -308,8 +317,8 @@ describe("session control surface architecture", () => {
 
   test("Variable Sets are gone from the create and established composers", async () => {
     const [route, establishedRoute] = await Promise.all([
-      source("routes/sessions-index.tsx"),
-      source("routes/session.tsx"),
+      source("../../../packages/react/src/app/routes/sessions-index.tsx"),
+      source("../../../packages/react/src/app/routes/session.tsx"),
     ]);
     for (const text of [route, establishedRoute]) {
       expect(text).not.toContain("session-variable-set-picker");
@@ -324,8 +333,8 @@ describe("session control surface architecture", () => {
 
   test("announces pin results through an independent live region", async () => {
     const [header, list] = await Promise.all([
-      source("components/rail/session-header.tsx"),
-      source("components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/components/rail/session-header.tsx"),
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
     ]);
     // A persistent description on the action button would replay the previous
     // pin/unpin result every time keyboard focus returns. The result belongs in
@@ -339,7 +348,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps pin and archive one click away while the full row menu stays on right-click", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     const rowStart = list.indexOf("function SessionRow(");
     const quickActionsStart = list.indexOf("function RowQuickActions(");
     const overflowStart = list.indexOf("function RowActionsMenu(");
@@ -366,7 +375,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps rail optimistic pin overrides out of the header projection", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("const serverSessions = useMemo");
     expect(list).toContain("const projected = serverSessions.find");
     const paginationKey = list.match(/const paginationKey = sessionPageKey\([\s\S]*?\n  \);/)?.[0];
@@ -377,7 +386,7 @@ describe("session control surface architecture", () => {
   });
 
   test("loads the first page and older sessions independently in each project", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
     expect(list).toContain(
       'const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;',
@@ -390,7 +399,7 @@ describe("session control surface architecture", () => {
   });
 
   test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain(
       "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
     );
@@ -400,7 +409,7 @@ describe("session control surface architecture", () => {
   });
 
   test("fills spare rail height before offering Show more", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     // The window is the manual step plus a measured fill, and fill loads stay quiet.
     expect(list).toContain("baseCountForGroup(key) + fillCountForGroup(key)");
     expect(list).toContain(
@@ -413,7 +422,7 @@ describe("session control surface architecture", () => {
   });
 
   test("restores manual Show more windows when the rail remounts", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("readSessionGroupWindows(groupWindowMemoryId, paginationKey)");
     expect(list).toContain(
       "writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts)",
@@ -424,7 +433,7 @@ describe("session control surface architecture", () => {
   });
 
   test("separates archive browsing and hydrates sparse creator groups", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("browseSessions.filter((session) => !session.archived)");
     expect(list).toContain('browseStatus === "archived" || session.archived');
     expect(list).toContain('label="Archived"');
@@ -437,7 +446,7 @@ describe("session control surface architecture", () => {
   });
 
   test("hands keyboard focus across optimistic project-move remounts", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
     // Default (channel id null) is the first row of the same project list.
     expect(list).toContain('[{ id: null, name: "Default" }, ...channels].map');
@@ -449,10 +458,13 @@ describe("session control surface architecture", () => {
   });
 
   test("reconciles the open session project without regressing an owned optimistic move", async () => {
-    const list = await source("components/rail/session-list.tsx");
-    const move = await source("lib/session-channel-move.ts");
-    const route = await source("routes/session.tsx");
-    const appContext = await source("context.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    const move = await source("../../../packages/react/src/app/lib/session-channel-move.tsx");
+    const route = await source("../../../packages/react/src/app/routes/session.tsx");
+    const appContext = [
+      await source("context.tsx"),
+      await source("../../../packages/react/src/app/app-state.tsx"),
+    ].join("\n");
     const lineageHook = await source("../../../packages/react/src/hooks/use-session-lineage.ts");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
@@ -526,7 +538,7 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps creator grouping while removing the retired creator/date filter controls", async () => {
-    const list = await source("components/rail/session-list.tsx");
+    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("const creatorSessions = useMemo");
     expect(list).toContain("sessionCreatorLabelMap(creatorSessions)");
     expect(list).not.toContain("Date filter field");
@@ -534,17 +546,19 @@ describe("session control surface architecture", () => {
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("onClick={openSearchDialog}");
-    expect(list).toContain("requestSessionSearch(rail.workspaceId, event.currentTarget)");
+    expect(list).toContain(
+      "requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget)",
+    );
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
   });
 
   test("the rail owns the lazy search dialog across conversation navigation", async () => {
-    const rail = await source("components/rail/rail-context.tsx");
-    expect(rail).toContain('lazy(() => import("@/components/session/session-search-dialog"))');
-    expect(rail).toContain("window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
-    expect(rail).toContain("window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    const rail = await source("../../../packages/react/src/app/components/rail/rail-context.tsx");
+    expect(rail).toContain('lazy(() => import("../session/session-search-dialog"))');
+    expect(rail).toContain("windowEvents.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain("windowEvents.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
     expect(rail).toContain("detail?.workspaceId !== workspaceId");
     expect(rail.match(/<SessionSearchDialog\b/g)).toHaveLength(1);
     expect(rail).toContain("key={`${appContext.accessContext.subjectId}:${workspaceId}`}");

@@ -1,13 +1,13 @@
 {
   "name": "@opengeni/example-embedded-product",
-  "version": "0.0.44",
+  "version": "0.0.45",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3102",
     "server": "bun --env-file=.env.local src/server.ts",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "@opengeni/connect": "workspace:*",

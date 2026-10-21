@@ -458,6 +458,54 @@ export async function getKnowledgeEntry(
   return (await withIndexStatus(db, context, [record], request.view ?? "published"))[0]!;
 }
 
+/**
+ * Read a bounded set of current entries in input order. Every entry still goes
+ * through the native actor, scope and transitive-evidence authorization seam;
+ * only the transaction setup and round trips are shared. Missing or no longer
+ * visible entries retain their null slot. This is not a historical revision read.
+ */
+export async function getKnowledgeEntries(
+  db: Database,
+  context: KnowledgeContext,
+  entryIds: string[],
+  options: {
+    view?: "published" | "needs_review" | "archived" | "rejected" | undefined;
+  } = {},
+): Promise<Array<KnowledgeEntryRecord | null>> {
+  const { entryIds: ids, ...request } = z
+    .object({
+      entryIds: z.array(z.uuid()).max(50),
+      view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
+    })
+    .strict()
+    .parse({ entryIds, ...options });
+  if (!ids.length) return [];
+  const records = await inKnowledgeContext(db, context, async (tx) => {
+    const rows = await rawRows<{ result: unknown }>(
+      tx,
+      sql`SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,
+        jsonb_build_object('operation','get','limit',1,'entryId',entry.id)
+          || ${JSON.stringify(request)}::jsonb) AS result
+      FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)
+        WITH ORDINALITY AS entry(id,position)
+      ORDER BY entry.position`,
+    );
+    return rows.map((row) => {
+      const values = z.array(z.unknown()).parse(row.result);
+      return values[0] ? decodeProjection(values[0], true) : null;
+    });
+  });
+  const decorated = await withIndexStatus(
+    db,
+    context,
+    records.filter((record) => record !== null),
+    request.view ?? "published",
+  );
+  let index = 0;
+  return records.map((record) => (record ? decorated[index++]! : null));
+}
+
 const Cursor = z
   .object({
     v: z.literal(2),

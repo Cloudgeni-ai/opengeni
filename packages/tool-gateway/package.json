@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/tool-gateway",
-  "version": "4.1.3",
+  "version": "4.2.0",
   "description": "Protocol-neutral catalog validation, authorization, and execution core for Opengeni tools.",
   "license": "Apache-2.0",
   "repository": {
@@ -30,7 +30,7 @@
   },
   "scripts": {
     "build": "bun ../../scripts/build-typescript-package.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

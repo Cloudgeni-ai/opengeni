@@ -52,7 +52,7 @@ const RULES: Rule[] = [
     method: "DELETE",
     pattern: /\/vault-providers\/connections\/:connectionId$/,
     text: () =>
-      "Disconnect a password manager and unlink its local vault mirrors. Removes Opengeni's stored access; never deletes upstream vaults or items.",
+      "Disconnect a password manager and unlink its local vault mirrors. Removes the workspace's stored access; never deletes upstream vaults or items.",
   },
   {
     method: "GET",

@@ -42,9 +42,15 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
             .join(&generation[..24]);
         create_private_directory(&directory)?;
         for (name, bytes) in [
-            (companion_name("opengeni-browserd"), BROWSERD),
+            (
+                companion_name(crate::browser_sidecar::BROWSERD_FILE),
+                BROWSERD,
+            ),
             (companion_name("agent-browser"), AGENT_BROWSER),
-            (companion_name("opengeni-computer-native"), COMPUTER_NATIVE),
+            (
+                companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE),
+                COMPUTER_NATIVE,
+            ),
         ] {
             materialize_executable(&directory.join(name), bytes)?;
         }
@@ -55,7 +61,9 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
             materialize_executable(&path, bytes)?;
         }
         let _ = CURRENT_GENERATION.set(directory.clone());
-        Ok(Some(directory.join(companion_name("opengeni-browserd"))))
+        Ok(Some(directory.join(companion_name(
+            crate::browser_sidecar::BROWSERD_FILE,
+        ))))
     }
 }
 
@@ -224,8 +232,10 @@ mod tests {
             AGENT_BROWSER
         );
         assert_eq!(
-            std::fs::read(directory.join(companion_name("opengeni-computer-native")))
-                .expect("computer-native"),
+            std::fs::read(
+                directory.join(companion_name(crate::browser_sidecar::COMPUTER_NATIVE_FILE,))
+            )
+            .expect("computer-native"),
             COMPUTER_NATIVE
         );
         assert_eq!(materialize(root.path()).expect("replay"), Some(browserd));

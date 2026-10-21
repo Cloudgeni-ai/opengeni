@@ -13,10 +13,10 @@ import {
   UserMinusIcon,
 } from "lucide-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState, EmptyStateLink } from "@opengeni/react/ui/empty-state";
 import {
   ListRow,
   ListRowSkeleton,
@@ -25,14 +25,14 @@ import {
   type RowListColumn,
   type RowListSort,
   type RowListVariant,
-} from "@/components/ui/list-row";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { usageLevel, usageValueText } from "@/components/ui/usage-meter";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/list-row";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { usageLevel, usageValueText } from "@opengeni/react/ui/usage-meter";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import airtableLogo from "../../../../../../data/catalog/logos/airtable-com-c6ce8ea28476.jpg";
 import frontLogo from "../../../../../../data/catalog/logos/front-com-96ac210c4196.jpg";

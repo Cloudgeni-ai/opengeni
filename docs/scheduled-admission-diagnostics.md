@@ -64,8 +64,22 @@ runs from before the last edit or resume do not count):
   (`session_cancelled` outside new-chat-per-run mode,
   `scheduled_target_session_unavailable`) and an unavailable model.
 - When runs fail or are skipped for a reason that may clear by itself (a busy
-  chat, a retryable refusal, a failed turn), the owner is told once after three
-  in a row. The schedule keeps running; a single skip or failure stays quiet.
+  chat, a paused workspace, a retryable refusal, a failed turn), the owner is
+  told once and the schedule keeps running. Only a schedule that runs at least
+  hourly waits for three such runs in a row; a daily, weekly or one-time
+  schedule, and a schedule's last run before its end, tell at the first one.
+
+Every occurrence settles. A Pause of the target chat or of the workspace
+refuses the occurrence under every overlap policy, not only `skip`: queued
+behind the Pause it could neither run nor settle, so no review would ever see
+it. A run that would start a new chat checks the workspace Pause before
+creating one. A paused chat is the schedule's own blocker (it pauses itself);
+a paused workspace (`scheduled_workspace_paused`) is not, so the schedule keeps
+its place and runs again once the workspace is resumed.
+
+Retiring an exhausted schedule waits for the review of its newest scheduled
+run, so a failed last run is still told. A notice already sent stays with the
+retired schedule and is withdrawn when a person resumes or deletes it.
 
 The notice is a `session.notification.posted` event with key
 `schedule-<task id>` on the blocked run's chat, else the chat the schedule runs

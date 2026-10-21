@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/jev",
-  "version": "4.1.3",
+  "version": "4.2.0",
   "description": "TypeSafe Jev client and the Jev-ranked code_search engine behind the worker's code_search agent tool.",
   "license": "Apache-2.0",
   "repository": {
@@ -30,7 +30,7 @@
   },
   "scripts": {
     "build": "bun ../../scripts/build-typescript-package.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "devDependencies": {

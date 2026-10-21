@@ -9,29 +9,33 @@ import {
   RenameAccountDialog,
   type ModelsScopeLabels,
   useModelsListLabel,
-} from "./models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import {
+  managesSubscriptionAccount,
   subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
-import { ACCOUNT_ENABLED_LABELS, EnableAccountRow } from "./subscription-account-ui";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import {
+  ACCOUNT_ENABLED_LABELS,
+  EnableAccountRow,
+} from "@/components/models/subscription-account-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import {
   DetailFact,
   DetailFacts,
   DetailSection,
   DetailSkeleton,
-} from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+} from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 export type SubscriptionAccountPlaces = {
   scopeName: string;
@@ -178,7 +182,10 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = subscriptionAccountName(account);
-  const canEdit = pool.canManageAccounts;
+  const canEdit = managesSubscriptionAccount(pool, account);
+  // A workspace also lists the organization's shared accounts; the organization manages them.
+  const organizationManaged =
+    pool.inherited || (!pool.organizationId && account.scope === "organization");
   const organization = Boolean(pool.organizationId);
   const status =
     account.status !== "active"
@@ -196,7 +203,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   });
   const scopeLabel = pool.organizationId
     ? organizationReachLabel(places.scope, access.data)
-    : pool.inherited
+    : organizationManaged
       ? places.scope.organization
       : account.scope === "user"
         ? places.scope.user
@@ -232,7 +239,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         }
       />
       <DetailPageBody>
-        {pool.inherited ? (
+        {organizationManaged ? (
           <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>

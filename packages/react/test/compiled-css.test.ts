@@ -227,8 +227,22 @@ describe("compiled CSS contract", () => {
     expect(Buffer.byteLength(compiled)).toBeGreaterThan(120_000);
     // A tripwire for accidental bloat (unscoped sources, whole palettes, prose
     // words turned into utilities), not a feature budget. The builder already
-    // excludes non-class sources; real UI growth raises this deliberately.
-    expect(Buffer.byteLength(compiled)).toBeLessThan(272_000);
+    // excludes non-class sources; real UI growth raises this deliberately (the
+    // web app's UI primitives moved into src/ui: ~404 KB; the session app in
+    // src/app with its token bridge: ~475 KB; the plain connect, This computer
+    // and capability-card stylesheets its components import: ~573 KB).
+    expect(Buffer.byteLength(compiled)).toBeLessThan(600_000);
+  });
+
+  test("never treats a root named inside :not() as scoping a host-page rule", () => {
+    expect(() => assertScoped("button:not(.og-root textarea) { outline: 0 }")).toThrow();
+    expect(() =>
+      assertScoped(":where(.og-root) button:not(.og-root textarea) { outline: 0 }"),
+    ).not.toThrow();
+    // The shipped focus ring names a root only inside :not(), so it is scoped
+    // like any host-page selector (root ancestor or root itself).
+    expect(compiled).toContain(":where(.og-root) :where(");
+    expect(() => assertScoped(compiled)).not.toThrow();
   });
 
   test("nests only leading-& selectors so host bundlers lower them without :is()", () => {

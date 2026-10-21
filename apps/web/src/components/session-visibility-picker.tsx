@@ -1,7 +1,7 @@
 import { LockIcon, UsersIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 export type SessionTenancyCreateCapabilitiesView = {
   activated: boolean;

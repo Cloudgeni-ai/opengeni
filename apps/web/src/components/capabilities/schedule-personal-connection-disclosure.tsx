@@ -1,5 +1,5 @@
 import { UserRoundIcon } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 export function SchedulePersonalConnectionDisclosure({
   ownerSubjectId,

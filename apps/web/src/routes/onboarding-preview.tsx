@@ -1,6 +1,6 @@
-import { t } from "@/lib/console-text";
-import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
-import { SettingRow } from "@/components/ui/setting-row";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
 import type { WorkspaceModelCatalogModel, ReasoningEffort, LatencyMode } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -8,8 +8,8 @@ import { directModelConnectionSpec, type CreateConnectionRequest } from "@openge
 import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { CreditRequiredPromptView } from "@/components/credit-required-prompt";
+import { Button } from "@opengeni/react/ui/button";
+import { CreditRequiredPromptView } from "@opengeni/react/app/components/credit-required-prompt";
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
@@ -18,9 +18,9 @@ import { OrganizationSwitcherLine } from "@/components/rail/switcher-block";
 import { SetupAccountRoute } from "@/routes/setup-account";
 import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { CouponRedeem } from "@/components/credits/coupon-redeem";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
-import { CreditsCelebrationDialog } from "@/components/credits/checkout-credits-celebration";
+import { CreditsCelebrationDialog } from "@opengeni/react/app/components/credits/checkout-credits-celebration";
 
 // Local-only fixtures. No provider credentials or real payments are used.
 let previewModel: Record<string, unknown> | null = null;

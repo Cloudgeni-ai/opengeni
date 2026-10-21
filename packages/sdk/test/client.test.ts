@@ -1557,6 +1557,7 @@ describe("OpenGeniClient", () => {
             "X-OpenGeni-Covered-Last": "42",
             "X-OpenGeni-Next-After": "42",
             "X-OpenGeni-Forensic-Exact": "true",
+            "X-OpenGeni-Conversation-Filter": "2",
           },
         }),
     );
@@ -1589,9 +1590,24 @@ describe("OpenGeniClient", () => {
       nextAfter: 42,
       nextBefore: null,
       forensicExact: true,
+      conversationFilter: 2,
     });
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure`,
+    );
+  });
+
+  test("listEventPage asks for tool-output previews only when requested", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      includeTypes: ["agent.toolCall.output"],
+      payloadMode: "full",
+      toolOutputs: "preview",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=full&includeTypes=agent.toolCall.output&toolOutputs=preview`,
     );
   });
 
@@ -1894,7 +1910,7 @@ describe("OpenGeniClient", () => {
       body: "",
     });
     expect((error as Error).message).toMatch(
-      /^Opengeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+      /^The request could not be confirmed — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
     );
     expect((error as Error).message).not.toContain("PRIVATE");
     expect((error as Error).message).not.toContain("bearer");
@@ -1964,8 +1980,32 @@ describe("OpenGeniClient", () => {
     expect((error as OpenGeniApiError).body).toBe("");
     expect((error as OpenGeniApiError).code).toBeUndefined();
     expect((error as OpenGeniApiError).message).toMatch(
-      /^Opengeni API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
+      /^API 404: Request failed\. Reference: [0-9a-f-]{36}\.$/,
     );
+  });
+
+  test("API error text an agent may relay names no platform and keeps the reference", async () => {
+    const requestId = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    const { client } = makeClient(
+      () =>
+        new Response(
+          JSON.stringify({
+            code: "internal_error",
+            message: "The workspace could not complete the request.",
+            requestId,
+          }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as Error).message).toBe(
+      `API 500: The workspace could not complete the request. Reference: ${requestId}.`,
+    );
+    expect((error as Error).message).not.toMatch(/opengeni/i);
   });
 
   test("decodes structured API error code/message while retaining the raw body", async () => {
@@ -1988,7 +2028,7 @@ describe("OpenGeniClient", () => {
       body,
     });
     expect((error as Error).message).toMatch(
-      /^Opengeni API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
+      /^API 422: Invalid session create request: initialMessage failed schema validation Reference: [0-9a-f-]{36}\.$/,
     );
   });
 
@@ -1997,7 +2037,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         requestId: "api-safe-503",
       },
@@ -2014,7 +2054,7 @@ describe("OpenGeniClient", () => {
       correlationId: "api-safe-503",
       outcomeUnknown: false,
       body,
-      message: "Opengeni is temporarily unavailable — retry. Reference: api-safe-503.",
+      message: "The workspace is temporarily unavailable — retry. Reference: api-safe-503.",
     });
   });
 
@@ -2155,7 +2195,7 @@ describe("OpenGeniClient", () => {
           body: "",
         });
         expect((error as Error).message).toBe(
-          `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+          `The workspace is temporarily unavailable — retry. Reference: ${correlationId}.`,
         );
         expect((error as Error).message).not.toContain("PRIVATE-UPSTREAM-BODY");
         expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toMatch(/^[0-9a-f-]{36}$/);

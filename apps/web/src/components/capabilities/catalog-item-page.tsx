@@ -22,7 +22,7 @@ import {
   CredentialForm,
   FikenConnectorControls,
   type ConnectAction,
-} from "@/components/capabilities/capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import {
   CapabilityAside,
   CapabilityMark,
@@ -33,26 +33,26 @@ import {
 import {
   ConnectorToolPermissions,
   hasConnectorToolPermissionTarget,
-} from "@/components/capabilities/connector-tool-permissions";
+} from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {
   capabilityPresentation,
   presentationPermissions,
-} from "@/components/capabilities/integration-experience";
-import type { IntegrationViewModel } from "./integration-view-model";
-import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
-import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
+} from "@opengeni/react/app/components/capabilities/integration-experience";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { McpAuthDiscoveryNotice } from "@opengeni/react/app/components/capabilities/mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "@opengeni/react/app/components/capabilities/onepassword-catalog-link";
 import {
   CatalogConnectedAccounts,
   type CatalogConnectedAccountsManagement,
   type CatalogConnectedAccountsProps,
 } from "./catalog-connected-accounts";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   capabilityCategoryLabel,
   capabilityConnectPlan,
@@ -64,8 +64,12 @@ import {
   GENERIC_API_KEY_FIELD,
   socialConnectionsForOwnership,
   type ConnectionHealth,
-} from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
+} from "@opengeni/react/app/lib/capabilities";
+import type {
+  CapabilityCatalogItem,
+  ConnectionOwnership,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    The page for a catalog entry: a connection from the catalog or the public
@@ -723,7 +727,12 @@ export function CatalogItemPage({
           description="Choose which actions run automatically and which need your review."
         >
           <ConnectorToolPermissions
-            key={`${workspaceId}:${item.id}`}
+            key={`${workspaceId}:${item.id}:${
+              connectionAccounts?.connections
+                ?.map((account) => `${account.id}:${account.version}:${account.status}`)
+                .sort()
+                .join(",") ?? ""
+            }`}
             workspaceId={workspaceId}
             capabilityId={item.id}
             bare

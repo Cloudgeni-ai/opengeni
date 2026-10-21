@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { OrganizationInvitation } from "@/types";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 
 /**
  * Onboarding connects Codex for the organization: its start and poll go

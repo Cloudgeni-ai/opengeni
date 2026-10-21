@@ -5,7 +5,7 @@ import type {
   ConnectionMetadata,
   InstalledSkillSummary,
   PluginPreview,
-} from "@/types";
+} from "@opengeni/react/app/types";
 import {
   initialSourceImportState,
   isWorkspaceImportedSkill,

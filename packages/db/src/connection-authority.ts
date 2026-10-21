@@ -5,7 +5,7 @@ import {
 } from "@opengeni/contracts/connection-authority";
 import { ConnectionKind, type ConnectionKind as ConnectionKindValue } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
-import { getExternalLinkTurnAuthorization } from "./external-link-work";
+import { getExternalLinkTurnAuthorizationInTransaction } from "./external-link-work";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 
 async function withOwnerContext<T>(
@@ -73,7 +73,11 @@ export async function resolveAcceptedConnectionUse(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const linked = await getExternalLinkTurnAuthorization(scopedDb, input, input.turnId);
+      const linked = await getExternalLinkTurnAuthorizationInTransaction(
+        scopedDb,
+        input,
+        input.turnId,
+      );
       if (
         linked &&
         (!linked.authorized ||

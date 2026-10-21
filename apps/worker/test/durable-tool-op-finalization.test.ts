@@ -7,7 +7,13 @@ import * as admission from "../src/activities/agent-turn/admission";
 import { runTurnStreamAttempt } from "../src/activities/agent-turn/stream-attempt";
 import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 
-for (const scenario of ["committed", "missing", "fenced", "event_failed"] as const) {
+for (const scenario of [
+  "committed",
+  "missing",
+  "fenced",
+  "checkpoint_fenced",
+  "event_failed",
+] as const) {
   test(`partial tool batch ${scenario}: foreground release follows exact receipt and durable event`, async () => {
     const order: string[] = [];
     const finalizations: Array<readonly string[] | undefined> = [];
@@ -19,6 +25,9 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
       usageLimitsMode: "none",
     });
     const checkpoint = [{ type: "message", role: "user", content: "Run two parallel tools" }];
+    const checkpointTx = {} as db.Database;
+    const allowedFence = { allowed: true } as Parameters<db.SessionEventMutation<"event">>[1];
+    const mutationEvents: string[] = [];
     const spies = [
       spyOn(runInput, "turnInput").mockResolvedValue({
         input: { input: checkpoint },
@@ -30,26 +39,32 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
       } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
       spyOn(admission, "ensureRunAllowedBetweenModelCalls").mockResolvedValue(),
       spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2),
+      // No explicit workspace recovery adds a discontinuity notice here.
+      spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       // This fixture has no stored programmatic operations to recover.
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
-      spyOn(db, "registerPendingSessionToolCall").mockResolvedValue({
+      spyOn(db, "registerPendingSessionToolCallInTransaction").mockResolvedValue({
         accepted: true,
         registered: true,
       }),
-      spyOn(db, "recordPendingSessionToolCallResult").mockImplementation(async (_db, input) => {
-        expect(input.callId).toBe("call_first");
-        expect(input.resultItem).toMatchObject({
-          type: "function_call_result",
-          callId: "call_first",
-          output: { type: "text", text: "completed first result" },
-        });
-        order.push("receipt");
-        return {
-          accepted: scenario !== "fenced",
-          recorded: scenario === "committed" || scenario === "event_failed",
-        };
-      }),
+      spyOn(db, "recordPendingSessionToolCallResultInTransaction").mockImplementation(
+        async (tx, input, fence) => {
+          expect(tx).toBe(checkpointTx);
+          expect(fence).toBe(allowedFence);
+          expect(input.callId).toBe("call_first");
+          expect(input.resultItem).toMatchObject({
+            type: "function_call_result",
+            callId: "call_first",
+            output: { type: "text", text: "completed first result" },
+          });
+          order.push("receipt");
+          return {
+            accepted: scenario !== "fenced",
+            recorded: scenario === "committed" || scenario === "event_failed",
+          };
+        },
+      ),
     ];
     const metric = { record() {}, observe() {}, add() {}, inc() {}, set() {} };
     const stream = {
@@ -111,8 +126,32 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
             modelRunSettings: settings,
             toolCancellationFenceRef: { current: null },
             firstModelRequestPreparationRecorded: true,
-            publish: async (events: Array<{ type: string }>) => {
-              if (events.some((event) => event.type === "agent.toolCall.output")) {
+            publish: async (
+              events: Array<{ type: string }>,
+              _immediate: boolean,
+              mutate?: db.SessionEventMutation<"event">,
+            ) => {
+              const output = events.some((event) => event.type === "agent.toolCall.output");
+              // Production publishing executes the receipt mutation inside the
+              // same fenced transaction as its structural event. Ignoring this
+              // callback silently tests neither receipt nor foreground release.
+              if (events.some((event) => event.type === "agent.toolCall.created") || output) {
+                expect(mutate).toBeDefined();
+                mutationEvents.push(output ? "output" : "created");
+                const fence =
+                  output && scenario === "checkpoint_fenced"
+                    ? ({
+                        allowed: false,
+                        reason: "attempt_changed",
+                        workspace: null,
+                        session: null,
+                        turn: null,
+                        attempt: null,
+                      } as Parameters<db.SessionEventMutation<"event">>[1])
+                    : allowedFence;
+                expect(await mutate!(checkpointTx, fence)).toBe(true);
+              }
+              if (output) {
                 expect(finalizations).toEqual([]);
                 order.push("event_started");
                 if (scenario === "event_failed") throw eventFailure;
@@ -158,9 +197,11 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
       } catch (error) {
         caught = error;
       }
-      if (scenario === "fenced") {
+      expect(mutationEvents).toEqual(["created", "created", "output"]);
+      if (scenario === "fenced" || scenario === "checkpoint_fenced") {
         expect(caught).toBeInstanceOf(TurnAttemptFencedError);
         expect(order).not.toContain("event_started");
+        if (scenario === "checkpoint_fenced") expect(order).not.toContain("receipt");
       } else {
         expect(caught).toBe(scenario === "event_failed" ? eventFailure : stopped);
       }

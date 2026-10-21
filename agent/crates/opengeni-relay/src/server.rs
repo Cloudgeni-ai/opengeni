@@ -85,10 +85,8 @@ pub fn metrics_router(registry: Arc<ChannelRegistry>, config: Arc<RelayConfig>) 
         })
 }
 
-/// Serve the relay on `config.bind` until `shutdown` resolves. Spawns a background
-/// reaper that bounds half-open channel state, and the dedicated metrics listener
-/// when [`RelayConfig::metrics_bind`] is set. Returns the bound wss address
-/// (useful when binding to port 0 in tests).
+/// Serve the relay on `config.bind` until `shutdown` resolves: [`BoundRelay::bind`]
+/// then [`BoundRelay::serve`]. Returns the bound wss address.
 ///
 /// # Errors
 ///
@@ -99,62 +97,125 @@ pub async fn serve(
     metrics: RelayMetrics,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> crate::error::RelayResult<SocketAddr> {
-    let registry = Arc::new(ChannelRegistry::new(&config, metrics));
-    let config = Arc::new(config);
-    let listener = TcpListener::bind(&config.bind)
+    BoundRelay::bind(config, metrics)
+        .await?
+        .serve(shutdown)
         .await
-        .map_err(|e| crate::error::RelayError::Server(format!("bind {}: {e}", config.bind)))?;
-    let addr = listener
-        .local_addr()
-        .map_err(|e| crate::error::RelayError::Server(format!("local_addr: {e}")))?;
-    let metrics_listener = bind_metrics_listener(&config, addr).await?;
-    let metrics_addr = metrics_listener
-        .as_ref()
-        .map(|(_, metrics_addr)| *metrics_addr);
-    tracing::info!(%addr, metrics_addr = ?metrics_addr, "relay listening");
+}
 
-    // The dedicated metrics listener outlives the wss drain (scrapes keep working
-    // while in-flight streams finish) and stops after it.
-    let metrics_server = metrics_listener.map(|(metrics_listener, _)| {
-        let app = metrics_router(registry.clone(), config.clone());
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(metrics_listener, app).await {
-                tracing::error!(error = %e, "relay metrics listener failed");
-            }
+/// A relay whose listeners are bound but which does not serve yet. Binding first
+/// gives the caller the bound address (port 0 picks one) while the relay holds the
+/// port, so nothing else can take it between choosing and serving.
+pub struct BoundRelay {
+    registry: Arc<ChannelRegistry>,
+    config: Arc<RelayConfig>,
+    listener: TcpListener,
+    addr: SocketAddr,
+    metrics_listener: Option<(TcpListener, SocketAddr)>,
+}
+
+impl BoundRelay {
+    /// Bind the wss listener on `config.bind`, and the dedicated metrics listener
+    /// when [`RelayConfig::metrics_bind`] is set.
+    ///
+    /// # Errors
+    ///
+    /// [`RelayError::Server`](crate::error::RelayError::Server) if either listener
+    /// cannot bind, or if the metrics listener would share the wss listener's port.
+    pub async fn bind(
+        config: RelayConfig,
+        metrics: RelayMetrics,
+    ) -> crate::error::RelayResult<Self> {
+        let registry = Arc::new(ChannelRegistry::new(&config, metrics));
+        let config = Arc::new(config);
+        let listener = TcpListener::bind(&config.bind)
+            .await
+            .map_err(|e| crate::error::RelayError::Server(format!("bind {}: {e}", config.bind)))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| crate::error::RelayError::Server(format!("local_addr: {e}")))?;
+        let metrics_listener = bind_metrics_listener(&config, addr).await?;
+        Ok(Self {
+            registry,
+            config,
+            listener,
+            addr,
+            metrics_listener,
         })
-    });
-
-    // The half-open reaper bounds transient state (a side that dialed but whose peer
-    // never arrived). Cheap; runs every few seconds.
-    let reaper_registry = registry.clone();
-    let reaper = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            ticker.tick().await;
-            let reaped = reaper_registry.reap_half_open(Instant::now());
-            if reaped > 0 {
-                tracing::debug!(reaped, "reaped half-open relay channels");
-            }
-        }
-    });
-
-    let routing = config.advertise_ip.map(|ip| {
-        Arc::new(crate::routing::Routing::new(SocketAddr::new(
-            ip,
-            addr.port(),
-        )))
-    });
-    let app = routed_router(registry, config, routing);
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
-    let result = server
-        .await
-        .map_err(|e| crate::error::RelayError::Server(format!("serve: {e}")));
-    reaper.abort();
-    if let Some(metrics_server) = metrics_server {
-        metrics_server.abort();
     }
-    result?;
-    Ok(addr)
+
+    /// The bound wss address.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Serve until `shutdown` resolves. Spawns a background reaper that bounds
+    /// half-open channel state, and serves the dedicated metrics listener when one
+    /// is bound. Returns the bound wss address.
+    ///
+    /// # Errors
+    ///
+    /// [`RelayError::Server`](crate::error::RelayError::Server) if serving fails.
+    pub async fn serve(
+        self,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> crate::error::RelayResult<SocketAddr> {
+        let Self {
+            registry,
+            config,
+            listener,
+            addr,
+            metrics_listener,
+        } = self;
+        let metrics_addr = metrics_listener
+            .as_ref()
+            .map(|(_, metrics_addr)| *metrics_addr);
+        tracing::info!(%addr, metrics_addr = ?metrics_addr, "relay listening");
+
+        // The dedicated metrics listener outlives the wss drain (scrapes keep working
+        // while in-flight streams finish) and stops after it.
+        let metrics_server = metrics_listener.map(|(metrics_listener, _)| {
+            let app = metrics_router(registry.clone(), config.clone());
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(metrics_listener, app).await {
+                    tracing::error!(error = %e, "relay metrics listener failed");
+                }
+            })
+        });
+
+        // The half-open reaper bounds transient state (a side that dialed but whose
+        // peer never arrived). Cheap; runs every few seconds.
+        let reaper_registry = registry.clone();
+        let reaper = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                ticker.tick().await;
+                let reaped = reaper_registry.reap_half_open(Instant::now());
+                if reaped > 0 {
+                    tracing::debug!(reaped, "reaped half-open relay channels");
+                }
+            }
+        });
+
+        let routing = config.advertise_ip.map(|ip| {
+            Arc::new(crate::routing::Routing::new(SocketAddr::new(
+                ip,
+                addr.port(),
+            )))
+        });
+        let app = routed_router(registry, config, routing);
+        let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
+        let result = server
+            .await
+            .map_err(|e| crate::error::RelayError::Server(format!("serve: {e}")));
+        reaper.abort();
+        if let Some(metrics_server) = metrics_server {
+            metrics_server.abort();
+        }
+        result?;
+        Ok(addr)
+    }
 }
 
 /// Bind the dedicated metrics listener when one is configured. It must not share

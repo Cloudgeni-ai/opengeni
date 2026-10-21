@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { KnowledgeEntryContent, KnowledgeEntryRecord } from "@opengeni/sdk";
-import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { Button } from "@opengeni/react/ui/button";
 
 type Evidence = KnowledgeEntryContent["evidence"][number];
 

@@ -5,11 +5,13 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 /** Session storage lifecycle migrations build on the withheld 0560 import
  * guards; this historical fixture withholds them and adds only the session
  * columns current adapters project. */
 const sessionStorageMigrationTail = [
+  "0888_session_list_invalidation.sql",
   "0649_session_content_archive.sql",
   "0650_session_archive_activity.sql",
   "0651_session_event_delta_folding.sql",
@@ -37,10 +39,19 @@ export async function acquirePreKnowledgeTestDatabase(
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // Resolves knowledge_index_claim from the withheld 0461 migration.
     await admin`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+    for (const name of strictOwnerMaintenanceMigrationTail)
+      await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     for (const name of knowledgeActorMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // Rewrites the visibility transition installed by the withheld 0501 migration.
     await admin`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
+    // Extends the machine grant predicates from withheld 0501.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0851_personal_machine_session_tree.sql')`;
+    // Replaces the file ownership trigger from withheld 0461 and reads the
+    // file read-capability table from withheld 0499.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0854_file_visibility.sql')`;
+    // The fork workflow identity backfill reads the withheld 0560 import column.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0856_session_fork_workflow_identity.sql')`;
     // The import migration extends the withheld 0499 attachment helper.
     await admin`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
     // The session storage lifecycle extends the withheld import guards.
@@ -57,6 +68,9 @@ export async function acquirePreKnowledgeTestDatabase(
     // that the withheld 0501/0738 migrations shape differently here. Their
     // standalone routines are installed after the replay below.
     await admin`INSERT INTO schema_migrations(name) VALUES('0768_private_visibility_ignores_leftovers.sql'), ('0769_private_visibility_never_blocks.sql')`;
+    // 0873 patches the account-binding fence as rewritten by the withheld 0501;
+    // this historical runtime keeps the earlier fence, so it stays recorded.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0873_mcp_binding_delegation_revocation.sql')`;
     await migrate(blank.databaseUrl);
     // The current visibility transition reads the routines 0768 and 0769 add,
     // so install everything before their exact-text rewrite blocks.
@@ -88,7 +102,10 @@ export async function acquirePreKnowledgeTestDatabase(
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     await admin`DELETE FROM schema_migrations WHERE name='0730_maintenance_work_probes.sql'`;
+    for (const name of strictOwnerMaintenanceMigrationTail)
+      await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     await admin`DELETE FROM schema_migrations WHERE name='0738_private_sessions_share_sandboxes.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0851_personal_machine_session_tree.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
     for (const name of sessionStorageMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;

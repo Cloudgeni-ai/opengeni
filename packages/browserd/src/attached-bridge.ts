@@ -174,6 +174,11 @@ export class AttachedBrowserBridgeClient {
     this.socket.destroy();
   }
 
+  /** True once this connection can no longer carry requests. */
+  get closed(): boolean {
+    return this.failure !== null;
+  }
+
   private acceptBytes(chunk: Buffer): void {
     if (this.failure || chunk.length === 0) return;
     this.receiveBuffer = Buffer.concat([this.receiveBuffer, chunk]);

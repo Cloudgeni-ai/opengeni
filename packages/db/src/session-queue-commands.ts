@@ -2732,6 +2732,35 @@ export async function submitHumanPromptInTransaction(
     occurredAt: now,
   });
 
+  // Sending the exact saved composer chooses the chat's future policy, not
+  // just this turn's. Keep the write in prompt admission so a failed Send or
+  // replay cannot change defaults. Non-composer API/automated inputs retain
+  // their existing per-turn semantics. The boundary also prevents an older
+  // accepted turn that starts later from restoring the previous policy.
+  const composerPolicy =
+    draft && (input.actor.type === "human" || input.actor.type === "operator")
+      ? {
+          model: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+          latencyMode: turn.latencyMode,
+        }
+      : null;
+  if (composerPolicy) {
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "session.model_settings.updated",
+      payload: {
+        ...composerPolicy,
+        effectiveFrom: "future_turns",
+        receiptId: reserved.receipt.id,
+      },
+      occurredAt: now,
+    });
+  }
+
   const supersession =
     effectiveDelivery === "steer"
       ? await supersedeSessionCurrentDirectionInTransaction(db, {
@@ -2937,6 +2966,7 @@ export async function submitHumanPromptInTransaction(
   await db
     .update(schema.sessions)
     .set({
+      ...composerPolicy,
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
       tools: session.tools,
       activeTurnId: effectiveDelivery === "steer" ? liveCurrentTurnId : session.activeTurnId,

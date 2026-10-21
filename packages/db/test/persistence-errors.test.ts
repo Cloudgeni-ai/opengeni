@@ -26,6 +26,21 @@ function databaseError(overrides: Record<string, unknown> = {}): Error {
 }
 
 describe("session event persistence failure truth", () => {
+  test("atomic checkpoints never retry an uncertain commit with an older rollback cause", async () => {
+    let attempts = 0;
+    await expect(
+      runIdempotentPersistenceTransaction({ stage: "atomic_checkpoint" }, async () => {
+        attempts++;
+        throw Object.assign(new Error("commit acknowledgement lost"), {
+          code: "ECONNRESET",
+          cause: { code: "40P01" },
+        });
+      }),
+    ).rejects.toMatchObject({
+      details: { attempts: 1, sqlState: null, retryOutcome: "not_retryable" },
+    });
+    expect(attempts).toBe(1);
+  });
   test("recognizes raw postgres transport failures without message heuristics", () => {
     for (const code of [
       "CONNECTION_CLOSED",

@@ -106,6 +106,41 @@ test("large review facts stay compact, and complete nested values are navigable 
       .join(""),
   ).toBe(args.nested.deeper.text);
 });
+test("selected messages read as provider subject and sender, falling back to the saved id", () => {
+  const args = { messageIds: ["one", "two"], addLabelIds: ["one"] };
+  const context = {
+    kind: "gmail" as const,
+    selectionLabels: [
+      {
+        id: "one",
+        title: "Quarterly report",
+        subtitle: "Finance <finance@example.test>",
+        provenance: "provider_metadata" as const,
+      },
+    ],
+  };
+  expect(toolReviewDetails(args, context, "/messageIds", 0).items).toEqual([
+    {
+      label: "1",
+      value: "Quarterly report",
+      detail: "Finance <finance@example.test> · one",
+      path: "/messageIds/0",
+      truncated: false,
+    },
+    { label: "2", value: "two", path: "/messageIds/1", truncated: false },
+  ]);
+  // Other fields never borrow message labels, even for a matching value.
+  expect(toolReviewDetails(args, context, "/addLabelIds", 0).items[0]!.value).toBe("one");
+  expect(toolReviewDetails({ messageId: "one" }, context, "/messageId", 0).items).toEqual([
+    { label: "Message", value: "Quarterly report", detail: "Finance <finance@example.test> · one" },
+  ]);
+  // A protected selection never reveals its labels.
+  expect(
+    JSON.stringify(
+      toolReviewDetails(args, { ...context, protectedFields: ["*"] }, "/messageIds", 0),
+    ),
+  ).not.toContain("Quarterly report");
+});
 test("long saved field names have bounded previews and complete authenticated navigation", () => {
   const key = "long-field-".repeat(2000),
     args = { [key]: "exact synthetic value" };

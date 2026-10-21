@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 /* ----------------------------------------------------------------------------
    Signing in to a subscription with a device code (ChatGPT for Codex, xAI for

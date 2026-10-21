@@ -15,7 +15,7 @@
     "dist:linux": "bun scripts/build.ts --production && electron-builder --linux --publish never",
     "dist:win": "bun scripts/build.ts --production && electron-builder --win --publish never",
     "test": "bun test",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsrs --noEmit -p tsconfig.json"
   },
   "devDependencies": {
     "@opengeni/desktop": "workspace:*",

@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts";
 import { parseVerifiedAttemptToolCatalog } from "@opengeni/codemode";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
@@ -1046,6 +1047,153 @@ export async function createWorkspaceArtifact(
     }
     throw error;
   }
+}
+
+/** What a duplicate's receipt records, so a retry replays only the same request. */
+function duplicateRequest(input: { sourceArtifactId: string; title?: string | undefined }) {
+  return { duplicateOf: input.sourceArtifactId, title: input.title ?? null };
+}
+
+/**
+ * A new Site from a Site's current version. Stored Site content is immutable
+ * and never collected per version, so the copy's first version references
+ * the original's HTML and source objects instead of copying their bytes.
+ * A retry with the same operation replays before the original is read again,
+ * so later edits to the original cannot turn a committed copy into a conflict.
+ */
+export async function duplicateWorkspaceArtifact(
+  db: Database,
+  input: Pick<
+    PublishMetadata,
+    | "accountId"
+    | "workspaceId"
+    | "operationKey"
+    | "actorSubjectId"
+    | "sourceSessionId"
+    | "sourceTurnId"
+    | "sourceAttemptId"
+    | "sourceExecutionGeneration"
+    | "sourceToolName"
+  > & {
+    viewer: WorkspaceArtifactViewer;
+    sourceArtifactId: string;
+    artifactId: string;
+    /** Omitted: `defaultTitle` of the original's title. */
+    title?: string;
+    defaultTitle: (originalTitle: string) => string;
+    slugFor: (title: string, artifactId: string) => string;
+    /** Who can see the copy, from the original's visibility. */
+    resolveAudience: (visibility: WorkspaceArtifact["visibility"]) => Promise<{
+      visibility: "workspace_shared" | "user_private";
+      ownerSubjectId: string | null;
+    }>;
+  },
+): Promise<WorkspaceArtifactMutationResponse> {
+  const request = duplicateRequest(input);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await lockOperation(tx, input.workspaceId, input.operationKey);
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+        if (replay) {
+          if (
+            replay.event.type !== "published" ||
+            !isDeepStrictEqual(replay.event.requestInput, request)
+          ) {
+            throw new WorkspaceArtifactConflictError(
+              "Idempotency key was already used for a different request",
+            );
+          }
+          return mutationResult(
+            replay.artifact,
+            replay.version,
+            replay.event,
+            true,
+            replay.current ?? replay.version,
+          );
+        }
+        const original = await artifactRow(
+          tx,
+          input.workspaceId,
+          input.sourceArtifactId,
+          input.viewer,
+        );
+        if (!original) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+        const source = await currentVersion(tx, original);
+        if (!source) throw new WorkspaceArtifactNotFoundError("Artifact has no published version");
+        const requestedTools = WorkspaceArtifactRequestedTools.parse(source.requestedTools);
+        await assertAttemptAuthority(tx, input);
+        await assertArtifactRequestedToolsInAttemptCatalog(tx, input, requestedTools);
+        const audience = await input.resolveAudience(
+          original.visibility === "user_private" ? "private" : "workspace",
+        );
+        const title = input.title ?? input.defaultTitle(original.title);
+        const [artifact] = await tx
+          .insert(schema.workspaceArtifacts)
+          .values({
+            id: input.artifactId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            slug: input.slugFor(title, input.artifactId),
+            title,
+            description: original.description,
+            createdBySubjectId: input.actorSubjectId,
+            visibility: audience.visibility,
+            ownerSubjectId: audience.ownerSubjectId,
+          })
+          .returning();
+        const [version] = await tx
+          .insert(schema.workspaceArtifactVersions)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            artifactId: input.artifactId,
+            revision: 1,
+            contentKey: source.contentKey,
+            contentSha256: source.contentSha256,
+            sizeBytes: source.sizeBytes,
+            sourceKey: source.sourceKey,
+            sourceSha256: source.sourceSha256,
+            sourceSizeBytes: source.sourceSizeBytes,
+            requestedTools,
+            operationKey: input.operationKey,
+            sourceSessionId: input.sourceSessionId,
+            sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
+            createdBySubjectId: input.actorSubjectId,
+          })
+          .returning();
+        const [updated] = await tx
+          .update(schema.workspaceArtifacts)
+          .set({ currentVersionId: version!.id, updatedAt: new Date() })
+          .where(eq(schema.workspaceArtifacts.id, artifact!.id))
+          .returning();
+        const [event] = await tx
+          .insert(schema.workspaceArtifactEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            artifactId: input.artifactId,
+            type: "published",
+            fromVersionId: null,
+            toVersionId: version!.id,
+            operationKey: input.operationKey,
+            requestDigest: null,
+            requestInput: request,
+            sourceSessionId: input.sourceSessionId,
+            sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
+            actorSubjectId: input.actorSubjectId,
+            reason: `Duplicated from “${original.title}”`,
+          })
+          .returning();
+        return mutationResult(updated!, version!, event!, false);
+      }),
+  );
 }
 
 export async function publishWorkspaceArtifactVersion(

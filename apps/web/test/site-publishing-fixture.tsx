@@ -7,12 +7,12 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { Toaster } from "../src/components/ui/sonner";
-import { ArtifactDetailRoute } from "../src/routes/artifacts";
+import { Toaster } from "@opengeni/react/app/components/toaster";
+import { ArtifactDetailRoute } from "@opengeni/react/app/routes/artifacts";
 import { SitePlatformUsageSection } from "../src/components/insights/site-platform-usage-section";
-import { SectionStack } from "../src/components/ui/section";
+import { SectionStack } from "@opengeni/react/ui/section";
 import { SiteAuthorizeRoute } from "../src/routes/site-auth";
-import { artifactReturnSearch } from "../src/lib/routes";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
 import { siteAuthSearch } from "../src/lib/site-auth";
 import { client, scenario, siteId, workspaceId } from "./site-publishing-context";
 import "../src/styles.css";

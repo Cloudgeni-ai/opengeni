@@ -91,6 +91,10 @@ pages or guarantee graceful completion for a permanently stuck controller.
   dir or the direct GitHub-Releases URL). A script served by a deployment also
   defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
   managed-cloud fallback is `https://app.opengeni.ai`.
+  For Windows, the managed-cloud one-liner is
+  `irm https://app.opengeni.ai/install.ps1 | iex`; self-hosted installations use
+  their own deployment origin instead. That same origin serves the promoted
+  release assets, so installation does not require a separate download hostname.
   Linux/macOS use an installed minisign/rsign or a capability-tested OpenSSL.
   Otherwise the installer downloads a temporary upstream minisign 0.11 verifier,
   authenticates its archive against a SHA-256 pinned in the script before execution,
@@ -121,6 +125,10 @@ pages or guarantee graceful completion for a permanently stuck controller.
   exit. Transient exit-observation failures recover per producer rather than
   permanently disabling updates. Unconfirmed cleanup reports its producer and
   recovery steps in the response and agent log; no blanket reset bypasses it.
+  A controller that cannot hand over browser/computer sessions reports
+  `update_busy_interactions`, distinct from uploads and other work. Unix streamed
+  commands, including one-off commands, already participate in update handover;
+  Windows waits rather than interrupting live commands.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
   systemd user/system unit, a macOS LaunchAgent, or a per-user Windows logon task
@@ -130,6 +138,11 @@ pages or guarantee graceful completion for a permanently stuck controller.
   preserves the installer's command `PATH`; agent commands retain that normal
   machine environment, while the lifecycle CLI resolves the operating system's
   real systemd tools ahead of unrelated user shims. `service install --print` is the dry run.
+  `stop` pauses automatic login startup as well as the current process;
+  `service start` resumes the installed definition without replacing it.
+  `service status --json` reports versioned installed/enabled/running state for
+  desktop service-backed management. Desktop launch never uninstalls a working
+  agent or resets its privacy grants.
   `opengeni-agent run` remains the explicit foreground mode.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
@@ -221,12 +234,48 @@ An authentication handshake timeout is a transient connection failure, not proof
 that the enrollment bearer was rejected. The agent retries the connection without
 recommending re-enrollment for that timeout.
 
+## In an Opengeni compute sandbox (`run --compute`)
+
+The same agent runs inside each sandbox of Opengeni compute. The
+sandbox's guest init starts it as `opengeni-agent run --compute <link file>`; the
+contract is `compute/docs/agent-link.md`.
+
+- The link file names the enrollment (`workspace_id`, `agent_id`), the
+  `workspace_root` and a loopback `nats_url`. The agent dials that address with
+  no credential: the guest forwards it to the sandbox's host, which speaks for
+  the sandbox to Opengeni over its own authenticated link.
+- The relay producer token arrives from the host on `_compute.relay`, and a
+  fresh one before it expires. It is kept in memory only; every stream
+  registration, the first and each reconnect, presents the latest one.
+- The guest carries each of the agent's connections as a stream that outlives
+  sleep, wake and checkpoints on the same host. When the host has no stream to
+  go on with (after a move, a recovery on another host or a restart of the host
+  agent), the guest sends `SIGUSR1`: the agent drops its connection and dials
+  again at once, without the outage back-off.
+- The agent writes what it has in use to `/run/compute/activity/agent.<pid>`,
+  so compute sleeps the sandbox only when the agent is idle too: running or
+  waiting host operations, plus open streams that carried traffic within the
+  stream silence limit (ten minutes unless the link file says otherwise).
+  Anything a viewer sends counts on every stream; what the agent sends counts
+  on terminal, browser and computer streams, but not desktop frames, which are
+  captured at a fixed rate whether or not anything changed. A browser
+  controller that is merely running does not count: each use of it is a
+  request, and requests keep the sandbox awake on the host's side.
+- Enrollment, credential renewal, self-update (the image pins the agent) and
+  service installation do not happen in this mode; requests for them are
+  refused with `renewal_unsupported` and `update_unsupported`.
+
 ## Wire protocol — single source of truth
 
 For native large-file editor writes, see [transactional uploads](TRANSACTIONAL-WRITES.md):
 the independent capability gate, exact upload lifecycle, supported Linux file
 semantics, and restart/lost-ack restrictions. `op_stream` alone does not imply
 transactional filesystem support.
+
+Per-request `run_as` (exec, git, PTY and file operations as another local user)
+is gated by `Capabilities.run_as`, advertised only on Linux by a root agent; see
+[Run as another local user](../docs/connected-machines.md#run-as-another-local-user).
+The credential switches live in `opengeni-agent-linux-ffi`.
 
 The protocol is defined **once** in [`proto/opengeni_agent.proto`](proto/opengeni_agent.proto)
 (proto3, package `opengeni.agent.v1`) and code-generated to **both** stacks so the

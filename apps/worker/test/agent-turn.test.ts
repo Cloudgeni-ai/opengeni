@@ -4816,6 +4816,30 @@ describe("sandbox file materialization note", () => {
     expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
   });
 
+  test("a backend that cannot mount object storage always gets signed downloads", () => {
+    // The compute fabric applies no mount entries, so a mounted attachment would
+    // never appear at its path. Every store must use signed delivery there, and
+    // that delivery keeps the box eager so the file is in place before the model.
+    for (const objectStorageBackend of ["s3-compatible", "azure-blob", "aws-s3", "gcs"] as const) {
+      const computeHome = testSettings({ sandboxBackend: "compute", objectStorageBackend });
+      expect(requiresSignedFileResourceDownloads(computeHome)).toBe(true);
+    }
+    const computeHome = testSettings({
+      sandboxBackend: "compute",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(
+      sandboxEstablishPolicyDecision({
+        lazyEnabled: true,
+        machinePrimary: false,
+        sandboxBackend: "compute",
+        hasRunCredentialResolver: false,
+        generatedVideoFileCount: 0,
+        hasSignedFileResources: requiresSignedFileResourceDownloads(computeHome),
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
+  });
+
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
       {
@@ -5778,7 +5802,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "An upstream service could not be reached. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
@@ -5814,7 +5838,7 @@ describe("transient provider error classifier", () => {
     const dropped = Object.assign(new TypeError(message), { code: "ECONNRESET" });
     const recovery = {
       error:
-        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "An upstream service could not be reached. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     };

@@ -112,6 +112,25 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+API replicas share the `opengeni-agent-state-ingestion` Core NATS queue group
+for machine heartbeat/event and Hello persistence. One member handles each
+delivery; other machine-event subscribers remain broadcast. Queue delivery is
+not durable or globally ordered: exact-runner database fences remain authoritative,
+and heartbeat renewal commits before optional inventory or telemetry work.
+Attached-browser inventory liveness is stored once per enrollment; unchanged
+profiles are neither rewritten nor row-locked. Connected-profile reads derive
+their last-seen time from that inventory observation, and disconnects freeze it.
+Enrollment serialization and device locks for material changes remain intact
+(see `docs/connected-machines.md`).
+
+Established-chat composer submissions (web and native) persist the submitted
+model, reasoning and latency as session defaults in the same transaction as
+prompt admission (`packages/db/src/session-queue-commands.ts`). Saving a draft
+alone changes no session setting. The existing `session.model_settings.updated`
+boundary prevents older accepted turns from reverting that choice when they
+start; retries replay without reapplying settings. Accepted turns remain frozen,
+while later schedules and automatic work inherit the chat's saved defaults.
+
 Session activity uses row-stamped transaction IDs rather than a shared workspace
 counter. Incremental discovery uses same-snapshot xmin watermarks for at-least-once
 monitoring; list pagination is a live xid keyset, not a retained historical view.
@@ -124,6 +143,17 @@ lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,
 hold session `FOR KEY SHARE`, serialize cursors, never update sessions. Legacy
 SQL rebases at the DB boundary; late raw events roll back/retry semantic admission
 before rejected audit persistence.
+The cursor trigger projects semantic sequence and activity together in one
+session-row update. Plain appends do not repeat that write; real lifecycle
+mutations still update their own fields. Activity uses PostgreSQL statement time
+without moving an existing session timestamp backwards.
+Receipt and operation checkpoints explicitly request the same narrow fence
+projection as plain event appends; they do not fetch frozen prompts or catalogs
+they never read. Plain mutation callbacks retain their full-row contract. Both
+projections use identical locks and admission decisions in the same transaction.
+Generic event appends (including explicit field updates), history checkpoints,
+open-suffix attachment and transport/token markers use that narrow projection
+too; none needs frozen session or attempt configuration to perform its write.
 
 Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
 non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
@@ -136,6 +166,17 @@ Session list totals materialize narrow, caller-RLS-authorized child metadata onc
 before recursive traversal. Roots retain their list/scope filters; exact-target
 grants do not expand to children. Tree depth does not multiply base session scans.
 
+The workspace live SSE also carries transient session-list invalidation hints.
+PostgreSQL commit triggers notify only on list-relevant changes; one lazy dedicated
+listener per API process batches dirty IDs at the existing 15-second cadence and
+filters them through current list authority before delivery. These hints have no
+replay cursor and are never history: reconnect/focus reconciles the authoritative
+lists. Web and desktop share the dirty-scope renderer, so unchanged roots, pins,
+expanded branches and project windows no longer poll. Missing listener support,
+transaction-only database handles, finite HTTP/1 batches and external host ACLs
+retain polling. The source is `packages/db/src/session-list-notifications.ts`; the
+authorized batch is `apps/api/src/http/session-list-hints.ts`.
+
 SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
 before transfer; oversized events travel intact/alone. Short pages never prove
 EOF. NATS restarts affect delivery/reachability, never history/queued obligations.
@@ -145,6 +186,9 @@ Raw-isolation rollback:
 validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
+Connection-use validation follows that lifecycle order with shared read fences
+and the existing fair workspace-control queue; independent validations do not
+exclusively lock each other, while lifecycle changes still exclude validation.
 
 Deleted session workflows close only after a worker-scoped absence proof;
 actor-filtered or wrong-tenant observations stay retryable. The versioned
@@ -160,7 +204,12 @@ see `docs/connected-machines.md`.
 Connected Machine control replies use a negotiated, process-scoped receipt
 journal (`agent/crates/opengeni-agent/src/rpc_replay.rs`). NATS/JWT rotation
 rebuilds transport, not execution: immutable delivery identities join accepted
-work or replay its reply. Expired deliveries cannot execute after receipt GC;
+work or replay its reply. Private batches of receiver-issued single-use tokens
+are prefetched per authenticated bus and exact process, so warm calls add no
+round trip. A fixed per-call elapsed offset preserves exec and receipt deadlines
+without charging idle prefetch age. Tokens have a suspend-inclusive monotonic lifetime; neither admission nor requester retry budgets depend
+on synchronized wall clocks. Unknown/expired tokens and changed payloads return
+prompt non-retryable errors preserving uncertain outcomes. Expired deliveries cannot execute after receipt GC;
 unknown outcomes never become never-sent merely because a later retry has no
 responder. `packages/runtime/src/sandbox/selfhosted/control-replay.ts` owns negotiation and
 bounded recovery. The requester listens for the exact process's hello before
@@ -221,6 +270,13 @@ Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
+Worker tool checkpoints commit each pending call/result receipt with its
+structural timeline event under one exact-attempt fence. The ordered stream
+batcher carries the transaction-local mutation; it never delays an individual
+result for its siblings. Stable SDK history and proven receipt retirement then
+share their own checkpoint, preserving canonical history and recovery ordering.
+See [run lifecycle](run-lifecycle.md) for the durability and retry boundaries.
+
 Subscription serving revisions are attempt-scoped; the accepted model and
 frozen connection authority remain the logical turn's contract. Shared-core
 placement, candidate-aware capacity waits and lease-backed switch events use
@@ -248,6 +304,11 @@ their explicit authority. Each update keeps its own lineage. [Details](run-lifec
 
 Agent-created sessions inherit omitted model/reasoning from the calling turn;
 latency defaults to `standard`.
+
+Required first-party MCP connect/tools-list outages preserve the accepted turn
+through paced durable recovery without a retry-count cutoff. The runtime's
+verified setup boundary grants this policy; external servers, tool invocations,
+and authorization or protocol errors do not. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable and attempt-fenced: retry settlement, never
 unknown effects ([fences and recovery](run-lifecycle.md)).
@@ -675,7 +736,7 @@ Model display: outside Models settings a model is its clean name plus its maker'
 logo, never a routing prefix, connection id or organization/workspace scope.
 `packages/contracts/src/model-display.ts` (`modelDisplayName`, `modelVendor`, re-exported
 by `@opengeni/sdk/model-display`) and `@opengeni/react`'s `ModelName`/`ModelMark` are
-the one source; the console's `apps/web/src/components/model-identity.tsx` adds the
+the one source; the console's `packages/react/src/app/components/model-identity.tsx` adds the
 logo tile and payer hint. The picker merges org- and workspace-connected copies.
 
 Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
@@ -700,6 +761,17 @@ before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
 queued JSON, before the host atomically seals final admission. Operation-result
 retention and consumer-generation acknowledgments remain engine-owned.
+Attempt-owned `run_on` commands use the same bounded observation and durable
+session-command adoption as attached exec. A running receipt transfers custody
+before the API returns; HTTP disconnection never requests a process stop.
+They gain no duration limit. Unix streamed commands remain eligible
+for update handover; browser-controller holds have their own progress reason.
+The same admission proof produces bounded category/count update-blocker
+snapshots. Private controller/session identities never cross into enrollment-wide
+diagnostics. Exact-operation/process-fenced progress persists the snapshot on the
+enrollment, clears it on advancement or process replacement, and projects its
+age and elapsed hold into Machines/fleet. This is evidence, not cancellation or
+permission to relax admission; older generic busy receipts remain unspecified.
 Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
@@ -727,6 +799,11 @@ Unbound `selfhosted` creates leave no queued shell.
 
 Omitted child placement inherits parent machine/root and shared home/group,
 including attached `backend:none`; selfhosted-only children require a machine.
+Personal machine tree consent uses protected exact-attempt creation witnesses,
+immutable parent/turn links, same-owner causal
+humans and the original revocable grant at claim and dispatch (0851); it neither
+copies grants nor expands other personal resources. Every ancestor machine
+snapshot must remain current. See [Connected Machines](connected-machines.md).
 
 Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
 machine pointer and verifies managed compute via viewer/lease authority;
@@ -782,6 +859,24 @@ verified checkpoint, else continues empty, warning every member; never replays.
 See migrations 0495/0526/0548, [run lifecycle](run-lifecycle.md).
 Operator reauthorization supersedes verified public recovery;
 [provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
+Current portable archives are revalidated on a new attempt even after a prior
+non-retryable restore verdict; cold replacement election adopts the accepted
+backend without rewriting archive provenance. Human recovery uses the same
+session recovery endpoint for exact-archive retry or deliberate empty-workspace
+continuation. Empty continuation preserves group identity, requires control of
+every quiescent member (or operator authority), retains archives and records a
+permanent notice/warning for every member. The supported operator entry point is
+`scripts/operator/sandbox-recovery.ts`; see
+[current workspace recovery](run-lifecycle.md#current-workspace-retry-and-deliberate-empty-continuation).
+
+Opengeni compute (`compute`) is a managed sandbox whose provider session is the
+machine agent: leases, groups, setup and usage follow the managed path, while
+transport (op-stream, relay PTY/desktop, agent error grammar) follows the
+Connected Machine path via `usesAgentTransport`. Its agent is reached through
+the API's agent gateway over its host's link, never by dialing Opengeni.
+Compute sleeps idle sandboxes, so compute leases never idle-drain; group end
+(chat/workspace deletion) drains them and the reaper deletes the sandbox and
+revokes its `sandbox` enrollment. See [compute backend](compute-backend.md).
 
 Home-compute selection proves establishment authority; invalid pointers reconcile
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
@@ -960,6 +1055,12 @@ overshoot, not reservations; shares may oversubscribe. Default-off
 `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
+Read-only authorization and counter projections do not mint write capabilities:
+see [`read-only database paths`](design/read-only-database-paths.md). Private
+counter SELECT policies remain owner-only and tenant/schema bounded; mutation
+capabilities and live authorization checks are unchanged. API-key last use is
+coalesced telemetry, never an authorization cache.
+
 ### 3.13 Task usage limits stop admission, not running work
 
 One optional USD-micro limit per root session counts the pre-margin
@@ -1122,11 +1223,14 @@ contracts → sdk → react → apps/web
 Server-free clients: `apps/web` consumes SDK/React, never owning session/authorization
 semantics. Embedded API/core/worker hosts preserve these boundaries.
 
-Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
+Console appearance: `packages/react/src/app/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
-Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
+Workspace management: `packages/react/src/app/lib/workspace-management-location.tsx`; lazy settings
 shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
 destinations.
+Excel add-in pane: `apps/web/office/` (its own Vite entry), served with its manifest by the
+web server; its live-workbook relay and `excel_run` live in the API. See
+[`excel-addin.md`](excel-addin.md).
 
 ---
 
@@ -1205,6 +1309,26 @@ and the attempt keeps authority. Model-call admission, which runs before every
 model request, reads `hasPendingSteerForTurn` (a queued user/API turn with
 `delivery: "steer"`, or a pending agent Steer instruction). When one exists,
 admission throws `ModelStepHandover` before the request leaves the worker.
+
+At the next claim, an already-queued leading run of plain, never-started Steers
+from the same initiating person shares one replacement attempt. Each message
+keeps its own accepted-time history item and goal snapshot; all but the last
+are settled as superseded without a worker attempt. The last turn alone owns
+execution settings, credentials and grants. Files, personal-resource attachments,
+scheduled or previously started work, realtime delegations, another initiator,
+and ordinary Sends stop the batch; grants and files are never combined.
+Pending machine inputs are delivered once against the final turn, after all
+batched user messages. This can move a pending update later than the former
+one-at-a-time claim order, but never changes an existing history prefix.
+Claim and pre-claim failure settlement share target selection, so rollback or
+failure cannot accidentally settle the first message for an error in the last.
+There is no debounce: a Steer accepted after claim still uses the next-step
+handover above. Batch supersession receipts carry `beforeAttempt: true`, so
+they do not create empty UI responses without hiding real handover text in a
+partial timeline. Conversation monitoring and search share the canonical prompt
+visibility predicate: the server-written batch supersession receipt proves its
+message was consumed, including after compaction or archival purges history.
+Queued, withdrawn and admission-rejected prompts remain hidden until consumed.
 
 The turn does not wait for that boundary on its own schedule. A Steer watch
 per attempt (`steer-watch.ts`) subscribes to the session's live events
@@ -1431,10 +1555,19 @@ For turns using deferred MCP disclosure, the worker starts non-eager preparation
 at main provider dispatch or earlier real tool/recovery demand. The runtime also
 starts it on a substantive provider response when no dispatch hook is available.
 One completion fence owns tool readiness and cleanup; closing before start does
-not create unused connections. Embedded callers keep immediate background
+not create unused connections. Explicit provider-dispatch preparation also
+defers catalog construction and persistence when every server already joined
+the required/eager connection barrier. Those connected servers keep their
+frozen first-request schemas; an unfinished catalog alone does not imply an
+unknown server catalog or expose an extra conditional search router.
+Embedded callers keep immediate background
 preparation by default. Factory-created attempt catalogs are detached immutable
 snapshots whose exact identity can reuse verification; deserialized catalogs
-still receive full checks. See [startup decisions and measurements](design/typing-turn-preparation.md).
+still receive full structure and digest checks. Gateway input/output validators
+compile together on the first call to a tool, before authorization or execution,
+against its preparation-time schema snapshot. Unused tools do not compile;
+schema compilation failures are retained for that tool, not argument-repair
+errors or a failure of every catalog entry. See [startup decisions and measurements](design/typing-turn-preparation.md).
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -1467,7 +1600,7 @@ Repository descriptors use sandbox-bound `repository_skill_read`, not managed
 Skills: `.agents/skills`; runtime bundles:
 `packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
 client assets/docs from `.agents/skills/opengeni-client`; drift-tested.
-Tools/host-gated `opengeni-schedules`; shortcut sends only request/time zone.
+Tools/host-gated `schedules`; shortcut sends only request/time zone.
 
 Reading/management/host selection: [Skill design](design/skills-system.md).
 
@@ -1525,6 +1658,15 @@ accepted turn. Accepted private uploads gain session read grants; original owner
 and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
 
+An app-shot is an image upload whose `files.app_shot` column records the captured
+window (app, title, capture time, accessibility text up to 32,000 characters, and the
+machine and window ids when that computer is connected, plus a browser window's page address
+and the browser profiles connected from that computer). It is written once with the
+upload and never changed. `renderAppShotForModel` (`packages/contracts/src/app-shot.ts`)
+appends it as untrusted data right after the screenshot, inside the user message it was
+sent with, so earlier request bytes never change. See
+[desktop app](design/desktop-app.md#app-shots).
+
 Knowledge is the product destination for retained sources and findings, with
 Library, Instructions and Review tabs on the Knowledge page (`/state`).
 `apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
@@ -1534,7 +1676,7 @@ home per scope in the web app: workspace and private-chat defaults (plus the
 owner-only organization identity row) on Settings > Agent learning (also opened
 from Knowledge's ⋯ menu), and one
 chat's override in the session dock's Agent tab beside its identity and
-capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
+capabilities (`packages/react/src/app/components/session/agent-configuration-panel.tsx`);
 the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
@@ -1582,8 +1724,11 @@ the aggregate fallback), `compaction` or `session-title`. Older events have none
 Streamed main calls also carry worker-measured `timing` (whole milliseconds: pre-dispatch
 work, first dispatch to first token and first text, first dispatch to terminal response)
 on the event and on `model_call_facts`. A call that needed several requests (a transport
-retry or a provider continuation) is measured from its first dispatch. The first
-measurement wins on replay and repair, and absent or malformed values stay null. Output
+retry or a provider continuation) is measured from its first dispatch. The
+pre-dispatch clock starts only at SDK model entry, never at a transport admission
+recheck: native providers can recheck after dispatch. Older measurements could
+therefore include the preceding response and tool work; they are not corrected on replay.
+The first measurement wins on replay and repair, and absent or malformed values stay null. Output
 tokens per second is derived, not stored:
 `1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
 positive.
@@ -1623,6 +1768,14 @@ durations, never primary/secondary position. Headers lacking both durations cann
 update labeled cache; absent reset timing does not clear an exhausted window.
 
 Claude account pools: [setup and quotas](model-providers.md#claude-subscription-usage).
+
+Models' pooled-limit projection is read-only account telemetry, not allocator
+policy. `packages/db/src/subscription-usage-pool.ts` scopes canonical accounts and
+reads 30-day private observation/call history; `packages/subscriptions/src/pool-usage.ts`
+owns pure weighting and reset-aware forecasts. Organization and workspace API
+reads expose percentages and relative weights only. See
+[pooled limits](model-providers.md#pooled-subscription-limits) for estimates,
+retention and incomplete-history behavior.
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
@@ -1801,8 +1954,8 @@ serves stock HTTP and in-process embedding hosts, owning validation, draft rotat
 event append, turn routing, receipt/replay behavior, and the response contract.
 Web Send rebases drafts (including unavailable files), aligns
 file-only text with create, freezes edits, preserves late voice transcripts
-(`packages/react/src/hooks/use-voice-input.ts`, `apps/web/src/lib/use-new-session-draft.ts`,
-`apps/web/src/routes/sessions-index.tsx`), and protects sibling drafts.
+(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/app/lib/use-new-session-draft.tsx`,
+`packages/react/src/app/routes/sessions-index.tsx`), and protects sibling drafts.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -1838,7 +1991,7 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
+Projects uses the shared catalog/reader; hosts can exclude `builtin:projects`.
 
 Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
@@ -2304,6 +2457,16 @@ confirmed handoff through existing PKCE and `ThisComputer.connect`. The agent's
 offer/event contract is unchanged. See [embedding](embedding.md#computer-connection-offers)
 and [desktop app](design/desktop-app.md#deep-links).
 
+Desktop setup preserves existing standalone agents as service-backed runners.
+`packages/agent-host/src/this-computer.ts` never removes their service, bundle,
+symlink or privacy grants, and never starts them as desktop children. Explicit
+signed-in setup reuses their live-reloaded connection store; native
+`service status --json` is the versioned read-only lifecycle seam. Pause/resume
+persists in the service manager across logins. Quitting the desktop leaves the
+service alone. Permission status comes from the current account's Machines
+view, preserving the service's own macOS responsible-process identity. New
+app-hosted installations retain the existing child-supervision model.
+
 `useSessionConversation` owns that same feed, queue and composer independently
 of presentation. `SessionConversationView` consumes the controller without
 opening another stream or maintaining a second draft. Hosts with persistent
@@ -2502,6 +2665,15 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
+Readiness is forward-compatible only for entirely unknown, securely shaped
+objects; named-object ACL, RLS and capability contracts remain exact. Unknown
+callable SECURITY DEFINER routines require a prior explicit binary contract.
+The pinned previous-binary inspector/evaluator CI and its release bootstrap are
+documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
+The migration runner partitions the live pending ledger into a posture-inert rolling prefix,
+maintenance span and eligible post-release suffix. Phase execution is cumulative
+and serialized by the existing advisory lock; default execution still applies
+everything. See [the phase contract](migrations-expand-contract.md#release-phases).
 The migration ledger keys receipts by full SQL filename, not ordinal. Published
 SQL names and bytes remain immutable, including historical duplicate ordinals.
 The source guard permits a duplicate group already present together on one
@@ -2599,11 +2771,13 @@ The trusted publisher's Node entrypoint is Bun-bundled but runs on pinned native
 Node for official Sigstore/TUF cryptography; package builds and packing stay on
 Bun. Signed split-source bundles survive failures as separate, hash-linked public
 provenance evidence. Diagnostic categories do not settle unknown registry writes.
-Canary packages prepack the complete cohort, retain write acknowledgements, then
-perform bounded strict read-only verification before producing Site pins.
-Post-write verification selects current tags and one immutable version manifest;
-each actual GET shares the original request quota, deadline and custody limits,
-including final complete-cohort qualification. Pre-write discovery is unchanged.
+Canary packages prepack the complete cohort and retain write acknowledgements in
+the credentialed `publish` job. npm accepts writes with 202 and processes them
+asynchronously, so a separate credential-free `confirm` job waits for every
+version with time-based backoff, rereads the complete cohort strictly, and only
+then produces Site pins. Re-running a failed `confirm` job resumes waiting without
+publishing. Verification selects current tags and one immutable version manifest;
+pre-write discovery is unchanged.
 An uncertain publication never automatically replays; signed-byte acceptance remains separate.
 For a completely acknowledged failed canary, the protected
 `reconcile-canary-publication.yml` controller can independently verify retained
@@ -2669,7 +2843,7 @@ Topics: [`README.md`](README.md).
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/`, `packages/runtime/src/provider-quota.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
+| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `packages/react/src/app/components/session/model-context-inspector.tsx`, `packages/react/src/app/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
@@ -2736,12 +2910,12 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
 | Slack app identity and icons | `packages/contracts/src/slack-bot-scopes.ts`, `scripts/generate-slack-bot-icons.ts`, `deploy/slack/` | [`slack-bot.md`](slack-bot.md) |
-| Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
+| Slack bot availability, scheduled posting and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | Opengeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts`, `scripts/public-api/` | Package READMEs, §3.10, §7.6, and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) |
-| Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
+| Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `packages/react/src/app/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
 | Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts`, `packages/react/src/usage.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
@@ -2762,7 +2936,7 @@ validation, isolated restoration and coverage limits.
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
-| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md) |
+| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---
@@ -2779,6 +2953,26 @@ Filtered session page ownership and its maintenance boundary: [session paginatio
 Session content blobs, legacy compaction and the idle-session archive: [session storage lifecycle](session-storage-lifecycle.md).
 
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
+
+Background maintenance must work with a `NOSUPERUSER NOBYPASSRLS` migration
+owner. Migrations 0848–0849 keep the fourteen registered due checks read-only:
+predicate-only, owner-private scheduling projections are maintained in the source
+transaction by triggers; probes never acquire write capabilities or trust caller
+scope settings. Source tables retain FORCE RLS. The due checks are conservative
+work hints, not authorization or claim receipts. Fixed global claim/reaper bodies
+still recheck the source rows and their original locks, lease identities and
+fences. Where those bodies previously relied on owner RLS bypass, an
+operation-specific, backend/transaction-bound private capability now admits only
+the required table commands while the body runs. Each invocation removes its own
+token, including error paths; deferred checkpoint validators attest their source
+relation and borrow separate read-only authority for their invocation. Runtime
+roles cannot read/write the projections or token ledger, call inner helpers, or
+attach the validators to other tables. `runtime-posture.ts` checks ownership,
+table/column ACLs and pinned helper search paths; maintenance tests migrate as the
+strict owner by default. These migrations require a maintenance rollout because
+older runtime-posture inventories reject the newly private helper functions.
+Pause old runtimes, migrate and provision roles, then start the matching image;
+do not restart the previous image against the new helper/grant contract.
 
 ### In-conversation connection setup
 
@@ -2842,3 +3036,30 @@ organization or explicit user authority independently of the current browser
 user. Execution rechecks that frozen authority, live owner authority and the exact
 serving account generation before every physical request. See the native Claude
 section in model-providers.md and the maintenance activation in deployment.md.
+
+### Slack connection and schedule authority
+
+Slack bot availability is independent of incoming channel routing. The Slack
+capability page exposes the same authorized installation inventory from each
+workspace; detail requests retain the installation home scope and normal grants.
+Organization sharing may cover all or selected same-organization workspaces.
+Schedules and interactive turns use the same selected bot tools; a saved legacy
+destination is a default, never a grant to add excluded tools. Bot preparation and
+physical delivery retain exact attempt, connection/version, workspace and sharing
+generation checks. Personal Slack Add and Reconnect use distinct creation and
+exact-identity replacement semantics. See [Slack](slack-bot.md).
+
+Workspace `defaultExecutionTarget` selects the placement of new root chats.
+Explicit session placement and child inheritance take precedence. Schedules
+opt into following it through `agentConfig.executionTarget: workspace_default`;
+each accepted occurrence freezes its resolved machine in the execution snapshot.
+Recovery never resolves a different default, and reusable/existing chats retain
+their established placement. Removed targets fail without choosing another
+computer. Workspace defaults may name only shared or organization machines;
+ordinary live machine authority still applies. See
+[Connected Machines](connected-machines.md).
+
+Deployment operator context is configured through
+`OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` and composed by runtime persistent
+instruction inspection for both modular and legacy agents. Persona overrides
+do not remove it. See `docs/local-development.md`.

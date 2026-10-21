@@ -1,9 +1,12 @@
+import { ToolDetailsProvider } from "./timeline/tool-details";
+import type { ToolDetails } from "./timeline/tool-presentation";
 import {
   OpenGeniApiContractMismatchError,
   OPENGENI_API_CONTRACT_REVISION,
   type StreamConnectionState,
   type WorkspaceControlEvent,
   type WorkspaceInteractionRevisionEvent,
+  type WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
@@ -61,6 +64,18 @@ export type OpenGeniProviderProps = {
    * component shows the host's own words and language. Missing keys fall back to English.
    */
   messages?: OpenGeniMessages | undefined;
+  /**
+   * The product name people know, shown wherever the built-in text names the product.
+   * Default "Opengeni".
+   */
+  productName?: string | undefined;
+  /**
+   * How much of each tool call the chat shows. `"full"` (default) shows commands,
+   * arguments, output and diffs. `"plain"` keeps every step visible with its plain
+   * name and status but never shows raw arguments, output or JSON: for products
+   * whose people are not developers.
+   */
+  toolDetails?: ToolDetails | undefined;
   children?: ReactNode;
 };
 
@@ -78,6 +93,8 @@ export function OpenGeniProvider({
   formatError,
   locale,
   messages,
+  productName,
+  toolDetails = "full",
   children,
 }: OpenGeniProviderProps) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
@@ -88,6 +105,8 @@ export function OpenGeniProvider({
   >("idle");
   const [workspaceInteractionEvent, setWorkspaceInteractionEvent] =
     useState<WorkspaceInteractionRevisionEvent | null>(null);
+  const [workspaceSessionListEvent, setWorkspaceSessionListEvent] =
+    useState<WorkspaceSessionListEvent | null>(null);
   const [workspaceInteractionConnectionState, setWorkspaceInteractionConnectionState] = useState<
     StreamConnectionState | "idle" | "error"
   >("idle");
@@ -178,6 +197,7 @@ export function OpenGeniProvider({
     const openLiveStream = client.streamWorkspaceLiveEvents!;
     setWorkspaceControlEvent(null);
     setWorkspaceInteractionEvent(null);
+    setWorkspaceSessionListEvent(null);
     if (!pageLive) {
       setWorkspaceControlConnectionState("idle");
       setWorkspaceInteractionConnectionState("idle");
@@ -187,6 +207,7 @@ export function OpenGeniProvider({
     const setConnectionState = (state: StreamConnectionState) => {
       setWorkspaceControlConnectionState(state);
       setWorkspaceInteractionConnectionState(state);
+      if (state !== "live") setWorkspaceSessionListEvent(null);
     };
     setConnectionState("connecting");
     void (async () => {
@@ -216,7 +237,7 @@ export function OpenGeniProvider({
               !current || event.sequence > current.sequence ? event : current,
             );
             callbackRef.current?.(event);
-          } else {
+          } else if (event.type === "workspace.interaction.changed") {
             workspaceInteractionSequencesRef.current.set(
               workspaceId,
               Math.max(
@@ -228,6 +249,8 @@ export function OpenGeniProvider({
               !current || event.sequence > current.sequence ? event : current,
             );
             interactionCallbackRef.current?.(event);
+          } else if (event.workspaceId === workspaceId) {
+            setWorkspaceSessionListEvent(event);
           }
         }
       } catch (error) {
@@ -238,6 +261,7 @@ export function OpenGeniProvider({
         if (!controller.signal.aborted) {
           setWorkspaceControlConnectionState("error");
           setWorkspaceInteractionConnectionState("error");
+          setWorkspaceSessionListEvent(null);
         }
       }
     })();
@@ -360,6 +384,7 @@ export function OpenGeniProvider({
       workspaceControlConnectionState,
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
+      workspaceSessionListEvent,
       registerSessionReconciler,
       reconcileSession,
     }),
@@ -370,16 +395,19 @@ export function OpenGeniProvider({
       workspaceControlConnectionState,
       workspaceInteractionEvent,
       workspaceInteractionConnectionState,
+      workspaceSessionListEvent,
       registerSessionReconciler,
       reconcileSession,
     ],
   );
   return (
-    <OpenGeniMessagesProvider locale={locale} messages={messages}>
+    <OpenGeniMessagesProvider locale={locale} messages={messages} productName={productName}>
       <ErrorMessageContext.Provider value={formatError}>
         <OpenGeniContext.Provider value={value}>
-          {children}
-          {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
+          <ToolDetailsProvider value={toolDetails}>
+            {children}
+            {contractMismatch ? <ApiContractMismatchScreen mismatch={contractMismatch} /> : null}
+          </ToolDetailsProvider>
         </OpenGeniContext.Provider>
       </ErrorMessageContext.Provider>
     </OpenGeniMessagesProvider>

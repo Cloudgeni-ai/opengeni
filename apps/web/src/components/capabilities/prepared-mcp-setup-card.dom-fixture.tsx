@@ -12,7 +12,8 @@ import {
 
 registerDom();
 window.location.href = "https://console.example.test/workspaces/workspace/sessions/session";
-const { PreparedMcpSetupCard } = await import("./prepared-mcp-setup-card");
+const { PreparedMcpSetupCard } =
+  await import("@opengeni/react/app/components/capabilities/prepared-mcp-setup-card");
 const setup = {
   name: "Records MCP",
   endpointUrl: "https://mcp.example.test/tools",

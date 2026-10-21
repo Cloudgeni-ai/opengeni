@@ -28,11 +28,105 @@
 #[allow(unsafe_code)]
 mod ffi;
 
+/// Milliseconds since boot including sleep, unaffected by wall-clock changes.
+#[cfg(windows)]
+pub fn continuous_millis() -> u64 {
+    ffi::continuous_millis()
+}
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod process_job;
 #[cfg(windows)]
 pub use process_job::ProcessJob;
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod registry;
+
+/// The default value of one key under `HKEY_CURRENT_USER`.
+///
+/// Only Windows has a registry; elsewhere every call reports
+/// [`std::io::ErrorKind::Unsupported`].
+pub mod current_user_registry {
+    use std::io;
+
+    /// Whether `HKEY_CURRENT_USER\{subkey}` exists.
+    ///
+    /// # Errors
+    ///
+    /// The key exists but cannot be opened, or this is not Windows.
+    pub fn key_exists(subkey: &str) -> io::Result<bool> {
+        #[cfg(windows)]
+        {
+            crate::registry::key_exists(subkey)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = subkey;
+            Err(unsupported())
+        }
+    }
+
+    /// The key's default string value, or `None` when the key or value is missing.
+    ///
+    /// # Errors
+    ///
+    /// The value cannot be read (for example it is not a string), or this is not Windows.
+    pub fn default_value(subkey: &str) -> io::Result<Option<String>> {
+        #[cfg(windows)]
+        {
+            crate::registry::default_value(subkey)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = subkey;
+            Err(unsupported())
+        }
+    }
+
+    /// Sets the key's default string value, creating the key when missing.
+    ///
+    /// # Errors
+    ///
+    /// The key cannot be created or written, or this is not Windows.
+    pub fn set_default_value(subkey: &str, value: &str) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            crate::registry::set_default_value(subkey, value)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (subkey, value);
+            Err(unsupported())
+        }
+    }
+
+    /// Deletes the key, which must have no subkeys. A missing key is already deleted.
+    ///
+    /// # Errors
+    ///
+    /// The key cannot be deleted, or this is not Windows.
+    pub fn delete_key(subkey: &str) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            crate::registry::delete_key(subkey)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = subkey;
+            Err(unsupported())
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn unsupported() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the registry exists only on Windows",
+        )
+    }
+}
 
 /// The primary display of the interactive session, in physical pixels.
 #[derive(Debug, Clone, PartialEq, Eq)]

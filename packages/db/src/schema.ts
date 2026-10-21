@@ -2262,8 +2262,8 @@ export const connections = pgTable(
         organizationUserResourceAuthorities.organizationMembershipId,
       ],
     }).onDelete("restrict"),
-    // Migration 0255 owns the same-organization origin FK because Drizzle
-    // cannot express PostgreSQL's column-subset SET NULL action.
+    // Migrations own the same-organization origin FK (ON DELETE CASCADE since
+    // 0857, as origin_workspace_id always equals workspace_id).
   }),
 );
 
@@ -5697,7 +5697,9 @@ export const sessionRealtimeModes = pgTable(
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
         'workspace-gateway/openai/gpt-realtime-2.1',
         'workspace-gateway/openai/gpt-realtime-mini',
-        'workspace-gateway/xai/grok-voice-think-fast-2.0'
+        'workspace-gateway/xai/grok-voice-think-fast-2.0',
+        'workspace-elevenlabs/eleven_realtime_v1_max',
+        'workspace-elevenlabs/eleven_realtime_v1_mini'
       )`,
     ),
     endReasonValid: check(
@@ -5898,6 +5900,11 @@ export const sessionRealtimeEntries = pgTable(
     sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
       .on(table.realtimeId, table.sourceUpdateId)
       .where(sql`${table.sourceUpdateId} is not null`),
+    // History deletion's ON DELETE SET NULL check has only history_item_id,
+    // not a realtime_id. Avoid a full ledger scan for every archived item.
+    historyItem: index("session_realtime_entries_history_item_idx")
+      .on(table.historyItemId)
+      .where(sql`${table.historyItemId} is not null`),
     delegationTurn: uniqueIndex("session_realtime_entries_delegation_turn_uq")
       .on(table.turnId)
       .where(sql`${table.kind} = 'delegation_call' and ${table.turnId} is not null`),
@@ -6208,6 +6215,10 @@ export const files = pgTable(
     privateOwnerSubjectIds: text("private_owner_subject_ids").array().default(sql`CASE
       WHEN nullif(current_setting('opengeni.private_file_owner',true),'') IS NULL THEN NULL
       ELSE ARRAY[current_setting('opengeni.private_file_owner',true)] END`),
+    /** The person the file belongs to: only they can share or limit it. */
+    ownerSubjectId: text("owner_subject_id").default(sql`coalesce(
+      nullif(current_setting('opengeni.private_file_owner',true),''),
+      nullif(current_setting('opengeni.initiating_human_subject_id',true),''))`),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -6222,6 +6233,8 @@ export const files = pgTable(
     sha256: text("sha256"),
     bucket: text("bucket").notNull(),
     objectKey: text("object_key").notNull(),
+    /** An app-shot's capture (AppShotCapture); written with the upload, never changed. */
+    appShot: jsonb("app_shot"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -9677,6 +9690,12 @@ export const sessionEvents = pgTable(
     // code; a plain column keeps the usage idempotency lookup indexable under
     // row-level security, where the payload expression index cannot be used.
     usageSourceKey: text("usage_source_key"),
+    // Filled by a BEFORE INSERT OR UPDATE OF payload trigger from
+    // payload ->> 'name' for agent.toolCall.created rows (migration 0889).
+    // Never written by application code. Rows written before 0889 keep NULL;
+    // readers fall back to the payload only then, so the presented-tool filter
+    // does not detoast every excluded call's arguments.
+    toolName: text("tool_name"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9684,6 +9703,11 @@ export const sessionEvents = pgTable(
       columns: [table.workspaceId, table.turnAttemptId],
       foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
     }).onDelete("restrict"),
+    // A deleted attempt's FK probe has no session_id. Avoid scanning every
+    // event in its workspace once for each attempt in the deleted chat.
+    attemptReference: index("session_events_workspace_attempt_idx")
+      .on(table.workspaceId, table.turnAttemptId)
+      .where(sql`${table.turnAttemptId} is not null`),
     sessionSequence: uniqueIndex("session_events_workspace_session_sequence_idx").on(
       table.workspaceId,
       table.sessionId,
@@ -10396,6 +10420,12 @@ export const sandboxLeases = pgTable(
     rotationReason: text("rotation_reason", {
       enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
+    // A chat or workspace deletion ended this compute lease's group: its
+    // sandbox is deleted without a workspace capture (0861).
+    groupEndRequestedAt: timestamp("group_end_requested_at", { withTimezone: true }),
+    // The agent gateway reported the current compute sandbox asleep since then;
+    // warm time does not accrue while it sleeps (0861).
+    computeAsleepSince: timestamp("compute_asleep_since", { withTimezone: true }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
     // these remain bare UUIDs here rather than generating a stricter wrong FK.
@@ -10702,6 +10732,11 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     ),
     blocking: index("sandbox_workspace_mutation_admissions_blocking_idx")
       .on(table.leaseId, table.workspaceGeneration)
+      .where(sql`${table.settledAt} is null`),
+    // Session-wide pending-writer checks start from this (normally empty) set
+    // instead of probing every attempt the session ever ran (migration 0879).
+    unsettledSession: index("sandbox_workspace_mutation_admissions_unsettled_session_idx")
+      .on(table.workspaceId, table.sessionId)
       .where(sql`${table.settledAt} is null`),
     attempt: index("sandbox_workspace_mutation_admissions_attempt_idx").on(
       table.workspaceId,
@@ -11614,6 +11649,7 @@ export const sandboxPtySessions = pgTable(
 // ONE source of truth for each CHECK.
 export const enrollmentExposureValues = ["whole-machine"] as const;
 export const enrollmentStatusValues = ["active", "revoked"] as const;
+export const enrollmentKindValues = ["machine", "sandbox"] as const;
 export const enrollmentOsValues = ["linux", "macos", "windows"] as const;
 export const sandboxKindValues = ["modal", "selfhosted"] as const;
 export const agentUpdateStatusValues = [
@@ -11649,8 +11685,18 @@ export const enrollments = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
-    // The agent's ed25519 public key (the machine identity).
-    pubkey: text("pubkey").notNull(),
+    // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
+    // Opengeni compute sandbox (migration 0858): bound to its sandbox group,
+    // reached through the agent gateway, with no key or bearer, and never
+    // listed, offered, attached or granted as a machine.
+    kind: text("kind", { enum: enrollmentKindValues }).notNull().default("machine"),
+    sandboxGroupId: uuid("sandbox_group_id"),
+    // The highest owner epoch the agent gateway accepted for a sandbox
+    // enrollment; null for machines.
+    linkEpoch: bigint("link_epoch", { mode: "number" }),
+    // The agent's ed25519 public key (the machine identity). Null exactly for
+    // sandbox enrollments, which hold no credential.
+    pubkey: text("pubkey"),
     exposure: text("exposure", { enum: enrollmentExposureValues })
       .notNull()
       .default("whole-machine"),
@@ -11740,6 +11786,10 @@ export const enrollments = pgTable(
     agentUpdateTargetVersion: text("agent_update_target_version"),
     agentUpdateExpectedBinarySha256: text("agent_update_expected_binary_sha256"),
     agentUpdateErrorCode: text("agent_update_error_code"),
+    agentUpdateBlockers: jsonb("agent_update_blockers")
+      .$type<Array<{ kind: string; count: number }>>()
+      .notNull()
+      .default([]),
     agentUpdateRetryable: boolean("agent_update_retryable").notNull().default(false),
     agentUpdateRolledBack: boolean("agent_update_rolled_back").notNull().default(false),
     agentUpdateConnectionInstanceId: text("agent_update_connection_instance_id"),
@@ -11771,6 +11821,17 @@ export const enrollments = pgTable(
       .where(sql`${table.authorityScope} = 'user'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    sandboxGroup: index("enrollments_sandbox_group_idx")
+      .on(table.workspaceId, table.sandboxGroupId)
+      .where(sql`${table.kind} = 'sandbox'`),
+    kindValid: check("enrollments_kind_check", sql`${table.kind} in ('machine', 'sandbox')`),
+    sandboxBinding: check(
+      "enrollments_sandbox_binding_check",
+      sql`(${table.kind} = 'machine' and ${table.sandboxGroupId} is null
+          and ${table.pubkey} is not null and ${table.linkEpoch} is null)
+        or (${table.kind} = 'sandbox' and ${table.sandboxGroupId} is not null
+          and ${table.pubkey} is null and ${table.authorityScope} = 'workspace')`,
+    ),
     authorityShape: check(
       "enrollments_authority_shape_check",
       sql`(

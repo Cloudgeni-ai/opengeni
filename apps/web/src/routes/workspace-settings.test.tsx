@@ -7,7 +7,7 @@ import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const workspaceA = "22222222-2222-4222-8222-222222222222";
 const workspaceB = "33333333-3333-4333-8333-333333333333";
@@ -87,7 +87,7 @@ const context = {
   accessContext: { subjectId: "user:caller" },
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children, className }: { children: ReactNode; className?: string }) => (
     <a href="#organization" className={className}>

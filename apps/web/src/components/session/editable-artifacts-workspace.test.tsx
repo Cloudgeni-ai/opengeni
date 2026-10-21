@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -7,20 +8,57 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { act, useState } from "react";
+import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { createRoot } from "react-dom/client";
 
-mock.module("@/routes/editable-artifact", () => ({
-  EditableArtifactRoute: ({ embedded }: { embedded?: boolean }) => (
-    <div data-native-preview>{embedded ? "Embedded native artifact" : "Full native artifact"}</div>
-  ),
+configurePageAppHost({
+  surfaces: {
+    editableArtifact: ({ embedded }: { embedded?: boolean | undefined }) => (
+      <div data-native-preview>
+        {embedded ? "Embedded native artifact" : "Full native artifact"}
+      </div>
+    ),
+  },
+});
+mock.module("@opengeni/react/app/routes/artifacts", () => ({
+  ArtifactDetailRoute: ({
+    artifactId,
+    embedded,
+    embeddedView,
+    embeddedControls,
+  }: {
+    artifactId: string;
+    embedded?: boolean;
+    embeddedView?: "site" | "settings";
+    embeddedControls?: { reloadToken: number; fullScreen: boolean };
+  }) =>
+    embeddedView === "settings" ? (
+      <div data-site-settings={artifactId}>Site settings panel</div>
+    ) : (
+      <div
+        data-site-preview={artifactId}
+        data-reload={embeddedControls?.reloadToken}
+        data-full-screen={embeddedControls?.fullScreen ? "" : undefined}
+      >
+        {embedded ? "Embedded Site" : "Full Site"}
+      </div>
+    ),
 }));
-mock.module("@/routes/artifacts", () => ({
-  ArtifactDetailRoute: ({ artifactId, embedded }: { artifactId: string; embedded?: boolean }) => (
-    <div data-site-preview={artifactId}>{embedded ? "Embedded Site" : "Full Site"}</div>
-  ),
+// The viewer's grants; a test that needs Site management swaps them in.
+const appAccess: { accessContext: unknown } = { accessContext: null };
+// Library rows ask the app who the viewer is, to offer a file's owner its share action.
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => ({
+    client: {},
+    accessKeyVersion: 0,
+    workspaces: [{ id: "workspace", accountId: "account", kind: "shared", name: "Design" }],
+    managedSelfContext: null,
+    accessContext: appAccess.accessContext,
+  }),
 }));
 
-const { SessionEditableArtifactsWorkspace } = await import("./editable-artifacts-workspace");
+const { SessionEditableArtifactsWorkspace } =
+  await import("@opengeni/react/app/components/session/editable-artifacts-workspace");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -32,6 +70,27 @@ beforeAll(() => {
 afterAll(() => {
   GlobalRegistrator.unregister();
 });
+
+const catalogEntry = (id: string, kind: "site" | "document" | "spreadsheet", title: string) => ({
+  id,
+  kind,
+  title,
+  status: "active" as const,
+  createdAt: "2026-09-01T00:00:00Z",
+  updatedAt: "2026-09-01T00:00:00Z",
+});
+
+// The artifact header has no picker: Back shows the session's artifacts.
+async function chooseFromList(container: HTMLElement, title: string) {
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Back to session artifacts"]')!.click(),
+  );
+  const item = [...container.querySelectorAll<HTMLButtonElement>("button[data-card-action]")].find(
+    (button) => button.textContent === title,
+  );
+  expect(item).toBeDefined();
+  await act(async () => item!.click());
+}
 
 describe("SessionEditableArtifactsWorkspace empty states", () => {
   test("catalog discovery stays in browse mode and a kind-qualified document request cannot select a colliding Site", async () => {
@@ -106,9 +165,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       await act(async () =>
         (container.querySelector("[data-open-document]") as HTMLButtonElement).click(),
       );
-      expect(
-        (container.querySelector('[aria-label="Choose artifact"]') as HTMLSelectElement).value,
-      ).toBe(`document:${id}`);
+      expect(container.querySelector('[aria-label="Choose artifact"]')).toBeNull();
       expect(container.querySelector("[data-site-preview]")).toBeNull();
       expect(selections).toEqual([`document:${id}`]);
       expect(container.querySelector("[data-native-preview]")?.textContent).toBe(
@@ -142,7 +199,12 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
             <SessionEditableArtifactsWorkspace
               workspaceId="11111111-1111-4111-8111-111111111111"
               artifacts={[
-                { id: discovered, title: "Discovered", modality: "site" },
+                {
+                  id: discovered,
+                  title: "Discovered",
+                  modality: "site",
+                  catalogItem: catalogEntry(discovered, "site", "Discovered"),
+                },
                 { id: request.artifactId, title: "Linked Site", modality: "site" },
               ]}
               status="ready"
@@ -174,19 +236,15 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       await act(async () => (container.querySelector("[data-open]") as HTMLButtonElement).click());
       expect(selected()).toBe(second);
       expect(selections).toEqual([first, second]);
-      await act(async () => {
-        const select = container.querySelector("select")!;
-        select.value = discovered;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      });
+      await chooseFromList(container, "Discovered");
       await act(async () =>
         (container.querySelector("[data-refresh]") as HTMLButtonElement).click(),
       );
       expect(selected()).toBe(discovered);
-      expect(selections).toEqual([first, second, discovered]);
+      expect(selections).toEqual([first, second, `site:${discovered}`]);
       await act(async () => (container.querySelector("[data-open]") as HTMLButtonElement).click());
       expect(selected()).toBe(second);
-      expect(selections).toEqual([first, second, discovered, second]);
+      expect(selections).toEqual([first, second, `site:${discovered}`, second]);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -212,8 +270,18 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
             <SessionEditableArtifactsWorkspace
               workspaceId="11111111-1111-4111-8111-111111111111"
               artifacts={[
-                { id: first, title: "First", modality: "site" },
-                { id: second, title: "Second", modality: "site" },
+                {
+                  id: first,
+                  title: "First",
+                  modality: "site",
+                  catalogItem: catalogEntry(first, "site", "First"),
+                },
+                {
+                  id: second,
+                  title: "Second",
+                  modality: "site",
+                  catalogItem: catalogEntry(second, "site", "Second"),
+                },
               ]}
               status="ready"
               onRetry={() => undefined}
@@ -235,18 +303,14 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
         await router.load();
         root.render(<RouterProvider router={router} />);
       });
-      expect(
-        container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
-      ).toBe(first);
+      // Catalog artifacts open on the session's list until one is chosen.
+      expect(container.textContent).toContain("Session artifacts");
+      expect(container.querySelector("[data-site-preview]")).toBeNull();
       await act(async () => container.querySelector("button")!.click());
       expect(
         container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
       ).toBe(second);
-      await act(async () => {
-        const select = container.querySelector("select")!;
-        select.value = first;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      });
+      await chooseFromList(container, "First");
       expect(
         container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
       ).toBe(first);
@@ -290,9 +354,80 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       expect(container.textContent).toContain("Embedded Site");
       expect(container.querySelector("a")).toBeNull();
       expect(container.textContent?.match(/Dashboard/g)).toHaveLength(1);
+      // The Site's reload and full screen sit in the one header row.
+      const preview = () => container.querySelector("[data-site-preview]")!;
+      expect(preview().getAttribute("data-reload")).toBe("0");
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Reload Site"]')!.click(),
+      );
+      expect(preview().getAttribute("data-reload")).toBe("1");
+      expect(preview().hasAttribute("data-full-screen")).toBe(false);
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Open full screen"]')!.click(),
+      );
+      expect(preview().hasAttribute("data-full-screen")).toBe(true);
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+  test("opens a session Site's settings in place for people who manage Sites", async () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const id = "22222222-2222-4222-8222-222222222222";
+    const render = async (permissions: string[]) => {
+      appAccess.accessContext = {
+        subjectId: "subject",
+        workspaceGrants: [{ workspaceId, permissions }],
+      };
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(
+          <SessionEditableArtifactsWorkspace
+            workspaceId={workspaceId}
+            artifacts={[{ id, title: "Dashboard", modality: "site" }]}
+            status="ready"
+            onRetry={() => undefined}
+          />,
+        );
+      });
+      return {
+        container,
+        cleanup: async () => {
+          await act(async () => root.unmount());
+          container.remove();
+        },
+      };
+    };
+    const reader = await render(["artifacts:read"]);
+    try {
+      expect(reader.container.querySelector('[aria-label="Site settings"]')).toBeNull();
+    } finally {
+      await reader.cleanup();
+    }
+    const manager = await render(["artifacts:read", "artifacts:publish"]);
+    try {
+      const toggle = manager.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Site settings"]',
+      );
+      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+      await act(async () => toggle?.click());
+      expect(manager.container.querySelector("[data-site-settings]")?.textContent).toBe(
+        "Site settings panel",
+      );
+      expect(manager.container.querySelector("[data-site-preview]")).toBeNull();
+      // Still in the session: settings open in place, with no link out.
+      expect(manager.container.querySelector("a")).toBeNull();
+      const back = manager.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Back to Site"]',
+      );
+      expect(back?.getAttribute("aria-pressed")).toBe("true");
+      await act(async () => back?.click());
+      expect(manager.container.querySelector("[data-site-preview]")).not.toBeNull();
+    } finally {
+      await manager.cleanup();
+      appAccess.accessContext = null;
     }
   });
   test("keeps a native document in the session without navigation links", async () => {
@@ -332,8 +467,18 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
         <SessionEditableArtifactsWorkspace
           workspaceId="11111111-1111-4111-8111-111111111111"
           artifacts={[
-            { id: firstId, modality: "document", title: "Plan" },
-            { id: secondId, modality: "spreadsheet", title: "Budget" },
+            {
+              id: firstId,
+              modality: "document",
+              title: "Plan",
+              catalogItem: catalogEntry(firstId, "document", "Plan"),
+            },
+            {
+              id: secondId,
+              modality: "spreadsheet",
+              title: "Budget",
+              catalogItem: catalogEntry(secondId, "spreadsheet", "Budget"),
+            },
           ]}
           status="ready"
           onRetry={() => undefined}
@@ -352,17 +497,12 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
         await router.load();
         root.render(<RouterProvider router={router} />);
       });
-      const select = container.querySelector<HTMLSelectElement>(
-        'select[aria-label="Choose artifact"]',
-      );
-      expect(select?.value).toBe(secondId);
+      expect(container.textContent).toContain("Budget");
+      expect(container.textContent).not.toContain("Plan");
 
-      await act(async () => {
-        if (!select) return;
-        select.value = firstId;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      expect(onSelectionChange).toHaveBeenCalledWith(firstId);
+      await chooseFromList(container, "Plan");
+      expect(onSelectionChange).toHaveBeenCalledWith(`document:${firstId}`);
+      expect(container.querySelector("[data-native-preview]")).not.toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

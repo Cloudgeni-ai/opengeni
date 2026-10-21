@@ -70,7 +70,7 @@ export interface ThisComputerOfferProps {
   onDismiss?(): void;
   /** The mark beside the title; a laptop by default. */
   icon?: ReactNode;
-  className?: string;
+  className?: string | undefined;
 }
 
 /**
@@ -183,7 +183,7 @@ export interface ThisComputerPanelProps {
   /** Opens `ThisComputerSetup`. */
   onSetup(): void;
   icon?: ReactNode;
-  className?: string;
+  className?: string | undefined;
 }
 
 /**
@@ -316,13 +316,20 @@ export function ThisComputerPanel({
         ) : (
           <p className="og-tc-panel-foot">
             <span>
-              {view === "paused" ? labels.resumeHint(platform) : labels.pauseHint(platform)}
+              {status?.management === "service"
+                ? catalogText("thisComputer.servicePauseHint")
+                : view === "paused"
+                  ? labels.resumeHint(platform)
+                  : labels.pauseHint(platform)}
             </span>
             <button type="button" className="og-tc-link" onClick={() => setConfirmingOff(true)}>
               {labels.turnOff}
             </button>
           </p>
         )
+      ) : null}
+      {!connected && status?.management === "service" ? (
+        <p className="og-tc-panel-foot">{catalogText("thisComputer.existingService")}</p>
       ) : null}
     </section>
   );

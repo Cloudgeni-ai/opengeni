@@ -19,6 +19,7 @@ import {
   quotaCapacity,
   quotaBlockClaim,
   quotaObservationApplies,
+  quotaAfterRateLimitReset,
   rankConnections,
   spreadHash,
   storedQuotaDocument,
@@ -740,6 +741,48 @@ describe("shared quota model", () => {
         NOW,
       ),
     ).toEqual({ kind: "unknown" });
+  });
+
+  test("a confirmed rate-limit reset invalidates stale exhausted windows and the stored deadline", () => {
+    const weeklyReset = NOW + 5 * 86_400_000;
+    // The stored reading says the weekly window is spent until next week.
+    const stale = quota({
+      windows: [
+        { id: "primary", usedPercent: 40, resetsAt: NOW + 3_600_000, status: "ok" },
+        { id: "secondary", usedPercent: 100, resetsAt: weeklyReset, status: "exhausted" },
+      ],
+      modelCooldowns: { "codex/spark": NOW + 60_000 },
+      exhaustedUntil: weeklyReset,
+      exhaustedKind: "quota",
+      exhaustedClaim: { until: weeklyReset, observedAt: NOW - 1_000, windowIds: ["secondary"] },
+    });
+    expect(quotaCapacity(stale, NOW)).toEqual({ kind: "exhausted", resetsAt: weeklyReset });
+
+    const reset = quotaAfterRateLimitReset(stale, NOW);
+    expect(quotaCapacity(reset, NOW)).toEqual({ kind: "unknown" });
+    expect(reset).toMatchObject({
+      windows: [
+        { id: "primary", usedPercent: null, resetsAt: null, status: "unknown" },
+        { id: "secondary", usedPercent: null, resetsAt: null, status: "unknown" },
+      ],
+      // Model cooldowns are not rate-limit windows.
+      modelCooldowns: { "codex/spark": NOW + 60_000 },
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      observedAt: NOW,
+      observedRefreshGeneration: 1,
+    });
+    expect(reset.exhaustedClaim).toBeUndefined();
+    expect(storedQuotaDocument(reset).exhaustedClaim).toBeUndefined();
+    // A usage reading fetched before the reset no longer replaces it.
+    expect(
+      applyQuotaObservation(
+        { refreshGeneration: 1, quota: reset },
+        { ...stale, observedAt: NOW - 1 },
+      ),
+    ).toBe(reset);
+    // Nothing left to invalidate: unchanged.
+    expect(quotaAfterRateLimitReset(reset, NOW + 1)).toBe(reset);
   });
 
   test("SUB-ELIG-06: an observation from an older credential generation never replaces the current quota", () => {

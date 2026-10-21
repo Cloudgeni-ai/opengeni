@@ -7,12 +7,12 @@ const CANARY_BODY_BYTES = 64 * 1024 * 1024;
 const CANARY_OUTPUT_BYTES = 80 * 1024 * 1024;
 const CANARY_RECORD_BYTES = 64 * 1024;
 /**
- * Receipt files one publication may retain. A registry GET retains up to four
- * files (selection, response, body, body record) and each receipt adds an
- * observation, so the largest default read budget (64 packages × 16 GETs) needs
- * about 4,800 files. The bound must cover that budget: when it did not, a slow
- * registry exhausted the files before the read quota or deadline, so the
- * publisher could not record its failure and reconciliation was refused.
+ * Receipt files one publication or confirmation may retain. A custodied registry
+ * GET retains four files (selection, response, body, body record). Confirmation
+ * keeps one observation per waiting read and custodies only the final complete
+ * reread, so the largest cohort (64 packages) waiting a full 30-minute window
+ * needs about 2,800 files. When the bound was smaller than a slow registry's
+ * reads, the publisher could not record its failure and reconciliation was refused.
  * The reconciliation reader admits the same count (`PUBLISHER_RECEIPT_FILES`).
  */
 export const CANARY_RECEIPT_FILES = 6144;

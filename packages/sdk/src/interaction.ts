@@ -709,6 +709,41 @@ export type BrowserDownloadSaveResponse = {
   replayed: boolean;
 };
 
+/** One browser recording as its controller reports it. */
+export type BrowserRecordingSummary = {
+  recordingId: string;
+  state: "recording" | "stopped";
+  startedAt: string;
+  stoppedAt: string | null;
+  stopReason: "requested" | "duration_limit" | "size_limit" | "session_ended" | null;
+  durationMs: number;
+  frameCount: number;
+  frameBytes: number;
+  actionCount: number;
+  bundle: { sizeBytes: number; sha256: string } | null;
+  streamError: string | null;
+};
+
+export type BrowserRecordingSaveRequest = {
+  operationId: string;
+  /** Workspace-relative .mp4 path; the action log is saved beside it. */
+  destinationPath?: string | undefined;
+};
+
+export type BrowserRecordingSaveResponse = {
+  recording: BrowserRecordingSummary;
+  video: {
+    path: string;
+    artifactId: string;
+    sizeBytes: number;
+    durationMs: number;
+    width: number;
+    height: number;
+    frameCount: number;
+  };
+  actionLogPath: string;
+};
+
 export type InteractionRect = {
   x: number;
   y: number;
@@ -1175,6 +1210,8 @@ export type ComputerSessionCapabilities = {
   backgroundActions: boolean;
   /** Raw window input stays in the background. Absent means foreground-only. */
   backgroundInput?: boolean | undefined;
+  /** Accepts a ComputerActionBatch as one operation. Absent means unsupported. */
+  actionBatches?: boolean | undefined;
   parallelApps: boolean;
 };
 
@@ -1286,6 +1323,16 @@ export type ComputerAction =
   | { type: "focus"; targetId: string }
   | { type: "launch"; applicationId: string };
 
+/** Semantic and keyboard actions run in order on one target as one operation,
+ * stopping at the first failure; the receipt observes the target once, after
+ * the last action. A batch stopped part way names how many actions completed
+ * in its error's details (`batchActionsCompleted`). Send it only to a session
+ * whose capabilities include actionBatches. */
+export type ComputerActionBatch = {
+  type: "batch";
+  actions: Extract<ComputerAction, { type: "semantic" | "keyboard" }>[];
+};
+
 export type CreateComputerSessionRequest = {
   operationId: string;
   sessionId: string;
@@ -1350,7 +1397,7 @@ export type ComputerActionRequest = {
   expectedTargetGeneration: string;
   expectedObservationId: string | null;
   expectedFrameId: string | null;
-  action: ComputerAction;
+  action: ComputerAction | ComputerActionBatch;
 };
 
 export type ComputerActionReceipt = {

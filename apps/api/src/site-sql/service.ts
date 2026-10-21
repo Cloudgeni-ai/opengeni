@@ -961,7 +961,7 @@ function bindParams(
     if (isSiteSqlPrincipalParam(key))
       throw new SiteSqlError(
         "validation",
-        `:${key} is set by Opengeni from the signed-in viewer; do not send it`,
+        `:${key} is set by the Site host from the signed-in viewer; do not send it`,
         { param: key },
       );
     if (!known.has(key))
@@ -971,7 +971,9 @@ function bindParams(
   for (const name of names) {
     if (isSiteSqlPrincipalParam(name)) {
       if (!Object.hasOwn(principal, name))
-        throw new SiteSqlError("validation", `:${name} is reserved for Opengeni`, { param: name });
+        throw new SiteSqlError("validation", `:${name} is reserved for the Site host`, {
+          param: name,
+        });
       bound[name] = principal[name]!;
     } else if (Object.hasOwn(given, name)) bound[name] = given[name]!;
     else if (options.requireAll)

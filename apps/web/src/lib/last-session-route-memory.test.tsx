@@ -8,7 +8,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const { ApiError } = await import("@/api");
 const { lastSessionMemoryId, readLastSessionId, useForgetLastSession, useSessionRouteMemory } =
-  await import("./last-session-memory");
+  await import("@opengeni/react/app/lib/last-session-memory");
 
 const memoryId = lastSessionMemoryId("user:maja", "workspace-a");
 

@@ -6,16 +6,18 @@
 import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } from "@opengeni/sdk";
 import {
   hasStoredSessionRealtimeOwnerProof,
+  isSessionRealtimeModel,
   projectSessionRealtimeLifecycle,
   type CreateSessionRealtimeControllerOptions,
   type SessionRealtimeClientLike,
   type SessionRealtimeController,
   type SessionRealtimeControllerSnapshot,
   type SessionRealtimeLifecycleProjection,
+  type RealtimeVoiceSettings,
   type SessionRealtimeModel,
   type WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/sdk/realtime";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { EmbeddedRealtimeSessionClientLike } from "../client";
 import { useEmbeddedRealtimeSession } from "../session-context";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
@@ -31,13 +33,28 @@ function abortError(message: string): Error {
 export type RealtimeModelOption = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
+  provider: WorkspaceRealtimeModelCatalogItem["provider"];
   description: string;
   available: boolean;
   unavailableReason: string | null;
   /** Machine-readable reason, e.g. `insufficient_credits` (same codes as voice input). */
   unavailableCode?: string | null | undefined;
   recommended: boolean;
+  /**
+   * Languages a conversation with this model can be set to. Absent when the
+   * model detects the spoken language itself.
+   */
+  languages?: readonly string[] | undefined;
+  /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+  voices?: WorkspaceRealtimeModelCatalogItem["voices"];
+  /** Whether any provider voice id is accepted beyond the listed `voices`. */
+  customVoice?: boolean | undefined;
+  /** Turn eagerness values this model accepts. */
+  turnEagerness?: WorkspaceRealtimeModelCatalogItem["turnEagerness"];
+  /** The provider's defaults for the settings it offers, other than language. */
+  voiceDefaults?: RealtimeVoiceSettings | undefined;
+  /** The workspace's saved voice settings for this model. */
+  workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
 };
 
 export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
@@ -51,11 +68,77 @@ export const CODEX_LIVE_MODEL = (t: OpenGeniText): RealtimeModelOption => ({
 });
 
 const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
+const REALTIME_LANGUAGE_STORAGE_KEY = "opengeni:realtime-language";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
 
 export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike &
   SessionRealtimeClientLike;
+
+const realtimeLanguageListeners = new Set<() => void>();
+let realtimeLanguageMemory: string | null = null;
+
+function readRealtimeLanguagePreference(): string | null {
+  if (typeof localStorage === "undefined") return realtimeLanguageMemory;
+  try {
+    return localStorage.getItem(REALTIME_LANGUAGE_STORAGE_KEY) ?? null;
+  } catch {
+    return realtimeLanguageMemory;
+  }
+}
+
+function subscribeRealtimeLanguagePreference(listener: () => void): () => void {
+  realtimeLanguageListeners.add(listener);
+  return () => realtimeLanguageListeners.delete(listener);
+}
+
+/**
+ * The person's chosen voice-conversation language (a catalog language code), or
+ * `null` to follow their app language. Kept on this device for every workspace.
+ */
+export function useRealtimeLanguagePreference(): {
+  language: string | null;
+  setLanguage(language: string | null): void;
+} {
+  const language = useSyncExternalStore(
+    subscribeRealtimeLanguagePreference,
+    readRealtimeLanguagePreference,
+    () => null,
+  );
+  const setLanguage = useCallback((next: string | null) => {
+    realtimeLanguageMemory = next;
+    if (typeof localStorage !== "undefined") {
+      try {
+        if (next === null) localStorage.removeItem(REALTIME_LANGUAGE_STORAGE_KEY);
+        else localStorage.setItem(REALTIME_LANGUAGE_STORAGE_KEY, next);
+      } catch {
+        // The choice still applies on this page when browser storage is unavailable.
+      }
+    }
+    for (const listener of realtimeLanguageListeners) listener();
+  }, []);
+  return { language, setLanguage };
+}
+
+/** The person's app language: the host locale, else the browser's language. */
+export function realtimeAppLanguage(locale: string | undefined): string | undefined {
+  if (locale) return locale;
+  return typeof navigator === "undefined" ? undefined : navigator.language || undefined;
+}
+
+/**
+ * The language a voice conversation with `model` is held in: the person's
+ * choice, else their app language. Undefined for models that detect the spoken
+ * language themselves, so nothing is sent for them.
+ */
+export function realtimeConversationLanguage(
+  model: Pick<RealtimeModelOption, "languages"> | undefined,
+  preference: string | null,
+  locale: string | undefined,
+): string | undefined {
+  if (!model?.languages?.length) return undefined;
+  return preference ?? realtimeAppLanguage(locale);
+}
 
 type RealtimeModelCatalogCacheEntry =
   | {
@@ -204,6 +287,116 @@ export type SessionRealtimeControllerFactory = (
   options: CreateSessionRealtimeControllerOptions,
 ) => SessionRealtimeController;
 
+type PrestartedSessionRealtime = {
+  model: SessionRealtimeModel;
+  controller: Promise<SessionRealtimeController>;
+  /** Filled in by the session view that adopts the call. */
+  modelContext: { current: (() => string | undefined) | undefined };
+  /** The conversation language; the adopting view takes it over. */
+  language: { current: () => string | undefined };
+  /** The voice settings; the adopting view takes them over. */
+  voiceSettings: { current: () => RealtimeVoiceSettings | undefined };
+};
+
+const prestartedSessionRealtime = new Map<string, PrestartedSessionRealtime>();
+/** Calls being ended after their host abandoned them, per session. */
+const abandonedSessionRealtime = new Map<string, Promise<void>>();
+
+function prestartKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}\u0000${sessionId}`;
+}
+
+/**
+ * Start voice for a session the host has just created, before its session view
+ * mounts. The connection comes up while the host navigates, and the view's
+ * `useSessionRealtime` (with the same workspace, session and model) adopts the
+ * running call instead of starting another. Call it from the action that
+ * created the session, so the microphone prompt follows the user's gesture.
+ *
+ * Returns `abandon`, which ends the call if no view adopted it yet (for
+ * example when navigation to the session failed).
+ */
+export function prestartSessionRealtime(input: {
+  client: RealtimeControllerClient;
+  workspaceId: string;
+  sessionId: string;
+  model: SessionRealtimeModel;
+  /**
+   * BCP 47 language the conversation is held in, for models that need one
+   * (see `realtimeConversationLanguage`).
+   */
+  language?: string | undefined;
+  /**
+   * Voice settings for this call (voice, language, turn eagerness), over the
+   * workspace's saved settings for the model.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
+  controllerFactory?: SessionRealtimeControllerFactory | undefined;
+}): () => void {
+  const key = prestartKey(input.workspaceId, input.sessionId);
+  const existing = prestartedSessionRealtime.get(key);
+  // A retried handoff keeps the call already starting for the same model.
+  if (existing?.model === input.model) return abandonPrestarted(key, existing);
+  if (existing) abandonPrestarted(key, existing)();
+  const modelContext: PrestartedSessionRealtime["modelContext"] = { current: undefined };
+  const language: PrestartedSessionRealtime["language"] = { current: () => input.language };
+  const voiceSettings: PrestartedSessionRealtime["voiceSettings"] = {
+    current: () => input.voiceSettings,
+  };
+  // An abandoned call for this session ends before the next one begins.
+  const controller = (abandonedSessionRealtime.get(key) ?? Promise.resolve())
+    .then(() => import("@opengeni/sdk/realtime"))
+    .then(({ createSessionRealtimeController }) => {
+      const created = (input.controllerFactory ?? createSessionRealtimeController)({
+        client: input.client,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        // The adopting view's audio element does not exist yet; a detached
+        // element plays the same way.
+        ...(typeof Audio === "undefined" ? {} : { remoteAudio: new Audio() }),
+        model: input.model,
+        getModelContext: () => modelContext.current?.(),
+        getLanguage: () => language.current(),
+        getVoiceSettings: () => voiceSettings.current(),
+      });
+      // The call's state (including a failed start) is read from the
+      // controller by the view that adopts it.
+      void created.start().catch(() => undefined);
+      return created;
+    });
+  const entry: PrestartedSessionRealtime = {
+    model: input.model,
+    controller,
+    modelContext,
+    language,
+    voiceSettings,
+  };
+  prestartedSessionRealtime.set(key, entry);
+  controller.catch(() => {
+    if (prestartedSessionRealtime.get(key) === entry) prestartedSessionRealtime.delete(key);
+  });
+  return abandonPrestarted(key, entry);
+}
+
+function abandonPrestarted(key: string, entry: PrestartedSessionRealtime): () => void {
+  return () => {
+    if (prestartedSessionRealtime.get(key) !== entry) return;
+    prestartedSessionRealtime.delete(key);
+    const ended = entry.controller.then(
+      (abandoned) =>
+        abandoned
+          .stop()
+          .catch(() => undefined)
+          .finally(() => abandoned.close()),
+      () => undefined,
+    );
+    abandonedSessionRealtime.set(key, ended);
+    void ended.finally(() => {
+      if (abandonedSessionRealtime.get(key) === ended) abandonedSessionRealtime.delete(key);
+    });
+  };
+}
+
 type AdmissionInput = {
   sessionStatus: SessionStatus;
   controlState: "active" | "paused";
@@ -244,6 +437,16 @@ export function useSessionRealtime(options: {
   modelUnavailableReason?: string | null | undefined;
   /** Model-visible application context captured with each durable realtime message. */
   getModelContext?: (() => string | undefined) | undefined;
+  /**
+   * BCP 47 language the conversation is held in, for models that need one
+   * (see `realtimeConversationLanguage`). Applies from the next connection.
+   */
+  language?: string | undefined;
+  /**
+   * Voice settings (voice, language, turn eagerness) over the workspace's saved
+   * settings for the model. Applies from the next connection.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -258,6 +461,10 @@ export function useSessionRealtime(options: {
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
   const modelContextProviderRef = useRef(options.getModelContext);
   modelContextProviderRef.current = options.getModelContext;
+  const languageRef = useRef(options.language);
+  languageRef.current = options.language;
+  const voiceSettingsRef = useRef(options.voiceSettings);
+  voiceSettingsRef.current = options.voiceSettings;
   const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
     status: hasStoredSessionRealtimeOwnerProof({
       workspaceId,
@@ -287,25 +494,51 @@ export function useSessionRealtime(options: {
   lifecycleRef.current = lifecycle;
   eventsReadyRef.current = options.eventsReady;
   const lifecycleActive = sessionRealtimeLifecycleIsActive(lifecycle);
+  const [prestarted, setPrestarted] = useState(false);
 
   useEffect(() => {
     let disposed = false;
     let controller: SessionRealtimeController | null = null;
     let unsubscribe: (() => void) | null = null;
-    void import("@opengeni/sdk/realtime")
-      .then(({ createSessionRealtimeController }) => {
-        if (disposed) return;
-        const controllerFactory = options.controllerFactory ?? createSessionRealtimeController;
-        controller = controllerFactory({
-          client,
-          workspaceId,
-          sessionId: options.sessionId,
-          ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
-          model,
-          getModelContext: () => modelContextProviderRef.current?.(),
+    const key = prestartKey(workspaceId, options.sessionId);
+    const adopted = prestartedSessionRealtime.get(key);
+    // A call started before this view mounted owns the session's voice. Wait
+    // for the selection to reach its model rather than racing it with another
+    // controller.
+    if (adopted && adopted.model !== model) return;
+    if (adopted) {
+      prestartedSessionRealtime.delete(key);
+      adopted.modelContext.current = () => modelContextProviderRef.current?.();
+      adopted.language.current = () => languageRef.current;
+      adopted.voiceSettings.current = () => voiceSettingsRef.current;
+    }
+    const pending: Promise<SessionRealtimeController | null> = adopted
+      ? adopted.controller
+      : import("@opengeni/sdk/realtime").then(({ createSessionRealtimeController }) => {
+          if (disposed) return null;
+          const controllerFactory = options.controllerFactory ?? createSessionRealtimeController;
+          return controllerFactory({
+            client,
+            workspaceId,
+            sessionId: options.sessionId,
+            ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
+            model,
+            getModelContext: () => modelContextProviderRef.current?.(),
+            getLanguage: () => languageRef.current,
+            getVoiceSettings: () => voiceSettingsRef.current,
+          });
         });
+    void pending
+      .then((created) => {
+        if (!created) return;
+        if (disposed) {
+          created.close();
+          return;
+        }
+        controller = created;
         controllerRef.current = controller;
         controllerModelRef.current = model;
+        setPrestarted(adopted !== undefined);
         unsubscribe = controller.subscribe(setSnapshot);
         if (eventsReadyRef.current) {
           void controller.observeLifecycle(lifecycleRef.current).catch(() => undefined);
@@ -356,6 +589,20 @@ export function useSessionRealtime(options: {
     void controllerRef.current?.observeLifecycle(lifecycle).catch(() => undefined);
   }, [lifecycle, options.eventsReady]);
 
+  // A delegated turn's result reaches the voice model through the realtime
+  // ledger. Pull it as soon as the session reports the turn's outcome instead
+  // of waiting for the next periodic sync.
+  const delegationOutcomeSequence = useMemo(
+    () => latestDelegationOutcomeSequence(options.events),
+    [options.events],
+  );
+  const flushedOutcomeSequenceRef = useRef(delegationOutcomeSequence);
+  useEffect(() => {
+    if (delegationOutcomeSequence <= flushedOutcomeSequenceRef.current) return;
+    flushedOutcomeSequenceRef.current = delegationOutcomeSequence;
+    void controllerRef.current?.flush().catch(() => undefined);
+  }, [delegationOutcomeSequence]);
+
   const start = useCallback(async () => {
     const controller = controllerRef.current;
     if (!controller || controllerModelRef.current !== model) {
@@ -399,6 +646,8 @@ export function useSessionRealtime(options: {
   return {
     snapshot,
     lifecycleActive,
+    /** The current call was started before this view mounted and adopted here. */
+    prestarted,
     canStart,
     admissionBlocker,
     codexConnected: options.codexConnected,
@@ -410,6 +659,23 @@ export function useSessionRealtime(options: {
     setInputMuted,
     setOutputMuted,
   };
+}
+
+const DELEGATION_OUTCOME_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "agent.message.completed",
+  "turn.completed",
+  "turn.failed",
+  "turn.cancelled",
+  "turn.superseded",
+]);
+
+/** The newest event that can settle a delegated turn's spoken result. */
+function latestDelegationOutcomeSequence(events: readonly SessionEvent[]): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (DELEGATION_OUTCOME_EVENT_TYPES.has(event.type)) return event.sequence;
+  }
+  return 0;
 }
 
 export function sessionRealtimeLifecycleIsActive(
@@ -533,6 +799,40 @@ export function useRealtimeModelSelection(options: {
     },
     [activeModel, catalog, workspaceId],
   );
+  const { language: languagePreference } = useRealtimeLanguagePreference();
+  /**
+   * The person's own language to send when starting voice with `modelId`: the
+   * fallback when neither they nor the workspace chose a conversation language.
+   */
+  const languageFor = useCallback(
+    (modelId: SessionRealtimeModel) =>
+      realtimeConversationLanguage(
+        catalog.find((model) => model.id === modelId),
+        null,
+        t.locale,
+      ),
+    [catalog, t.locale],
+  );
+  /**
+   * The voice settings to send when starting voice with `modelId`: the host's
+   * `base` settings, with the language the person picked in the voice menu on
+   * top. The workspace's saved settings apply on the server under these.
+   */
+  const voiceSettingsFor = useCallback(
+    (
+      modelId: SessionRealtimeModel,
+      base?: RealtimeVoiceSettings | undefined,
+    ): RealtimeVoiceSettings | undefined => {
+      const picked =
+        languagePreference !== null &&
+        catalog.find((model) => model.id === modelId)?.languages?.length
+          ? languagePreference
+          : null;
+      if (picked === null) return base;
+      return { ...base, language: picked };
+    },
+    [catalog, languagePreference],
+  );
 
   // The fallback catalog is a placeholder: a caller that starts voice on its own
   // (a call from outside the app) waits for the real one, or the selection
@@ -541,7 +841,14 @@ export function useRealtimeModelSelection(options: {
   const catalogReady =
     (scope.source === "cache" && scope.client === client && scope.workspaceId === workspaceId) ||
     (fallbackFinal?.client === client && fallbackFinal.workspaceId === workspaceId);
-  return { models: catalog, selectedModel, selectModel, catalogReady };
+  return {
+    models: catalog,
+    selectedModel,
+    selectModel,
+    catalogReady,
+    languageFor,
+    voiceSettingsFor,
+  };
 }
 
 function toRealtimeModelOption(model: WorkspaceRealtimeModelCatalogItem): RealtimeModelOption {
@@ -552,7 +859,7 @@ function readRealtimeModelPreference(workspaceId: string): SessionRealtimeModel 
   if (typeof localStorage === "undefined") return null;
   try {
     const value = localStorage.getItem(`${REALTIME_MODEL_STORAGE_PREFIX}:${workspaceId}`);
-    return isRealtimeModel(value) ? value : null;
+    return isSessionRealtimeModel(value) ? value : null;
   } catch {
     return null;
   }
@@ -565,18 +872,4 @@ function writeRealtimeModelPreference(workspaceId: string, model: SessionRealtim
   } catch {
     // Voice selection still works when browser storage is unavailable.
   }
-}
-
-function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
-  return (
-    value === "opengeni-azure/gpt-live-1" ||
-    value === "gpt-live-1-boulder-alpha" ||
-    value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
-    value === "opengeni-gateway/openai/gpt-realtime-mini" ||
-    value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||
-    value === "supergrok/grok-voice-think-fast-2.0" ||
-    value === "workspace-gateway/openai/gpt-realtime-2.1" ||
-    value === "workspace-gateway/openai/gpt-realtime-mini" ||
-    value === "workspace-gateway/xai/grok-voice-think-fast-2.0"
-  );
 }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PrivacyPreferencesSection } from "./privacy-preferences";
-import type { ClientConfig } from "@/types";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 describe("Your account privacy preferences", () => {
   test("is a row under Privacy when the deployment asks for analytics consent", () => {

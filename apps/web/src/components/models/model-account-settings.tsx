@@ -11,21 +11,26 @@ import { LockIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { useAppContext } from "@/context";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField, FieldStack } from "@/components/ui/field";
-import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section } from "@/components/ui/section";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  invalidateSharedQueries,
+  sharedQueryWriter,
+  useSharedQuery,
+} from "@opengeni/react/app/lib/shared-query";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField, FieldStack } from "@opengeni/react/ui/field";
+import { ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section } from "@opengeni/react/ui/section";
 import {
   SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowLink,
-} from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+} from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { FallbackOrderControl } from "./model-account-policy-controls";
-import { ModelsFormPage } from "./models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 
 /* ----------------------------------------------------------------------------
    Sharing subscriptions: the default rules for the organization's model
@@ -309,52 +314,33 @@ export function useModelAccountSettingsOverview(
   enabled: boolean,
 ): ModelAccountSettingsOverviewState {
   const client = useAppContext().client;
-  const [overview, setOverview] = useState<ModelAccountSettingsOverview | null>(null);
-  const [loading, setLoading] = useState(enabled && Boolean(organizationId));
-  const [error, setError] = useState<Error | null>(null);
+  const {
+    data: overview,
+    loading,
+    error,
+    refresh: reload,
+  } = useSharedQuery(
+    client,
+    ["model-settings", "account-settings", "organization", organizationId ?? null],
+    () => client.getModelAccountSettingsOverview(organizationId!),
+    { enabled: enabled && Boolean(organizationId), staleTimeMs: 300_000 },
+  );
   const [saving, setSaving] = useState<string | null>(null);
-  const generation = useRef(0);
   const contextGeneration = useRef(0);
   const savingRef = useRef(false);
 
-  const reload = useCallback(async () => {
-    const current = ++generation.current;
-    if (!enabled || !organizationId) {
-      setOverview(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const loaded = await client.getModelAccountSettingsOverview(organizationId);
-      if (current === generation.current) setOverview(loaded);
-    } catch (caught) {
-      if (current === generation.current) {
-        setOverview(null);
-        setError(caught instanceof Error ? caught : new Error(String(caught)));
-      }
-    } finally {
-      if (current === generation.current) setLoading(false);
-    }
-  }, [client, enabled, organizationId]);
-
   useEffect(() => {
     contextGeneration.current += 1;
-    setOverview(null);
     savingRef.current = false;
     setSaving(null);
-    void reload();
     return () => {
-      generation.current += 1;
       contextGeneration.current += 1;
     };
-  }, [reload]);
+  }, [client, enabled, organizationId]);
 
   const update = useCallback(
     async (key: string, request: UpdateOrganizationModelAccountSettingsRequest) => {
       if (!enabled || !organizationId || !overview || savingRef.current) return false;
-      const current = generation.current;
       const context = contextGeneration.current;
       savingRef.current = true;
       setSaving(key);
@@ -364,10 +350,10 @@ export function useModelAccountSettingsOverview(
           expectedVersion: overview.organization.version,
         });
         // Locking clears workspace overrides: re-read every workspace.
-        if (current === generation.current) await reload();
+        await invalidateSharedQueries(client, ["model-settings", "account-settings"]);
         return true;
       } catch (caught) {
-        if (current === generation.current) toast.error(failureMessage(caught));
+        if (context === contextGeneration.current) toast.error(failureMessage(caught));
         return false;
       } finally {
         if (context === contextGeneration.current) {
@@ -376,7 +362,7 @@ export function useModelAccountSettingsOverview(
         }
       }
     },
-    [client, enabled, organizationId, overview, reload],
+    [client, enabled, organizationId, overview],
   );
 
   return { overview, loading, error, saving, reload, update };
@@ -608,47 +594,34 @@ export function useWorkspaceModelAccountSettings(
   enabled: boolean,
 ): WorkspaceModelAccountSettingsState {
   const client = useAppContext().client;
-  const [settings, setSettings] = useState<WorkspaceModelAccountSettings | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+  const {
+    data: settings,
+    error,
+    refresh: reload,
+  } = useSharedQuery(
+    client,
+    ["model-settings", "account-settings", "workspace", workspaceId],
+    () => client.getWorkspaceModelAccountSettings(workspaceId),
+    { enabled, staleTimeMs: 300_000 },
+  );
   const [saving, setSaving] = useState<string | null>(null);
-  const generation = useRef(0);
   const savingRef = useRef(false);
   const contextGeneration = useRef(0);
 
-  const reload = useCallback(async () => {
-    const current = ++generation.current;
-    if (!enabled) {
-      setSettings(null);
-      return;
-    }
-    setError(null);
-    try {
-      const loaded = await client.getWorkspaceModelAccountSettings(workspaceId);
-      if (current === generation.current) setSettings(loaded);
-    } catch (caught) {
-      if (current === generation.current) {
-        setSettings(null);
-        setError(caught instanceof Error ? caught : new Error(String(caught)));
-      }
-    }
-  }, [client, enabled, workspaceId]);
-
   useEffect(() => {
     contextGeneration.current += 1;
-    setSettings(null);
     savingRef.current = false;
     setSaving(null);
-    void reload();
     return () => {
-      generation.current += 1;
       contextGeneration.current += 1;
     };
-  }, [reload]);
+  }, [client, enabled, workspaceId]);
 
   const update = useCallback(
     async (key: string, request: UpdateWorkspaceModelAccountSettingsRequest) => {
       if (!enabled || !settings || savingRef.current) return;
       const context = contextGeneration.current;
+      const write = sharedQueryWriter(client);
       savingRef.current = true;
       setSaving(key);
       try {
@@ -656,10 +629,12 @@ export function useWorkspaceModelAccountSettings(
           ...request,
           expectedVersion: settings.version,
         });
-        if (context === contextGeneration.current) {
-          generation.current += 1;
-          setSettings(saved);
-        }
+        write(["model-settings", "account-settings", "workspace", workspaceId], saved);
+        await invalidateSharedQueries(client, [
+          "model-settings",
+          "account-settings",
+          "organization",
+        ]);
       } catch (caught) {
         if (context === contextGeneration.current) {
           toast.error(failureMessage(caught));

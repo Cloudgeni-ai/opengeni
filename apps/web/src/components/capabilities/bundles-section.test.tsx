@@ -11,7 +11,7 @@ import type {
   CapabilityCatalogItem,
   InstalledSkillSummary,
   PluginInstallationSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -226,6 +226,22 @@ describe("BundlesSection", () => {
       await rendered.unmount();
     }
   });
+
+  test("a member manages Skills while plugins stay with workspace administrators", async () => {
+    const rendered = await renderSection({ canManage: true, canManagePlugins: false });
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Workspace administrators can install, update, and remove plugins.",
+      );
+      expect(rendered.container.textContent).not.toContain("these items");
+      const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
+        candidate.textContent?.includes("Import plugin"),
+      );
+      expect(button?.disabled).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 function rowIds(container: ParentNode): string[] {
@@ -248,6 +264,7 @@ async function renderSection(
   options: {
     section?: "skills" | "plugins" | "all";
     canManage?: boolean;
+    canManagePlugins?: boolean;
     empty?: boolean;
     loadError?: boolean;
 
@@ -263,6 +280,9 @@ async function renderSection(
       workspaceId="00000000-0000-4000-8000-000000000001"
       connections={[]}
       canManage={options.canManage ?? true}
+      {...(options.canManagePlugins === undefined
+        ? {}
+        : { canManagePlugins: options.canManagePlugins })}
       items={options.empty ? [] : catalogItems()}
       logoUrl={() => null}
       busyCatalogId={null}

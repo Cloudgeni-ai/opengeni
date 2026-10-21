@@ -12,7 +12,7 @@ import { CapabilityMark } from "./capability-page";
 import { CapabilitySlotPage, useCapabilityPageSlot } from "./capability-page-slot";
 import { PluginPage, type PluginManageActions } from "./plugin-page";
 import { humanizeName } from "./skill-copy";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
 

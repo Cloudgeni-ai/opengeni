@@ -27,7 +27,10 @@ import {
   isVerifiedDelegatedHumanAuthorization,
   withSiteSessionOrigin,
 } from "@opengeni/core";
-import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
+import {
+  freezeSessionRealtimeConnectionAccounts,
+  managedSessionGroupBackend,
+} from "@opengeni/core";
 import {
   createRealtimeVoiceBilling,
   RealtimeVoiceUnavailableError,
@@ -63,7 +66,7 @@ import {
   BeginSessionRealtimeRequest,
   ClearSessionContextRequest,
   CodexRealtimeWebrtcRequest,
-  GatewayRealtimeConnectRequest,
+  SessionRealtimeWebsocketRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   CreateSessionRequest,
@@ -95,6 +98,9 @@ import {
   SessionControlRequest,
   SessionRetryRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_CONVERSATION_FILTER_HEADER,
+  SESSION_EVENT_CONVERSATION_FILTER_VERSION,
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
@@ -182,6 +188,7 @@ import {
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
+  listSessionEventConversationBookkeeping,
   listSessionEventPage,
   listSessionHumanInputRequests,
   listSessionGoalRevisionPage,
@@ -269,10 +276,10 @@ import {
   publishDurableSessionEvents,
 } from "@opengeni/events";
 import {
-  createGatewayRealtimeConnectionSecret,
-  GatewayRealtimeBrokerError,
-} from "../gateway-realtime";
-import { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } from "../xai-realtime";
+  createRealtimeWebsocketConnection,
+  RealtimeWebsocketBrokerError,
+  realtimeWebsocketProvider,
+} from "../realtime-websocket";
 import {
   prepareExternalLinkTurnAdmission,
   externalContinuationCommitAuthorizer,
@@ -287,12 +294,17 @@ import {
   type ChannelAOperation,
 } from "../sandbox/channel-a";
 import {
+  connectedCommandStopRpc,
+  deliverConnectedCommandStop,
+} from "../sandbox/command-completion";
+import {
   NatsControlRpc,
   negotiateCapabilities,
   negotiateSelfhostedCapabilities,
   resolveConnectedMachineWorkspaceRoot,
   selectBackend,
   SelfhostedSession,
+  usesAgentTransport,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -399,6 +411,8 @@ import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
+/** One immediate stop attempt; a sleeping compute sandbox wakes within it. */
+const BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS = 5_000;
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
 /**
@@ -1421,7 +1435,33 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!result.command) {
         throw new HTTPException(404, { message: "background command not found" });
       }
-      return c.json(result);
+      const { stopTarget, ...body } = result;
+      if (stopTarget) {
+        // Deliver the cancellation now rather than on the next reconciliation
+        // pass. The runner's pushed exit settles the command; when this
+        // delivery fails, the reconciler delivers it on its next pass.
+        const budgetMs = Math.min(
+          settings.sandboxSelfhostedControlTimeoutMs,
+          BACKGROUND_COMMAND_STOP_DELIVERY_TIMEOUT_MS,
+        );
+        const delivery = await deliverConnectedCommandStop(
+          connectedCommandStopRpc({
+            db,
+            settings,
+            connect: async () => bus.getRequestConnection(),
+            budgetMs,
+          }),
+          stopTarget,
+          budgetMs,
+        );
+        if (!delivery.delivered) {
+          deps.observability?.warn("background command stop delivery deferred", {
+            commandId,
+            error: delivery.error,
+          });
+        }
+      }
+      return c.json(body);
     },
   );
 
@@ -1917,18 +1957,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const sessionId = c.req.param("sessionId");
+  /**
+   * Open (or rotate) the provider WebSocket of an active realtime mode: claim
+   * the connection, admit billing, mint the provider client secret, and record
+   * the connection before the browser opens the socket itself. One handler
+   * serves every WebSocket provider; the older per-provider paths stay as
+   * aliases for clients loaded before the unified path existed.
+   */
+  const negotiateRealtimeWebsocket = async (c: Context) => {
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    const sessionId = c.req.param("sessionId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
+    const parsed = SessionRealtimeWebsocketRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid Gateway realtime request",
-      });
+      throw new HTTPException(422, { message: "invalid realtime WebSocket request" });
     }
     c.header("cache-control", "private, no-store");
     const {
@@ -1939,9 +1984,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       expectedVersion,
       expectedConnectionEpoch,
       rotate,
+      language,
+      voiceSettings,
     } = parsed.data;
     let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
       null;
+    let provider: ReturnType<typeof realtimeWebsocketProvider> = null;
     let connectionCompleted = false;
     try {
       claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -1964,7 +2012,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (claim.replay) {
         throw new SessionRealtimeConflictError(
           "REALTIME_CONNECTION_STATE_CHANGED",
-          "Realtime Gateway tokens are single-use; reconnect with a new operation",
+          "Realtime client secrets are single-use; reconnect with a new operation",
+        );
+      }
+      provider = realtimeWebsocketProvider(claim.mode.model);
+      if (!provider) {
+        throw new RealtimeWebsocketBrokerError(
+          "model_unavailable",
+          "This voice model does not use a WebSocket connection",
         );
       }
       await realtimeVoiceBilling.admit({
@@ -1973,13 +2028,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         model: claim.mode.model,
         attribution: creditDebitAttributionForGrant(grant),
       });
-      const secret = await createGatewayRealtimeConnectionSecret({
+      const connection = await createRealtimeWebsocketConnection({
         db,
         settings,
+        accountId: grant.accountId,
         workspaceId,
         sessionId,
         model: claim.mode.model,
-        fetchImpl: deps.codexFetch ?? fetch,
+        language,
+        voiceSettings,
+        fetchImpls: {
+          "ai-gateway": deps.codexFetch,
+          supergrok: deps.xaiFetch,
+          elevenlabs: deps.codexFetch,
+        },
       });
       const claimed = claim;
       const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
@@ -1991,11 +2053,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             connectionId: claimed.connection.id,
             operationId,
             connectionEpoch: claimed.connection.connectionEpoch,
-            sdpAnswer: "gateway-client-secret-minted",
+            sdpAnswer: `${connection.provider}-client-secret-minted`,
           }),
         ),
       );
       connectionCompleted = true;
+      // Finish the first-minute settlement before returning the usable connection.
+      // A heartbeat may never arrive; do not detach this debit from the request.
       await settleRealtimeVoice({
         grant,
         attribution: creditDebitAttributionForGrant(grant),
@@ -2003,8 +2067,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         realtimeId,
       });
+      const { provider: _provider, ...answer } = connection;
       return c.json({
-        ...secret,
+        ...answer,
         connectionId: completed.connection.id,
         connectionEpoch: completed.connection.connectionEpoch,
         startupFenceSequence: completed.connection.startupFenceSequence,
@@ -2024,12 +2089,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               operationId,
               connectionEpoch: claimed.connection.connectionEpoch,
               failureCode:
-                error instanceof GatewayRealtimeBrokerError
+                error instanceof RealtimeWebsocketBrokerError
                   ? error.code
                   : error instanceof TranscriptionBillingRefusedError ||
                       error instanceof RealtimeVoiceUnavailableError
                     ? "billing_refused"
-                    : "gateway_error",
+                    : `${provider?.id ?? "websocket"}_error`,
             }),
           ),
         ).catch(() => undefined);
@@ -2037,13 +2102,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const refused = realtimeVoiceRefusalResponse(c, error);
       if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
-      if (!(error instanceof GatewayRealtimeBrokerError)) throw error;
-      const status = error.code === "credential_unavailable" ? 409 : 502;
+      if (!(error instanceof RealtimeWebsocketBrokerError)) throw error;
+      const status =
+        error.code === "credential_unavailable" || error.code === "voice_unavailable" ? 409 : 502;
       return c.json(
         {
           error: {
             status,
-            code: `GATEWAY_REALTIME_${error.code.toUpperCase()}`,
+            code: `${provider?.errorCodePrefix ?? "REALTIME"}_${error.code.toUpperCase()}`,
             message: error.message,
             retryable: error.code === "provider_error",
           },
@@ -2051,122 +2117,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         status,
       );
     }
-  });
-
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    if (!z.string().uuid().safeParse(sessionId).success) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid SuperGrok realtime request" });
-    }
-    c.header("cache-control", "private, no-store");
-    const {
-      realtimeId,
-      operationId,
-      browserInstanceId,
-      ownerKey,
-      expectedVersion,
-      expectedConnectionEpoch,
-      rotate,
-    } = parsed.data;
-    let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
-      null;
-    let connectionCompleted = false;
-    try {
-      claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            operationId,
-            ownerSubjectId: grant.subjectId,
-            browserInstanceId,
-            ownerKey,
-            expectedVersion,
-            expectedConnectionEpoch,
-            rotate,
-            promotionMode: "staged",
-          }),
-        ),
-      );
-      if (claim.replay) {
-        throw new SessionRealtimeConflictError(
-          "REALTIME_CONNECTION_STATE_CHANGED",
-          "SuperGrok realtime tokens are single-use; reconnect with a new operation",
-        );
-      }
-      const secret = await createXaiRealtimeConnectionSecret({
-        db,
-        settings,
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        sessionId,
-        model: claim.mode.model,
-        fetchImpl: deps.xaiFetch ?? fetch,
-      });
-      const claimed = claim;
-      const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            connectionId: claimed.connection.id,
-            operationId,
-            connectionEpoch: claimed.connection.connectionEpoch,
-            sdpAnswer: "supergrok-client-secret-minted",
-          }),
-        ),
-      );
-      connectionCompleted = true;
-      return c.json({
-        ...secret,
-        connectionId: completed.connection.id,
-        connectionEpoch: completed.connection.connectionEpoch,
-        startupFenceSequence: completed.connection.startupFenceSequence,
-        modeVersion: claimed.modeVersion,
-        replay: false as const,
-      });
-    } catch (error) {
-      if (claim !== null && !claim.replay && !connectionCompleted) {
-        const claimed = claim;
-        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-          scopedDb.transaction(async (tx) =>
-            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              connectionId: claimed.connection.id,
-              operationId,
-              connectionEpoch: claimed.connection.connectionEpoch,
-              failureCode: error instanceof XaiRealtimeBrokerError ? error.code : "supergrok_error",
-            }),
-          ),
-        ).catch(() => undefined);
-      }
-      if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
-      if (!(error instanceof XaiRealtimeBrokerError)) throw error;
-      const status = error.code === "credential_unavailable" ? 409 : 502;
-      return c.json(
-        {
-          error: {
-            status,
-            code: `SUPERGROK_REALTIME_${error.code.toUpperCase()}`,
-            message: error.message,
-            retryable: error.code === "provider_error",
-          },
-        },
-        status,
-      );
-    }
-  });
+  };
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+    negotiateRealtimeWebsocket,
+  );
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway",
+    negotiateRealtimeWebsocket,
+  );
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok",
+    negotiateRealtimeWebsocket,
+  );
 
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/connections/:connectionId/activate",
@@ -3428,6 +3391,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       SessionEventSemanticClass,
       "excludeClasses",
     );
+    // Conversation-first readers exclude step events but keep presented tool
+    // calls (images, published files, Skill changes). Turnless step rows (PTY
+    // and background command output) stay excluded; the sandbox dock reads
+    // them with includeTypes when it opens. Unknown values are ignored
+    // so older and newer clients degrade to the plain type filter.
+    const retainPresentedToolCalls = c.req.query("presentedToolCalls") === "include";
+    // Step readers ask for large tool outputs as bounded previews and read one
+    // row's exact output when the reader needs it. Full payload pages only;
+    // older servers ignore the option and return exact outputs.
+    const toolOutputPreview =
+      c.req.query("toolOutputs") === "preview" &&
+      payloadMode === "full" &&
+      resultMode !== "compact";
     const limit = latestClass
       ? 1
       : eventListLimit(
@@ -3446,10 +3422,32 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       excludeTypes,
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
+      ...(retainPresentedToolCalls && !latestClass ? { retainPresentedToolCalls: true } : {}),
+      ...(toolOutputPreview && !latestClass ? { toolOutputPreview: true } : {}),
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
       ...(latestClass ? { authoritativeLatest: true } : {}),
     });
-    const events = dbPage.events;
+    const retainsPresented =
+      retainPresentedToolCalls &&
+      !latestClass &&
+      !!excludeTypes?.includes("agent.toolCall.created");
+    // A conversation read that also excludes turn bookkeeping keeps the rows
+    // its startup phases draw and those of turns without other steps.
+    const bookkeeping =
+      retainsPresented &&
+      !includeTypes?.length &&
+      !includeClasses?.length &&
+      !excludeClasses?.length &&
+      SESSION_EVENT_BOOKKEEPING_STEP_TYPES.every((type) => excludeTypes!.includes(type))
+        ? await conversationBookkeeping(db, workspaceId, sessionId, dbPage, {
+            after,
+            before,
+            direction,
+            payloadMode: dbPayloadMode,
+          })
+        : [];
+    const events =
+      bookkeeping.length > 0 ? mergeBySequence(dbPage.events, bookkeeping) : dbPage.events;
     if (resultMode === "compact") {
       const event = events[0];
       c.header("X-OpenGeni-Event-Result-Mode", "compact");
@@ -3492,7 +3490,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header("X-OpenGeni-Event-Mode", mode);
     c.header("X-OpenGeni-Event-Direction", direction);
     c.header("X-OpenGeni-Payload-Mode", payloadMode);
+    if (toolOutputPreview && !latestClass) c.header("X-OpenGeni-Tool-Outputs", "preview");
     c.header("X-OpenGeni-Forensic-Exact", String(forensicExact));
+    // Tells a conversation-first reader this server applies presentedToolCalls
+    // (an older one ignores it and drops presented tool calls).
+    if (retainPresentedToolCalls && !latestClass) {
+      c.header(
+        SESSION_EVENT_CONVERSATION_FILTER_HEADER,
+        String(SESSION_EVENT_CONVERSATION_FILTER_VERSION),
+      );
+    }
     const coveredFirst = page.events[0]?.sequence;
     const coveredLastEvent = page.events.at(-1);
     const coveredLast =
@@ -3875,8 +3882,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
       );
       if (
-        projection.operationId === receipt.operationId &&
-        projection.status === "consent_accepted"
+        ("action" in parsed.data && receipt.outcome === "accepted") ||
+        (projection.operationId === receipt.operationId && projection.status === "consent_accepted")
       ) {
         // Establish/verify only. No failed-turn Retry, Send, tool callback or
         // command replay. The ordinary cold->warming election owns creation.
@@ -4515,8 +4522,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       },
     };
     if (capabilities.DesktopStream.transport !== null) {
+      // A compute group box serves its agent's relay framebuffer, like a
+      // Connected Machine; a Modal swap target keeps noVNC.
+      const computeGroupActive =
+        activeSandbox === null &&
+        managedSessionGroupBackend(settings.sandboxBackend, session.sandboxBackend) === "compute";
       const wire = resolveActiveDesktopTransport(
-        selfhostedActive,
+        selfhostedActive || computeGroupActive,
         settings.sandboxDesktopInteractive !== false,
       );
       responseCapabilities = {
@@ -4988,6 +5000,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         authorization,
         session: ctx.session,
         path: request.path,
+        visibility: request.visibility,
         signal: ctx.waitSignal,
       }),
     );
@@ -5206,7 +5219,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.open");
     const req = await parseChannelABody(c, PtyOpenRequest);
-    if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
+    // A durable PTY is a provider process retained under the session-home lease.
+    // Agent-transport routes (Connected Machines and compute sandboxes) serve
+    // interactive terminals as relay streams from the agent instead (the
+    // viewer's `relay-pty` transport), so they are refused here before any PTY
+    // is opened.
+    if (usesAgentTransport(ctx.session.sandboxBackend) || ctx.session.activeSandboxId !== null) {
       throw new HTTPException(409, {
         message:
           "durable interactive terminals require the session-home provider route and are unavailable on active swaps or non-persistable routes; use synchronous exec or attach the session home sandbox",
@@ -5574,10 +5592,12 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";
   }
-  if (suffix === "/realtime/gateway" && verb === "POST") {
-    return "session.realtime.start";
-  }
-  if (suffix === "/realtime/supergrok" && verb === "POST") {
+  if (
+    (suffix === "/realtime/websocket" ||
+      suffix === "/realtime/gateway" ||
+      suffix === "/realtime/supergrok") &&
+    verb === "POST"
+  ) {
     return "session.realtime.start";
   }
   if (suffix === "/realtime" && verb === "POST") {
@@ -6019,7 +6039,7 @@ export function sessionListQuery(
     const parsedEndUser = SessionScopeSubjectId.safeParse(query.scopeSubjectId);
     if (!parsedEndUser.success) {
       throw new HTTPException(400, {
-        message: "scopeSubjectId must be a canonical Opengeni user subject",
+        message: "scopeSubjectId must be a canonical user subject",
       });
     }
     scopeSubjectId = parsedEndUser.data;
@@ -6410,6 +6430,56 @@ function eventSequence(raw: string | undefined, fallback: number): number {
     return fallback;
   }
   return Math.floor(sequence);
+}
+
+type SessionEventDbPage = Awaited<ReturnType<typeof listSessionEventPage>>;
+type SessionHistoryEvent = SessionEventDbPage["events"][number];
+
+/**
+ * The bookkeeping rows a conversation page keeps (see
+ * listSessionEventConversationBookkeeping), limited to the sequences this page
+ * covers: when more rows remain, beyond the page's last row in its reading
+ * direction belongs to the next page.
+ */
+async function conversationBookkeeping(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  page: SessionEventDbPage,
+  options: {
+    after: number;
+    before: number | undefined;
+    direction: "before" | "after";
+    payloadMode: SessionEventPayloadMode;
+  },
+): Promise<SessionHistoryEvent[]> {
+  const first = page.events[0];
+  const last = page.events.at(-1);
+  const turns = new Map<string, number | null>();
+  for (const event of page.events) {
+    if (!event.turnId) continue;
+    const started = turns.get(event.turnId) ?? null;
+    if (started === null && event.type === "turn.started") turns.set(event.turnId, event.sequence);
+    else if (!turns.has(event.turnId)) turns.set(event.turnId, null);
+  }
+  return await listSessionEventConversationBookkeeping(db, workspaceId, sessionId, {
+    turns: [...turns].map(([turnId, started]) => ({ turnId, started })),
+    // An empty page covers the whole requested range (the turn running at its
+    // start may still have startup rows there).
+    after: first && page.hasMore && options.direction === "before" ? first.sequence : options.after,
+    before: last && page.hasMore && options.direction === "after" ? last.sequence : options.before,
+    payloadMode: options.payloadMode,
+  });
+}
+
+function mergeBySequence(
+  events: readonly SessionHistoryEvent[],
+  extra: readonly SessionHistoryEvent[],
+): SessionHistoryEvent[] {
+  const ids = new Set(events.map((event) => event.id));
+  return [...events, ...extra.filter((event) => !ids.has(event.id))].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
 }
 
 function optionalEventSequence(raw: string | undefined): number | undefined {

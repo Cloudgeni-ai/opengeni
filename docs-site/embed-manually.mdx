@@ -53,7 +53,7 @@ Keep all `@opengeni` packages on the same version.
 
     `resolve` maps your signed-in user to Opengeni. Workspaces and memberships are created on first use, so there is no onboarding step. See [Users & tenants](/integrate/users-and-tenants) for the three shapes.
 
-    `createSession` lets the browser start chats. Return a fuller request to choose the agent, tools, and model; see [Configure the agent](/integrate/configure-the-agent).
+    When the user sends their first message in a new chat, the proxy calls your backend's `createSession` hook and creates the session as that user. The hook chooses the agent, tools, and model; see [Choose what your agent can do](#choose-what-your-agent-can-do) below.
 
     Not on Next.js? Use the Express or Hono adapter, or `createSessionProxyHandler` from `@opengeni/sdk/session-proxy` (see [Proxy from any backend](/integrate/proxy-from-any-backend)).
 
@@ -75,6 +75,46 @@ Keep all `@opengeni` packages on the same version.
 </Steps>
 
 Chats are private to each user by default. That needs private chats enabled for your organization; if they are off, the proxy returns an error that says who can turn them on.
+
+## Choose what your agent can do
+
+Embedded agents can use Opengeni's built-in capabilities and your product's own tools. Configure them on your backend; the conversation component stays the same.
+
+For example, replace the route above with this configuration to give a support agent web search and your product's MCP tools, with approval required before updating a ticket:
+
+```ts
+// app/api/opengeni/[...path]/route.ts
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
+import { og } from "@/lib/opengeni";
+
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
+  resolve: async (request) => {
+    const me = await authenticate(request); // your existing session check
+    if (!me) return new Response("Unauthorized", { status: 401 });
+    return { user: me.id, tenant: me.orgId };
+  },
+  createSession: (input) => ({
+    ...input,
+    agent: {
+      identity: "You are Acme's support assistant.",
+      capabilities: { from: "none", webSearch: true },
+      renderer: "opengeni",
+    },
+    sandboxBackend: "none", // this agent uses API tools, without shell or compute tools
+  }),
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // your product's MCP endpoint
+    approvals: { ask: ["update_ticket"] },
+  },
+});
+```
+
+- **Built-in capabilities:** `agent.capabilities` selects features such as web search, Knowledge, artifacts, and subagents. `from: "none"` starts with essentials such as asking questions and reading Skills; this example adds web search. Your attached product tools remain available. Use `from: "all"` to start with all capabilities, then turn individual ones off. See [Configure the agent](/integrate/configure-the-agent) for the full list and how to update an existing session.
+- **Your product's tools:** `toolServer` attaches your MCP endpoint and supplies a signed user token. You implement the endpoint, verify the token, and authorize each action against your product's data. See [Give the agent your data](/integrate/your-data) for the matching server example, tool allowlists, per-session MCP servers, and OpenAPI integrations.
+- **Approvals:** `approvals.ask` requests human approval for the named tools; the embedded conversation displays the approval. Tool selection and approval do not grant access to your data: your API still enforces the user's permissions. See [Approvals & questions](/integrate/approvals-and-questions) for saved permission choices and approval behavior.
+
+Without an explicit agent configuration, new sessions inherit the workspace and deployment defaults. Use the backend hook to choose the capabilities appropriate for your product.
 
 ## Next
 

@@ -1,6 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { PrivateScheduledTaskSummary } from "@/types";
+import type { PrivateScheduledTaskSummary } from "@opengeni/react/app/types";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -34,7 +34,7 @@ const client = {
   listPrivateScheduledTaskSummaries: async () => ({ schedules: [summary, onDemand] }),
   pausePrivateScheduledTask,
 };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({ client }) }));
 const { PrivateScheduleSummaries } = await import("./private-schedule-summaries");
 
 afterAll(() => {

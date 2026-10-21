@@ -1,12 +1,16 @@
 import type { MoveVaultItemRequest, VaultItem, VaultSummary } from "@opengeni/react";
 import { useState } from "react";
 
-import { Field, FieldStack } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
+import { Field, FieldStack } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 
-import { VAULT_GROUP_TITLE, vaultErrorText, vaultGroup } from "./vault-model";
+import {
+  VAULT_GROUP_TITLE,
+  vaultErrorText,
+  vaultGroup,
+} from "@opengeni/react/app/components/secrets/vault-model";
 
 /**
  * Move or copy one item to another vault (a small prompt, so a dialog). Copy

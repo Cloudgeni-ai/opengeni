@@ -6,6 +6,7 @@ import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } f
 import {
   projectSessionRealtimeLifecycle,
   type SessionRealtimeControllerSnapshot,
+  type RealtimeVoiceSettings,
   type SessionRealtimeModel,
 } from "@opengeni/sdk/realtime";
 import {
@@ -13,6 +14,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  LanguagesIcon,
   LoaderCircleIcon,
   MicIcon,
   MicOffIcon,
@@ -54,10 +56,12 @@ import {
 import { MENU_CHECK_CLASS } from "../lib/menu-styles";
 import {
   CODEX_LIVE_MODEL,
+  realtimeAppLanguage,
   type RealtimeControllerClient,
   type RealtimeModelOption,
   type SessionRealtimeControllerFactory,
   sessionRealtimeLifecycleIsActive,
+  useRealtimeLanguagePreference,
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "./session-realtime";
@@ -67,7 +71,11 @@ export {
   codexRealtimeAdmissionAllowed,
   codexRealtimeAdmissionBlocker,
   CODEX_LIVE_MODEL,
+  prestartSessionRealtime,
+  realtimeAppLanguage,
+  realtimeConversationLanguage,
   sessionRealtimeLifecycleIsActive,
+  useRealtimeLanguagePreference,
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "./session-realtime";
@@ -96,32 +104,47 @@ const REALTIME_MODEL_PROVIDERS = [
   "Connected Codex",
   "Connected SuperGrok",
   "Your Gateway",
+  "Your ElevenLabs",
 ] as const;
 type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META = (
   t: OpenGeniText,
-): Record<RealtimeModelProvider, { billingClass: BillingClass; label: string; hint: string }> => ({
+): Record<
+  RealtimeModelProvider,
+  // `key` is unique per provider; several providers can share a billing class.
+  { key: string; billingClass: BillingClass; label: string; hint: string }
+> => ({
   // The wire value keeps its historical spelling; the product name is Opengeni.
   OpenGeni: {
+    key: "opengeni",
     billingClass: "opengeni_credits",
     label: t("realtime.realtimeControl.opengeni"),
     hint: t("realtime.realtimeControl.usesOpengeniCredits"),
   },
   "Connected Codex": {
+    key: "codex",
     billingClass: "codex_subscription",
     label: t("realtime.realtimeControl.connectedCodex"),
     hint: t("realtime.realtimeControl.chatgptCodexPlan"),
   },
   "Connected SuperGrok": {
+    key: "supergrok",
     billingClass: "supergrok_subscription",
     label: t("realtime.realtimeControl.connectedSupergrok"),
     hint: t("realtime.realtimeControl.supergrokXaiPlan"),
   },
   "Your Gateway": {
+    key: "gateway",
     billingClass: "byok",
     label: t("realtime.realtimeControl.yourGateway"),
     hint: t("realtime.realtimeControl.billedToYourAiGateway"),
+  },
+  "Your ElevenLabs": {
+    key: "elevenlabs",
+    billingClass: "byok",
+    label: t("realtime.realtimeControl.yourElevenlabs"),
+    hint: t("realtime.realtimeControl.billedToYourElevenlabs"),
   },
 });
 /** Display name; the catalog's `provider` value stays the wire identifier. */
@@ -152,6 +175,13 @@ export function SessionRealtimeControl(props: {
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
   /** Explicitly expose low-level controller diagnostics; disabled by default. */
   showDiagnostics?: boolean | undefined;
+  /**
+   * Voice settings for this session's voice (voice, language, turn eagerness),
+   * over the workspace's saved settings for the selected model. A language the
+   * person picks in the voice menu takes precedence. Settings the selected
+   * model does not offer are ignored.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -169,12 +199,14 @@ export function SessionRealtimeControl(props: {
     model: selectedModel.id,
     modelAvailable: selectedModel.available,
     modelUnavailableReason: selectedModel.unavailableReason,
+    language: selection.languageFor(selectedModel.id),
+    voiceSettings: selection.voiceSettingsFor(selectedModel.id, props.voiceSettings),
   });
   const autostartModelRef = useRef(props.realtimeAutostartModel ?? null);
   const autostartStartedRef = useRef(false);
 
   const { models, selectedModel: selectedRealtimeModel, selectModel } = selection;
-  const { canStart, start } = realtime;
+  const { canStart, start, prestarted } = realtime;
   const onRealtimeAutostartConsumed = props.onRealtimeAutostartConsumed;
   const onVoiceActiveChange = props.onVoiceActiveChange;
   const voiceActive = realtime.snapshot.mode?.state === "active";
@@ -186,7 +218,18 @@ export function SessionRealtimeControl(props: {
 
   useEffect(() => {
     const pending = autostartModelRef.current;
-    if (!pending || autostartStartedRef.current || lifecycleActive) return;
+    if (!pending || autostartStartedRef.current) return;
+    const consume = () => {
+      autostartModelRef.current = null;
+      onRealtimeAutostartConsumed?.();
+    };
+    if (prestarted && selectedRealtimeModel.id === pending) {
+      // The host started this call before the view mounted; it is the autostart.
+      autostartStartedRef.current = true;
+      consume();
+      return;
+    }
+    if (lifecycleActive) return;
     const available = models.some((model) => model.id === pending && model.available);
     if (!available) return;
     if (selectedRealtimeModel.id !== pending) {
@@ -197,15 +240,12 @@ export function SessionRealtimeControl(props: {
     autostartStartedRef.current = true;
     // One automatic attempt. A failed start stays visible with its reason and
     // the user retries explicitly; re-arming would loop on a definitive refusal.
-    const consume = () => {
-      autostartModelRef.current = null;
-      onRealtimeAutostartConsumed?.();
-    };
     void start().then(consume, consume);
   }, [
     canStart,
     lifecycleActive,
     models,
+    prestarted,
     props.sessionId,
     props.workspaceId,
     onRealtimeAutostartConsumed,
@@ -825,79 +865,221 @@ export function RealtimeModelPickerMenu(props: {
   onSelect: (modelId: SessionRealtimeModel) => void;
 }) {
   const t = useOpenGeniText();
+  const { language: languagePreference, setLanguage } = useRealtimeLanguagePreference();
+  // The language page is local to the menu; leaving a provider closes it.
+  const [languagePage, setLanguagePage] = useState<{
+    provider: RealtimeModelProvider;
+    open: boolean;
+  } | null>(null);
+  const changeProvider = (provider: RealtimeModelProvider | null, direction: 1 | -1) => {
+    setLanguagePage(null);
+    props.onProviderChange(provider, direction);
+  };
   const providers = REALTIME_MODEL_PROVIDERS.filter((provider) =>
     props.models.some((model) => model.provider === provider),
   );
-  const pageKey = props.provider ? `voice-models:${props.provider}` : "voice-providers";
-  const body = props.provider ? (
-    <div data-testid="realtime-model-picker-models">
-      <PickerBackHeader
-        label={realtimeProviderLabel(t, props.provider)}
-        icon={
-          <BillingClassMark
-            billingClass={REALTIME_PROVIDER_META(t)[props.provider].billingClass}
-            aria-label=""
+  const providerLanguages = props.provider
+    ? props.models.find((model) => model.provider === props.provider && model.languages?.length)
+        ?.languages
+    : undefined;
+  const languagePageOpen =
+    providerLanguages !== undefined &&
+    languagePage?.provider === props.provider &&
+    languagePage.open;
+  const direction =
+    languagePage?.provider === props.provider ? (languagePage.open ? 1 : -1) : props.direction;
+  const pageKey = languagePageOpen
+    ? `voice-languages:${props.provider}`
+    : props.provider
+      ? `voice-models:${props.provider}`
+      : "voice-providers";
+  const appLanguage = realtimeAppLanguage(t.locale);
+  const appLanguageName = appLanguage
+    ? languageDisplayName(baseLanguage(appLanguage), t.locale)
+    : null;
+  // Without a pick of their own, the person talks in the workspace's language
+  // for this provider's voice, else their app language.
+  const workspaceLanguage = props.provider
+    ? props.models.find(
+        (model) => model.provider === props.provider && model.workspaceVoiceSettings?.language,
+      )?.workspaceVoiceSettings?.language
+    : undefined;
+  const workspaceLanguageName = workspaceLanguage
+    ? languageDisplayName(baseLanguage(workspaceLanguage), t.locale)
+    : null;
+  const automaticLanguageName = workspaceLanguageName ?? appLanguageName;
+  const body =
+    languagePageOpen && props.provider ? (
+      <div data-testid="realtime-language-picker">
+        <PickerBackHeader
+          label={t("realtime.realtimeControl.voiceLanguage")}
+          icon={<LanguagesIcon className="size-4 text-og-fg-muted" aria-hidden />}
+          onBack={() => setLanguagePage({ provider: props.provider!, open: false })}
+        />
+        <p className="px-2.5 pb-1.5 text-og-sm text-og-fg-muted">
+          {t("realtime.realtimeControl.voiceLanguageDescription")}
+        </p>
+        <div className="flex flex-col gap-0.5">
+          <PickerNavRow
+            label={t("realtime.realtimeControl.voiceLanguageAutomatic")}
+            hint={
+              workspaceLanguageName
+                ? t("realtime.realtimeControl.voiceLanguageWorkspaceLanguage", {
+                    language: workspaceLanguageName,
+                  })
+                : appLanguageName
+                  ? t("realtime.realtimeControl.voiceLanguageAppLanguage", {
+                      language: appLanguageName,
+                    })
+                  : undefined
+            }
+            disabled={props.disabled}
+            active={languagePreference === null}
+            showChevron={false}
+            trailing={
+              languagePreference === null ? (
+                <CheckIcon className={MENU_CHECK_CLASS} aria-hidden />
+              ) : undefined
+            }
+            testId="realtime-language-choice-automatic"
+            onClick={() => setLanguage(null)}
           />
-        }
-        onBack={() => props.onProviderChange(null, -1)}
-      />
-      <div className="flex flex-col gap-0.5">
-        {props.models
-          .filter((model) => model.provider === props.provider)
-          .map((model) => {
-            const selected = model.id === props.selectedModel.id;
+          {sortedLanguages(providerLanguages ?? [], t.locale).map(({ code, name, nativeName }) => {
+            const selected = languagePreference === code;
             return (
               <PickerNavRow
-                key={model.id}
-                label={model.label}
-                hint={
-                  model.unavailableReason ??
-                  (model.recommended
-                    ? t("realtime.realtimeControl.recommendedDescription", {
-                        description: model.description,
-                      })
-                    : model.description)
-                }
-                disabled={props.disabled || !model.available}
-                title={model.unavailableReason ?? model.description}
+                key={code}
+                label={name}
+                hint={nativeName !== name ? nativeName : undefined}
+                disabled={props.disabled}
                 active={selected}
                 showChevron={false}
                 trailing={
                   selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : undefined
                 }
-                testId={`realtime-model-choice-${model.id}`}
-                onClick={() => props.onSelect(model.id)}
+                testId={`realtime-language-choice-${code}`}
+                onClick={() => setLanguage(code)}
               />
             );
           })}
+        </div>
       </div>
-    </div>
-  ) : (
-    <div className="flex flex-col gap-0.5" data-testid="realtime-model-picker-providers">
-      {providers.map((provider) => {
-        const meta = REALTIME_PROVIDER_META(t)[provider];
-        return (
-          <PickerNavRow
-            key={provider}
-            label={realtimeProviderLabel(t, provider)}
-            hint={meta.hint}
-            icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
-            active={props.selectedModel.provider === provider}
-            testId={`realtime-model-provider-${meta.billingClass}`}
-            onClick={() => props.onProviderChange(provider, 1)}
-          />
-        );
-      })}
-    </div>
-  );
+    ) : props.provider ? (
+      <div data-testid="realtime-model-picker-models">
+        <PickerBackHeader
+          label={realtimeProviderLabel(t, props.provider)}
+          icon={
+            <BillingClassMark
+              billingClass={REALTIME_PROVIDER_META(t)[props.provider].billingClass}
+              aria-label=""
+            />
+          }
+          onBack={() => changeProvider(null, -1)}
+        />
+        <div className="flex flex-col gap-0.5">
+          {props.models
+            .filter((model) => model.provider === props.provider)
+            .map((model) => {
+              const selected = model.id === props.selectedModel.id;
+              return (
+                <PickerNavRow
+                  key={model.id}
+                  label={model.label}
+                  hint={
+                    model.unavailableReason ??
+                    (model.recommended
+                      ? t("realtime.realtimeControl.recommendedDescription", {
+                          description: model.description,
+                        })
+                      : model.description)
+                  }
+                  disabled={props.disabled || !model.available}
+                  title={model.unavailableReason ?? model.description}
+                  active={selected}
+                  showChevron={false}
+                  trailing={
+                    selected ? <CheckIcon className={MENU_CHECK_CLASS} aria-hidden /> : undefined
+                  }
+                  testId={`realtime-model-choice-${model.id}`}
+                  onClick={() => props.onSelect(model.id)}
+                />
+              );
+            })}
+        </div>
+        {providerLanguages ? (
+          <div className="mt-1.5 border-t border-og-border pt-1.5">
+            <PickerNavRow
+              label={t("realtime.realtimeControl.voiceLanguage")}
+              hint={
+                languagePreference !== null
+                  ? languageDisplayName(languagePreference, t.locale)
+                  : automaticLanguageName
+                    ? t("realtime.realtimeControl.voiceLanguageAutomaticValue", {
+                        language: automaticLanguageName,
+                      })
+                    : t("realtime.realtimeControl.voiceLanguageAutomatic")
+              }
+              icon={<LanguagesIcon className="size-4 shrink-0 text-og-fg-muted" aria-hidden />}
+              disabled={props.disabled}
+              testId="realtime-language-row"
+              onClick={() => setLanguagePage({ provider: props.provider!, open: true })}
+            />
+          </div>
+        ) : null}
+      </div>
+    ) : (
+      <div className="flex flex-col gap-0.5" data-testid="realtime-model-picker-providers">
+        {providers.map((provider) => {
+          const meta = REALTIME_PROVIDER_META(t)[provider];
+          return (
+            <PickerNavRow
+              key={provider}
+              label={realtimeProviderLabel(t, provider)}
+              hint={meta.hint}
+              icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
+              active={props.selectedModel.provider === provider}
+              testId={`realtime-model-provider-${meta.key}`}
+              onClick={() => changeProvider(provider, 1)}
+            />
+          );
+        })}
+      </div>
+    );
 
   return (
     <div className="relative overflow-hidden" data-testid="realtime-model-picker-menu">
-      <PickerAnimatedPage pageKey={pageKey} direction={props.direction}>
+      <PickerAnimatedPage pageKey={pageKey} direction={direction}>
         {body}
       </PickerAnimatedPage>
     </div>
   );
+}
+
+function baseLanguage(tag: string): string {
+  return tag.split(/[-_]/)[0] ?? tag;
+}
+
+function languageDisplayName(code: string, locale: string | undefined): string {
+  try {
+    return (
+      new Intl.DisplayNames(locale ? [locale] : undefined, { type: "language" }).of(code) ?? code
+    );
+  } catch {
+    return code;
+  }
+}
+
+function sortedLanguages(
+  codes: readonly string[],
+  locale: string | undefined,
+): { code: string; name: string; nativeName: string }[] {
+  return codes
+    .map((code) => ({
+      code,
+      name: languageDisplayName(code, locale),
+      nativeName: languageDisplayName(code, code),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name, locale));
 }
 
 function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: SessionRealtimeControllerSnapshot }) {

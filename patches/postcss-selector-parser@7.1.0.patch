@@ -1,0 +1,26 @@
+diff --git a/postcss-selector-parser.d.ts b/postcss-selector-parser.d.ts
+index 4efbc10d1a90b306d56f0ff935be8e2c8d1fb06d..44697feec5255cb0ccc857ba8ff1c88b18c5b773 100644
+--- a/postcss-selector-parser.d.ts
++++ b/postcss-selector-parser.d.ts
+@@ -14,9 +14,6 @@
+  */
+ export = parser;
+ 
+-// A type that's T but not U.
+-type Diff<T, U> = T extends U ? never : T;
+-
+ // TODO: Conditional types in TS 1.8 will really clean this up.
+ declare function parser(): parser.Processor<never>;
+ declare function parser<Transform>(processor: parser.AsyncProcessor<Transform>): parser.Processor<Transform, never>;
+@@ -332,10 +329,9 @@ declare namespace parser {
+     function root(opts: ContainerOptions): Root;
+     function isRoot(node: any): node is Root;
+ 
+-    interface _Selector<S> extends Container<string, Diff<Node, S>> {
++    interface Selector extends Container<string, NodeTypes[Exclude<keyof NodeTypes, 'selector'>]> {
+         type: "selector";
+     }
+-    type Selector = _Selector<Selector>;
+     function selector(opts: ContainerOptions): Selector;
+     function isSelector(node: any): node is Selector;
+ 

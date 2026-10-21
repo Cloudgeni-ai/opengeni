@@ -16,6 +16,8 @@ export function scheduledRunErrorText(error: string): string {
   const trimmed = error.trim();
   if (trimmed === "scheduled_session_paused")
     return "This run was skipped because its chat was paused. Open the chat and resume it to allow future runs; skipped runs are not replayed.";
+  if (trimmed === "scheduled_workspace_paused")
+    return "This run was skipped because the workspace's agent activity was paused. Runs start again once the workspace is resumed; skipped runs are not replayed.";
   if (trimmed === "scheduled_session_not_idle")
     return "This run was skipped because its chat was busy. The schedule will try again at its next scheduled time.";
   if (trimmed === "session_usage_limit") return SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE;

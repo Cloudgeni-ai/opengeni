@@ -1,8 +1,11 @@
 import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
+
+const DialogContainedPortal = containedPortal(Dialog.Portal);
 
 export type SessionCapabilityFrameProps = {
   name: string;
@@ -14,7 +17,7 @@ export type SessionCapabilityFrameProps = {
   expanded: boolean;
   complete: boolean;
   /** Completion copy must reflect the provider's actual scope of access. */
-  completeLabel?: string;
+  completeLabel?: string | undefined;
   actionLabel: string;
   /** Direct navigation actions should not announce a dialog on the card. */
   opensDialog?: boolean;
@@ -160,7 +163,7 @@ export function SessionCapabilityFrame({
           if (!open && !busy) onClose();
         }}
       >
-        <Dialog.Portal>
+        <DialogContainedPortal>
           <Dialog.Overlay className="og-root og-session-capability-overlay" style={portalStyle} />
           <Dialog.Content
             className="og-root og-session-capability-dialog"
@@ -196,7 +199,7 @@ export function SessionCapabilityFrame({
             </div>
             <div className="og-session-capability-dialog-body">{children}</div>
           </Dialog.Content>
-        </Dialog.Portal>
+        </DialogContainedPortal>
       </Dialog.Root>
     </div>
   );

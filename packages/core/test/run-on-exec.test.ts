@@ -1,9 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
 import {
   FakeOpRunner,
   type FakeOpScript,
   InMemoryOpStreamTransport,
+  timeoutAgentError,
+  agentErrorToControlError,
   type ControlRpc,
 } from "@opengeni/runtime/sandbox";
 import {
@@ -27,6 +29,7 @@ type ExecPlan = {
   failureCode?: "OP_OVERFLOW" | "OP_SPOOL_IO" | "OP_PIPE_IO";
   failureDetail?: Record<string, string>;
   sideEffect?: boolean;
+  holdUntilCancel?: boolean;
 };
 
 /**
@@ -43,6 +46,8 @@ class InMemoryMachineRunner implements ControlRpc {
   readonly opRunner: FakeOpRunner;
   executions = 0;
   completedSideEffects = 0;
+  onStart?: () => void;
+  unavailable = false;
 
   constructor(private readonly plans: Record<string, ExecPlan>) {
     this.opRunner = new FakeOpRunner({
@@ -61,6 +66,7 @@ class InMemoryMachineRunner implements ControlRpc {
     opts: { timeoutMs: number },
   ): Promise<ControlResponse> {
     this.requests.push({ req, wireTimeoutMs: opts.timeoutMs });
+    if (this.unavailable) throw agentErrorToControlError(timeoutAgentError());
     const op = req.op;
     if (op?.$case === "fsRead") {
       const content = encoder.encode("machine-file");
@@ -72,7 +78,9 @@ class InMemoryMachineRunner implements ControlRpc {
         },
       };
     }
-    return await this.opRunner.request(_subject, req, opts);
+    const response = await this.opRunner.request(_subject, req, opts);
+    if (op?.$case === "opStart") this.onStart?.();
+    return response;
   }
 
   private scriptExec(exec: { command: string[]; timeoutMs: number }): FakeOpScript {
@@ -86,7 +94,7 @@ class InMemoryMachineRunner implements ControlRpc {
       ...(plan.stdout ? [{ channel: "stdout" as const, bytes: plan.stdout }] : []),
       ...(plan.stderr ? [{ channel: "stderr" as const, bytes: plan.stderr }] : []),
     ];
-    if (plan.durationMs > exec.timeoutMs) {
+    if (exec.timeoutMs > 0 && plan.durationMs > exec.timeoutMs) {
       return {
         frames,
         exit: {
@@ -101,6 +109,7 @@ class InMemoryMachineRunner implements ControlRpc {
     }
     return {
       frames,
+      ...(plan.holdUntilCancel ? { live: true, holdUntilCancel: true } : {}),
       ...(plan.healAfterLiveLoss
         ? {
             live: true,
@@ -147,6 +156,150 @@ async function run(
 }
 
 describe("run_on Connected Machine exec receipts", () => {
+  test("a replaced runner transfers the abandoned one-off to exact-connection cleanup", async () => {
+    const runner = new InMemoryMachineRunner({
+      "blocked read": { durationMs: 0, exitCode: 0, holdUntilCancel: true },
+    });
+    let live = CONNECTION_INSTANCE;
+    const abandoned: { connectionInstanceId: string; opId: string }[] = [];
+    runner.onStart = () => {
+      live = "replacement-connection";
+      runner.unavailable = true;
+    };
+    const opStream = {
+      ...runner.opStream,
+      silenceTimeoutMs: 120,
+      reconnectHoldMs: 600,
+      ackIntervalMs: 20,
+    };
+    const result = await executeRunOnSelfhostedMachine(
+      {
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: "/home/user/project",
+        controlRpc: runner,
+        opStream,
+        relay: { host: "relay.test", tls: true },
+        controlTimeoutMs: 2_000,
+        execTimeoutMs: 0,
+        resolveOperationAdmission: async () => ({
+          connectionInstanceId: live,
+          workspaceRoot: "/home/user/project",
+          opStream,
+        }),
+        abandonCommand: async (input) => {
+          abandoned.push(input);
+          return { commandId: "retained-command" };
+        },
+      },
+      TARGET,
+      { kind: "exec", cmd: "blocked read" },
+    );
+    expect(result.ok).toBe(false);
+    expect(abandoned, JSON.stringify(result)).toHaveLength(1);
+    const starts = runner.requests.filter(({ req }) => req.op?.$case === "opStart");
+    expect(starts).toHaveLength(1);
+    expect(abandoned[0]).toMatchObject({
+      connectionInstanceId: CONNECTION_INSTANCE,
+      opId: starts[0]!.req.requestId,
+    });
+  });
+  test("a live one-off yields only after durable adoption without stopping it or a sibling", async () => {
+    const runner = new InMemoryMachineRunner({
+      "blocked read": { durationMs: 0, exitCode: 0, holdUntilCancel: true },
+      sibling: { durationMs: 0, exitCode: 0, stdout: "still working" },
+    });
+    const adoption = Promise.withResolvers<{ commandId: string }>();
+    const requested = Promise.withResolvers<void>();
+    let returned = false;
+    const blocked = executeRunOnSelfhostedMachine(
+      {
+        yieldTimeMs: 1,
+        backgroundCommands: {
+          adoptBackgroundCommand: async () => {
+            requested.resolve();
+            return await adoption.promise;
+          },
+        },
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: "/home/user/project",
+        controlRpc: runner,
+        opStream: runner.opStream,
+        relay: { host: "relay.test", tls: true },
+        controlTimeoutMs: 30_000,
+        execTimeoutMs: 0,
+      },
+      TARGET,
+      { kind: "exec", cmd: "blocked read" },
+    ).then((result) => {
+      returned = true;
+      return result;
+    });
+    await requested.promise;
+    expect(returned).toBe(false);
+    const sibling = await run(runner, { kind: "exec", cmd: "sibling" }, { execTimeoutMs: 0 });
+    expect(sibling).toMatchObject({ ok: true, stdout: "still working", deadlineMs: 0 });
+    adoption.resolve({ commandId: "retained-command" });
+    expect(await blocked).toMatchObject({
+      ok: true,
+      state: "running",
+      commandId: "retained-command",
+      exitCode: null,
+      timedOut: false,
+      deadlineMs: 0,
+    });
+    const cancellations = runner.requests.filter(({ req }) => req.op?.$case === "opCancel");
+    expect(cancellations).toHaveLength(0);
+  });
+  test("an unlimited one-off keeps its native receipt without gaining a deadline", async () => {
+    const runner = new InMemoryMachineRunner({
+      "long work": { durationMs: 86_400_000, exitCode: 0, stdout: "complete", sideEffect: true },
+    });
+    const result = await run(runner, { kind: "exec", cmd: "long work" }, { execTimeoutMs: 0 });
+    expect(result).toMatchObject({
+      ok: true,
+      exitCode: 0,
+      timedOut: false,
+      deadlineMs: 0,
+      stdout: "complete",
+    });
+    expect(runner.completedSideEffects).toBe(1);
+    expect(runner.requests.filter(({ req }) => req.op?.$case === "opCancel")).toHaveLength(0);
+  });
+
+  test("failed custody adoption stops the exact unowned one-off rather than returning a running receipt", async () => {
+    const runner = new InMemoryMachineRunner({
+      "blocked read": { durationMs: 0, exitCode: 0, holdUntilCancel: true },
+    });
+    const result = await executeRunOnSelfhostedMachine(
+      {
+        yieldTimeMs: 1,
+        backgroundCommands: {
+          adoptBackgroundCommand: async () => {
+            throw new Error("owner no longer active");
+          },
+        },
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: "/home/user/project",
+        controlRpc: runner,
+        opStream: runner.opStream,
+        relay: { host: "relay.test", tls: true },
+        controlTimeoutMs: 30_000,
+        execTimeoutMs: 0,
+      },
+      TARGET,
+      { kind: "exec", cmd: "blocked read" },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.commandId).toBeUndefined();
+    expect(runner.executions).toBe(1);
+    expect(runner.requests.some(({ req }) => req.op?.$case === "opCancel")).toBe(true);
+  });
   test("a grant revoked after snapshot fences exec/read/write at the last boundary with zero dispatch", async () => {
     for (const op of [
       { kind: "exec", cmd: "true" },
@@ -245,7 +398,7 @@ describe("run_on Connected Machine exec receipts", () => {
 
   test("<deadline exit 0 and nonzero preserve exact terminal status", async () => {
     const runner = new InMemoryMachineRunner({
-      clean: { durationMs: 119_999, exitCode: 0, stdout: "clean\n" },
+      clean: { durationMs: 31_000, exitCode: 0, stdout: "clean\n" },
       nonzero: { durationMs: 1, exitCode: 7, stderr: "failed\n" },
     });
 
@@ -272,27 +425,76 @@ describe("run_on Connected Machine exec receipts", () => {
     expect(runner.executions).toBe(2);
   });
 
-  test("configured 120s exec deadline is distinct from the 30s control deadline", async () => {
-    const runner = new InMemoryMachineRunner({
-      build: { durationMs: 31_000, exitCode: 0, stdout: "built\n" },
-    });
+  test.each([
+    [0, 0],
+    [1, 0],
+    [0, 25],
+    [1, 25],
+  ])(
+    "configured exec deadline deducts %dms initial admission and %dms before-send revalidation",
+    async (admissionMs, revalidationMs) => {
+      const runner = new InMemoryMachineRunner({
+        build: { durationMs: 31_000, exitCode: 0, stdout: "built\n" },
+      });
+      let now = 1_000_000;
+      let admissions = 0;
+      const clock = spyOn(Date, "now").mockImplementation(() => now);
+      try {
+        const exec = await executeRunOnSelfhostedMachine(
+          {
+            workspaceId: WORKSPACE,
+            agentId: AGENT,
+            connectionInstanceId: CONNECTION_INSTANCE,
+            workspaceRoot: "/home/user/project",
+            controlRpc: runner,
+            opStream: runner.opStream,
+            relay: { host: "relay.test", tls: true },
+            controlTimeoutMs: 30_000,
+            execTimeoutMs: 120_000,
+            resolveOperationAdmission: async () => {
+              // Admission and the final route check share one absolute deadline.
+              now += admissions++ === 0 ? admissionMs : revalidationMs;
+              return {
+                connectionInstanceId: CONNECTION_INSTANCE,
+                workspaceRoot: "/home/user/project",
+                opStream: runner.opStream,
+                operationResourcePolicySupported: true,
+                operationCpuQuotaSupported: true,
+                operationResourcePolicy: {
+                  memoryMaxBytes: null,
+                  memoryHighBytes: null,
+                  cpuMaxMillicores: null,
+                  revision: 0,
+                },
+              };
+            },
+          },
+          TARGET,
+          { kind: "exec", cmd: "build" },
+        );
+        expect(exec.deadlineMs).toBe(120_000);
+        expect(admissions).toBe(2);
+        expect(exec).toMatchObject({ ok: true, exitCode: 0, stdout: "built\n" });
+        const execRequest = runner.requests.find(({ req }) => req.op?.$case === "opStart");
+        if (execRequest?.req.op?.$case !== "opStart") throw new Error("expected OpStart request");
+        if (execRequest.req.op.opStart.op?.$case !== "exec") {
+          throw new Error("expected op-stream exec request");
+        }
+        expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(
+          120_000 - admissionMs - revalidationMs,
+        );
+        expect(execRequest.wireTimeoutMs).toBe(30_000);
 
-    const exec = await run(runner, { kind: "exec", cmd: "build" });
-    expect(exec.deadlineMs).toBe(120_000);
-    const execRequest = runner.requests.find(({ req }) => req.op?.$case === "opStart");
-    if (execRequest?.req.op?.$case !== "opStart") throw new Error("expected OpStart request");
-    if (execRequest.req.op.opStart.op?.$case !== "exec") {
-      throw new Error("expected op-stream exec request");
-    }
-    expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(120_000);
-    expect(execRequest.wireTimeoutMs).toBe(30_000);
-
-    const read = await run(runner, { kind: "read", path: "/tmp/result" });
-    expect(read).toMatchObject({ kind: "read", ok: true, content: "machine-file" });
-    const readRequest = runner.requests.find(({ req }) => req.op?.$case === "fsRead");
-    expect(readRequest?.req.op?.$case).toBe("fsRead");
-    expect(readRequest?.wireTimeoutMs).toBe(30_000);
-  });
+        const read = await run(runner, { kind: "read", path: "/tmp/result" });
+        expect(read).toMatchObject({ kind: "read", ok: true, content: "machine-file" });
+        const readRequest = runner.requests.find(({ req }) => req.op?.$case === "fsRead");
+        expect(readRequest?.req.op?.$case).toBe("fsRead");
+        expect(readRequest?.wireTimeoutMs).toBe(30_000);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
 
   test(">deadline execution is killed, typed, and never ok:true", async () => {
     const runner = new InMemoryMachineRunner({

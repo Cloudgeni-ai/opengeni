@@ -11,13 +11,14 @@ import {
   createSession,
   encryptEnvironmentValue,
   ensureManagedAccessForUser,
+  updateWorkspaceSettings,
   withWorkspaceRls,
   withSessionRlsActorContext,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { connectSubscriptionCoreCodexConnection } from "@opengeni/db";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { signDelegatedAccessToken, UpdateWorkspaceSettingsRequest } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
 import {
@@ -29,6 +30,7 @@ import {
 import { Hono } from "hono";
 
 import { registerSessionRoutes } from "../src/routes/sessions";
+import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
 const DELEGATION_SECRET = "session-realtime-routes-secret-with-32-bytes";
 const encryptionKey = Buffer.alloc(32, 11);
@@ -48,6 +50,7 @@ let app: Hono;
 let bus: MemoryEventBus;
 const wakes: Array<{ sessionId: string; wakeRevision: number }> = [];
 let providerCalls = 0;
+const elevenLabsMints: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
 
 setDefaultTimeout(30_000);
 
@@ -71,7 +74,7 @@ beforeAll(async () => {
     triggerScheduledTask: noop,
   } as unknown as SessionWorkflowClient;
   app = new Hono();
-  registerSessionRoutes(app, {
+  const deps = {
     settings,
     db: client.db,
     bus,
@@ -94,6 +97,25 @@ beforeAll(async () => {
         });
       }
       providerCalls += 1;
+      if (request.url === "https://api.elevenlabs.io/v1/convai/realtime/client_secrets") {
+        const body = (await request.json()) as {
+          session?: { audio?: { output?: { voice?: string } } };
+        };
+        elevenLabsMints.push({ headers: request.headers, body });
+        if (body.session?.audio?.output?.voice === "unknown-voice-id") {
+          return Response.json(
+            {
+              detail: {
+                type: "validation_error",
+                code: "invalid_voice_id",
+                message: "Unknown voice",
+              },
+            },
+            { status: 400 },
+          );
+        }
+        return Response.json({ value: "ek_test_secret", expires_at: 2_000_000_000 });
+      }
       if (request.url === "https://voice.example.test/openai/v1/live/sessions") {
         expect(request.headers.get("api-key")).toBe("synthetic-azure-key");
         return Response.json({
@@ -119,7 +141,10 @@ beforeAll(async () => {
         },
       );
     },
-  } as unknown as ApiRouteDeps);
+  } as unknown as ApiRouteDeps;
+  registerSessionRoutes(app, deps);
+  // Voice settings are workspace settings, listed by the realtime model catalog.
+  registerWorkspaceRoutes(app, deps);
 }, 180_000);
 
 afterAll(async () => {
@@ -220,7 +245,7 @@ async function fixture(withConnector = false) {
     workspaceId: grant.workspaceId!,
     subjectId,
     principalKind: "human_session",
-    permissions: ["sessions:read", "sessions:control"],
+    permissions: ["sessions:read", "sessions:control", "workspace:read"],
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   return {
@@ -702,12 +727,17 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       connectionEpoch: number;
       initialItems: unknown[];
       instructions: string;
+      protocol: string;
+      protocols: string[];
+      sessionUpdate: Record<string, unknown> | null;
       replay: boolean;
     };
     expect(connected).toMatchObject({
       token: "vcst_test_token",
       upstreamModelId: "openai/gpt-realtime-2.1",
       connectionEpoch: 1,
+      protocol: "ai-gateway",
+      protocols: ["ai-gateway-realtime.v1", "ai-gateway-auth.vcst_test_token"],
       replay: false,
     });
     expect(connected.url).toBe(
@@ -715,6 +745,41 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     );
     expect(connected.initialItems).toBeArray();
     expect(connected.instructions).toContain("realtime conversational interface");
+    // The server now builds the session update; it must stay byte-identical to
+    // the event clients sent before, so the provider sees the same prefix.
+    expect(JSON.stringify(connected.sessionUpdate)).toBe(
+      JSON.stringify({
+        type: "session-update",
+        config: {
+          instructions: connected.instructions,
+          outputModalities: ["audio"],
+          inputAudioFormat: { type: "audio/pcm", rate: 24_000 },
+          outputAudioFormat: { type: "audio/pcm", rate: 24_000 },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          turnDetection: { type: "server-vad", prefixPaddingMs: 300, silenceDurationMs: 500 },
+          tools: [
+            {
+              type: "function",
+              name: "delegate_to_session",
+              description:
+                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+              parameters: {
+                type: "object",
+                properties: {
+                  request: {
+                    type: "string",
+                    description: "Complete standalone task for the session agent",
+                  },
+                },
+                required: ["request"],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      }),
+    );
     expect(providerCalls).toBe(callsBefore + 1);
 
     const replay = await app.request(`${base}/gateway`, {
@@ -741,6 +806,270 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       },
     );
     expect(activated.status).toBe(200);
+  });
+
+  test("mints an Eleven Realtime client secret with the workspace ElevenLabs key", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "workspace-elevenlabs/eleven_realtime_v1_max",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    expect(startedResponse.status).toBe(201);
+    const started = (await startedResponse.json()) as {
+      mode: { id: string; version: number; connectionEpoch: number };
+    };
+    const request = {
+      realtimeId: started.mode.id,
+      operationId: crypto.randomUUID(),
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      expectedConnectionEpoch: started.mode.connectionEpoch,
+      rotate: false,
+    };
+
+    // Without a workspace key the broker refuses before calling ElevenLabs.
+    const mintsBefore = elevenLabsMints.length;
+    const missing = await app.request(`${base}/websocket`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(request),
+    });
+    expect(missing.status).toBeGreaterThanOrEqual(400);
+    expect(elevenLabsMints.length).toBe(mintsBefore);
+
+    const [workspace] =
+      await shared.admin`select account_id from workspaces where id = ${value.workspaceId}`;
+    await createConnection(client.db, {
+      accountId: workspace!.account_id as string,
+      workspaceId: value.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "elevenlabs-test-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: value.subjectId,
+    });
+
+    const connectOperationId = crypto.randomUUID();
+    const response = await app.request(`${base}/websocket`, {
+      method: "POST",
+      headers: value.headers,
+      // The refused attempt durably failed epoch 1, so the client rotates.
+      body: JSON.stringify({
+        ...request,
+        operationId: connectOperationId,
+        expectedConnectionEpoch: 1,
+        rotate: true,
+      }),
+    });
+    expect(response.status).toBe(200);
+    const connected = (await response.json()) as {
+      provider: string;
+      token: string;
+      url: string;
+      upstreamModelId: string;
+      instructions: string;
+      protocol: string;
+      protocols: string[];
+      sessionUpdate: Record<string, unknown> | null;
+      transcriptAudioTags?: boolean;
+    };
+    expect(connected).toMatchObject({
+      token: "ek_test_secret",
+      upstreamModelId: "eleven_realtime_v1_max",
+      protocol: "openai",
+      protocols: ["realtime", "openai-insecure-api-key.ek_test_secret"],
+      sessionUpdate: null,
+      transcriptAudioTags: true,
+    });
+    expect(connected.url).toBe(
+      "wss://api.elevenlabs.io/v1/convai/realtime?model=eleven_realtime_v1_max",
+    );
+
+    // The mint carries the whole session: ElevenLabs applies it at session.created.
+    expect(elevenLabsMints.length).toBe(mintsBefore + 1);
+    const mint = elevenLabsMints.at(-1)!;
+    expect(mint.headers.get("xi-api-key")).toBe("elevenlabs-test-key");
+    expect(mint.body).toMatchObject({
+      session: {
+        type: "realtime",
+        model: "eleven_realtime_v1_max",
+        instructions: connected.instructions,
+        output_modalities: ["audio"],
+        audio: {
+          input: {
+            format: { type: "audio/pcm", rate: 24_000 },
+            transcription: {},
+            turn_detection: { type: "semantic_vad", eagerness: "high" },
+          },
+          output: { format: { type: "audio/pcm" } },
+        },
+        tools: [{ type: "function", name: "delegate_to_session" }],
+        max_duration_seconds: 3600,
+      },
+    });
+
+    // ElevenLabs does not detect the spoken language: the person's language
+    // becomes the conversation language, mapped to ElevenLabs' code.
+    let live = connected as unknown as {
+      connectionId: string;
+      connectionEpoch: number;
+      modeVersion: number;
+    };
+    let operationId = connectOperationId;
+    let expectedConnectionEpoch = 1;
+    type MintedAudio = {
+      input: { transcription: unknown; turn_detection: unknown };
+      output: Record<string, unknown>;
+    };
+    const attemptRotation = async (extra: Record<string, unknown>): Promise<Response> => {
+      const activated = await app.request(
+        `${base}/${started.mode.id}/connections/${live.connectionId}/activate`,
+        {
+          method: "POST",
+          headers: value.headers,
+          body: JSON.stringify({
+            browserInstanceId: proof.browserInstanceId,
+            ownerKey: proof.ownerKey,
+            operationId,
+            expectedVersion: live.modeVersion,
+            expectedConnectionEpoch,
+            connectionEpoch: live.connectionEpoch,
+          }),
+        },
+      );
+      expect(activated.status).toBe(200);
+      const activeMode = ((await activated.json()) as { mode: { version: number } }).mode;
+      operationId = crypto.randomUUID();
+      expectedConnectionEpoch = live.connectionEpoch;
+      return await app.request(`${base}/websocket`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          ...request,
+          operationId,
+          expectedVersion: activeMode.version,
+          expectedConnectionEpoch,
+          rotate: true,
+          ...extra,
+        }),
+      });
+    };
+    const rotate = async (extra: Record<string, unknown>): Promise<MintedAudio> => {
+      const rotated = await attemptRotation(extra);
+      expect(rotated.status).toBe(200);
+      live = (await rotated.json()) as typeof live;
+      return (elevenLabsMints.at(-1)!.body as { session: { audio: MintedAudio } }).session.audio;
+    };
+    for (const [language, transcription] of [
+      ["nb-NO", { language: "no" }],
+      ["pt-BR", { language: "pt-br" }],
+      // A language ElevenLabs does not support keeps its default.
+      ["eo", {}],
+    ] as const) {
+      const audio = await rotate({ language });
+      expect(audio.input.transcription).toEqual(transcription);
+      // Nothing chosen: ElevenLabs' default voice and Opengeni's quick turn-taking.
+      expect(audio.output).toEqual({ format: { type: "audio/pcm" } });
+      expect(audio.input.turn_detection).toEqual({ type: "semantic_vad", eagerness: "high" });
+    }
+
+    const elevenMax = "workspace-elevenlabs/eleven_realtime_v1_max";
+    const elevenMini = "workspace-elevenlabs/eleven_realtime_v1_mini";
+    // The settings route merges through this, after its own settings authorization.
+    const patchVoice = async (realtimeVoice: Record<string, unknown>) =>
+      (await updateWorkspaceSettings(client.db, value.workspaceId, { realtimeVoice })).settings
+        .realtimeVoice;
+    // The workspace's saved settings apply to every voice session in it, over
+    // the person's own language.
+    expect(
+      await patchVoice({
+        [elevenMax]: { voice: "nb-voice-id", language: "no", turnEagerness: "medium" },
+        [elevenMini]: { voice: "mini-voice-id" },
+      }),
+    ).toEqual({
+      [elevenMax]: { voice: "nb-voice-id", language: "no", turnEagerness: "medium" },
+      [elevenMini]: { voice: "mini-voice-id" },
+    });
+    let audio = await rotate({ language: "en-US" });
+    expect(audio.input.transcription).toEqual({ language: "no" });
+    expect(audio.input.turn_detection).toEqual({ type: "semantic_vad", eagerness: "medium" });
+    expect(audio.output).toEqual({ format: { type: "audio/pcm" }, voice: "nb-voice-id" });
+
+    // A connection's own settings (an embedding app, or the person's pick)
+    // override the workspace's field by field.
+    audio = await rotate({
+      language: "en-US",
+      voiceSettings: { language: "sv-SE", turnEagerness: "low" },
+    });
+    expect(audio.input.transcription).toEqual({ language: "sv" });
+    expect(audio.input.turn_detection).toEqual({ type: "semantic_vad", eagerness: "low" });
+    expect(audio.output.voice).toBe("nb-voice-id");
+
+    // The catalog lists what each provider offers and the workspace's values.
+    const catalogResponse = await app.request(
+      `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
+      { headers: value.headers },
+    );
+    expect(catalogResponse.status).toBe(200);
+    const catalog = (await catalogResponse.json()) as {
+      models: Array<Record<string, unknown> & { id: string }>;
+    };
+    const catalogModel = (id: string) => catalog.models.find((model) => model.id === id);
+    expect(catalogModel(elevenMax)?.voices).toContainEqual({ id: "lily", label: "Lily" });
+    expect(catalogModel(elevenMax)).toMatchObject({
+      customVoice: true,
+      turnEagerness: ["low", "medium", "high"],
+      voiceDefaults: { voice: "brian", turnEagerness: "high" },
+      workspaceVoiceSettings: { voice: "nb-voice-id", language: "no", turnEagerness: "medium" },
+    });
+    expect(catalogModel(elevenMax)?.languages).toContain("no");
+    const gatewayModel = catalogModel("workspace-gateway/openai/gpt-realtime-2.1");
+    expect(gatewayModel?.voices).toContainEqual({ id: "marin", label: "Marin" });
+    expect(gatewayModel?.languages).toBeUndefined();
+    expect(gatewayModel?.turnEagerness).toBeUndefined();
+    expect(catalogModel("supergrok/grok-voice-think-fast-2.0")).toMatchObject({
+      voiceDefaults: { voice: "eve" },
+    });
+    expect(catalogModel("gpt-live-1-boulder-alpha")?.voices).toBeUndefined();
+
+    // Null removes one model's settings and keeps the others'.
+    expect(await patchVoice({ [elevenMax]: null })).toEqual({
+      [elevenMini]: { voice: "mini-voice-id" },
+    });
+    audio = await rotate({ language: "nb-NO" });
+    expect(audio.input.transcription).toEqual({ language: "no" });
+    expect(audio.output).toEqual({ format: { type: "audio/pcm" } });
+    expect(audio.input.turn_detection).toEqual({ type: "semantic_vad", eagerness: "high" });
+
+    // A voice the ElevenLabs account cannot use gets a clear, non-retryable answer.
+    const rejectedVoice = await attemptRotation({ voiceSettings: { voice: "unknown-voice-id" } });
+    expect(rejectedVoice.status).toBe(409);
+    expect(await rejectedVoice.json()).toMatchObject({
+      error: {
+        code: "ELEVENLABS_REALTIME_VOICE_UNAVAILABLE",
+        message: expect.stringContaining("Add it to My Voices in ElevenLabs"),
+        retryable: false,
+      },
+    });
+
+    // Settings outside the contract, such as an unsupported speed, are rejected.
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({ realtimeVoice: { [elevenMax]: { speed: 1.2 } } })
+        .success,
+    ).toBe(false);
   });
 
   test("keeps omission-compatible clients on immediate idempotent activation during rollout", async () => {

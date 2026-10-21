@@ -292,3 +292,16 @@ the cost mechanism; a production/browser-task benchmark remains necessary to
 claim end-to-end task latency or quality improvements.
 The provider's affinity header now labels a cohort rather than an individual
 session; this deliberately changes provider routing metadata, not model input.
+
+## Not adopted: one cohort per account (October 20, 2026)
+
+A broader cohort was tried and reverted: one key per Opengeni account, used as
+both this header and the OpenAI/Azure `prompt_cache_key`. It made new tenant
+sessions of an embedding product start warm, but it routes every session of an
+account through one prefix-and-key combination. OpenAI documents roughly 15
+requests per minute per prefix-and-key combination before overflow goes to
+additional machines, each starting cold. A busy account runs far above that, so
+long sessions could lose their own cached history on later turns, which is
+most of the cached volume. The cohort stays workspace and person, and the body
+`prompt_cache_key` stays the session id. A finer design, such as a few stable
+buckets per shared prefix, needs measurement under real concurrent load first.

@@ -103,11 +103,23 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { instrumentSandboxClientSessionOperations } from "./operation-purpose";
+export {
+  currentSandboxOperationPurpose,
+  instrumentSandboxClientSessionOperations,
+  instrumentSandboxSessionOperations,
+  SANDBOX_OPERATION_PURPOSES,
+  sandboxHookOperationPurpose,
+  withSandboxOperationPurpose,
+  type SandboxOperationPurpose,
+  type SandboxSetupOperationObservation,
+} from "./operation-purpose";
 import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
+import type { ComputeCreateIdentity } from "./compute/session";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -165,6 +177,7 @@ export {
   renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
   providerWorkspaceCaptureIsPointInTime,
+  providerDrainCaptureIsPointInTime,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
@@ -537,6 +550,7 @@ export {
   NatsControlRpc,
   SelfhostedControlError,
   agentErrorToControlError,
+  parseAgentRpcSubject,
   subjectFor,
   offlineControlResponse,
   timeoutControlResponse,
@@ -547,9 +561,22 @@ export {
   drainingMessage,
   execDeadlineHint,
   NEVER_SENT_DETAIL_KEY,
+  CONNECTION_REPLACED_DETAIL_KEY,
+  AGENT_UNANSWERED_DETAIL_KEY,
+  agentNotAnsweredReason,
+  isAgentNotAnswered,
+  requestWithoutWaking,
+  withoutWaking,
+  type NoWakeReply,
+  connectionReplacedAgentError,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+export {
+  AGENT_LINK_LOST_HEADER,
+  AGENT_UNANSWERED_HEADER,
+  NO_WAKE_HEADER,
+} from "./selfhosted/control-replay";
 // The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
 // + machine.* events; the op-engine's op-stream client emits through this too).
 export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";
@@ -605,6 +632,7 @@ export {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
   isConnectedMachineAbsolutePath,
+  isUnusableConnectedMachineWorkspace,
   isWindowsConnectedMachinePath,
   normalizeConnectedMachineWorkspaceRoot,
   relativeConnectedMachinePath,
@@ -613,6 +641,46 @@ export {
   type ConnectedMachineOs,
 } from "./selfhosted/workspace-path";
 export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
+// Opengeni compute: managed microVM sandboxes whose provider session is the
+// Connected Machine agent inside the box (docs/compute-backend.md).
+export {
+  ComputeControlClient,
+  ComputeControlError,
+  isComputeSandboxNotFound,
+  type ComputeCreateRequest,
+  type ComputeSandboxView,
+  type ComputeWokenView,
+} from "./compute/control";
+export {
+  getComputeAgentPlane,
+  setComputeAgentPlane,
+  usesAgentTransport,
+  type ComputeAgentConnection,
+  type ComputeAgentPlane,
+} from "./compute/plane";
+export {
+  COMPUTE_WORKSPACE_ROOT,
+  ComputeSandboxClient,
+  ComputeSandboxSession,
+  ComputeWakeGate,
+  ComputeWakingControlRpc,
+  deleteComputeBox,
+  wakeComputeSandboxOnNoResponders,
+  type ComputeCreateIdentity,
+  type ComputeSessionState,
+  type ComputeTurnDeps,
+} from "./compute/session";
+export {
+  COMPUTE_METADATA,
+  createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
+  sweepComputeOrphans,
+  type ComputeOrphanSweepProgress,
+  type StaleComputeEnrollment,
+  type StaleComputeEnrollmentPage,
+  type ComputeOrphanSweepResult,
+  type ComputeSandboxIdentity,
+} from "./compute/orphans";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`
@@ -629,11 +697,14 @@ export {
 } from "./selfhosted/op-transport";
 export {
   cancelSelfhostedOp,
+  isOpTombstone,
   OP_STREAM_ACK_INTERVAL_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
+  OP_START_RESEND_HORIZON_MS,
   querySelfhostedOp,
+  releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,
   type OpStreamExecOutcome,
   type OpStreamJournal,
@@ -792,15 +863,20 @@ export function createSandboxClientForBackend(
     exposedPorts.push(BROWSER_CONTROL_PORT);
   }
 
-  const raw = withProviderExactResumeContract(
-    registration,
-    registration.build({
-      settings,
-      environment,
-      exposedPorts,
-      ...(metrics ? { metrics } : {}),
-    }),
-  );
+  const built = registration.build({
+    settings,
+    environment,
+    exposedPorts,
+    ...(metrics ? { metrics } : {}),
+  });
+  if (metrics?.onSandboxSetupOperation) {
+    instrumentSandboxClientSessionOperations(
+      built,
+      registration.backend,
+      metrics.onSandboxSetupOperation,
+    );
+  }
+  const raw = withProviderExactResumeContract(registration, built);
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
     ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
@@ -1960,6 +2036,9 @@ export async function establishSandboxSessionFromEnvelope(
     loadHostWorkspaceArchive?: (ref: WorkspaceArchiveObjectRef) => Promise<WorkspaceArchiveSpool>;
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
+    /** The lease a created box belongs to. A compute sandbox's agent is
+     * enrolled under it, so creating one requires it; other backends ignore it. */
+    createIdentity?: ComputeCreateIdentity;
     onSandboxCreated?: SandboxCreatedCallback;
     /** Durable lease owners fence the attempt before invoking a provider create.
      * Called for each physical attempt, including logical-image fallback. A
@@ -2184,6 +2263,12 @@ export async function establishSandboxSessionFromEnvelope(
         // Non-Modal providers and isolated client-factory fixtures retain their
         // ordinary admission hook. Production Modal requires the wire intent.
         await opts.onBeforeSandboxCreate?.(createSettings);
+        if (backend === "compute") {
+          return await candidate.create!(
+            { manifest: createManifest },
+            opts.createIdentity ? { opengeniCreateIdentity: opts.createIdentity } : undefined,
+          );
+        }
         return await candidate.create!({ manifest: createManifest });
       };
       const createStarted = Date.now();

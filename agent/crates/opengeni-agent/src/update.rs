@@ -28,7 +28,7 @@ use crate::enrollment::InstallIdentity;
 use crate::DEFAULT_API_URL;
 
 /// Public fallback used only before the machine has any enrolled deployment.
-const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+const DEFAULT_BASE_URL: &str = DEFAULT_API_URL;
 // Linux current_exe follows the running inode. After replacement it can return
 // a deleted path; retain the install identity for retries and successor exec.
 static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -37,10 +37,23 @@ static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new()
 pub fn installed_executable() -> Result<&'static Path, String> {
     INSTALLED_EXECUTABLE
         .get_or_init(|| {
-            std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())
+            let path =
+                std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())?;
+            // _NSGetExecutablePath can return the launch symlink on macOS.
+            // Resolve it BEFORE selecting an artifact or replacing anything;
+            // otherwise a bundle alias becomes a standalone executable.
+            #[cfg(target_os = "macos")]
+            let path = resolve_macos_install_path(&path)
+                .map_err(|_| "installed_binary_unavailable".to_string())?;
+            Ok(path)
         })
         .as_deref()
         .map_err(Clone::clone)
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_macos_install_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
 }
 
 fn apply_verified_update(
@@ -302,6 +315,34 @@ pub struct ManagedUpdateResult {
     pub expected_sha256: String,
 }
 
+/// The update check for one control-plane request. This path exists only after
+/// an authorized human/control-plane request. Manual opt-in may cross a staged
+/// rollout boundary and may re-pin the same version after a failed/rolled-back
+/// attempt; signature, digest, target, monotonic-version, atomic-apply,
+/// health-gate, and rollback checks remain.
+fn managed_update_config(
+    base_url: &str,
+    channel: &str,
+    agent_id: String,
+    target_version: &str,
+    install_path: &Path,
+) -> UpdateConfig {
+    let mut config = UpdateConfig::new(
+        base_url.trim_end_matches('/'),
+        channel,
+        agent_id,
+        env!("CARGO_PKG_VERSION"),
+    );
+    select_install_target(&mut config, install_path);
+    config.allow_staged_rollout_opt_in = true;
+    config.allow_same_version = true;
+    // The request names its exact release. The channel pointer can still name
+    // the previous release while the control plane rolls out, so read that
+    // release's own signed manifest.
+    config.pinned_version = Some(target_version.to_string());
+    config
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ManagedUpdatePhase {
     Downloading,
@@ -333,19 +374,13 @@ pub fn apply_managed(
     )
     .map_err(|_| "install_identity_unavailable".to_string())?;
     let source = HttpSource::new().map_err(|_| "update_transport_unavailable".to_string())?;
-    let mut config = UpdateConfig::new(
-        base_url.trim_end_matches('/'),
+    let config = managed_update_config(
+        base_url,
         channel,
         install_identity.public_key_base64(),
-        env!("CARGO_PKG_VERSION"),
+        target_version,
+        install_path,
     );
-    select_install_target(&mut config, install_path);
-    // This path exists only after an authorized human/control-plane request.
-    // Manual opt-in may cross a staged rollout boundary and may re-pin the same
-    // version after a failed/rolled-back attempt; signature, digest, target,
-    // monotonic-version, atomic-apply, health-gate, and rollback checks remain.
-    config.allow_staged_rollout_opt_in = true;
-    config.allow_same_version = true;
     let plan = match check_update_manifest(&source, &config) {
         Ok(ManifestCheckOutcome::Available(plan)) => plan,
         Ok(ManifestCheckOutcome::UpToDate(_)) => return Err("target_not_offered".to_string()),
@@ -551,6 +586,73 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn macos_install_alias_resolves_before_artifact_selection_and_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "sealed original").unwrap();
+        let alias = dir.path().join("agent");
+        symlink(&executable, &alias).unwrap();
+        let resolved = resolve_macos_install_path(&alias).unwrap();
+        assert_eq!(resolved, executable.canonicalize().unwrap());
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        #[cfg(target_os = "macos")]
+        {
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, &resolved);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_through_an_app_symlink_captures_the_bundle_executable() {
+        const PROBE: &str = "OPENGENI_TEST_APP_ALIAS";
+        if let Some(expected) = std::env::var_os(PROBE) {
+            let installed = installed_executable().unwrap();
+            assert_eq!(installed, Path::new(&expected));
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, installed);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let alias = dir.path().join("agent");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        let output = std::process::Command::new(&alias)
+            .args([
+                "--exact",
+                "update::tests::running_through_an_app_symlink_captures_the_bundle_executable",
+                "--nocapture",
+            ])
+            .env(PROBE, executable.canonicalize().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn app_and_standalone_installations_select_distinct_signed_artifacts() {
@@ -563,6 +665,21 @@ mod tests {
         let mut standalone = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.28");
         select_install_target(&mut standalone, Path::new("/usr/local/bin/opengeni-agent"));
         assert_eq!(standalone.target, "universal-apple-darwin");
+    }
+
+    #[test]
+    fn a_managed_update_reads_the_requested_release_manifest() {
+        let config = managed_update_config(
+            "https://example.com/",
+            "stable",
+            "agent".to_string(),
+            "0.1.110",
+            Path::new("/usr/local/bin/opengeni-agent"),
+        );
+        assert_eq!(config.pinned_version.as_deref(), Some("0.1.110"));
+        assert_eq!(config.base_url, "https://example.com");
+        assert!(config.allow_staged_rollout_opt_in);
+        assert!(config.allow_same_version);
     }
 
     fn connection(channel: &str) -> StoredConnection {

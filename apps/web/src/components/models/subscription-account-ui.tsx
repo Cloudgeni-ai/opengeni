@@ -1,10 +1,10 @@
 import type { ComponentProps } from "react";
-import { ProviderTile } from "./models-ui";
-import { ListRow } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+import { ProviderTile } from "@opengeni/react/app/components/models/models-ui";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 
 /** The on/off words for an account's allocator, shared by its switch and read-only facts. */
 export const ACCOUNT_ENABLED_LABELS = { on: "Enabled", off: "Disabled" } as const;
@@ -98,5 +98,17 @@ export function SubscriptionRotationSettingRows({
         }
       />
     </SettingRowGroup>
+  );
+}
+
+/**
+ * Splits the one account list into subscriptions and pay-as-you-go keys, so
+ * gateways nobody uses never sit among (or above) the subscription pools.
+ */
+export function AccountGroupHeading({ children }: { children: string }) {
+  return (
+    <li className="col-span-full list-none px-3 pt-5 pb-1 first:pt-2">
+      <h3 className="m-0 text-xs font-medium tracking-wide text-fg-muted uppercase">{children}</h3>
+    </li>
   );
 }

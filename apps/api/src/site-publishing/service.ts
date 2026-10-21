@@ -31,19 +31,23 @@ import {
   getPublishedSiteVersion,
   getSiteDataSite,
   getSitePublication,
+  getSiteWorkspaceMemberPermissions,
   isSitePublishingUuid,
   getWorkspaceSiteLimitProfile,
   markSitePublicationEdgeSynced,
   readSiteRuntimeUsage,
   recordSitePublicationScan,
   getPublishedSite,
+  getWorkspace,
   listSiteRuntimeCancellationCandidates,
   revokeSiteViewerSessions,
   SitePublishingError,
   SITE_RUNTIME_SITE_PRINCIPAL,
+  updateWorkspaceArtifactVisibility,
   upsertSitePublication,
   readSiteHostnameEdgeState,
   readSiteHostnameLiveGeneration,
+  resolveNamedManagedPersonalWorkspaceGrant,
   type PublishedSiteRecord,
   type SiteDataSite,
   type SiteHostnameEdgeState,
@@ -834,8 +838,9 @@ export async function requireSitePublicationWriter(
 
 /**
  * Resolve a Site for publication management. The caller must see the Site
- * (its audience); managers are the Site Data managers (owner, workspace admin,
- * an agent acting for one, or a person-less key with artifacts:publish).
+ * (its audience); managers are the Site Data managers (anyone in the workspace
+ * with artifacts:publish, an agent acting for one, or a person-less key with
+ * artifacts:publish).
  * `mutate` callers must also pass `requireSitePublicationWriter`.
  */
 export async function resolveSiteManagement(
@@ -857,10 +862,32 @@ export async function resolveSiteManagement(
     site,
     record,
     manager: siteDataRole(grant, site, viewer.subjectId) === "manager",
-    admin: hasLiteralPermission(grant.permissions, "workspace:admin"),
+    admin: await isSiteAdministrator(deps, grant, viewer.subjectId),
     owner: viewer.subjectId !== null && owner === viewer.subjectId,
     subjectId: viewer.subjectId,
   };
+}
+
+/**
+ * Site administration (limits, extra assistant tools, lifting an admin
+ * takedown): a workspace admin, or the owner of a Personal workspace (and
+ * their agents) in that workspace. A Personal workspace deliberately carries
+ * no workspace:admin, but its owner administers it, as workspace settings do.
+ */
+export async function isSiteAdministrator(
+  deps: Pick<SitePublishingDeps, "db">,
+  grant: AccessGrant,
+  personSubjectId: string | null,
+): Promise<boolean> {
+  if (hasLiteralPermission(grant.permissions, "workspace:admin")) return true;
+  if (personSubjectId === null) return false;
+  return (
+    (await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: personSubjectId,
+    })) !== null
+  );
 }
 
 export function requireSiteManager(management: SiteManagement): void {
@@ -869,7 +896,7 @@ export function requireSiteManager(management: SiteManagement): void {
       403,
       "forbidden",
       "site_manager_required",
-      "Only the Site's owner or a workspace admin can manage its publication",
+      "You need permission to publish artifacts in this workspace to manage this Site's publication",
     );
 }
 
@@ -987,9 +1014,64 @@ export async function siteHostnameAvailability(
 }
 
 /**
+ * Whether publishing this Site first shares it with its personal workspace.
+ *
+ * Publication serves workspace Sites only. A personal workspace has nobody
+ * but its owner, and every chat there is Only me, so a Site its owner's agent
+ * makes is Only me too, and the personal workspace offers no Share step:
+ * publishing such a Site was a dead end. There, Only me and the workspace are
+ * the same one person, so publishing an active Only me Site shares it as part
+ * of publishing. Only the Site's owner, or their own agent, does this (the
+ * same person who could change its audience); in a shared workspace the owner
+ * still shares it first, because that widens who can see it.
+ *
+ * Only a publication that is not yet active shares: once published, a Site
+ * its owner set back to Only me stays Only me, and edits answer
+ * `site_not_shared` like anywhere else until they unpublish or share it.
+ */
+async function publishesPersonalOnlyMeSite(
+  deps: SitePublishingDeps,
+  management: SiteManagement,
+  existing: SitePublicationRecord | null,
+): Promise<boolean> {
+  const { record } = management;
+  if (existing?.status === "active") return false;
+  if (record.status !== "active" || record.visibility !== "user_private") return false;
+  if (!management.owner || !management.subjectId) return false;
+  if ((await getWorkspace(deps.db, management.scope.workspaceId))?.kind !== "personal")
+    return false;
+  // Defence in depth: the caller is this personal workspace's live owner.
+  if (management.subjectId.startsWith("user:"))
+    return (
+      (await getSiteWorkspaceMemberPermissions(deps.db, management.scope, management.subjectId)) !==
+      null
+    );
+  return true;
+}
+
+async function sharePersonalSiteForPublishing(
+  deps: SitePublishingDeps,
+  management: SiteManagement,
+  visibility: "workspace_shared" | "user_private" = "workspace_shared",
+): Promise<PublishedSiteRecord> {
+  const { scope, record } = management;
+  await updateWorkspaceArtifactVisibility(deps.db, {
+    workspaceId: scope.workspaceId,
+    artifactId: record.id,
+    viewer: { subjectId: management.subjectId },
+    visibility,
+  });
+  const shared = await getPublishedSite(deps.db, scope, record.id);
+  if (!shared) throw sitePublishingError(404, "not_found", "site_not_found", "Site not found");
+  return shared;
+}
+
+/**
  * Create or change a Site's publication. The caller is a manager; a Site must
  * be active and visible to its workspace to be served; public access needs the
  * deployment to allow it; changing the limit profile needs a workspace admin.
+ * In a personal workspace, publishing an Only me Site shares it with that
+ * one-person workspace (see `publishesPersonalOnlyMeSite`).
  */
 export async function upsertSitePublicationForManager(
   deps: SitePublishingDeps,
@@ -999,7 +1081,8 @@ export async function upsertSitePublicationForManager(
 ): Promise<{ publication: SitePublication; created: boolean }> {
   requireSitesDomain(deps.settings);
   requireSiteManager(management);
-  const { scope, record } = management;
+  const { scope } = management;
+  let record = management.record;
   const existing = await getSitePublication(deps.db, scope, record.id);
   if (
     existing?.status === "suspended" &&
@@ -1023,7 +1106,12 @@ export async function upsertSitePublicationForManager(
     await requireSitePlatformOpen(deps, "publish");
     await requireSitePlatformQuota(deps, scope, ["requests", "storage_bytes"]);
   }
-  if (activating && !siteServable(record))
+  const sharesPersonalSite =
+    activating && (await publishesPersonalOnlyMeSite(deps, management, existing));
+  if (
+    activating &&
+    !siteServable(sharesPersonalSite ? { ...record, visibility: "workspace_shared" } : record)
+  )
     throw sitePublishingError(
       409,
       "conflict",
@@ -1123,28 +1211,37 @@ export async function upsertSitePublicationForManager(
       ? { invitedEmails: normalizeEmails(request.invitedEmails) }
       : {}),
   };
+  // Shared just before the publication is written, so it is served the
+  // moment it exists; if publishing fails, the Site goes back to Only me.
+  if (sharesPersonalSite) record = await sharePersonalSiteForPublishing(deps, management);
   // A new publication without a label takes a suggested one; a random suffix
   // collides rarely, so retry a few times.
   let result: Awaited<ReturnType<typeof upsertSitePublication>> | null = null;
-  for (let attempt = 0; attempt < 5 && result === null; attempt += 1) {
-    try {
-      result = await upsertSitePublication(deps.db, scope, {
-        siteId: record.id,
-        defaultLabel: suggestSiteHostnameLabel(record.title, randomSuffix()),
-        changes,
-        actor: grant.subjectId,
-        holdDays: deps.settings.sitesHostnameHoldDays,
-        defaults: { access: "members", noindex: true },
-      });
-    } catch (error) {
-      const retry =
-        error instanceof SitePublishingError &&
-        (error.code === "taken" || error.code === "held") &&
-        request.label === undefined &&
-        existing === null &&
-        attempt < 4;
-      if (!retry) throw error;
+  try {
+    for (let attempt = 0; attempt < 5 && result === null; attempt += 1) {
+      try {
+        result = await upsertSitePublication(deps.db, scope, {
+          siteId: record.id,
+          defaultLabel: suggestSiteHostnameLabel(record.title, randomSuffix()),
+          changes,
+          actor: grant.subjectId,
+          holdDays: deps.settings.sitesHostnameHoldDays,
+          defaults: { access: "members", noindex: true },
+        });
+      } catch (error) {
+        const retry =
+          error instanceof SitePublishingError &&
+          (error.code === "taken" || error.code === "held") &&
+          request.label === undefined &&
+          existing === null &&
+          attempt < 4;
+        if (!retry) throw error;
+      }
     }
+  } catch (error) {
+    if (sharesPersonalSite)
+      await sharePersonalSiteForPublishing(deps, management, "user_private").catch(() => undefined);
+    throw error;
   }
   const { publication, created, previousLabel } = result!;
   const stopping = existing ? siteAccessNarrowed(existing, publication) : null;

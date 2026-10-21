@@ -1,26 +1,26 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
 import type { DefaultModelSelectionSource, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { payerShortLabel } from "@/components/models/models-ui";
-import { ModelPicker } from "@/components/pickers";
-import { buttonVariants } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
+import { payerShortLabel } from "@opengeni/react/app/components/models/models-ui";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
+import { buttonVariants } from "@opengeni/react/ui/button";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   availabilityReasonLabel,
   billingClassForModel,
   billingClassLabel,
   payerSummaryForModel,
   type PickerModelRow,
-} from "@/lib/model-policy";
-import { initialReasoningEffort } from "@/lib/session-tools";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/app/lib/model-policy";
+import { initialReasoningEffort } from "@opengeni/react/app/lib/session-tools";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
-import type { IntelligenceEffort } from "@/lib/session-tools";
+import type { IntelligenceEffort } from "@opengeni/react/app/lib/session-tools";
 
 type Draft = { model: string; reasoningEffort: IntelligenceEffort };
 

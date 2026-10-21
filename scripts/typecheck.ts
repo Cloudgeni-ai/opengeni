@@ -9,14 +9,14 @@ import {
 } from "./ci/resource-budget";
 import { typecheckProjects } from "./ci/workspace";
 
-// Typecheck the whole workspace with the stable TypeScript 7 compiler. Each
+// Typecheck the whole workspace with the pinned tsrs compiler. Each
 // package/app carries its own tsconfig with the per-package compilerOptions
 // (jsx, types, standalone web config, ...), so we drive them individually
 // rather than via project references (which would require `composite` +
 // declaration emit and fight `noEmit`).
 //
 // The projects are independent (no cross-project emit), so we run each project's
-// `tsc --noEmit` through a bounded worker pool instead of strictly one-at-a-time.
+// `tsrs --noEmit` through a bounded worker pool instead of strictly one-at-a-time.
 // Wall time drops to roughly the slowest project plus scheduling, while the
 // concurrency cap keeps total RSS bounded on memory-constrained hosts. The
 // impact planner may pass an exact project subset through repeated `--project`
@@ -43,7 +43,7 @@ function selectedProjects(args = process.argv.slice(2)): string[] {
 
 const projects = selectedProjects();
 
-const tsc = join(process.cwd(), "node_modules", "typescript", "bin", "tsc");
+const compiler = join(process.cwd(), "node_modules", "tsrs", "bin", "tsrs");
 const MAX_FAILURE_OUTPUT_BYTES = 1024 * 1024;
 
 function positiveInteger(value: string | undefined, fallback: number, name: string): number {
@@ -80,7 +80,7 @@ type ProjectResult = { project: string; status: number; output: string };
 
 function typecheckProject(project: string): Promise<ProjectResult> {
   return new Promise((resolve) => {
-    const child = spawn("node", [tsc, "--noEmit", "-p", join(project, "tsconfig.json")], {
+    const child = spawn("node", [compiler, "--noEmit", "-p", join(project, "tsconfig.json")], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -96,7 +96,7 @@ function typecheckProject(project: string): Promise<ProjectResult> {
     child.stdout.on("data", capture);
     child.stderr.on("data", capture);
     child.on("error", (err) => {
-      output += `\n[typecheck] failed to spawn TypeScript 7: ${String(err)}\n`;
+      output += `\n[typecheck] failed to spawn tsrs: ${String(err)}\n`;
       resolve({ project, status: 1, output });
     });
     child.on("close", (code) =>

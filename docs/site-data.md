@@ -296,7 +296,7 @@ use the schedule's. Site-origin agents use the same native role as console agent
 
 
 
-**Web.** The Site page's Data tab (`apps/web/src/components/artifacts/site-data.tsx`)
+**Web.** The Site page's Data tab (`packages/react/src/app/components/artifacts/site-data.tsx`)
 is shown to likely managers and trusts the API's answer: collections with
 access, records and size against the quota, a paged record table, a record's
 JSON as text, confirmed deletes with `expectedVersion`, and JSON/CSV export.
@@ -651,7 +651,7 @@ answered; a metering failure is logged and does not fail the call.
 - `packages/sdk/test/site-data.test.ts`,
   `packages/react/test/published-html-artifact-frame.test.ts`: the bridge
   routing, capability negotiation and binary uploads.
-- `apps/web/src/components/artifacts/site-data.test.tsx`: the Data tab.
+- `packages/react/src/app/components/artifacts/site-data.test.tsx`: the Data tab.
 - Site SQL: `packages/contracts/test/site-sql.test.ts` (the statement
   checker and its refusals), `apps/site-gateway/test/site-db.miniflare.test.ts`
   (the `SiteDatabase` Durable Object in workerd: signatures, previous secret,

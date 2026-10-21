@@ -1,12 +1,12 @@
 import { CircleAlertIcon } from "lucide-react";
 import { useRef, useState, type ReactNode, type Ref } from "react";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRow } from "@/components/ui/setting-row";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import type { ManagedSocialProvider } from "@/components/managed-social-auth-buttons";
 
 export type SignInMethodView = {

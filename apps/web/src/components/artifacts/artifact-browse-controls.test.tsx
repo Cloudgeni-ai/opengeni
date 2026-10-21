@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -12,11 +13,11 @@ import {
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, ArtifactCatalogListResponse } from "@opengeni/sdk";
-import { artifactRoute } from "@/lib/artifact-catalog";
+import { artifactRoute } from "@opengeni/react/app/lib/artifact-catalog";
 
-let ArtifactBrowseControls: typeof import("./artifact-browse-controls").ArtifactBrowseControls;
+let ArtifactBrowseControls: typeof import("@opengeni/react/app/components/artifacts/artifact-browse-controls").ArtifactBrowseControls;
 let context: { client: ReturnType<typeof catalogClient>; accessKeyVersion: number };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -27,7 +28,8 @@ beforeAll(async () => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  ({ ArtifactBrowseControls } = await import("./artifact-browse-controls"));
+  ({ ArtifactBrowseControls } =
+    await import("@opengeni/react/app/components/artifacts/artifact-browse-controls"));
 });
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();

@@ -18,25 +18,23 @@ import {
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 import { startDatabaseTiming } from "./database-timing";
+import {
+  createSessionListChangeSource,
+  type SessionListChangeSource,
+} from "./session-list-notifications";
 
-// §7.7 driver widening (Step I). `Database` is the structural, cross-driver
-// query-layer port: every helper in this file accepts `db: Database` and uses
-// only the methods present on drizzle's base `PgDatabase` (select/insert/update/
-// delete/transaction/execute). Widening from the concrete
-// `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
-// pure TYPE change — no runtime behavior changes — that lets an embedded host
-// inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
-// Opengeni's schema, not just the postgres-js handle `createDb` builds. The
-// `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
-// callable across drivers whose raw-result shapes differ (postgres-js returns a
-// row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
-// reads that index a row array (`getManagedUserByEmail` here is the only
-// host-facing one — see `userLookup`) stay postgres-js-shaped for standalone;
-// `userLookup` is the injection seam for hosts on a different driver.
-// `PostgresJsDatabase<typeof schema>` is assignable to this, so standalone is
-// unaffected.
-
-export type Database = PgDatabase<any, typeof schema>;
+// Structural cross-driver query port. Opengeni passes explicit tables to its
+// builders; it never uses Drizzle's schema-registered relational `query` API.
+// Omit that API at both root and transaction scope without rejecting a host's
+// richer schema-configured handle. The query-result HKT remains deliberately
+// driver-independent; standalone raw row arrays retain their existing shape.
+export type Database = Omit<PgDatabase<any, any>, "query" | "transaction"> & {
+  transaction<T>(
+    run: (tx: DatabaseTransaction) => Promise<T>,
+    config?: PgTransactionConfig,
+  ): Promise<T>;
+};
+type DatabaseTransaction = Database & { rollback(): never };
 
 declare const sessionActivityDatabaseBrand: unique symbol;
 
@@ -227,6 +225,8 @@ export type UserProfileLookup = (
 ) => Promise<ManagedUserProfile[]>;
 
 export type CreateDbOptions = {
+  /** Direct or session-pooled PostgreSQL URL for API list invalidations. Lazy; never a transaction pooler. */
+  notificationDatabaseUrl?: string;
   /**
    * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
    * UNSET → today's behavior: NO `search_path` startup parameter is sent, so the
@@ -278,9 +278,15 @@ type DbBinding = {
   rlsStrategy: RlsStrategy;
   userLookup?: UserLookup;
   userProfileLookup?: UserProfileLookup;
+  sessionListChanges?: SessionListChangeSource;
 };
 
 const dbBindings = new WeakMap<object, DbBinding>();
+
+/** Absent for externally constructed handles or transaction-only connections. */
+export function sessionListChangesFor(db: Database): SessionListChangeSource | undefined {
+  return dbBindings.get(db as object)?.sessionListChanges;
+}
 
 /** The strategy bound to a handle (or the `"force"` default). */
 export function rlsStrategyFor(db: Database): RlsStrategy {
@@ -475,10 +481,17 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
   // is never reused indefinitely, and bound each connection's prepared-statement
   // cache; application_name aids server-side diagnostics.
+  // Opening a connection costs tens of milliseconds (TCP, TLS, auth, startup
+  // parameters) on the request that needs it, while an idle one costs the server
+  // only a backend slot. With a 30 s idle timeout, bursty workers reopened about
+  // one connection a second in steady state; five minutes keeps a worker's pool
+  // warm between turns. postgres.js TCP keepalive (60 s) keeps NAT and load
+  // balancer flow state alive for idle connections, and max_lifetime still
+  // bounds every connection's age.
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
     prepare: preparedStatements,
-    idle_timeout: 30,
+    idle_timeout: 300,
     max_lifetime: 1800,
     // postgres.js grows one pool-wide reconnect delay after every refused or
     // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
@@ -512,15 +525,24 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       // their own SET clause.
     },
   });
-  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client, { schema });
+  // Registering the full schema eagerly allocates one relational query builder
+  // per table on every transaction/savepoint, even for a single raw SQL query.
+  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client);
+  const sessionListChanges = options.notificationDatabaseUrl
+    ? createSessionListChangeSource(options.notificationDatabaseUrl, {
+        ...(options.searchPath ? { searchPath: options.searchPath } : {}),
+      })
+    : undefined;
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
     ...(options.userProfileLookup ? { userProfileLookup: options.userProfileLookup } : {}),
+    ...(sessionListChanges ? { sessionListChanges } : {}),
   });
   return {
     db,
     close: async () => {
+      await sessionListChanges?.close();
       await client.end();
     },
   };

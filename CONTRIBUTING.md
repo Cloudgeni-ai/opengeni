@@ -19,7 +19,9 @@ configuration, the native (no Docker) path, and the web-app walkthrough.
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
-Typecheck runs on the pinned stable TypeScript 7 `tsc`. See
+Typechecking and declaration emission run on exact-pinned `tsrs`, including compiler
+fixtures and packed-consumer checks. TypeScript dependencies remain only where metadata
+or editor/framework compatibility requires them. See
 [`docs/toolchain.md`](docs/toolchain.md) for what runs typecheck/lint/format and why.
 
 ## Checks
@@ -34,7 +36,7 @@ For quick local iteration, run:
 
 ```bash
 bun run typecheck
-bun test
+bun run test:unit
 ```
 
 For broader changes that touch persistence, orchestration, sandboxing, or the web/API boundary, also run:
@@ -47,6 +49,9 @@ bun run test:e2e
 ## Pull Requests
 
 - Keep changes focused.
+- Main merges follow the [merge-queue runbook](docs/merge-queue.md): full relevant
+  local suites, independent agent review, exact-head evidence comment, then
+  queueing. Fast queue green is not full-suite/release green.
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.
@@ -119,7 +124,11 @@ and artifacts afterward. Never print values or commit them to Git.
 
 **Promote `main` → `production`:** open a GitHub PR with base `production` and compare `main`. Merge with a **merge commit** (never squash, never GitHub rebase-and-merge: both rewrite SHAs and poison the next promote). The extra merge commit lives only on `production`. The next ship is the same PR shape again. Do not PR `production` back to `main` just because of that merge commit. Do not force-push `production`.
 
-**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies). Then merge `production` → `main` with a merge commit so daily work is not stranded. Squash remains allowed on PRs into `main`.
+**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies).
+Then bring the hotfix back to `main` so daily work is not stranded. Once the main
+queue is enabled, queue that PR with a merge commit. Before activation, follow
+the currently allowed main merge method and the same local-test/review process.
+Production protections and the incident hotfix lane are unchanged.
 
 **Official cut:** dispatch `open-version-pr.yml` on `main` (or set `VERSION_PR_ON_PUSH=true`). Merge the Version PR, promote that SHA to `production`, then `workflow_dispatch` the evidence-bound candidate / acceptance / publication workflows. Do not commit version bumps onto `production`. Official source ancestry is `origin/production`. The `production` pointer already exists; do not recreate it and do not force-push.
 
@@ -176,19 +185,31 @@ or moving an existing `latest` tag. Registry first-publication behavior is uncha
 
 All archives are packed and frozen before the first write. Each topological
 publication retains an intent and a positive library HTTP acknowledgement before
-the next write; write retries are disabled. Receipt visibility is checked afterward
-in one bounded read-only phase, preserving latest, archive integrity, canary tag
-and provenance metadata checks. Site pins appear only after the complete cohort
-matches. Acknowledgements are not independent signed-byte acceptance. An uncertain
-write stops without replay. Bounded safe receipts survive ordinary workflow failure;
-a lost runner can still lose its artifact. Existing versions are never repaired in place.
-The final gate rereads the complete cohort within the original shared deadline,
-read quota and custody caps. These reads do not claim an atomic registry snapshot.
-Post-write receipt polling selects the current dist-tags document and the exact
-immutable version manifest rather than unrelated historical versions. Both GETs
-count toward the same 256-request budget and share one per-observation signal;
-the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
-and occupied-version/stable-tag guards still use their existing metadata path.
+the next write; write retries are disabled. Acknowledgements are not independent
+signed-byte acceptance. An uncertain write stops without replay. Bounded safe
+receipts survive ordinary workflow failure, retained per attempt as
+`canary-publication-receipts-<source_sha>-<attempt>`; a lost runner can still lose
+its artifact. Existing versions are never repaired in place.
+
+npm accepts each write with `202 Accepted` and processes it afterwards; the version
+is unreadable until then. That usually takes 3-10 minutes and has taken more than
+18 minutes for the largest archives. The `publish` job therefore ends after the
+acknowledged write phase and hands its frozen cohort (names, versions, previous
+`latest`, SHA-512 integrity) to the credential-free `confirm` job as a job output.
+`confirm` polls each still-invisible version with backoff (5s doubling to one
+minute) for one 30-minute window, treating timeouts, 429 and 5xx as "not yet".
+Once every version has been seen it rereads the complete cohort, preserving the
+latest, archive integrity, canary tag and provenance checks, and only then uploads
+`site-package-versions-<source_sha>`. A canary tag already moved to a later canary
+is accepted; an older one is still pending. Waiting reads keep one observation
+record each; the final complete-cohort reread retains full response custody in
+`canary-confirmation-receipts-<source_sha>-<attempt>`. If npm needs longer than
+one window, re-run the failed `confirm` job: it reuses the publish job's output,
+publishes nothing and turns the same run green. A moved `latest`, different
+integrity or invalid identity fails immediately. Polling selects the current
+dist-tags document and the exact immutable version manifest rather than unrelated
+historical versions. Pre-write discovery and occupied-version/stable-tag guards
+still use their existing metadata path.
 
 **Receipt-only recovery:** after a failed canary workflow has acknowledged its
 entire cohort, `reconcile-canary-publication.yml` can observe that exact source,
@@ -196,10 +217,14 @@ run and attempt without publishing again. The protected current controller reads
 historical source only as immutable JSON data. It requires the original provider
 failure, absent Site artifact, bounded receipt artifact, complete linked positive
 acknowledgements and zero unknown writes. It verifies actual archive/manifest
-hashes and official GitHub provenance, then runs the unchanged bounded metadata
-poller and final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
-unsupported producer protocols, changed latest or superseded canary tags fail
-closed; this command cannot repair tags, rebuild packages or dispatch another run.
+hashes and official GitHub provenance, then runs the shared metadata poller and
+final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
+unsupported producer protocols, changed latest or a canary tag older than the
+publication fail closed; this command cannot repair tags, rebuild packages or
+dispatch another run. It applies only when the publish job itself failed after
+acknowledging the whole cohort. When only the `confirm` job failed, re-run that
+job instead; reconciliation holds and says so. Every hold records and prints its
+exact reason (`RECONCILIATION_HELD.reason`).
 This verifier supports only same-source receipt protocol V1. Ancestor publication
 records truthful split-source V2 identities; if it fails, retain those receipts and
 stop for a separately reviewed V2 recovery path. Do not feed them to V1 recovery,

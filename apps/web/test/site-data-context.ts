@@ -5,7 +5,7 @@ import type {
   SiteDataRecordResponse,
   SiteDataWriteRequest,
 } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 // Sample data for the Site Data preview. The page, tabs and Data view are the
 // production components; only the client and app context are fixtures.

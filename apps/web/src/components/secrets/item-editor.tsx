@@ -17,19 +17,22 @@ import {
 import { PlusIcon, Trash2Icon, UploadIcon } from "lucide-react";
 import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FlushFormPage } from "@/components/ui/flush-form-page";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
 import { SecretInput } from "@/components/ui/secret-field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { cn } from "@/lib/utils";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { fieldLabel } from "./item-page";
 import { PasswordGeneratorPopover } from "./password-generator-popover";
 import { HIT_AREA } from "./secret-actions";
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
-import { ITEM_TYPE_LABEL, vaultErrorText } from "./vault-model";
+import {
+  ITEM_TYPE_LABEL,
+  vaultErrorText,
+} from "@opengeni/react/app/components/secrets/vault-model";
 import { creatableTypes, sourceHome, vaultOperations } from "./vault-providers";
 
 /* ----------------------------------------------------------------------------

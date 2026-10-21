@@ -8,17 +8,21 @@ import { describe, expect, test } from "bun:test";
 import { createElement, useState } from "react";
 import { flushSync } from "react-dom";
 
-import { RepositoryContextMenuBody } from "@/components/repository-picker";
-import { attachManualRepository } from "@/lib/manual-repositories";
+import { RepositoryContextMenuBody } from "@opengeni/react/app/components/repository-picker";
+import { attachManualRepository } from "@opengeni/react/app/lib/manual-repositories";
 import {
   buildResources,
   groupRepositories,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
   type RepoDraft,
-} from "@/lib/session-tools";
-import { useManualRepositoryCatalogReconciliation } from "@/lib/use-manual-repository-catalog-reconciliation";
-import type { GitHubRepository, PersonalGitHubRepositoryCatalogItem, ResourceRef } from "@/types";
+} from "@opengeni/react/app/lib/session-tools";
+import { useManualRepositoryCatalogReconciliation } from "@opengeni/react/app/lib/use-manual-repository-catalog-reconciliation";
+import type {
+  GitHubRepository,
+  PersonalGitHubRepositoryCatalogItem,
+  ResourceRef,
+} from "@opengeni/react/app/types";
 import {
   actRun,
   flush,

@@ -5,9 +5,9 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { RetainedArtifactRoute } from "../src/routes/retained-artifact";
-import { InlineChatArtifact } from "../src/components/artifacts/retained-file-preview";
-import { SessionEditableArtifactsWorkspace } from "../src/components/session/editable-artifacts-workspace";
+import { RetainedArtifactRoute } from "@opengeni/react/app/routes/retained-artifact";
+import { InlineChatArtifact } from "@opengeni/react/app/components/artifacts/retained-file-preview";
+import { SessionEditableArtifactsWorkspace } from "@opengeni/react/app/components/session/editable-artifacts-workspace";
 import { workspaceId, artifactId } from "./retained-text-preview-context";
 import "../src/styles.css";
 const params = new URLSearchParams(location.search);

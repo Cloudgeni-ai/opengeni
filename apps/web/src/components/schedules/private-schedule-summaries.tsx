@@ -8,13 +8,13 @@ import { LockIcon, PauseIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { formatMoney } from "@/components/insights/usage-format";
-import { Button } from "@/components/ui/button";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { useAppContext } from "@/context";
-import type { PrivateScheduledTaskSummary } from "@/types";
+import { Button } from "@opengeni/react/ui/button";
+import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import type { PrivateScheduledTaskSummary } from "@opengeni/react/app/types";
 
 import { scheduleWords } from "./schedule-model";
 

@@ -1,7 +1,9 @@
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
-import { AppearanceProvider } from "./lib/appearance";
+// Backs the shared session UI with this app's router and API helpers.
+import "./app-host";
+import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
 import { createRoot } from "react-dom/client";
@@ -15,9 +17,12 @@ import {
   installVitePreloadErrorReporting,
   setClientErrorReporter,
 } from "./lib/client-error-reporting";
-import { createClientSignalReporter, setClientSignalReporter } from "./lib/client-signals";
+import {
+  createClientSignalReporter,
+  setClientSignalReporter,
+} from "@opengeni/react/app/lib/client-signals";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
-import { setAnalyticsConsentDecisionSender } from "./lib/analytics-consent";
+import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,

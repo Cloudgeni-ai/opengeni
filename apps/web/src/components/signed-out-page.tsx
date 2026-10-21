@@ -2,13 +2,13 @@ import { ActivityIcon, BoxesIcon, CloudIcon, PaletteIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
-import { BrandMark, Wordmark } from "@/components/brand-mark";
-import { Button } from "@/components/ui/button";
+import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 
 // Copy follows the public landing page (opengeni.ai): its headline, its lead
 // sentence and the platform features it names.

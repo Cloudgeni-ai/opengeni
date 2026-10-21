@@ -261,6 +261,16 @@ describe("Postgres editable artifact authority", () => {
 
   test("grants the outbox dispatcher exactly six functions and no relation privileges", async () => {
     if (!available || !shared) return;
+    // A dedicated-only provisioning run must repair PUBLIC drift too, without
+    // adding policy predicates to the dispatcher's six entry points.
+    await shared.admin.unsafe(`GRANT EXECUTE ON FUNCTION
+      opengeni_private.maintenance_claim_active(text,text),
+      opengeni_private.maintenance_title_event_visible(text,uuid) TO PUBLIC`);
+    await provisionRoles(shared.adminUrl, {
+      rlsStrategy: "scoped",
+      artifactOutboxDispatcherRole: "opengeni_artifact_outbox_dispatcher",
+      artifactOutboxDispatcherPassword: "artifact-outbox-test-password",
+    });
     const dispatcherRole = "opengeni_artifact_outbox_dispatcher";
     const expectedFunctions = [
       "claim_editable_artifact_live_outbox(text, integer, integer, name)",
@@ -297,6 +307,17 @@ describe("Postgres editable artifact authority", () => {
     expect(
       functionAcls.filter((entry) => entry.dispatcherExecute).map((entry) => entry.signature),
     ).toEqual(expectedFunctions);
+    for (const signature of [
+      "maintenance_claim_active(text, text)",
+      "maintenance_title_event_visible(text, uuid)",
+    ]) {
+      expect(functionAcls.find((entry) => entry.signature === signature)).toEqual({
+        signature,
+        appExecute: true,
+        dispatcherExecute: false,
+        publicExecute: false,
+      });
+    }
     for (const signature of expectedFunctions) {
       expect(functionAcls.find((entry) => entry.signature === signature)).toEqual({
         signature,

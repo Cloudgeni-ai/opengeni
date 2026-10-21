@@ -35,7 +35,17 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
-  test.each(["exact", "session", "controller", "target", "extra", "legacy", "unknown"] as const)(
+  test.each([
+    "exact",
+    "session",
+    "controller",
+    "target",
+    "extra",
+    "legacy",
+    "legacy-foreign",
+    "legacy-lost",
+    "unknown",
+  ] as const)(
     "metadata-only tab opening validates binding and never replays (%s)",
     async (scenario) => {
       const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
@@ -44,21 +54,39 @@ describe("BrowserControlClient", () => {
       const server = Bun.serve({
         port: 0,
         async fetch(request) {
-          routes.push(`${request.method} ${new URL(request.url).pathname}`);
+          const route = `${request.method} ${new URL(request.url).pathname}`;
+          routes.push(route);
+          const sessionPath = `/v1/browser-sessions/${reference.browserSessionId}`;
+          const legacy =
+            scenario === "legacy" || scenario === "legacy-foreign" || scenario === "legacy-lost";
+          if (route === `GET ${sessionPath}/targets`) {
+            expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+            return scenario === "legacy"
+              ? success([target])
+              : failure(404, "resource_not_found", "browser session not found");
+          }
           expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
           expect(await request.json()).toEqual({ url: "https://new.example.test/" });
-          if (scenario === "legacy" || scenario === "unknown")
+          if (legacy && route === `POST ${sessionPath}/targets`)
+            return success(
+              browserObservation(
+                scenario === "legacy-foreign"
+                  ? { ...target, controllerGeneration: "other-controller" }
+                  : target,
+              ),
+            );
+          if (legacy || scenario === "unknown")
             return Response.json(
               {
                 protocolVersion: 1,
                 ok: false,
                 error: {
-                  code: scenario === "legacy" ? "resource_not_found" : "outcome_unknown",
-                  message: scenario === "legacy" ? "route not found" : "synthetic uncertain open",
+                  code: legacy ? "resource_not_found" : "outcome_unknown",
+                  message: legacy ? "route not found" : "synthetic uncertain open",
                   retryable: false,
                 },
               },
-              { status: scenario === "legacy" ? 404 : 409 },
+              { status: legacy ? 404 : 409 },
             );
           return success({
             browserSessionId: scenario === "session" ? randomUUID() : reference.browserSessionId,
@@ -83,21 +111,24 @@ describe("BrowserControlClient", () => {
         });
         const browser = client.sessionClient({ reference, controlToken, viewToken });
         const pending = browser.openTargetWithInventory("https://new.example.test/");
-        if (scenario === "exact")
+        if (scenario === "exact" || scenario === "legacy")
           expect(await pending).toEqual({ ...reference, targets: [target] });
-        else if (scenario === "legacy")
-          await expect(pending).rejects.toMatchObject({
-            status: 409,
-            error: { code: "unsupported", retryable: false },
-          });
-        else if (scenario === "unknown")
+        else if (scenario === "unknown" || scenario === "legacy-lost")
           await expect(pending).rejects.toMatchObject({
             status: 409,
             error: { code: "outcome_unknown", retryable: false },
           });
         else await expect(pending).rejects.toThrow();
+        const sessionPath = `/v1/browser-sessions/${reference.browserSessionId}`;
         expect(routes).toEqual([
-          `POST /v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+          `POST ${sessionPath}/targets/open-with-inventory`,
+          // An older controller image rejects the route before dispatch, so the
+          // original open route runs once; nothing else is ever re-sent.
+          ...(scenario === "legacy" || scenario === "legacy-lost"
+            ? [`POST ${sessionPath}/targets`, `GET ${sessionPath}/targets`]
+            : scenario === "legacy-foreign"
+              ? [`POST ${sessionPath}/targets`]
+              : []),
         ]);
       } finally {
         await server.stop(true);
@@ -616,7 +647,16 @@ describe("BrowserControlClient", () => {
         status: 400,
         error: { code: rejected.code, message: rejected.message },
       });
-      expect(requests).toHaveLength(6);
+      rejected = { status: 404, code: "resource_not_found", message: "route not found" };
+      await expect(browser.startRecording(command.targetId)).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message: expect.stringContaining("browser recording"),
+        },
+      });
+      expect(requests).toHaveLength(7);
     } finally {
       server.stop(true);
     }
@@ -1290,6 +1330,17 @@ describe("BrowserControlClient", () => {
         if (url.pathname === "/v1/failure") {
           return failure(409, "controller_stale", "controller moved");
         }
+        if (url.pathname === "/v1/driver-failure") {
+          return Response.json(
+            {
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: false,
+              error: { code: "driver_failed", message: "driver broke", retryable: false },
+              diagnostic: { errorClass: "TypeError", frame: "Backend.observe", extra: "x" },
+            },
+            { status: 500 },
+          );
+        }
         if (url.pathname === "/v1/malformed") {
           return Response.json({ nope: true });
         }
@@ -1497,6 +1548,19 @@ describe("BrowserControlClient", () => {
           message: "controller moved",
           retryable: false,
         },
+        diagnostic: null,
+      });
+      // A driver failure's operator diagnostic is kept beside the unchanged error.
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/driver-failure",
+          token: controlToken,
+        }),
+      ).rejects.toMatchObject<Partial<BrowserControlRequestError>>({
+        status: 500,
+        error: { code: "driver_failed", message: "driver broke", retryable: false },
+        diagnostic: { errorClass: "TypeError", frame: "Backend.observe" },
       });
       await expect(
         client.requestForSession({

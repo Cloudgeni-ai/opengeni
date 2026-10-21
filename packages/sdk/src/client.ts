@@ -4,6 +4,7 @@ import {
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
@@ -15,6 +16,7 @@ import type {
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
+  SubscriptionUsagePoolsResponse,
 } from "@opengeni/contracts";
 import {
   insightsUsageQueryString,
@@ -101,6 +103,7 @@ import type {
   AgentInstructionReviewListResponse,
 } from "./knowledge";
 import type {
+  DuplicateWorkspaceArtifactRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
@@ -191,6 +194,9 @@ import {
   type BrowserDownloadListResponse,
   type BrowserDownloadSaveRequest,
   type BrowserDownloadSaveResponse,
+  type BrowserRecordingSaveRequest,
+  type BrowserRecordingSaveResponse,
+  type BrowserRecordingSummary,
   type BrowserIdentity,
   type BrowserIdentityListOptions,
   type BrowserIdentityListResponse,
@@ -277,6 +283,8 @@ import type {
   CodexRealtimeWebrtcResponse,
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
@@ -382,6 +390,8 @@ import type {
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileVisibilityRequest,
+  UpdateFileVisibilityResponse,
   ConnectionMetadata,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubDisconnectRequest,
@@ -872,7 +882,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected Opengeni API does not support ${feature}`);
+  return new Error(`The connected API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -1142,8 +1152,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
             for (const segment of path) {
               target = (target as Record<string, unknown>)[segment];
             }
-            if (typeof target !== "function")
-              throw new TypeError("Opengeni tool path is not callable");
+            if (typeof target !== "function") throw new TypeError("Tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {
@@ -2390,7 +2399,26 @@ export class OpenGeniClient {
     );
   }
 
-  /** Mint a short-lived browser token for one AI Gateway realtime connection. */
+  /**
+   * Open (or rotate) the provider WebSocket of an active realtime mode. The
+   * response carries a short-lived client secret and the provider session.
+   */
+  async negotiateRealtimeWebsocket(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRealtimeWebsocketRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<SessionRealtimeWebsocketResponse> {
+    return await this.requestJson<SessionRealtimeWebsocketResponse>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/realtime/websocket`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
+  /** @deprecated Use negotiateRealtimeWebsocket; this alias route is served by the same handler. */
   async negotiateGatewayRealtime(
     workspaceId: string,
     sessionId: string,
@@ -2406,7 +2434,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Mint a short-lived browser token from a connected SuperGrok account. */
+  /** @deprecated Use negotiateRealtimeWebsocket; this alias route is served by the same handler. */
   async negotiateXaiSubscriptionRealtime(
     workspaceId: string,
     sessionId: string,
@@ -2880,6 +2908,8 @@ export class OpenGeniClient {
         ...(listOptions?.excludeClasses?.length
           ? { excludeClasses: listOptions.excludeClasses.join(",") }
           : {}),
+        ...(listOptions?.presentedToolCalls === "include" ? { presentedToolCalls: "include" } : {}),
+        ...(listOptions?.toolOutputs === "preview" ? { toolOutputs: "preview" } : {}),
         ...(options.latest ? { latest: options.latest } : {}),
       }),
       {
@@ -2940,6 +2970,7 @@ export class OpenGeniClient {
       nextAfter: integerHeader("X-OpenGeni-Next-After"),
       nextBefore: integerHeader("X-OpenGeni-Next-Before"),
       forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
+      conversationFilter: integerHeader(SESSION_EVENT_CONVERSATION_FILTER_HEADER),
     };
   }
 
@@ -4570,6 +4601,56 @@ export class OpenGeniClient {
     );
   }
 
+  /** Starts recording one tab of a browser session as a video. The recording
+   * follows the agent to other tabs it acts on, opens or selects. */
+  async startBrowserRecording(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRecordingSummary> {
+    return await this.requestJson<BrowserRecordingSummary>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings`,
+      { targetId },
+      {},
+      options,
+    );
+  }
+
+  async getBrowserRecording(
+    workspaceId: string,
+    browserSessionId: string,
+    recordingId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRecordingSummary> {
+    return await this.requestJson<BrowserRecordingSummary>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Stops a recording and saves it as an MP4 plus an action log in the
+   * browser's source session workspace; the MP4 is also a retained artifact. */
+  async saveBrowserRecording(
+    workspaceId: string,
+    browserSessionId: string,
+    recordingId: string,
+    request: BrowserRecordingSaveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRecordingSaveResponse> {
+    return await this.requestJson<BrowserRecordingSaveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/recordings/${encodeURIComponent(recordingId)}/save`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async createBrowserSession(
     workspaceId: string,
     request: CreateBrowserSessionRequest,
@@ -5431,6 +5512,20 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
     );
+  }
+
+  /** Pooled account limits and forecasts; does not contact providers. */
+  async getWorkspaceSubscriptionUsagePools(
+    workspaceId: string,
+  ): Promise<SubscriptionUsagePoolsResponse> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/subscription-usage-pools`);
+  }
+
+  /** Organization subscription limits; uses the account-list administrator boundary. */
+  async getOrganizationSubscriptionUsagePools(
+    organizationId: string,
+  ): Promise<SubscriptionUsagePoolsResponse> {
+    return this.requestJson("GET", `/v1/organizations/${organizationId}/subscription-usage-pools`);
   }
 
   async listClaudeSubscriptionAccounts(
@@ -7528,6 +7623,7 @@ export class OpenGeniClient {
             ...(input.scope ? { scope: input.scope } : {}),
             sizeBytes,
             sha256,
+            ...(input.appShot ? { appShot: input.appShot } : {}),
           },
           { signal },
         ),
@@ -7577,6 +7673,25 @@ export class OpenGeniClient {
     return this.requestJson(
       "GET",
       `/v1/workspaces/${workspaceId}/files${query.size ? `?${query}` : ""}`,
+    );
+  }
+
+  /**
+   * Change who can open a file: everyone in the workspace, or only you (Only
+   * me). Only the file's owner can.
+   */
+  async updateFileVisibility(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileVisibilityResponse> {
+    return await this.requestJson<UpdateFileVisibilityResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/visibility`,
+      request,
+      undefined,
+      options,
     );
   }
 
@@ -8397,6 +8512,22 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Copies a Site's current version into a new Site you own, with the same visibility. */
+  async duplicateWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+    request: DuplicateWorkspaceArtifactRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/duplicate`,
       request,
       undefined,
       options,
@@ -11556,7 +11687,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "Opengeni is temporarily unavailable — retry.",
+    displayMessage: "The workspace is temporarily unavailable — retry.",
   });
 }
 
@@ -11593,7 +11724,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "The request could not be confirmed — reconcile before retrying.",
   });
 }
 

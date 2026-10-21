@@ -2040,9 +2040,10 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     };
   }
 
+  const queuedMerge = source.parents.length === 2 && source.parents[1] === pullIdentity.headSha;
   invariant(
-    source.parents.length === 1,
-    "release source tree differs from the exact reviewed head and is not a single-parent moving-main squash",
+    source.parents.length === 1 || queuedMerge,
+    "release source tree differs from the exact reviewed head and is not a moving-main squash or exact-head merge",
   );
   const integrationBaseSha = source.parents[0];
   invariant(
@@ -2085,7 +2086,9 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     "release source tree differs from the exact reviewed moving-main composition",
   );
   return {
-    mergeMethod: "provider-verified-moving-main-squash",
+    mergeMethod: queuedMerge
+      ? "provider-verified-moving-main-merge"
+      : "provider-verified-moving-main-squash",
     sourceComposition: {
       type: "exact-reviewed-delta-on-moving-main",
       integrationBaseSha,

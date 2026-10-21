@@ -1,7 +1,7 @@
 import { act } from "react";
 import { expect, mock, test } from "bun:test";
 import type { SkillRecord, SkillSummary } from "@opengeni/sdk";
-import type { AppContextValue } from "@/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 import { registerDom, renderComponent, flush } from "../../../../packages/react/test/render-hook";
 registerDom();
 const { SkillsPanelContent } = await import("./skills-panel");

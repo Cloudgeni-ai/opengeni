@@ -11,6 +11,14 @@ import type {
 } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  clearSharedQueries,
+  invalidateSharedQueries,
+  peekSharedQuery,
+  retainSharedQueries,
+  sharedQueryWriter,
+} from "@opengeni/react/app/lib/shared-query";
+import { renderHook } from "../../../../packages/react/test/render-hook";
 
 const listConnections = mock(async (_workspaceId: string): Promise<ConnectionMetadata[]> => []);
 const listWorkspaceGatewayCustomModels = mock(
@@ -109,7 +117,7 @@ const context = {
   },
 };
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => context,
 }));
 
@@ -117,7 +125,7 @@ mock.module("sonner", () => ({
   toast: { error: toastError, success: toastSuccess },
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     confirmLabel,
@@ -146,8 +154,8 @@ mock.module("@/components/ui/confirm-dialog", () => ({
 
 // The one-field Replace key prompt renders its real form frame inline: the
 // Radix dialog around it is a portal.
-const actualFormDialog = await import("@/components/ui/form-dialog");
-mock.module("@/components/ui/form-dialog", () => ({
+const actualFormDialog = await import("@opengeni/react/ui/form-dialog");
+mock.module("@opengeni/react/ui/form-dialog", () => ({
   ...actualFormDialog,
   FormDialog: ({
     open,
@@ -168,7 +176,7 @@ mock.module("@/components/ui/form-dialog", () => ({
 }));
 
 // Menus and the disconnect confirm as plain buttons: the real ones are Radix portals.
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -178,7 +186,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
     </button>
   ),
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
     open,
     onConfirm,
@@ -204,8 +212,15 @@ mock.module("@/components/ui/destructive-confirm", () => ({
     ) : null,
 }));
 
-const { AiGatewayConnectionCard, OpenRouterConnectionCard, OpperConnectionCard } =
-  await import("./ai-gateway-connection");
+const {
+  AiGatewayConnectionCard,
+  OpenRouterConnectionCard,
+  OpperConnectionCard,
+  PROVIDER_CONNECTION_CONFIGS,
+  useProviderConnection,
+} = await import("./ai-gateway-connection");
+const { useWorkspaceModelCatalog } =
+  await import("@opengeni/react/app/lib/use-workspace-model-catalog");
 
 /** The status in the provider page header; "…" while it's still loading. */
 function statusText(container: HTMLElement): string {
@@ -514,6 +529,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  clearSharedQueries(context.client);
   listConnections.mockClear();
   getWorkspaceModelCatalog.mockClear();
   createConnection.mockClear();
@@ -559,6 +575,43 @@ beforeEach(() => {
 });
 
 describe("AiGatewayConnectionCard custom models", () => {
+  test("retains supporting reads on revisits and refreshes them through the Models prefix", async () => {
+    const release = retainSharedQueries(context.client);
+    const first = await renderCard();
+    await act(async () => first.root.unmount());
+    first.container.remove();
+    const second = await renderCard();
+    try {
+      expect(listConnections).toHaveBeenCalledTimes(1);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await invalidateSharedQueries(context.client, ["model-settings"]);
+      });
+      expect(listConnections).toHaveBeenCalledTimes(2);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => second.root.unmount());
+      second.container.remove();
+      release();
+    }
+  });
+
+  test("shares one connection read across readers of the same workspace provider", async () => {
+    const gateway = await renderCard();
+    const other = await renderCard();
+    try {
+      expect(listConnections).toHaveBeenCalledTimes(1);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => {
+        gateway.root.unmount();
+        other.root.unmount();
+      });
+      gateway.container.remove();
+      other.container.remove();
+    }
+  });
+
   test("lets an admin preconfigure one exact Gateway slug before connecting", async () => {
     const created = customModel("anthropic/claude-sonnet-4.6");
     listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
@@ -993,6 +1046,104 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  for (const mutation of ["custom model", "credential", "replacement credential"] as const) {
+    for (const mountedCatalog of [false, true]) {
+      test(`a deferred ${mutation} save after unmount refreshes ${mountedCatalog ? "mounted" : "retained"} dependents`, async () => {
+        const modelSave = deferred<WorkspaceGatewayCustomModel>();
+        const credentialSave = deferred<ConnectionMetadata>();
+        createWorkspaceGatewayCustomModel.mockImplementation(() => modelSave.promise);
+        createConnection.mockImplementation(() => credentialSave.promise);
+        updateConnection.mockImplementation(() => credentialSave.promise);
+        if (mutation === "replacement credential") {
+          listConnections.mockImplementation(async () => [gatewayConnection()]);
+        }
+        const catalogKey = ["model-settings", "workspace-catalog", "workspace-a"] as const;
+        const accessKey = [
+          "model-settings",
+          "access",
+          "workspaces",
+          "workspace-a",
+          "vercel_gateway",
+          "current",
+        ] as const;
+        const summaryKey = ["model-settings", "workspace-snapshots", "workspace-a"] as const;
+        const otherWorkspaceKey = ["model-settings", "workspace-catalog", "workspace-b"] as const;
+        const overviewKey = ["model-settings", "codex-overview", "workspace-a"] as const;
+        const release = retainSharedQueries(context.client);
+        const write = sharedQueryWriter(context.client);
+        write(catalogKey, { models: [] });
+        write(accessKey, { policy: "before" });
+        write(summaryKey, { "workspace-a": "before" });
+        write(otherWorkspaceKey, { models: [] });
+        write(overviewKey, { accounts: {} });
+        let catalog = mountedCatalog
+          ? await renderHook(() => useWorkspaceModelCatalog("workspace-a"), undefined)
+          : undefined;
+        const onConnectionChange = mock(() => {});
+        const provider = await renderHook(
+          () =>
+            useProviderConnection({
+              client: context.client as unknown as Parameters<
+                typeof useProviderConnection
+              >[0]["client"],
+              workspaceId: "workspace-a",
+              config: PROVIDER_CONNECTION_CONFIGS.vercel,
+              canManageConnection: true,
+              canManageCustomModels: true,
+              onConnectionChange,
+            }),
+          undefined,
+        );
+        let unmounted = false;
+        try {
+          let saving!: Promise<unknown>;
+          await act(async () => {
+            saving =
+              mutation === "custom model"
+                ? provider.result.current.addCustomModel("deepseek/deepseek-v3.2")
+                : provider.result.current.saveKey("fixture-late-credential");
+            await flush();
+          });
+          expect(
+            mutation === "custom model"
+              ? createWorkspaceGatewayCustomModel
+              : mutation === "credential"
+                ? createConnection
+                : updateConnection,
+          ).toHaveBeenCalledTimes(1);
+          await provider.unmount();
+          unmounted = true;
+          getWorkspaceModelCatalog.mockImplementation(async () => ({
+            models: [gatewayCatalogModel()],
+          }));
+          await act(async () => {
+            modelSave.resolve(customModel("deepseek/deepseek-v3.2"));
+            credentialSave.resolve(gatewayConnection());
+            await saving;
+            await flush();
+          });
+          if (!mountedCatalog) {
+            expect(peekSharedQuery(context.client, catalogKey)).toBeNull();
+            catalog = await renderHook(() => useWorkspaceModelCatalog("workspace-a"), undefined);
+          }
+          expect(catalog!.result.current.models).toEqual([gatewayCatalogModel()]);
+          expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(1);
+          expect(peekSharedQuery(context.client, accessKey)).toBeNull();
+          expect(peekSharedQuery(context.client, summaryKey)).toBeNull();
+          expect(peekSharedQuery(context.client, otherWorkspaceKey)?.data).toEqual({ models: [] });
+          expect(peekSharedQuery(context.client, overviewKey)?.data).toEqual({ accounts: {} });
+          expect(onConnectionChange).not.toHaveBeenCalled();
+          expect(toastSuccess).not.toHaveBeenCalled();
+        } finally {
+          if (!unmounted) await provider.unmount();
+          await catalog?.unmount();
+          release();
+          await flush();
+        }
+      });
+    }
+  }
+
   test("suppresses a completed mutation after switching workspaces", async () => {
     let resolveWorkspaceACreate: ((value: WorkspaceGatewayCustomModel) => void) | undefined;
     createWorkspaceGatewayCustomModel.mockImplementation(async (workspaceId, request) => {
@@ -1156,7 +1307,9 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(
         container.querySelector('button[aria-label="Remove deepseek/deepseek-v3.2"]'),
       ).not.toBeNull();
-      expect(getWorkspaceModelCatalog).toHaveBeenCalledWith("workspace-a");
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledWith("workspace-a", {
+        signal: expect.any(AbortSignal),
+      });
       expect(listConnections).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());

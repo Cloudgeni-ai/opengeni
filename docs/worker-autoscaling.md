@@ -32,7 +32,7 @@ Helm rejects unsupported schema/target values, absent prerequisites, enabled
 slot-saturation metrics, and arbitrary `customMetrics` in this mode. Empty
 custom metrics or the exact historical `opengeni_turns_inflight` Pods
 AverageValue `"8"` singleton are supported; the latter is rendered once, not
-twice. Existing `autoscaling.behavior` is replaced by the schema-v1 policy.
+twice. Configured `autoscaling.behavior` fields override the schema-v1 defaults.
 Feature-off HPA metrics/behavior remain unchanged.
 
 The feature renders exactly one autoscaling/v2 HPA for the turn Deployment:
@@ -58,9 +58,11 @@ maximum; agent-only inflight is not added to R.
 
 Scale-up: zero stabilization, `selectPolicy: Max`, at most four Pods per 30
 seconds. Scale-down: 600-second stabilization and one Pod per 300 seconds are
-retained as policy fields, but `selectPolicy: Disabled` prevents downscale.
-Downscale enablement and any future 2- or 4-pod production floor are separate,
-recovery-qualified changes. A downscale-disabled HPA may still increase to its
+the defaults. The fallback `selectPolicy: Disabled` prevents downscale unless
+`worker.turns.autoscaling.behavior.scaleDown.selectPolicy` is explicitly set to
+`Max` or `Min`. A partial override retains the default stabilization and rate
+limits; configured policies and windows are respected. Floor selection and
+downscale enablement remain operator decisions. A downscale-disabled HPA may still increase to its
 ceiling and stay there; no savings claim follows from this source change.
 
 ## Raw metric and scrape contract

@@ -68,6 +68,80 @@ describe("links in human-input questions", () => {
     ]);
   });
 
+  test("Markdown links render their label and keep the full URL as href", () => {
+    expect(linkifySegments(`[Open authorization](${SIGN_IN_URL}) Then paste the code.`)).toEqual([
+      { kind: "link", value: SIGN_IN_URL, label: "Open authorization" },
+      { kind: "text", value: " Then paste the code." },
+    ]);
+    expect(linkifySegments("See [docs](https://example.com/a_(b)), or https://x.dev.")).toEqual([
+      { kind: "text", value: "See " },
+      { kind: "link", value: "https://example.com/a_(b)", label: "docs" },
+      { kind: "text", value: ", or " },
+      { kind: "link", value: "https://x.dev" },
+      { kind: "text", value: "." },
+    ]);
+    // Unsafe or malformed targets stay plain text; no javascript: links.
+    expect(linkifySegments("[x](javascript:alert(1)) [y] (z) [w](no spaces allowed)")).toEqual([
+      { kind: "text", value: "[x](javascript:alert(1)) [y] (z) [w](no spaces allowed)" },
+    ]);
+  });
+
+  test("help text Markdown links show the label, not raw syntax", async () => {
+    mounted = await renderComponent(
+      <HumanInputForm
+        request={{
+          id: "request-markdown",
+          allowSkip: false,
+          expiresAt: null,
+          questions: [
+            question({
+              kind: "secret",
+              label: "Code",
+              prompt: "Finish sign-in",
+              helpText: `[Open authorization](${SIGN_IN_URL}) Use this new link.`,
+              secret,
+            }),
+          ],
+        }}
+        autoFocus={false}
+        onSubmit={() => {}}
+      />,
+    );
+    const anchors = links(mounted.container);
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]!.textContent).toBe("Open authorization");
+    expect(anchors[0]!.getAttribute("href")).toBe(SIGN_IN_URL);
+    expect(mounted.container.textContent).not.toContain("](");
+  });
+
+  test("option descriptions are linked", async () => {
+    mounted = await renderComponent(
+      <HumanInputForm
+        request={{
+          id: "request-options",
+          allowSkip: false,
+          expiresAt: null,
+          questions: [
+            question({
+              id: "pick",
+              kind: "single_select",
+              label: "Pick one",
+              prompt: "Pick one",
+              options: [
+                { id: "a", label: "A", description: "See [pricing](https://example.com/p)" },
+                { id: "b", label: "B", description: null },
+              ],
+            }),
+          ],
+        }}
+        autoFocus={false}
+        onSubmit={() => {}}
+      />,
+    );
+    const anchor = links(mounted.container).find((a) => a.textContent === "pricing");
+    expect(anchor?.getAttribute("href")).toBe("https://example.com/p");
+  });
+
   test("a pending secret question makes its sign-in URL clickable and wrappable", async () => {
     mounted = await renderComponent(
       <HumanInputForm

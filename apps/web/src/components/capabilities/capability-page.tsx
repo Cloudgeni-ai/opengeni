@@ -6,12 +6,12 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailFact, DetailFacts, DetailSection } from "@/components/ui/detail-sheet";
-import { Disclosure } from "@/components/ui/disclosure";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
-import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/detail-page";
+import { DetailFact, DetailFacts, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
+import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    The one detail anatomy behind every Capabilities row (DESIGN.md section 8):

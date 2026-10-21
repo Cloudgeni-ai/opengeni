@@ -190,14 +190,21 @@ test.each(["personal"] as const)(
         `/v1/integrations/oauth/callback?${new URLSearchParams({ state, ...(code ? { code: "synthetic-code" } : {}) })}`,
       );
     const read = async (id: string) => (await app.request(`${base}/${id}`, { headers })).json();
-    const begin = async (providerId = "gmail") => {
+    // Reconnecting names the exact account, as the console's Reconnect does;
+    // an attempt without one connects an additional account.
+    const begin = async (
+      providerId = "gmail",
+      reconnectAccountId?: string,
+      extraHeaders: Record<string, string> = {},
+    ) => {
       const response = await app.request(base, {
         method: "POST",
-        headers,
+        headers: { ...headers, ...extraHeaders },
         body: JSON.stringify({
           providerId,
           ownership,
           returnUrl,
+          ...(reconnectAccountId ? { reconnectAccountId } : {}),
           idempotencyKey: randomUUID(),
         }),
       });
@@ -454,7 +461,7 @@ test.each(["personal"] as const)(
       // version and ownership unchanged; preview availability is irrelevant.
       for (const failure of grantFailures) {
         const reason = setGrantFailure(failure);
-        const reconnect = await begin();
+        const reconnect = await begin("gmail", completed.account.id);
         const response = await callback(reconnect.state);
         expect(response.headers.get("location")).toBe(returnUrl);
         const failedAttempt = await read(reconnect.attempt.id);
@@ -478,7 +485,7 @@ test.each(["personal"] as const)(
       }
       setGrantFailure();
       expect(previewRequests).toBe(0);
-      const verifiedReconnect = await begin();
+      const verifiedReconnect = await begin("gmail", completed.account.id);
       expect((await callback(verifiedReconnect.state)).headers.get("location")).toBe(returnUrl);
       expect(await read(verifiedReconnect.attempt.id)).toMatchObject({
         state: "complete",
@@ -516,6 +523,25 @@ test.each(["personal"] as const)(
       await callback(denied.state);
       expect(await read(denied.attempt.id)).toEqual(failed);
       expect(exchanges).toBe(acceptedExchanges);
+
+      // Started in the desktop app: the browser that finishes the sign-in goes
+      // to the console's hand-back page, which reopens the app on returnUrl.
+      const desktop = { "x-opengeni-desktop-app": "windows" };
+      const fromApp = await begin("gmail", undefined, {
+        ...desktop,
+        origin: "https://host.example",
+      });
+      const handBack = new URL("https://host.example/desktop-return");
+      handBack.searchParams.set("url", returnUrl);
+      expect((await callback(fromApp.state, false)).headers.get("location")).toBe(
+        handBack.toString(),
+      );
+      // Another site's console never has its return rewritten.
+      const otherConsole = await begin("gmail", undefined, {
+        ...desktop,
+        origin: "https://other.example.test",
+      });
+      expect((await callback(otherConsole.state, false)).headers.get("location")).toBe(returnUrl);
 
       const revoked = await begin();
       await revokeOrganizationApiKey(client.db, grant.accountId, apiKey.id);

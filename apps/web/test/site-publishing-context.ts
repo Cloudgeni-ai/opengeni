@@ -9,7 +9,7 @@ import {
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 // Sample data for the Publish to web preview. The Site page, the Publish page
 // and the sign-in page are the production components; only the client and the

@@ -40,6 +40,88 @@ CREATE POLICY workspace_isolation ON "widgets"
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id));
 `;
 
+const CATALOG_WINDOW = `
+CREATE TEMP TABLE saved_forced_tables ON COMMIT DROP AS
+SELECT class.oid::regclass AS relation FROM pg_class class
+WHERE class.oid IN ('widgets'::regclass) AND class.relforcerowsecurity;
+DO $open_window$
+DECLARE forced regclass;
+BEGIN
+  FOR forced IN SELECT relation FROM saved_forced_tables ORDER BY relation::text LOOP
+    EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', forced);
+  END LOOP;
+END $open_window$;
+UPDATE widgets SET origin_workspace_id = workspace_id;
+DO $close_window$
+DECLARE forced regclass;
+BEGIN
+  FOR forced IN SELECT relation FROM saved_forced_tables ORDER BY relation::text LOOP
+    EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', forced);
+  END LOOP;
+END $close_window$;
+`;
+
+describe("catalog-filtered owner posture window", () => {
+  const analyze = (window: string, extra: Record<string, string> = {}) =>
+    analyzeMigrationRlsBackfills(
+      fixture({
+        "0001_base.sql": FORCED_TABLE,
+        "0002_window.sql": window,
+        ...extra,
+      }),
+    );
+
+  test("accepts the exact closed regclass window", () => {
+    expect(analyze(CATALOG_WINDOW)).toEqual([]);
+  });
+  test.each([
+    ["missing restore", CATALOG_WINDOW.slice(0, CATALOG_WINDOW.indexOf("DO $close_window$"))],
+    ["unfiltered snapshot", CATALOG_WINDOW.replace(" AND class.relforcerowsecurity", "")],
+    ["unbounded catalog", CATALOG_WINDOW.replace("class.oid IN ('widgets'::regclass) AND ", "")],
+    [
+      "policy bypass",
+      CATALOG_WINDOW.replace(
+        "UPDATE widgets",
+        "CREATE POLICY bypass ON widgets USING (true); UPDATE widgets",
+      ),
+    ],
+    [
+      "extra open-loop policy",
+      CATALOG_WINDOW.replace(
+        "END $open_window$",
+        "CREATE POLICY bypass ON widgets USING (true); END $open_window$",
+      ),
+    ],
+    [
+      "snapshot tampering",
+      CATALOG_WINDOW.replace("UPDATE widgets", "DELETE FROM saved_forced_tables; UPDATE widgets"),
+    ],
+    [
+      "different restore snapshot",
+      CATALOG_WINDOW.replace(
+        "FROM saved_forced_tables ORDER BY relation::text LOOP\n    EXECUTE format('ALTER TABLE %s FORCE",
+        "FROM other_tables ORDER BY relation::text LOOP\n    EXECUTE format('ALTER TABLE %s FORCE",
+      ),
+    ],
+  ])("rejects %s", (_label, window) => {
+    expect(analyze(window)).toContainEqual(
+      expect.objectContaining({ kind: "write", tables: ["widgets"] }),
+    );
+  });
+  test("only listed tables receive owner visibility", () => {
+    expect(
+      analyze(CATALOG_WINDOW.replace("'widgets'::regclass", "'other_table'::regclass")),
+    ).toHaveLength(1);
+  });
+  test("re-arms after close and in the next file", () => {
+    const findings = analyze(`${CATALOG_WINDOW}\nUPDATE widgets SET origin_workspace_id = NULL;`, {
+      "0003_after.sql": "UPDATE widgets SET origin_workspace_id = NULL;",
+    });
+    expect(findings).toHaveLength(2);
+    expect(findings.map((finding) => finding.file)).toEqual(["0002_window.sql", "0003_after.sql"]);
+  });
+});
+
 describe("splitStatements", () => {
   test("keeps a dollar-quoted body as one statement", () => {
     const statements = splitStatements(

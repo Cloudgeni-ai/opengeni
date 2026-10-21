@@ -37,6 +37,10 @@ const withheldMigrations = [
   migration,
   accountBindingsMigration,
   sharingMigration,
+  // Rewrites this cutover's resolver; replay only after it is installed.
+  "0876_connection_validation_shared_locks.sql",
+  // Extends machine grant predicates rewritten by withheld 0501.
+  "0851_personal_machine_session_tree.sql",
   admissionDiagnosticsMigration,
   admissionRefusalsMigration,
   receiverExecutionContextMigration,
@@ -119,6 +123,17 @@ const withheldMigrations = [
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
   "0846_independent_session_titles.sql",
+  // Usage history routines live in the subscription schema the withheld 0688
+  // creates; the seed reads them. Replay both after it.
+  "0871_subscription_usage_history.sql",
+  "0872_subscription_usage_call_history_seed.sql",
+  // Patches the account-binding fence withheld 0494 installs.
+  "0873_mcp_binding_delegation_revocation.sql",
+  // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
+  "0884_subscription_core_personal_quarantine_expiry.sql",
+  // The schedule list trigger reads the audience column of 0720, withheld
+  // with the allowance tail below; replay after it.
+  "0888_session_list_invalidation.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

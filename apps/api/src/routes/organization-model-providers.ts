@@ -27,7 +27,8 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { offerClaudeDefaultModels } from "../claude-default-models";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 const OrganizationId = z.string().uuid();
 

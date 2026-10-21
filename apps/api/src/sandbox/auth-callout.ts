@@ -255,6 +255,13 @@ export async function handleAuthorizationRequest(
     connectionInstanceId,
     leaseMs: AGENT_CONNECTION_LEASE_MS,
   });
+  // The takeover point. A second live process is refused (and counted) while
+  // the holder's lease lasts, so two processes of one enrollment running at
+  // once is a rare edge: a partitioned holder whose lease lapsed. Its requesters
+  // were answered and its commands settled lost when the new process claimed,
+  // but it keeps running what it ran. If it holds the connection again later,
+  // its operation inventory on that connection is answered with the operations
+  // Opengeni no longer recognises, and it stops them (operation-inventory.ts).
   if (!claim.claimed) {
     warnDenial(
       deps,

@@ -20,6 +20,9 @@ pub(crate) enum RenewNowError {
     LocalState,
     /// The control plane refused or could not be reached; retrying may help.
     Renewal,
+    /// This agent has no enrollment of its own to renew: a compute sandbox's
+    /// agent, whose enrollment Opengeni compute keeps.
+    Unsupported,
 }
 
 impl RenewNowError {
@@ -29,6 +32,7 @@ impl RenewNowError {
             Self::LegacyOrigin => "legacy_origin",
             Self::LocalState => "local_state_unavailable",
             Self::Renewal => "renewal_failed",
+            Self::Unsupported => "renewal_unsupported",
         }
     }
 

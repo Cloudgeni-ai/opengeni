@@ -1,14 +1,14 @@
 import { ChevronRightIcon, CpuIcon, StarIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { MetaChip } from "@/components/ui/meta-chip";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   UsageMeter,
   UsageMeterGroup,
   type UsageMeterVariant,
   type UsageWindowReading,
-} from "@/components/ui/usage-meter";
+} from "@opengeni/react/ui/usage-meter";
 import {
   codexOrganizationAccounts,
   codexWorkspaceAccounts,

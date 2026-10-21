@@ -2,7 +2,7 @@
 // the production components under its own client, config and permissions.
 import { createContext, useCallback, useContext, useRef, type ReactNode } from "react";
 
-import type { AppContextValue } from "../src/context";
+import type { AppContextValue } from "@opengeni/react/app/app-context";
 
 const ScenarioContext = createContext<AppContextValue | null>(null);
 

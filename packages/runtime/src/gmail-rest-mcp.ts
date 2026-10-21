@@ -1,4 +1,8 @@
-import type { McpServerConnectionRef, ToolAuthNeededPayload } from "@opengeni/contracts";
+import {
+  TOOL_REVIEW_SELECTION_LABELS_MAX,
+  type McpServerConnectionRef,
+  type ToolAuthNeededPayload,
+} from "@opengeni/contracts";
 import {
   defineLocalMcpBridgeDescriptor,
   type LocalMcpBridgeAdapter,
@@ -32,6 +36,12 @@ export const GMAIL_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
 const GMAIL_BINARY_RESPONSE_MAX_BYTES = Math.ceil((GMAIL_DOWNLOAD_MAX_BYTES * 4) / 3) + 1024 * 1024;
 const MAX_PAGE_SIZE = 50;
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Messages described on the approval card itself. */
+const SAMPLE_LABELS = 3;
+/** Stays under Gmail's per-user quota (metadata reads cost 5 units, 250 units/s). */
+const SELECTION_LABEL_CONCURRENCY = 8;
+/** Labelling the whole selection must not hold up the approval for long. */
+const SELECTION_LABELS_BUDGET_MS = 45_000;
 const MUTATION_TOOLS = new Set([
   ...GMAIL_EXTRA_MUTATIONS,
   "create_draft",
@@ -552,42 +562,86 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         : [];
     const selected = [...new Set(ids.filter((id): id is string => typeof id === "string"))].slice(
       0,
-      3,
+      TOOL_REVIEW_SELECTION_LABELS_MAX,
     );
     const clean = (value: string) =>
       value
         .replaceAll("\u0000", "")
         .replace(/\p{Surrogate}/gu, "�")
         .slice(0, 256);
-    const samples = await Promise.all(
-      selected.map(async (id) => {
-        const url = new URL(
-          `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(requiredId(id, "messageId"))}`,
+    const describe = async (id: string, skippable: (error: unknown) => boolean) => {
+      const url = new URL(
+        `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(requiredId(id, "messageId"))}`,
+      );
+      url.searchParams.set("format", "metadata");
+      url.searchParams.set("fields", "id,payload(headers)");
+      for (const name of ["Subject", "From"]) url.searchParams.append("metadataHeaders", name);
+      let message: GmailMessage;
+      try {
+        message = await this.request<GmailMessage>("get_message", url, {}, true);
+      } catch (error) {
+        if (skippable(error)) return null;
+        throw error;
+      }
+      if (message.id !== id)
+        throw new GmailRestProviderError(
+          "Gmail review metadata did not match the selected message",
         );
-        url.searchParams.set("format", "metadata");
-        url.searchParams.set("fields", "id,payload(headers)");
-        for (const name of ["Subject", "From"]) url.searchParams.append("metadataHeaders", name);
-        let message: GmailMessage;
-        try {
-          message = await this.request<GmailMessage>("get_message", url, {}, true);
-        } catch (error) {
-          if (error instanceof GmailRestProviderError && error.status === 404) return null;
-          throw error;
+      const headers = headerMap(message.payload?.headers);
+      return {
+        id,
+        title: clean(headers.subject ? decodeWords(headers.subject) : "(No subject)"),
+        ...(headers.from ? { subtitle: clean(headers.from) } : {}),
+        provenance: "provider_metadata" as const,
+      };
+    };
+    // Samples only enrich the review card. A message Gmail cannot read for
+    // the card (missing, malformed id, rate limit, outage, transport) is
+    // left out, and the action itself reports any real problem when it
+    // runs. Authentication and access refusals still fail closed: the
+    // grant cannot act on this message either.
+    const samples = await Promise.all(
+      selected
+        .slice(0, SAMPLE_LABELS)
+        .map((id) =>
+          describe(
+            id,
+            (error) =>
+              error instanceof GmailRestProviderError &&
+              error.status !== 401 &&
+              error.status !== 403,
+          ),
+        ),
+    );
+    // The rest only label the full list in details, so they are best effort:
+    // bounded concurrency and time. A missing message is skipped; any other
+    // failure (often a rate limit) stops further reads and leaves the
+    // remaining rows as ids.
+    const rest: Array<Awaited<ReturnType<typeof describe>>> = [];
+    const queue = selected.slice(SAMPLE_LABELS);
+    const deadline = Date.now() + SELECTION_LABELS_BUDGET_MS;
+    let next = 0;
+    let stopped = false;
+    await Promise.all(
+      Array.from({ length: Math.min(SELECTION_LABEL_CONCURRENCY, queue.length) }, async () => {
+        while (!stopped && next < queue.length && Date.now() < deadline) {
+          const index = next++;
+          try {
+            rest[index] = await describe(
+              queue[index]!,
+              (error) => error instanceof GmailRestProviderError && error.status === 404,
+            );
+          } catch {
+            stopped = true;
+          }
         }
-        if (message.id !== id)
-          throw new GmailRestProviderError(
-            "Gmail review metadata did not match the selected message",
-          );
-        const headers = headerMap(message.payload?.headers);
-        return {
-          id,
-          title: clean(headers.subject ? decodeWords(headers.subject) : "(No subject)"),
-          ...(headers.from ? { subtitle: clean(headers.from) } : {}),
-          provenance: "provider_metadata" as const,
-        };
       }),
     );
-    return { samples: samples.filter((sample) => sample !== null) };
+    const labels = [...samples, ...rest].filter((label) => label != null);
+    return {
+      samples: samples.filter((sample) => sample !== null),
+      ...(labels.length > 0 ? { selectionLabels: labels } : {}),
+    };
   }
 
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
@@ -1741,6 +1795,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         );
       throw new GmailRestProviderError(
         `Gmail returned an unreadable response (${response.status}): ${safeErrorMessage(error)}`,
+        // Keep a refusal's status even when its body is not JSON, so 401/403
+        // are still recognized as authentication and access refusals.
+        response.ok ? undefined : response.status,
       );
     });
     if (!response.ok) {

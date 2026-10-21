@@ -1,16 +1,19 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
-import { capabilityErrorToast, filterCapabilityCatalogItems } from "./lib/capabilities";
-import { projectSessionTimeline, summarizeSessionFailure } from "./lib/events";
+import {
+  capabilityErrorToast,
+  filterCapabilityCatalogItems,
+} from "@opengeni/react/app/lib/capabilities";
+import { projectSessionTimeline, summarizeSessionFailure } from "@opengeni/react/app/lib/events";
 import {
   buildApiKeyPermissionGroups,
   buildSessionMcpPermissionGroups,
   delegableApiKeyPermissions,
   hasWorkspacePermission,
-} from "./lib/permissions";
+} from "@opengeni/react/app/lib/permissions";
 import {
   orgSettingsPath,
   parseCheckoutOutcome,
@@ -19,14 +22,14 @@ import {
   workspaceSessionPath,
   workspaceSessionsPath,
   workspaceSettingsPath,
-} from "./lib/routes";
-import { sameSessionForContext } from "./lib/session-context";
+} from "@opengeni/react/app/lib/routes";
+import { sameSessionForContext } from "@opengeni/react/app/lib/session-context";
 import {
   defaultExpandedAncestors,
   sessionAncestorPath,
   sessionStateLabel,
   visualTreeDepth,
-} from "./lib/session-rail";
+} from "@opengeni/react/app/lib/session-rail";
 import {
   authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
@@ -37,8 +40,8 @@ import {
   sessionBranchSummaryKey,
   sessionBranchSummaryDecision,
   upsertSessionBranchChild,
-} from "./lib/session-branch-cache";
-import { SessionChannelProjectionAuthority } from "./lib/session-pins";
+} from "@opengeni/react/app/lib/session-branch-cache";
+import { SessionChannelProjectionAuthority } from "@opengeni/react/app/lib/session-pins";
 import {
   buildPinnedRailSections,
   buildRailForest,
@@ -49,14 +52,14 @@ import {
   relativeTimeLabel,
   visibleForestRows,
   visibleTreeRows,
-} from "./lib/sessions-group";
-import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
+} from "@opengeni/react/app/lib/sessions-group";
+import { organizationsForSubject, orgLabel, workspacesInOrg } from "@opengeni/react/app/lib/org";
 import {
   emptySessionDraft,
   isSessionDraftComputeReady,
   managedBackendOptions,
   submissionFromSessionDraft,
-} from "./lib/session-create";
+} from "@opengeni/react/app/lib/session-create";
 import {
   buildAdditionalRepositoryResources,
   buildTools,
@@ -78,16 +81,16 @@ import {
   selectableMcpServers,
   selectedAvailableCapabilityToolIds,
   type RepoDraft,
-} from "./lib/session-tools";
+} from "@opengeni/react/app/lib/session-tools";
 import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
   scheduleFromFormState,
   summarizeLastRun,
 } from "./lib/scheduled-tasks";
-import { entitlementEntries, formatEntitlementValue } from "./lib/format";
+import { entitlementEntries, formatEntitlementValue } from "@opengeni/react/app/lib/format";
 import { listViewState } from "./lib/load-state";
-import { upsertWorkspace, workspaceCreationAccountId } from "./lib/workspaces";
+import { upsertWorkspace, workspaceCreationAccountId } from "@opengeni/react/app/lib/workspaces";
 import type {
   AccessContext,
   CapabilityCatalogItem,
@@ -100,7 +103,7 @@ import type {
   Session,
   SessionEvent,
   Workspace,
-} from "./types";
+} from "@opengeni/react/app/types";
 
 describe("workspace route helpers", () => {
   test("builds canonical workspace-scoped console URLs", () => {

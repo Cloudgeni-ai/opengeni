@@ -6,24 +6,24 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { useAppContext } from "@/context";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -34,12 +34,12 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
   type OrganizationAdminResource,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import type {
   OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import { useOrganizationDirectory } from "./organization-directory";
 

@@ -82,7 +82,12 @@ export function parseSandboxFileArtifactReceipt(
       return null;
     }
   }
-  if (!recordWithKeys(value, SANDBOX_FILE_RECEIPT_KEYS)) return null;
+  if (
+    !recordWithKeys(value, SANDBOX_FILE_RECEIPT_KEYS) &&
+    !recordWithKeys(value, SANDBOX_FILE_RECEIPT_WITH_ACCESS_KEYS)
+  )
+    return null;
+  if (value.access !== undefined && !isFileAccess(value.access)) return null;
   const artifact = parseRetainedWorkspaceFileReference(value.artifact, expectedWorkspaceId);
   const pathSegments = typeof value.sandboxPath === "string" ? value.sandboxPath.split("/") : [];
   if (
@@ -377,6 +382,19 @@ const RETENTION_KEYS = new Set(["policy", "expiresAt"]);
 const RETRIEVAL_KEYS = new Set(["method", "path", "acceptRanges", "maxRangeBytes"]);
 const GENERATED_IMAGE_RECEIPT_KEYS = new Set(["type", "artifact", "sandboxPath"]);
 const SANDBOX_FILE_RECEIPT_KEYS = new Set(["type", "sandboxPath", "filename", "artifact"]);
+/** Receipts from servers where files have audiences also say who can open them. */
+const SANDBOX_FILE_RECEIPT_WITH_ACCESS_KEYS = new Set([...SANDBOX_FILE_RECEIPT_KEYS, "access"]);
+const FILE_ACCESS_KEYS = new Set(["visibility", "whoCanOpen"]);
+
+function isFileAccess(value: unknown): boolean {
+  return (
+    recordWithKeys(value, FILE_ACCESS_KEYS) &&
+    (value.visibility === "private" || value.visibility === "workspace") &&
+    typeof value.whoCanOpen === "string" &&
+    value.whoCanOpen.length >= 1 &&
+    value.whoCanOpen.length <= 512
+  );
+}
 const GENERATED_VIDEO_RECEIPT_KEYS = new Set([
   "type",
   "schemaVersion",

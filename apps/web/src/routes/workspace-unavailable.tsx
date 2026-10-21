@@ -1,15 +1,15 @@
 import { useEffect } from "react";
 
-import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { CrossSlotDeepLinkRecovery } from "@/components/cross-slot-deep-link-recovery";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
+import { Button } from "@opengeni/react/ui/button";
+import { CrossSlotDeepLinkRecovery } from "@opengeni/react/app/components/cross-slot-deep-link-recovery";
 import {
   resolveAuthorizedWorkspaceFallback,
   type RouteRecoveryLocation,
   workspaceSessionIdFromPath,
 } from "@/lib/authorized-route-recovery";
-import { SessionUnavailableRoute } from "@/routes/session-unavailable";
-import type { AccessContext, Workspace } from "@/types";
+import { SessionUnavailableRoute } from "@opengeni/react/app/routes/session-unavailable";
+import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 export function WorkspaceUnavailableRoute(props: {
   requestedWorkspaceId: string;

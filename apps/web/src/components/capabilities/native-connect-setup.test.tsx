@@ -7,7 +7,8 @@ import {
 } from "../../../../../packages/react/test/render-hook";
 
 registerDom();
-const { NativeConnectSetup, nativeConnectApiInput } = await import("./native-connect-setup");
+const { NativeConnectSetup, nativeConnectApiInput } =
+  await import("@opengeni/react/app/components/capabilities/native-connect-setup");
 
 const attempt: ConnectAttempt = {
   id: "attempt",

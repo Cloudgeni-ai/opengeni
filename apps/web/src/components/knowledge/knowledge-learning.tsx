@@ -7,26 +7,26 @@ import type {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { Notice } from "@/components/ui/notice";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Section, SectionStack } from "@/components/ui/section";
+import { Button } from "@opengeni/react/ui/button";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
 import {
   SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowSkeleton,
-} from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/setting-row";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   AGENT_LEARNING_TITLE,
   IDENTITY_POLICY_MODE,
   IDENTITY_POLICY_VALUE,
   LEARNING_MODE_LABEL,
-} from "@/lib/agent-learning-vocabulary";
-import { isPermissionDenied } from "@/lib/api-error";
-import type { CompanyProfileAgentPolicy } from "@/types";
+} from "@opengeni/react/app/lib/agent-learning-vocabulary";
+import { isPermissionDenied } from "@opengeni/react/ui/api-error";
+import type { CompanyProfileAgentPolicy } from "@opengeni/react/app/types";
 
 import { errorText } from "./knowledge-data";
 

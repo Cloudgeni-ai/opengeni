@@ -40,6 +40,7 @@ import {
 import { agentAssetName, signedHash, verifyAgentSignature } from "./agent-download";
 import { computerName } from "./computer-name";
 import { HostedAgent, type AgentChild } from "./hosted-agent";
+import { parseAgentServiceStatus, type AgentServiceStatus } from "./agent-service";
 
 interface RunResult {
   code: number;
@@ -130,11 +131,29 @@ export interface ThisComputerDeps {
    */
   agentConfigDir?: string;
   /**
-   * Take over an agent installed separately on this computer (its background
-   * service, and on a Mac the older standalone agent app). Default true; an
-   * app with its own agent leaves other agents alone.
+   * Reuse a separately installed agent through its existing service. Default
+   * true; an isolated app with its own agent leaves other agents alone.
    */
   adoptStandaloneAgent?: boolean;
+  /** Read the enrolled service's own live status, never a child-process TCC probe. */
+  readMachine?(
+    accountId: string,
+    baseUrl: string,
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<{
+    online: boolean;
+    screenControl: boolean;
+    permissions: Partial<Record<AgentPermissionId, boolean>> | null;
+  } | null>;
+  enableScreenControl?(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
+  /**
+   * Let the Opengeni Browser Chrome extension reach this agent, so agents can
+   * work in the person's own Chrome. Default true. An app whose people don't
+   * use that extension turns it off: its agent then leaves the extension to
+   * any other agent on the computer.
+   */
+  browserExtension?: boolean;
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
   /**
@@ -161,11 +180,10 @@ export interface ThisComputerDeps {
    * (`granted`) or no longer being waited for.
    */
   onGuidePermission?(id: ThisComputerPermissionId | null, granted?: boolean): void;
-  /** Moves a file or folder to the Trash. */
-  trash(path: string): Promise<void>;
+  /** @deprecated Installations are never removed by desktop setup. */
+  trash?(path: string): Promise<void>;
   /**
-   * The separate Mac agent app, which held the screen-control permissions,
-   * was handed over: the person has to allow them again for this app.
+   * @deprecated Existing signing identities and grants are preserved; never called.
    */
   onScreenControlHandedOver?(): void;
   onChange(): void;
@@ -173,8 +191,11 @@ export interface ThisComputerDeps {
 
 /** What the app remembers about this computer between launches. */
 interface ComputerState {
-  /** A separately installed agent's background service was handed over to the app. */
+  /** The person explicitly enabled this computer in the desktop app. */
   adopted: boolean;
+  management: "app" | "service";
+  /** Persisted before download so a failed enrollment can be retried after relaunch. */
+  appInstalled: boolean;
   /** The person paused this computer; the agent stays stopped until they resume. */
   paused: boolean;
   /** Screen control was asked for, so its permissions are part of setting up. */
@@ -254,7 +275,14 @@ type Permissions = ReturnType<typeof parsePermissions>;
  */
 export class ThisComputer {
   private readonly agent: HostedAgent;
-  private readonly hostedPath: string;
+  private readonly installedPath: string;
+  private serviceBinary: string | null = null;
+  private serviceCache: { at: number; value: AgentServiceStatus } | null = null;
+  private machineCache: {
+    at: number;
+    key: string;
+    value: Awaited<ReturnType<NonNullable<ThisComputerDeps["readMachine"]>>>;
+  } | null = null;
   private readonly statePath: string;
   private state: ComputerState;
   private connectionsCache: { at: number; value: AgentConnection[] } | null = null;
@@ -283,8 +311,11 @@ export class ThisComputer {
   private readonly agentEnv: Record<string, string>;
 
   constructor(private readonly deps: ThisComputerDeps) {
-    this.hostedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
-    this.agentEnv = deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {};
+    this.installedPath = deps.agentPath ?? hostedAgentPath(deps.platform, deps.home, deps.env);
+    this.agentEnv = {
+      ...(deps.agentConfigDir ? { OPENGENI_CONFIG_DIR: deps.agentConfigDir } : {}),
+      ...(deps.browserExtension === false ? { OPENGENI_AGENT_BROWSER_EXTENSION: "off" } : {}),
+    };
     this.statePath = join(deps.dataDir, "this-computer.json");
     this.state = this.loadState();
     this.agent = new HostedAgent({
@@ -303,7 +334,90 @@ export class ThisComputer {
 
   /** Whether an agent installed separately is taken over (see the deps). */
   private get adopts(): boolean {
-    return this.deps.adoptStandaloneAgent !== false;
+    return this.deps.adoptStandaloneAgent ?? (!this.deps.agentPath && !this.deps.agentConfigDir);
+  }
+
+  private get macBundleBinary(): string | null {
+    if (!this.adopts || this.deps.platform !== "darwin") return null;
+    const path = join(standaloneMacAgentApp(this.deps.home), "Contents", "MacOS", "opengeni-agent");
+    return existsSync(path) ? path : null;
+  }
+
+  private get hostedPath(): string {
+    return this.serviceBinary ?? this.macBundleBinary ?? this.installedPath;
+  }
+
+  private get serviceBacked(): boolean {
+    return (
+      this.adopts &&
+      (this.state.management === "service" ||
+        this.macBundleBinary !== null ||
+        (!this.state.adopted && !this.state.appInstalled && existsSync(this.installedPath)))
+    );
+  }
+
+  private async serviceStatus(): Promise<AgentServiceStatus> {
+    if (this.serviceCache && Date.now() - this.serviceCache.at < 5_000)
+      return this.serviceCache.value;
+    const result = await this.run(this.hostedPath, ["service", "status", "--json"], {
+      timeoutMs: 15_000,
+    });
+    const status = result.code === 0 ? parseAgentServiceStatus(result.output) : null;
+    if (!status) {
+      const legacy =
+        result.code !== 0 && /(?:unexpected|unrecognized|unknown).*--json/iu.test(result.output);
+      throw new ThisComputerError(
+        "unknown",
+        legacy
+          ? "Update the existing Opengeni agent from Machines before managing it here. Its installation and permissions have not been changed."
+          : failureMessage("Couldn't read the existing agent service status", result),
+      );
+    }
+    if (status?.installed && status.binaryPath) this.serviceBinary = status.binaryPath;
+    this.serviceCache = { at: Date.now(), value: status };
+    return status;
+  }
+
+  private async reportedMachine(
+    accountId: string,
+    baseUrl: string,
+    workspaceId: string,
+    connection: AgentConnection,
+  ) {
+    const key = JSON.stringify([accountId, baseUrl, workspaceId, connection.agentId]);
+    if (this.machineCache?.key === key && Date.now() - this.machineCache.at < 5_000)
+      return this.machineCache.value;
+    let value = await this.deps
+      .readMachine?.(accountId, baseUrl, connection.workspaceId, connection.agentId)
+      .catch(() => null);
+    if (!value && connection.workspaceId !== workspaceId) {
+      value = await this.deps
+        .readMachine?.(accountId, baseUrl, workspaceId, connection.agentId)
+        .catch(() => null);
+    }
+    this.machineCache = { at: Date.now(), key, value: value ?? null };
+    return value ?? null;
+  }
+
+  private async requireService(): Promise<AgentServiceStatus> {
+    const status = await this.serviceStatus();
+    if (!status.installed)
+      throw new ThisComputerError(
+        "unknown",
+        "The existing agent has no installed background service. Start it with opengeni-agent start, then try again. Its files have not been changed.",
+      );
+    return status;
+  }
+
+  private async serviceAction(action: "start" | "stop"): Promise<void> {
+    await this.requireService();
+    await this.expect(
+      this.run(this.hostedPath, ["service", action], { timeoutMs: 60_000 }),
+      action === "start" ? "Couldn't resume the agent service" : "Couldn't pause the agent service",
+      "unknown",
+    );
+    this.serviceCache = null;
+    this.machineCache = null;
   }
 
   private run(
@@ -326,6 +440,7 @@ export class ThisComputer {
    * disconnected no longer opens the app at login.
    */
   openAtLoginChange(connected: boolean): "open" | "stop" | null {
+    connected = connected && !this.serviceBacked;
     if (connected === this.state.openAtLogin) return null;
     this.saveState({ openAtLogin: connected });
     return connected ? "open" : "stop";
@@ -333,11 +448,11 @@ export class ThisComputer {
 
   /**
    * At launch: start the agent when this computer serves a workspace and isn't
-   * paused. A separately installed agent is taken over first.
+   * paused. Existing standalone services are never changed or started here.
    */
   async boot(): Promise<void> {
-    if (!this.supported || this.state.paused) return;
-    if (!this.state.adopted && !this.hasAnyAgent()) return;
+    if (!this.supported || this.state.paused || this.serviceBacked) return;
+    if (!this.state.adopted && (this.adopts || !this.hasAnyAgent())) return;
     try {
       await this.ensureInstalled(null);
       const connections = await this.connections(true);
@@ -349,27 +464,79 @@ export class ThisComputer {
     }
   }
 
-  async status(baseUrl: string, workspaceId: string): Promise<ThisComputerStatus> {
+  async status(
+    baseUrl: string,
+    workspaceId: string,
+    accountId?: string,
+  ): Promise<ThisComputerStatus> {
     const base = {
       busy: this.busy || this.installing !== null,
       error: this.error,
       ...(this.errorCode ? { errorCode: this.errorCode } : {}),
       machineName: await computerName(),
+      management: this.serviceBacked ? ("service" as const) : ("app" as const),
+      ...(this.serviceBacked && this.deps.platform === "darwin"
+        ? { permissionAppName: "Opengeni Agent" }
+        : {}),
       ...(this.progress !== null ? { setupProgress: this.progress } : {}),
     };
     if (!this.supported || !agentAssetName(this.deps.platform, this.deps.arch)) {
       return { ...base, state: "unavailable" };
     }
     if (!existsSync(this.hostedPath)) return { ...base, state: "not_installed" };
+    if (this.serviceBacked && !this.state.adopted) return { ...base, state: "not_connected" };
     const connections = await this.connections();
-    if (!this.connectionIn(connections, baseUrl, workspaceId)) {
+    const connection = this.connectionIn(connections, baseUrl, workspaceId);
+    if (!connection) {
       return { ...base, state: "not_connected" };
+    }
+    if (this.serviceBacked) {
+      let service: AgentServiceStatus;
+      try {
+        service = await this.serviceStatus();
+      } catch (caught) {
+        return {
+          ...base,
+          state: "connected",
+          reconnecting: true,
+          error: errorText(caught),
+          errorCode: "unknown",
+        };
+      }
+      const machine = accountId
+        ? await this.reportedMachine(accountId, baseUrl, workspaceId, connection)
+        : null;
+      const permissions =
+        machine?.permissions && (machine.online || (service?.installed && !service.enabled))
+          ? SCREEN_PERMISSIONS.flatMap((id) =>
+              typeof machine.permissions?.[id] === "boolean"
+                ? [{ id, granted: machine.permissions[id]! }]
+                : [],
+            )
+          : undefined;
+      return {
+        ...base,
+        state: service?.installed && !service.enabled ? "paused" : "connected",
+        reconnecting:
+          !service?.running ||
+          !machine?.online ||
+          (this.deps.platform === "darwin" && this.state.screenControl && !machine.permissions),
+        ...(permissions ? { permissions } : {}),
+        ...(!machine && service.enabled && !base.error
+          ? {
+              error:
+                "Couldn't verify this agent's connection. Check your sign-in and network, then try again.",
+              errorCode: "offline" as const,
+            }
+          : {}),
+      };
     }
     const permissions = await this.permissionList();
     const missing = permissions?.some((permission) => !permission.granted) ?? false;
     return {
       ...base,
       state: this.state.paused ? "paused" : "connected",
+      enrollmentId: connection.agentId,
       ...(permissions
         ? {
             permissions,
@@ -391,6 +558,7 @@ export class ThisComputer {
     needsPermissions: boolean;
     /** In the order to allow them. */
     missingPermissions: ThisComputerPermissionId[];
+    management?: "service" | "app";
   }> {
     if (!this.supported) {
       return {
@@ -400,6 +568,19 @@ export class ThisComputer {
         reconnecting: false,
         needsPermissions: false,
         missingPermissions: [],
+      };
+    }
+    if (this.serviceBacked) {
+      const connections = this.state.adopted ? await this.connections() : [];
+      const service = this.state.adopted ? await this.serviceStatus().catch(() => null) : null;
+      return {
+        installed: true,
+        connected: connections.length > 0,
+        running: service?.running ?? false,
+        reconnecting: Boolean(service?.enabled && !service.running),
+        needsPermissions: false,
+        missingPermissions: [],
+        management: "service",
       };
     }
     const connections = await this.connections();
@@ -424,13 +605,17 @@ export class ThisComputer {
     options: ThisComputerConnectOptions,
   ): Promise<ThisComputerStatus> {
     await this.act(async () => {
-      const binary = await this.ensureInstalled(baseUrl);
+      // Read-only compatibility check before granting access; never replace an
+      // older standalone agent to make this setup action succeed.
+      if (this.serviceBacked) await this.requireService();
       if (await this.connectThroughAnother(accountId, baseUrl, workspaceId, options)) return;
       const token = await this.deps
         .mintEnrollToken(accountId, workspaceId, options.screenControl)
         .catch((caught: unknown) => {
           throw serverFailure(caught, "Couldn't start setting up this computer");
         });
+      // Authenticate before downloading, enrolling, or starting any local runner.
+      const binary = await this.ensureInstalled(baseUrl);
       await this.expect(
         // The name people know the computer by, not its network hostname.
         this.run(
@@ -452,13 +637,16 @@ export class ThisComputer {
         "connect_failed",
       );
       this.saveState({
+        adopted: true,
+        management: this.serviceBacked ? "service" : "app",
         paused: false,
         screenControl: this.state.screenControl || options.screenControl,
         setupPending: options.screenControl && this.deps.platform === "darwin",
         turnedOff: this.state.turnedOff.filter((key) => key !== useKey(baseUrl, workspaceId)),
       });
       // A running agent reads its connections when it starts.
-      if (this.agent.state === "stopped") this.agent.start(baseUrl);
+      if (this.serviceBacked) await this.serviceAction("start");
+      else if (this.agent.state === "stopped") this.agent.start(baseUrl);
       else await this.agent.restart();
       const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
       if (!connection) {
@@ -468,11 +656,16 @@ export class ThisComputer {
         throw serverFailure(caught, "Couldn't let agents use this computer");
       });
     });
-    return await this.status(baseUrl, workspaceId);
+    return await this.status(baseUrl, workspaceId, accountId);
   }
 
   async pause(): Promise<void> {
     await this.act(async () => {
+      if (this.serviceBacked) {
+        if (!this.state.adopted) return;
+        await this.serviceAction("stop");
+        return;
+      }
       this.saveState({ paused: true });
       await this.agent.stop();
     });
@@ -480,6 +673,11 @@ export class ThisComputer {
 
   async resume(): Promise<void> {
     await this.act(async () => {
+      if (this.serviceBacked) {
+        if (!this.state.adopted) return;
+        await this.serviceAction("start");
+        return;
+      }
       this.saveState({ paused: false });
       await this.ensureInstalled(null);
       const first = (await this.connections(true))[0];
@@ -540,9 +738,10 @@ export class ThisComputer {
       const rest = await this.connections(true);
       if (rest.length === 0) {
         this.saveState({ paused: false, setupPending: false });
-        await this.agent.stop();
+        if (this.serviceBacked) await this.serviceAction("stop");
+        else await this.agent.stop();
       } else {
-        await this.agent.restart();
+        if (!this.serviceBacked) await this.agent.restart();
       }
       // The local link is gone either way; removing the machine there is a courtesy.
       await this.deps
@@ -598,7 +797,7 @@ export class ThisComputer {
     options: ThisComputerConnectOptions,
   ): Promise<boolean> {
     // A connection made without screen control can't give it.
-    if (options.screenControl && !this.state.screenControl) return false;
+    if (options.screenControl && !this.state.screenControl && !this.serviceBacked) return false;
     const connections = await this.connections(true);
     const key = useKey(baseUrl, workspaceId);
     const origin = normalizeServerUrl(baseUrl);
@@ -611,8 +810,18 @@ export class ThisComputer {
     ];
     for (const connection of candidates) {
       try {
+        if (this.serviceBacked && options.screenControl) {
+          const machine = await this.reportedMachine(accountId, baseUrl, workspaceId, connection);
+          if (!machine?.screenControl) {
+            if (!this.deps.enableScreenControl)
+              throw new Error("Couldn't verify screen-control access for the existing agent.");
+            await this.deps.enableScreenControl(accountId, workspaceId, connection.agentId);
+          }
+        }
         await this.deps.allowAgents(accountId, workspaceId, connection.agentId);
-      } catch {
+      } catch (caught) {
+        if (this.serviceBacked && connection === own)
+          throw serverFailure(caught, "Couldn't use the existing agent");
         continue;
       }
       if (connection === own) {
@@ -620,8 +829,16 @@ export class ThisComputer {
       } else {
         this.saveState({ alsoIn: { ...this.state.alsoIn, [key]: connection.agentId } });
       }
-      this.saveState({ paused: false });
-      if (this.agent.state === "stopped") this.agent.start(connection.apiUrl);
+      // The authenticated server grant succeeded before local management begins.
+      const serviceBacked = this.serviceBacked;
+      if (serviceBacked) await this.serviceAction("start");
+      this.saveState({
+        paused: false,
+        adopted: true,
+        management: serviceBacked ? "service" : "app",
+        screenControl: this.state.screenControl || options.screenControl,
+      });
+      if (!serviceBacked && this.agent.state === "stopped") this.agent.start(connection.apiUrl);
       return true;
     }
     return false;
@@ -637,6 +854,12 @@ export class ThisComputer {
    */
   async requestPermission(id: ThisComputerPermissionId): Promise<void> {
     if (this.deps.platform !== "darwin" || !PERMISSION_ORDER.includes(id)) return;
+    if (this.serviceBacked) {
+      // A child of the desktop asks for the desktop's grants, not the service's.
+      // The existing agent already owns the System Settings entries.
+      if (this.state.adopted) this.deps.openSystemSettings(SETTINGS_PANES[id]);
+      return;
+    }
     if (id === "files") return await this.requestFolders();
     this.watchForGrants();
     this.guide(id);
@@ -793,6 +1016,8 @@ export class ThisComputer {
   invalidate(): void {
     this.connectionsCache = null;
     this.permissionsCache = null;
+    this.serviceCache = null;
+    this.machineCache = null;
   }
 
   // --- The agent's file -------------------------------------------------------------------------
@@ -820,7 +1045,10 @@ export class ThisComputer {
   }
 
   private async install(server: string | null): Promise<string> {
-    const learned = this.state.adopted || !this.adopts ? null : await this.adoptStandalone();
+    if (this.serviceBacked) {
+      await this.requireService();
+      return this.hostedPath;
+    }
     if (await this.versionOf(this.hostedPath)) return this.hostedPath;
     if (this.deps.bundledAgent) {
       throw new ThisComputerError(
@@ -828,10 +1056,15 @@ export class ThisComputer {
         "This app's copy of the agent is missing or damaged. Reinstall the app.",
       );
     }
-    const from = server ?? learned;
+    const from = server;
     if (!from) {
       throw new ThisComputerError("connect_failed", "Set up this computer again from a workspace.");
     }
+    if (!this.saveState({ appInstalled: true }))
+      throw new ThisComputerError(
+        "download_failed",
+        "Couldn't save this computer's setup state. Check the app's data-folder access and try again.",
+      );
     await this.download(from);
     return this.hostedPath;
   }
@@ -925,42 +1158,6 @@ export class ThisComputer {
       renameSync(target, old);
     }
     renameSync(staged, target);
-  }
-
-  /**
-   * Hands a separately installed agent over to the app, once: its background
-   * service is removed (its connections stay), and on a Mac the separate agent
-   * app goes to the Trash with its entries in Privacy & Security. That app was
-   * how agents used the screen, so screen control carries over and its
-   * permissions become part of setting up this app.
-   */
-  private async adoptStandalone(): Promise<string | null> {
-    const macApp = this.deps.platform === "darwin" ? standaloneMacAgentApp(this.deps.home) : null;
-    const macBinary = macApp ? join(macApp, "Contents", "MacOS", "opengeni-agent") : null;
-    const existing = [this.hostedPath, macBinary].find(
-      (candidate): candidate is string => candidate !== null && existsSync(candidate),
-    );
-    let server: string | null = null;
-    if (existing) {
-      const listed = await this.run(existing, ["connections"], { timeoutMs: 15_000 });
-      server = listed.code === 0 ? (parseConnections(listed.output)[0]?.apiUrl ?? null) : null;
-      const removed = await this.run(existing, ["service", "uninstall"], { timeoutMs: 60_000 });
-      if (removed.code !== 0) {
-        throw new ThisComputerError(
-          "takeover_failed",
-          failureMessage("Couldn't take over the agent already on this computer", removed),
-        );
-      }
-    }
-    const handsOverScreen = macApp !== null && existsSync(macApp);
-    if (macApp && handsOverScreen) {
-      if (isSymlink(this.hostedPath)) unlinkSync(this.hostedPath);
-      await this.deps.trash(macApp);
-      execFile("/usr/bin/tccutil", ["reset", "All", "ai.opengeni.agent"], () => undefined);
-    }
-    this.saveState({ adopted: true, ...(handsOverScreen ? { screenControl: true } : {}) });
-    if (handsOverScreen) this.deps.onScreenControlHandedOver?.();
-    return server;
   }
 
   // --- Running it -------------------------------------------------------------------------------
@@ -1064,6 +1261,7 @@ export class ThisComputer {
 
   /** The screen-control permissions to set up, or null when there are none to ask for. */
   private async permissionList(): Promise<ThisComputerPermission[] | null> {
+    if (this.serviceBacked) return null;
     if (!this.state.screenControl || this.deps.platform !== "darwin") return null;
     const permissions = await this.permissions();
     if (!permissions?.required) return null;
@@ -1112,6 +1310,8 @@ export class ThisComputer {
   private loadState(): ComputerState {
     const fallback: ComputerState = {
       adopted: false,
+      management: "app",
+      appInstalled: false,
       paused: false,
       screenControl: false,
       requested: [],
@@ -1124,6 +1324,8 @@ export class ThisComputer {
       const saved = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<ComputerState>;
       return {
         adopted: saved.adopted === true,
+        management: saved.management === "service" ? "service" : "app",
+        appInstalled: saved.appInstalled === true,
         paused: saved.paused === true,
         screenControl: saved.screenControl === true,
         requested: Array.isArray(saved.requested)
@@ -1148,13 +1350,15 @@ export class ThisComputer {
     }
   }
 
-  private saveState(change: Partial<ComputerState>): void {
+  private saveState(change: Partial<ComputerState>): boolean {
     this.state = { ...this.state, ...change };
     try {
       mkdirSync(this.deps.dataDir, { recursive: true });
       writeFileSync(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 });
+      return true;
     } catch {
       // Kept in memory; the next launch asks again.
+      return false;
     }
   }
 

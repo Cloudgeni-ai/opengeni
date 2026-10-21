@@ -4,7 +4,7 @@
 // the CLIENT half: reassembly, heals, ack policy, fault taxonomy, rendering
 // parity, and the durable-before-wire-ack ordering.
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { shell } from "@openai/agents/sandbox";
 import { ErrorCode, ExecRequest, OpChannel, type ControlRequest } from "@opengeni/agent-proto";
@@ -14,6 +14,7 @@ import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhost
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 import {
   OpStreamExecClient,
+  OP_START_RESEND_HORIZON_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   type OpStreamJournal,
   type OpStreamOutputFrame,
@@ -29,6 +30,7 @@ const WORKSPACE_ROOT = "/home/user/project";
 function buildRig(
   opts: {
     journal?: OpStreamJournal;
+    outputReleaseSupported?: boolean;
     execTimeoutMs?: number;
     windowBytes?: number;
     memoryMaxBytes?: number;
@@ -100,6 +102,7 @@ function buildRig(
     opStream: {
       transport,
       ...(opts.journal ? { journal: opts.journal } : {}),
+      ...(opts.outputReleaseSupported ? { outputReleaseSupported: true } : {}),
       ...(opts.windowBytes !== undefined ? { windowBytes: opts.windowBytes } : {}),
       ackIntervalMs: 20,
       silenceTimeoutMs: 120,
@@ -1065,6 +1068,43 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.get("call_ack:0")?.finalAcked).toBe(true);
   });
 
+  test("a runner serving OpRelease releases a stored foreground op in one answered exchange", async () => {
+    const events: string[] = [];
+    let releases: () => ControlRequest[] = () => [];
+    const journal: OpStreamJournal = {
+      attachGeneration: () => "7",
+      persistSettled: (opId, exitSeq) => {
+        events.push(`persist:${opId}@${exitSeq}:released=${releases().length}`);
+      },
+    };
+    const { transport, runner, session, requests } = buildRig({
+      journal,
+      outputReleaseSupported: true,
+    });
+    releases = () => requests.filter((request) => request.op?.$case === "opRelease");
+    runner.script("call_release:0", { frames: [{ channel: "stdout", bytes: "stored" }] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("call_release", () => session.exec({ cmd: "true" }));
+    const run = runner.runs.get("call_release:0");
+    const exitSeq = run!.exitSeq.toString();
+    expect(releases()).toEqual([]);
+
+    // The durability hook: the frontier is persisted first, then one
+    // OpRelease for exactly its exit frame, answered released.
+    await session.finalizeOpStreamOps();
+    expect(events).toEqual([`persist:call_release:0@${exitSeq}:released=0`]);
+    expect(releases().map((request) => request.op)).toEqual([
+      { $case: "opRelease", opRelease: { opId: "call_release:0", exitSeq } },
+    ]);
+    expect(runner.releasedOps.has("call_release:0")).toBe(true);
+    // No final ACK is published: the answer settled it.
+    expect(transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+    // Nothing is left for a later hook.
+    await session.finalizeOpStreamOps();
+    expect(releases()).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
   test("a durable tool result releases only its own sub-ops, preserving parallel and setup output", async () => {
     const { runner, session, transport } = buildRig();
     for (const opId of ["call_first:0", "call_first:1", "call_second:0"]) {
@@ -1572,6 +1612,66 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.has("call_retry_revoke:0")).toBe(false);
   });
 
+  test("no start for an op is sent past the resend horizon of its first attempt", async () => {
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+    });
+    // Three refusals, then the runner would admit it: at the fourth attempt,
+    // five minutes after the third, the horizon has passed.
+    runner.script("call_horizon:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+      drainingStarts: 3,
+    });
+    const startedAt = Date.now();
+    let now = startedAt;
+    const startsAt: number[] = [];
+    const session = new SelfhostedSession({
+      workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: {
+        request: async (subject, request, opts) => {
+          if (request.op?.$case === "opStart") startsAt.push(Date.now());
+          return await runner.request(subject, request, opts);
+        },
+      },
+      relay: { host: "relay.test" },
+      timeoutMs: 2_000,
+      // No exec deadline: only the horizon ends the retries.
+      execTimeoutMs: 0,
+      retryClock: {
+        sleep: async () => {
+          now += 5 * 60_000;
+          setSystemTime(new Date(now));
+        },
+        jitter: () => 0.5,
+      },
+      opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    try {
+      const outcome = await runWithToolCallCorrelation("call_horizon", () =>
+        session.exec({ cmd: "must-not-run" }),
+      ).then(
+        (result) => result.stdout,
+        (error: unknown) => error,
+      );
+      expect(outcome).not.toBe("must-not-run");
+    } finally {
+      setSystemTime();
+    }
+    expect(startsAt.length).toBe(3);
+    expect(runner.runs.has("call_horizon:0")).toBe(false);
+    for (const at of startsAt) {
+      expect(at - startedAt + 2_000 + 120_000).toBeLessThanOrEqual(OP_START_RESEND_HORIZON_MS);
+    }
+  });
+
   test("revocation while the frame subscription is opening fences the initial OpStart", async () => {
     const transport = new InMemoryOpStreamTransport();
     const runner = new FakeOpRunner({
@@ -1734,6 +1834,30 @@ describe("op-stream exec (fake runner)", () => {
       retryable: true,
     });
     expect(responder.requests).toHaveLength(0);
+  });
+
+  test("an expired delivery receipt preserves an unknown OpStart outcome without retry", async () => {
+    const { runner, session, requests } = buildRig();
+    runner.script("call_expired:0", {
+      frames: [],
+      startError: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "Earlier execution may have occurred; inspect the outcome before retrying.",
+        retryable: false,
+        detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+      },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await expect(
+      runWithToolCallCorrelation("call_expired", () => session.exec({ cmd: "do-not-repeat" })),
+    ).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_PROTOCOL,
+      retryable: false,
+      neverSent: false,
+      detail: { outcome_unknown: "true" },
+    });
+    expect(requests.filter((request) => request.op?.$case === "opStart")).toHaveLength(1);
   });
 
   test("a runner that refuses OpStart (protocol) is unsupported without fallback", async () => {

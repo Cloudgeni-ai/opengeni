@@ -20,7 +20,7 @@ import {
 import { IdLine, useLoad } from "@/components/developer/shared";
 import { DEVELOPER_GUIDE_URL } from "@/components/developer/test-result";
 import { WebhookFormPage, WebhookPage, WebhooksSection } from "@/components/developer/webhooks";
-import { SectionStack } from "@/components/ui/section";
+import { SectionStack } from "@opengeni/react/ui/section";
 import { developerSearch, type DeveloperLocation } from "@/lib/developer-route";
 
 const LIST: DeveloperLocation = {};

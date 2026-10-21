@@ -3,22 +3,25 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { CouponRedeem } from "@/components/credits/coupon-redeem";
-import { useAppContext } from "@/context";
-import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
-import { CREDIT_BALANCE_CHANGED, notifyCreditBalanceChanged } from "@/lib/credit-balance-events";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { billingCheckoutReturnUrl } from "@opengeni/react/app/lib/credit-checkout";
+import {
+  CREDIT_BALANCE_CHANGED,
+  notifyCreditBalanceChanged,
+} from "@opengeni/react/app/lib/credit-balance-events";
 import {
   apiErrorAdvice,
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
-} from "@/lib/api-error";
-import { entitlementEntries } from "@/lib/format";
+} from "@opengeni/react/ui/api-error";
+import { entitlementEntries } from "@opengeni/react/app/lib/format";
 import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import {
   beginOrganizationAdminOperation,
@@ -29,15 +32,15 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
   type OrganizationAdminOperationSlot,
-} from "@/lib/organization-admin";
-import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import type { BillingEntitlementsResponse, BillingSummary } from "@opengeni/react/app/types";
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
 import { SubscriptionPlans } from "./subscription-plans";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
 
 // Budgets load only on this page: they never join the session or rail graphs.
 const CreditsCelebrationDialog = lazy(() =>
-  import("@/components/credits/checkout-credits-celebration").then((module) => ({
+  import("@opengeni/react/app/components/credits/checkout-credits-celebration").then((module) => ({
     default: module.CreditsCelebrationDialog,
   })),
 );

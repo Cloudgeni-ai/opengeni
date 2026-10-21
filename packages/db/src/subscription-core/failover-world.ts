@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   evaluateWorkspaceModelPolicy,
+  modelServiceTierCatalogEntry,
   readTurnExecutionPolicyV1,
   SubscriptionPersonalAuthorityV2,
 } from "@opengeni/contracts";
@@ -412,6 +413,7 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
         provider: id,
         kind: subscriptionCoreConnectionKind(provider),
         now: new Date(input.now),
+        health: "stored",
       });
       // Background work carries each provider's own frozen compatibility
       // pool. A live source change must not widen that accepted ceiling.
@@ -463,7 +465,12 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
                     .filter(
                       (model) =>
                         model.provider === id &&
-                        connection.observedModelSlugs!.includes(model.upstreamModelId),
+                        connection.observedModelSlugs!.includes(model.upstreamModelId) &&
+                        // An Ultrafast turn stays on accounts offering that tier.
+                        (accepted.policy.latencyMode !== "ultrafast" ||
+                          connection.observedModelSlugs!.includes(
+                            modelServiceTierCatalogEntry(model.upstreamModelId, "ultrafast"),
+                          )),
                     )
                     .map((model) => model.id),
                 }),

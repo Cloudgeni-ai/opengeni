@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { CheckboxField, Field } from "@/components/ui/field";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { CheckboxField, Field } from "@opengeni/react/ui/field";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
   ACCESS_PRESET_COPY,
   ORGANIZATION_PERMISSION_GROUPS,

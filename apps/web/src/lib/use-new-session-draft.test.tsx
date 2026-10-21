@@ -23,12 +23,15 @@ import {
   nextFocusedNewSessionProjectLaunchIntent,
   nextNewSessionProjectLaunchIntent,
   resolveHydratedNewSessionProjectSelection,
-} from "../routes/sessions-index-hydration";
+} from "@opengeni/react/app/routes/sessions-index-hydration";
 import {
   newSessionDraftOptionsFromSessionDraft,
   sessionDraftFromNewSessionDraftOptions,
-} from "./session-create";
-import { useNewSessionDraft, type NewSessionDraftEditable } from "./use-new-session-draft";
+} from "@opengeni/react/app/lib/session-create";
+import {
+  useNewSessionDraft,
+  type NewSessionDraftEditable,
+} from "@opengeni/react/app/lib/use-new-session-draft";
 
 registerDom();
 

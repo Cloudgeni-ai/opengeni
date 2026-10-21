@@ -1,11 +1,12 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { Session } from "@/types";
+import type { Session } from "@opengeni/react/app/types";
 
-mock.module("@/context", () => ({ useAppContext: () => ({}) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({}) }));
 mock.module("sonner", () => ({ toast: Object.assign(() => 0, { success: () => 0 }) }));
-const { ReadOnlySessionNotice, sessionReadOnlyArchive } = await import("./session-retention");
+const { ReadOnlySessionNotice, sessionReadOnlyArchive } =
+  await import("@opengeni/react/app/components/session/session-retention");
 const { readOnlyChatsDescription } = await import("@/routes/read-only-chats");
 afterAll(() => mock.restore());
 

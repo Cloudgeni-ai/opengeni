@@ -1,4 +1,7 @@
-import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  type ConnectionMetadata,
+} from "@opengeni/contracts";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -68,7 +71,14 @@ export async function getWorkspaceConnectionModelRestrictions(
    * no legacy Claude pool or v1 snapshot is read and these are used.
    */
   claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
+  /**
+   * An already authorized public-workspace metadata read from this invocation.
+   * Its owner still observes the original failure; unavailable metadata keeps
+   * the independent scoped read and its original error behavior.
+   */
+  workspaceConnections?: Promise<readonly ConnectionMetadata[] | undefined>,
 ): Promise<ConnectionModelRestrictions> {
+  const sharedMetadata = workspaceConnections?.catch(() => undefined);
   const union = (rows: Array<{ allowedModelIds?: string[] | null }>) =>
     rows.some((row) => row.allowedModelIds == null)
       ? null
@@ -114,7 +124,12 @@ export async function getWorkspaceConnectionModelRestrictions(
     );
     for (const row of rows) restrictions[row.prefix] = row.allowedModelIds;
   });
-  for (const connection of await listDirectModelConnections(db, workspaceId, subjectId)) {
+  const metadata = await sharedMetadata;
+  const directConnections =
+    metadata === undefined
+      ? await listDirectModelConnections(db, workspaceId, subjectId)
+      : metadata.filter((connection) => connection.workspaceId === workspaceId);
+  for (const connection of directConnections) {
     const spec = directModelConnectionSpec(connection);
     if (spec) restrictions[`${spec.providerId}/`] = [spec.modelId];
   }

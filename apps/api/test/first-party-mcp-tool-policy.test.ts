@@ -1057,7 +1057,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "Opengeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1090,7 +1090,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "Opengeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1267,7 +1267,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent?.error).toMatchObject({
         code: `${tool}_failed`,
-        message: "Opengeni could not complete the request.",
+        message: "The workspace could not complete the request.",
         diagnosticExport: "disabled",
         diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
       });

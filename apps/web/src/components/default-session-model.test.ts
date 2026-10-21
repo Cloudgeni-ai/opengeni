@@ -1,8 +1,8 @@
-import { t } from "@/lib/console-text";
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
-import { projectPickerRows } from "@/lib/model-policy";
+import { projectPickerRows } from "@opengeni/react/app/lib/model-policy";
 
 import { defaultModelPickerRows, defaultModelSummary } from "./default-session-model";
 

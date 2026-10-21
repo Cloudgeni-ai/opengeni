@@ -8,22 +8,22 @@ import {
 import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
-import { copyText } from "@/components/ui/copy-field";
+import { copyText } from "@opengeni/react/ui/copy-field";
 import {
   DropdownMenuItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
-import { detectConnectOs } from "@/lib/deployment";
-import { desktopBridge } from "@/lib/desktop";
+} from "@opengeni/react/ui/dropdown-menu";
+import { detectConnectOs } from "@opengeni/react/app/lib/deployment";
+import { desktopBridge } from "@opengeni/react/app/lib/desktop";
 import {
   desktopDownloadsFor,
   desktopDownloadUrl,
   desktopInstallCommand,
   desktopReleasePageUrl,
-} from "@/lib/desktop-download";
-import { currentPhoneAppPlatform } from "@/lib/open-in-app";
+} from "@opengeni/react/app/lib/desktop-download";
+import { currentPhoneAppPlatform } from "@opengeni/react/app/lib/open-in-app";
 
 /**
  * The account menu's "Desktop app" row: the download for this computer, the
