@@ -22,8 +22,10 @@ env:
 
 jobs:
   entry:
-    name: ${{ github.event_name == 'pull_request' && 'Queue ready' || 'PR entry (not applicable)' }}
-    if: ${{ github.event_name == 'pull_request' }}
+    # A skipped job is also an accepted required check: Version events must not
+    # even use the Queue ready name owned by authenticated automation-report.
+    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'changeset-release/main' && 'Queue ready' || 'PR entry (not applicable)' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'changeset-release/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -154,7 +156,7 @@ jobs:
         run: >-
           bun scripts/ci/retry-once.ts --report "$RUNNER_TEMP/queue-retry.json" --
           bun scripts/ci/profile-command.ts --name queue-unit-${{ matrix.index }}
-          --output "$RUNNER_TEMP/queue-unit.json" --timeout-seconds 1200 --
+          --output "$RUNNER_TEMP/queue-unit-{attempt}.json" --timeout-seconds 1200 --
           bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/queue-plan/impact-plan.json"
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
       - uses: actions/upload-artifact@v7.0.1
@@ -162,12 +164,12 @@ jobs:
         with:
           name: queue-unit-${{ matrix.index }}
           path: |
-            ${{ runner.temp }}/queue-unit.json
+            ${{ runner.temp }}/queue-unit-*.json
             ${{ runner.temp }}/queue-retry.json
           if-no-files-found: ignore
 
   ready:
-    name: ${{ github.event_name == 'pull_request' && 'Queue shadow result' || 'Queue ready' }}
+    name: ${{ github.event_name == 'merge_group' && 'Queue ready' || 'Queue shadow result' }}
     needs: [plan, contracts, units]
     if: ${{ always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'queue-shadow')) }}
     runs-on: ubuntu-latest

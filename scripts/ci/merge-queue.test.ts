@@ -26,7 +26,7 @@ test("queue checks cover PR entry and the exact combined merge group", () => {
       .OPENGENI_REQUIRE_REAL_DB,
   ).toBe("1");
   expect(queue.jobs.ready.name).toBe(
-    "${{ github.event_name == 'pull_request' && 'Queue shadow result' || 'Queue ready' }}",
+    "${{ github.event_name == 'merge_group' && 'Queue ready' || 'Queue shadow result' }}",
   );
   expect(queue.jobs.ready.if).toContain("always()");
   expect(queue.jobs.ready.if).toContain("github.event_name != 'pull_request'");
@@ -38,12 +38,30 @@ test("queue checks cover PR entry and the exact combined merge group", () => {
 });
 
 test("cheap PR entry never masquerades as combined-tree CI or duplicates the heavy suite", () => {
-  expect(queue.jobs.entry.if).toBe("${{ github.event_name == 'pull_request' }}");
+  expect(queue.jobs.entry.if).toBe(
+    "${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'changeset-release/main' }}",
+  );
+  expect(queue.jobs.entry.name).toContain(
+    "github.event.pull_request.head.ref != 'changeset-release/main'",
+  );
   expect(queue.jobs.entry.name).toContain("'PR entry (not applicable)'");
   expect(queue.jobs.entry.steps[0].run).toContain("not test or review evidence");
   expect(queue.jobs.plan.if).toContain("github.event_name != 'pull_request'");
   expect(queue.jobs.plan.if).toContain("queue-shadow");
   expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
+});
+
+test("ordinary PR events cannot starve reconciliation or publish public alerts", () => {
+  const health = workflow("queue-health");
+  expect(health.concurrency).toBeUndefined();
+  expect(health.jobs.report.if).toContain("github.event.workflow_run.event == 'merge_group'");
+  expect(health.jobs.report.if).toContain(
+    "github.event.workflow_run.path == '.github/workflows/ci.yml'",
+  );
+  expect(health.jobs.report.concurrency.group).toContain("'event' || 'reconcile'");
+  const run = health.jobs.report.steps.find((step: any) => step.env?.QUEUE_HEALTH_ALERTS);
+  expect(run.env.QUEUE_HEALTH_ALERTS).toContain("vars.QUEUE_HEALTH_ALERTS == 'true'");
+  expect(run.env.QUEUE_HEALTH_ALERTS).toContain("github.event_name != 'workflow_run'");
 });
 
 test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {

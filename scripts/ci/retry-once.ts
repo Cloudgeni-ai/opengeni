@@ -5,15 +5,19 @@ export async function retryOnce(run: (attempt: number) => Promise<number>): Prom
   const first = await run(1);
   // A cancellation or deadline is not evidence of a flaky assertion. Preserve
   // the existing per-attempt deadline and never restart cancelled work.
-  if (first === 0 || first === 124 || first >= 128) return first;
+  if (first === 0 || first === 70 || first === 124 || first >= 128) return first;
   console.log(`[retry-once] attempt 1 failed (${first}); retrying unchanged inputs once`);
   const second = await run(2);
   console.log(
     second === 0
-      ? "[retry-once] recovered on unchanged retry"
+      ? "::warning::[retry-once] recovered on unchanged retry; inspect both attempt profiles"
       : `[retry-once] retry failed (${second})`,
   );
   return second;
+}
+
+export function attemptCommand(command: string[], attempt: number): string[] {
+  return command.map((argument) => argument.replaceAll("{attempt}", String(attempt)));
 }
 
 if (import.meta.main) {
@@ -36,7 +40,7 @@ if (import.meta.main) {
   const result = await retryOnce(async (attempt) => {
     if (cancelled) return 130;
     const startedAt = new Date().toISOString();
-    child = Bun.spawn(command, {
+    child = Bun.spawn(attemptCommand(command, attempt), {
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",

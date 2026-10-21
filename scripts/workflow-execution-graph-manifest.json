@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-queue.yml",
-      "sha256": "9438f4486d14236bee5d74e5ad81cf8d7443ae33136c7354ada29fe28b898ecb"
+      "sha256": "7f6480d34b2c78cf0c79c7b8b982c1d5cdc7b350a145352bd2d3d117a805b53d"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -98,7 +98,7 @@
     },
     {
       "path": ".github/workflows/queue-health.yml",
-      "sha256": "b07c4f37270adbeeddcca0ee979d8465b2d56bdffc8bb89350a9107ff4daeb99"
+      "sha256": "09b78220e3e94debd0dbff03f97e079f83a9820ab9db011cc7d0acbc691caea4"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
@@ -1329,7 +1329,7 @@
       "workflow": ".github/workflows/merge-queue.yml",
       "job": "units",
       "step": "Run every impact-selected unit file with real database enforcement",
-      "sha256": "36ca512b4a705ef96e046ba86c82e0710b9a38be99cd1af1e270c07ef5fd7254"
+      "sha256": "3ea69456ef607e6a771bb1333de88b05f85af34eb5426192358f417b93482f2b"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",
@@ -1551,7 +1551,7 @@
       "workflow": ".github/workflows/queue-health.yml",
       "job": "report",
       "step": "Record stage timings and report failed full main CI",
-      "sha256": "14ffa72484cb553fa714865ca2bb9dbd510c8e2d29b591fb956a682fb251fb1f"
+      "sha256": "26e46f3d1cfca19888d8634cdbd63147fe4fa668c7fe6b7f78a2ca195fb166e6"
     },
     {
       "workflow": ".github/workflows/reconcile-canary-publication.yml",

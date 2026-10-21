@@ -46,6 +46,14 @@ export function queuePullNumber(branch: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
+export function publicAlertsEnabled(
+  event: { workflow_run?: unknown },
+  setting: string | undefined,
+) {
+  // The hourly/manual lane is the single writer; event receipts stay read-only.
+  return !event.workflow_run && setting === "true";
+}
+
 export function queueTiming(run: Run, jobs: Job[], pull: Pull): QueueTiming {
   const candidateAt = run.head_commit?.timestamp ?? run.created_at;
   const enqueues = pull.timelineItems.nodes.filter(
@@ -252,10 +260,15 @@ if (import.meta.main) {
   if (!repository) throw new Error("GITHUB_REPOSITORY is required");
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH!, "utf8"));
   const now = new Date().toISOString();
+  const alertsEnabled = publicAlertsEnabled(event, process.env.QUEUE_HEALTH_ALERTS);
   if (event.workflow_run) {
     const run: Run = gh(`repos/${repository}/actions/runs/${event.workflow_run.id}`);
     const rows = collectQueueTimings(gh, repository, [run]);
-    const alert = reportRedMain(gh, repository, run);
+    const alert = {
+      reported: false,
+      redMain: isRedMain(run),
+      reason: "event receipt; public alerts belong to opted-in reconciliation",
+    };
     writeFileSync(
       "queue-health.json",
       JSON.stringify({ generatedAt: now, rows, alert }, null, 2) + "\n",
@@ -278,10 +291,14 @@ if (import.meta.main) {
     ) as Run[];
     const alerts = redRuns
       .filter((run) => isRedMain(run) && Date.parse(run.updated_at) >= Date.now() - 86400000)
-      .map((run) => reportRedMain(gh, repository, run));
+      .map((run) =>
+        alertsEnabled
+          ? reportRedMain(gh, repository, run)
+          : { reported: false, runId: run.id, reason: "QUEUE_HEALTH_ALERTS is not enabled" },
+      );
     writeFileSync(
       "queue-health.json",
-      JSON.stringify({ ...summary, rows, alerts }, null, 2) + "\n",
+      JSON.stringify({ ...summary, rows, alertsEnabled, alerts }, null, 2) + "\n",
     );
     if (process.env.GITHUB_STEP_SUMMARY)
       appendFileSync(

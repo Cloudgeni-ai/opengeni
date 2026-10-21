@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   isRedMain,
+  publicAlertsEnabled,
   queuePullNumber,
   queueTiming,
   reportRedMain,
@@ -8,6 +9,13 @@ import {
   type Pull,
   type Run,
 } from "./queue-health";
+
+test("landing telemetry is read-only; only explicitly opted-in reconciliation publishes alerts", () => {
+  expect(publicAlertsEnabled({}, undefined)).toBe(false);
+  expect(publicAlertsEnabled({}, "false")).toBe(false);
+  expect(publicAlertsEnabled({}, "true")).toBe(true);
+  expect(publicAlertsEnabled({ workflow_run: { id: 42 } }, "true")).toBe(false);
+});
 
 const run: Run = {
   id: 42,

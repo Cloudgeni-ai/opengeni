@@ -7,13 +7,6 @@ on:
     - cron: "37 * * * *"
   workflow_dispatch:
 
-# A single writer deduplicates incident comments/issues. It never cancels a
-# report already in progress. Pending reports may coalesce; hourly collection
-# reconstructs all queue timings from provider history.
-concurrency:
-  group: queue-health-report
-  cancel-in-progress: false
-
 permissions:
   contents: read
   actions: read
@@ -22,6 +15,12 @@ permissions:
 
 jobs:
   report:
+    # Filter before claiming a concurrency slot: cheap PR-entry completions must
+    # neither consume runners nor displace the hourly reconciliation.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'merge_group' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/ci.yml') }}
+    concurrency:
+      group: queue-health-${{ github.event_name == 'workflow_run' && 'event' || 'reconcile' }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -37,6 +36,9 @@ jobs:
       - name: Record stage timings and report failed full main CI
         env:
           GH_TOKEN: ${{ github.token }}
+          # Reconciliation is the only public-comment writer. Default off keeps
+          # landing instrumentation inert; enable separately at rollout.
+          QUEUE_HEALTH_ALERTS: ${{ vars.QUEUE_HEALTH_ALERTS == 'true' && github.event_name != 'workflow_run' && 'true' || 'false' }}
         run: bun scripts/ci/queue-health.ts
       - uses: actions/upload-artifact@v7.0.1
         with:

@@ -37,9 +37,14 @@ silently dropping tests.
 Failed unit shards retry unchanged inputs **once inside the required job**, before
 GitHub can eject a PR and invalidate its successors. Recovery is recorded in
 `queue-retry.json`; deterministic failure stays red. Cancellation/signals and the
-existing 1200-second deadline do not retry. The new job's 45-minute outer envelope
+existing 1200-second deadline do not retry; process-leak exit 70 also stays red.
+Attempt profiles use separate `queue-unit-1.json`/`queue-unit-2.json` files and a
+recovered flake emits a warning annotation. The new job's 45-minute outer envelope
 accommodates two attempts; individual test and attempt budgets remain unchanged.
 Native queue has no configured flake-retry switch here.
+The draft's 45-minute queue response timeout includes runner waiting and planning;
+at the worst-case job envelope it may expire before a retry finishes. Do not treat
+the retry as guaranteed under saturation; timeout remains failure, not a waiver.
 
 `ci.yml` uses a **full** plan on every admitted main push. Its existing
 `ci-main-push` concurrency group does not cancel the running build; GitHub keeps
@@ -235,7 +240,9 @@ reserve; then rerun the model. Merely configuring C16 does not create runners.
 ## Continuous timing and post-land watch
 
 `queue-health.yml` records JSON after each queue/full-CI completion and reconciles
-the last day hourly. It reads provider queue-add/remove events, synthetic commit
+the last day hourly. Cheap PR-entry completions are filtered before job concurrency.
+Event receipts and reconciliation have separate non-cancelling lanes, so PR/queue
+traffic cannot displace the hourly reconciliation. It reads provider queue-add/remove events, synthetic commit
 timestamps, exact-attempt job starts/finishes and PR merge time. Missing timestamps
 remain null; workflow metadata `updated_at` is not substituted for CI completion.
 It reports ready → candidate, candidate → CI, CI → result and result → merge, with
@@ -244,10 +251,12 @@ percentiles. A rolling-day p95 enqueue-to-CI-start wait over 30 minutes sets
 `stopSignal: true` and recommends true batching (option B). Reports are retained
 for 30 days; no pre-activation native stage times are invented.
 
-On a completed red **push CI on main**, the watcher comments on the exact landing
-PR and appends a deduplicated alert to the GitHub issue **Main CI health: failed
-full-suite runs**. Hourly reconciliation catches event reports coalesced while the
-single reporter was busy. Cancelled, neutral, skipped and unfinished runs never
+Landing instrumentation does **not** post public comments or issues. Explicit
+rollout opt-in `QUEUE_HEALTH_ALERTS=true` enables the hourly/manual reconciliation
+lane as the sole public writer. For red **push CI on main**, it comments on the
+exact landing PR and appends a deduplicated alert to **Main CI health: failed
+full-suite runs**. Event receipts remain read-only. Hourly reconciliation catches
+reports coalesced while the event lane was busy. Cancelled, neutral, skipped and unfinished runs never
 become failures. The landing PR is an investigation suspect, **not a proven
 culprit**: coalesced full CI includes earlier changes too. Compare the last green
 SHA and failing leaf, then bisect/reproduce if needed. Once confirmed, revert the
@@ -278,7 +287,9 @@ paging integration. A failed full run cannot prove causality alone.
 Version PRs are created with `GITHUB_TOKEN`, so their PR event cannot be relied on
 to start CI. The existing authenticated Version-PR full-CI dispatch remains. Only
 after admission and completion does it publish `Queue ready` on the exact input
-head. The combined merge group still runs the ordinary fast workflow. Version
+head. Human label/reopen/push events on that branch never emit even a skipped
+check with the `Queue ready` name; manual dispatch is always a shadow result.
+The combined merge group still runs the ordinary fast workflow. Version
 automation opens/updates PRs; it does not auto-merge them or bypass agent evidence.
 Do not update an already reviewed/queued Version PR just to refresh its base.
 
