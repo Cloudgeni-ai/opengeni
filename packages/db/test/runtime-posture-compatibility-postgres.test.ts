@@ -12,12 +12,14 @@ import {
 } from "../src/runtime-posture";
 import {
   loadRuntimePostureBaseline,
+  PRE_COMPATIBILITY_PRODUCTION_SOURCE,
   readRuntimePostureBaseline,
 } from "../../../scripts/runtime-posture-baseline";
 
 let database: RestrictedRuntimeTestDatabase | null = null;
 let client: DbClient | null = null;
 let baseline: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
+let preCompatibility: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
 const options = { rlsStrategy: "force" as const, targetSchema: "og_data" };
 
 beforeAll(async () => {
@@ -27,6 +29,7 @@ beforeAll(async () => {
   const root = resolve(import.meta.dir, "../../..");
   const pin = await readRuntimePostureBaseline(root);
   baseline = await loadRuntimePostureBaseline(root, pin.sourceCommit);
+  preCompatibility = await loadRuntimePostureBaseline(root, PRE_COMPATIBILITY_PRODUCTION_SOURCE);
   console.log(
     `runtime posture baseline: ${pin.status} ${pin.sourceCommit} (${pin.release ?? "not yet a production release"})`,
   );
@@ -42,6 +45,7 @@ afterAll(async () => {
   await client?.close();
   await database?.release();
   await baseline?.cleanup();
+  await preCompatibility?.cleanup();
 }, 180_000);
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
@@ -51,6 +55,56 @@ realTest(
   async () => {
     await assertRuntimeDatabasePosture(client!.db, options);
     await baseline!.module.assertRuntimeDatabasePosture(client!.db, options);
+  },
+);
+
+realTest(
+  "reproduces the production bcc60cd8 upgrade rejection without broadening EXECUTE",
+  async () => {
+    const module = preCompatibility!.module;
+    const posture = await module.inspectRuntimeDatabasePosture(client!.db, options);
+    const failures = module.evaluateRuntimeDatabasePosture(posture, options);
+    console.log("pre-compatibility production violations", JSON.stringify(failures));
+    expect(failures.length).toBeGreaterThanOrEqual(42);
+    for (const table of ["session_title_operations", "site_session_access"]) {
+      expect(
+        failures.some(
+          (failure) =>
+            failure.startsWith("RLS tables are absent from the declared contract:") &&
+            failure.includes(table),
+        ),
+      ).toBe(true);
+      expect(
+        failures.some((failure) =>
+          failure.startsWith(`table ${table} grants excess runtime privileges:`),
+        ),
+      ).toBe(true);
+    }
+    expect(
+      failures.filter((failure) =>
+        failure.startsWith("runtime role lacks EXECUTE on private routine "),
+      ).length,
+    ).toBeGreaterThanOrEqual(39);
+    await assertRuntimeDatabasePosture(client!.db, options);
+
+    // Replay those real catalog shapes under names neither compatibility
+    // binary knows. Keep the originals: removing them would weaken the current
+    // binary's named-object contract and would not simulate an additive change.
+    const future = await inspectRuntimeDatabasePosture(client!.db, options);
+    for (const name of ["session_title_operations", "site_session_access"]) {
+      const table = future.tables.find((entry) => entry.name === name)!;
+      future.tables.push({ ...table, name: `future_${name}` });
+    }
+    for (const failure of failures) {
+      const prefix = "runtime role lacks EXECUTE on private routine ";
+      if (!failure.startsWith(prefix)) continue;
+      const name = failure.slice(prefix.length);
+      const routine = future.privateRoutines.find((entry) => entry.name === name)!;
+      expect(routine.execute).toBe(false);
+      future.privateRoutines.push({ ...routine, name: `future_${name}` });
+    }
+    expect(evaluateRuntimeDatabasePosture(future, options)).toEqual([]);
+    expect(baseline!.module.evaluateRuntimeDatabasePosture(future, options)).toEqual([]);
   },
 );
 

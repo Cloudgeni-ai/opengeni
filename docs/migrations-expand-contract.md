@@ -231,6 +231,15 @@ example `fixtures/site-limits-2fef1581b.ts`) remain necessary for non-readiness
 compatibility. The release-schema hash tests and historical maintenance notes
 are complementary, not evidence that an old readiness probe passes.
 
+The historical production source `bcc60cd80f2fd557e9f64beee38c1562d629de8c`
+also runs as a negative control. Against the schema through 0887 it produces
+42 violations: undeclared RLS plus grants for `session_title_operations` and
+`site_session_access`, and 39 private helper EXECUTE expectations. The test
+replays those actual safe catalog shapes under future names, preserving all
+current known objects, and requires both compatibility evaluators to accept
+them without granting EXECUTE. Later additions may add historical violations;
+intentional retirement of this witness needs an explicit test update.
+
 **Bootstrap:** the initial pin is explicitly `status: "bootstrap"`, pointing
 at the compatibility implementation commit in this PR. It is not a claim
 about today's production binary, which predates the fix. No additive rollout

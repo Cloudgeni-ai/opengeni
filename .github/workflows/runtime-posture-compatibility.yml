@@ -71,6 +71,8 @@ jobs:
           # Exact immutable commit only, never a current-source fallback. gh's
           # credential helper authenticates without persisting checkout credentials.
           git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$pin"
+          old="$(bun -e 'import {PRE_COMPATIBILITY_PRODUCTION_SOURCE} from "./scripts/runtime-posture-baseline"; console.log(PRE_COMPATIBILITY_PRODUCTION_SOURCE)')"
+          git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$old"
       - name: Unit regressions and baseline validation
         run: bun test --max-concurrency=2 packages/db/test/runtime-posture.test.ts scripts/runtime-posture-baseline.test.ts
       - name: Database package typecheck

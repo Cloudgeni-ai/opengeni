@@ -11,6 +11,9 @@ export type RuntimePostureBaseline = {
   release: string | null;
 };
 
+/** Historical production image from the cancelled OPE-822 upgrade rehearsal. */
+export const PRE_COMPATIBILITY_PRODUCTION_SOURCE = "bcc60cd80f2fd557e9f64beee38c1562d629de8c";
+
 export function parseRuntimePostureBaseline(value: unknown): RuntimePostureBaseline {
   const pin = value as Partial<RuntimePostureBaseline> | null;
   if (
@@ -90,10 +93,17 @@ export async function loadRuntimePostureBaseline(root: string, sourceCommit: str
   if (!/^[a-f0-9]{40}$/.test(sourceCommit)) throw new Error("Baseline must be a full commit SHA");
   const directory = await mkdtemp(join(root, ".runtime-posture-baseline-"));
   try {
+    const postureSource = execFileSync(
+      "git",
+      ["show", `${sourceCommit}:packages/db/src/runtime-posture.ts`],
+      { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+    );
+    await writeFile(join(directory, "runtime-posture.ts"), postureSource);
     for (const name of [
-      "runtime-posture.ts",
       "role-relationships.ts",
-      "runtime-posture-legacy-routines.json",
+      ...(postureSource.includes('"./runtime-posture-legacy-routines.json"')
+        ? ["runtime-posture-legacy-routines.json"]
+        : []),
     ]) {
       const source = execFileSync("git", ["show", `${sourceCommit}:packages/db/src/${name}`], {
         cwd: root,
