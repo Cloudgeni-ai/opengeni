@@ -1,0 +1,134 @@
+# Merged-traffic shadow
+
+`scripts/ci/batch-traffic-shadow.ts` samples actual recently merged PR traffic while
+agents adopt the normal batcher readiness signal. This is **not queue admission**:
+`mergedAt` is explicitly a FIFO readiness proxy, not an assertion that tests or
+independent review existed at that time. It never changes the active batcher.
+
+## Read-only replay
+
+```sh
+bun scripts/ci/batch-traffic-shadow.ts --once --lookback-hours 24 --max-prs 128 \
+  --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
+```
+
+Use Bun 1.4.3 and Git 2.38+. Runtime dependencies are built-ins and Git only. The
+existing `GH_TOKEN`/`GITHUB_TOKEN` or GitHub App authentication works through
+`GitHubReader`/`GitHubAuth`; never put credentials in output, Git URLs or images.
+Default execution is read-only even when `BATCHER_MODE=active` is inherited. The
+explicit `--ci-shadow` switch is the only publication opt-in.
+
+Without `--once`, poll at `BATCHER_POLL_SECONDS` (default 30). SIGINT/SIGTERM stop
+polling without cancelling hosted runs. Options have environment equivalents:
+
+| Option | Environment | Default |
+| --- | --- | --- |
+| `--lookback-hours` | `TRAFFIC_SHADOW_LOOKBACK_HOURS` |24, maximum720 |
+| `--cap` | `TRAFFIC_SHADOW_CAP` |16, maximum16 |
+| `--max-prs` | `TRAFFIC_SHADOW_MAX_PRS` |128, maximum1000 |
+| `--output` | `TRAFFIC_SHADOW_OUTPUT` |`./traffic-shadow` |
+| `--git-dir` | `TRAFFIC_SHADOW_GIT_DIR` |`<output>/objects.git` |
+| `--once` | `TRAFFIC_SHADOW_ONCE=true` |poll |
+
+`BATCHER_REPOSITORY` selects the repository; only main history is supported.
+The bare cache is disposable, owned by this process and rebuildable. For a large
+repository it can first be seeded by a **local fetch** from an existing clone;
+the program still fetches remote main before replay. Do not point it at another
+agent's writable repository/cache. No checkout or historical source execution
+occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
+
+## Collection and interpretation
+
+- Paginate closed PRs ordered by update time until the lookback boundary; select
+  merged main PRs by exact `merged_at`. This is not Search and does not use its
+  1,000-result limit. Incomplete pagination fails explicitly. Keep the most recent
+  `max-prs`, then sort FIFO; report how many were omitted by this bound.
+- Preserve PR number, exact observed head, head ref, provider merge SHA, creation
+  and merge time. Same-time merges are ordered by actual main first-parent
+  position, then PR number. Deduplicate identical records, reject inconsistent
+  projections. A reused/changed historical head can cause a disagreement; it is
+  not silently replaced with the squash commit.
+- Cohorts have at most 16 members. Version PRs are singleton barriers. Reconstruct
+  the base from the first actual merge's first parent, not today's main. Compare
+  every synthetic member tree with its actual merge tree and the whole tip with
+  the last actual merge. Single-parent landings are labelled squash-or-rebase:
+  topology alone does not distinguish them.
+- `treeEqual` requires identical tree OIDs. `equivalent` additionally requires
+  complete, ordered contiguous first-parent composition and each intermediate
+  tree to match. An omitted/direct commit, missing object, unsupported projection,
+  conflict or differing tree is reported, never called equivalent. Synthetic
+  commit identities are deliberately different from historical landings.
+- The conflict step identifies where composition failed, **not a unique culprit**.
+  No bisection/code attribution is invented. Historical CI cancellation and
+  infrastructure failures are never treated as a failing PR verdict.
+- Query main `ci.yml` push runs by each exact historical merge SHA. Missing runs
+  remain missing (including coalesced intermediate tips). Read current-attempt
+  jobs for actual start/end bounds, not run `updated_at` as completion. These are
+  observed workflow outcomes, not verified Full CI/release-admission receipts.
+  Matching trees do not equate batch-selected coverage with historical full CI.
+
+Each observation writes timestamped JSON plus atomically replaced `latest.json`:
+input/proxy metadata, candidates/manifests, per-member/tree comparisons, main CI
+runs, actual build/collection durations, stage counts, disagreements and optional
+publication comparisons. No readiness-to-CI latency is claimed from `mergedAt`.
+
+Core manifests currently allow only `auto-merge` or `queue-ready` binding enums.
+Traffic replay uses `queue-ready` **only as a synthetic transport placeholder**:
+its event ID begins `traffic-shadow:merged-at-proxy:`, evidence ID is explicitly
+`NOT-ADMISSION-OR-REVIEW-EVIDENCE`, and the report records the real proxy type. Do
+not feed these manifests into live admission or represent them as ready labels.
+
+## Optional hosted CI shadow — separately authorize before use
+
+```sh
+# This command WRITES queue/state refs. It was not run against GitHub in this task.
+bun scripts/ci/batch-traffic-shadow.ts --ci-shadow --once --lookback-hours 24 \
+  --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
+```
+
+The existing `QueueOnlyPublisher` and `AtomicGitWriter` perform one atomic update:
+
+- Create-only `refs/heads/queue/shadow-traffic/<batchId>`.
+- Append-only CAS-fenced `refs/heads/batcher-shadow-traffic-state` ledger recording
+  published batch IDs and proxy bindings. This is separate from queue/live and
+  the normal shadow-ci state ref. An inherited branch-prefix override is ignored.
+
+No main, PR comments, labels, readiness, cancellations, deletions or reruns are
+exposed by this path. There is one hosted traffic slot, including the time between
+publication and workflow discovery. Every existing traffic candidate is inspected;
+absent runs or any nonterminal attempt hold the slot. CAS handles concurrent
+publishers. Failed/ambiguous pushes are reconciled on the next observation from
+remote refs/state; do not blindly retry an external mutation.
+
+The candidate's **pre-cohort base must already contain the Batch CI adapter**,
+and the adapter paths must be unchanged in the candidate. The program never
+overlays today's verifier on a historical tree. Only equivalent cohorts may
+publish. Before the adapter lands on main, this intentionally reports a wait;
+read-only historical replay still produces useful candidates. The shipped
+`.github/workflows/batch-ci.yml` `queue/**` trigger handles this namespace.
+
+No exact candidate or previously published proxy binding is automatically
+published again after a restart or rolling-window regrouping. A cohort partly
+overlapping already published traffic is skipped rather than charging hosted CI
+twice. Completed candidates are compared through `GitHubReader.runs`, which uses
+the existing exact batch-result artifact verifier (batch ID, tip, run and attempt).
+Wrong/missing receipts cannot be green. Only exact trusted success/code-failure
+results and equivalent trees permit a coarse comparison with one unambiguous
+historical success/failure run; this is not proof of identical coverage or PR blame.
+
+The one-slot guarantee covers coordinated traffic publishers. Manual external
+reruns or writers outside the state-ref protocol are not atomically fenced by
+GitHub Actions; do not operate competing writers/reruns in this namespace. Queue
+publication/App/ruleset permissions remain an operator prerequisite, not something
+the tool grants itself. No cloud service or database is required.
+
+## Tests
+
+```sh
+bun test scripts/ci/batch-traffic-shadow.test.ts --max-concurrency=2
+```
+
+Real bare-Git fixtures cover squash/true-merge replay, conflicts, gaps, FIFO/proxy
+semantics, provider pagination/CI job timing, immutable read-only refs, restart
+deduplication, CAS races, namespace restrictions, old-adapter waits and exact
+outcome comparison. All publication tests use local bare remotes, never GitHub.
