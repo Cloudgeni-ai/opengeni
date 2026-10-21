@@ -163,7 +163,6 @@ unindented comment:
 
 ```sql
 -- deployment-mode: maintenance
--- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
 -- maintenance-justification: revokes a credential path that pre-NNNN binaries
 --   still serve; any window where an old API runs is the exposure itself.
 ```
@@ -198,3 +197,69 @@ without a default, `ADD CHECK ... NOT VALID`, `DROP VIEW`, `DROP TYPE` or
 `RENAME VALUE`. Passing the guard does not make a change backward compatible;
 the review still has to. Shipped migrations are frozen and exempt; never raise
 the threshold to exempt a new file.
+
+## Online-safety guard
+
+`bun run check:migration-online-safety` checks **0888 and later**. This separate
+boundary leaves the already-shipped 0786–0887 deployment-mode range frozen;
+never raise it to admit a new migration. The impact-selected CI guard runs with
+the other migration checks. Ordinary main PRs use targeted local tests before
+merge; the full CI impact plan runs after merge, following repository policy.
+`bun scripts/check-migration-online-safety.ts --audit-existing` reports the older
+0786+ range without failing CI or modifying SQL.
+
+| Rule ID | Rolling migration rule / fix |
+| --- | --- |
+| `nonconcurrent-index` | Existing-table indexes need `CONCURRENTLY` in a separate file with the runner's line-2 `-- opengeni:concurrent-index lock-timeout=5s` directive. |
+| `constraint-validation` | Add FOREIGN KEY/CHECK constraints `NOT VALID`; validate in a separate migration. Validation after another ALTER of that table in the same file retains its strong lock through the scan and is flagged too. |
+| `table-rewrite` | Flag type changes, `SET NOT NULL`, policy-listed defaults, serial/identity and stored generated columns, PRIMARY KEY/UNIQUE builds, `CLUSTER`, `VACUUM FULL`, and tablespace/access-method/logging changes. Expand/backfill/contract instead, or attach an earlier concurrent unique index with `USING INDEX`. |
+| `unbatched-data` | Existing-table UPDATE/DELETE and INSERT SELECT from potentially large existing sources need a rolling or post-release batched backfill. Known single-row config changes are allowed. |
+| `unannotated-contract` | DROP TABLE/COLUMN, table/column RENAME and TRUNCATE need the existing `-- contract-step:` annotation naming the earlier release that stopped using the shape, or why the previous release is unaffected. |
+| `explicit-lock` | Remove explicit `LOCK [TABLE]`; explain any unavoidable lock using an exception. |
+| `maintenance-concurrent-index` | Move concurrent builds outside the parked window, into a rolling migration. |
+| `maintenance-batched-backfill` | Move batches into a rolling or post-release migration. |
+| `maintenance-unbatched-data` | Split large-table data work from the short maintenance cutover; run a rolling or post-release batched backfill. |
+
+Every online-safety rule can be overridden with a reason of **at least six
+words**, not a placeholder, in the leading comment block. Repeat the header for
+each rule; it never silences other rules. Keep runner directives on line 2:
+
+```sql
+-- deployment-mode: rolling
+-- contract-step: release 1.2 stopped nullable writes and installed the fill trigger.
+-- online-safety-exception: table-rewrite: Migration 0888 validated the existing column's IS NOT NULL check.
+ALTER TABLE example ALTER COLUMN value SET NOT NULL;
+```
+
+The lint deliberately does not infer validated NOT NULL checks; explain that
+proof with `table-rewrite`. PRIMARY KEY attachment is also flagged because it
+can scan nullable columns even when an index already exists. An online-safety
+exception does **not** override
+deployment-mode, contract-step, runner-directive validation, or other existing
+guards. For example, the deployment-mode guard already disallows maintenance
+concurrent-index directives. A `contract-step` proves compatibility, not cheap
+locking: a type change can still require an online-safety exception.
+
+This is a deterministic heuristic, not a planner or row-count estimate. All
+existing tables are potentially large. A single-row exemption requires literal
+equalities on every column of a known PRIMARY KEY/unique key from earlier SQL;
+arbitrary WHERE clauses, LIMITs, procedural loops and joins do not prove it.
+Partial/expression indexes do not supply that proof. New tables created earlier
+in the same file are exempt; `IF NOT EXISTS` or conditional DO-block creation
+does not prove a table is new. Catalog reads and constant SELECTs are allowed.
+Quoted/schema-qualified names and nested comments are supported. Quoted routine
+bodies and dynamic SQL strings are not analyzed; static SQL inside DO blocks is.
+Phase directives are ordinary comments to this guard.
+
+The heuristic does not model every PostgreSQL statement: MERGE, copies via
+CREATE TABLE AS/SELECT INTO, partition operations, REINDEX and materialized-view
+refreshes still need review. Comma joins and CTE/table name shadowing can hide
+INSERT SELECT sources; SQL-standard BEGIN ATOMIC routine bodies are not reliably
+distinguished from migration commands. Maintenance checks intentionally cover
+only the three maintenance rules above, not every possible slow DDL operation.
+
+The added-column default policy recognizes `now`, `random`, `gen_random_uuid`,
+`uuid_generate_vN`/`uuid_generate_v1mc`, `uuidv4`/`uuidv7`, `nextval`, `setval`, `clock_timestamp` and
+`timeofday`. It conservatively includes `now()` even though PostgreSQL treats
+it as stable; unknown user-defined function volatility is not inferred. Passing
+this lint is not a proof that arbitrary SQL is cheap or backward compatible.

@@ -16155,6 +16155,8 @@ export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
         queued: z.number().int().nonnegative(),
         unread: z.number().int().nonnegative(),
         activeWork: z.number().int().nonnegative(),
+        /** Idle sessions parked on their own wake-up; already included in `active`. */
+        waiting: z.number().int().nonnegative().optional(),
       }),
     ),
   }),

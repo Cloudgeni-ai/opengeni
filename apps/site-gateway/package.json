@@ -8,7 +8,7 @@
   "scripts": {
     "build:shell": "bun scripts/build-shell.ts",
     "check:shell": "bun scripts/build-shell.ts --check",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test": "bun test"
   },
   "dependencies": {
@@ -16,7 +16,7 @@
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.0",
+    "@types/bun": "^1.4.3",
     "miniflare": "4.20260730.0",
     "typescript": "7.0.2"
   }

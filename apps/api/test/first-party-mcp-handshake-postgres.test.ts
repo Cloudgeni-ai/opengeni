@@ -296,11 +296,10 @@ describe("first-party MCP tool listing", () => {
     const tools = (listed.body!.result as { tools: Array<{ name: string }> }).tools;
     expect(tools.length).toBeGreaterThan(10);
     // The liveness check and the learning policy are read together, then the
-    // bound-session check, workspace settings, model catalog, Memory selector
-    // and admin access. They used to be read one after another (42
-    // statements); the workspace's control state and kind are no longer read.
-    expect(listed.mostOpenTransactions).toBeGreaterThanOrEqual(5);
-    expect(listed.statements.length).toBeLessThanOrEqual(34);
+    // bound-session check, model catalog and admin access. Legacy Memory
+    // settings and selectors no longer contribute to the tool surface.
+    expect(listed.mostOpenTransactions).toBeGreaterThanOrEqual(3);
+    expect(listed.statements.length).toBeLessThanOrEqual(25);
   });
 
   test("a refused bound-session check still refuses tools/list after the surface reads", async () => {

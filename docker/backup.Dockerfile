@@ -1,6 +1,7 @@
 # Independent operator utility: no application runtime, database driver or SDK.
 ARG POSTGRES_MAJOR=18
-FROM oven/bun:1.4.0 AS bun
+ARG BUN_VERSION=1.4.3
+FROM oven/bun:${BUN_VERSION} AS bun
 FROM postgres:${POSTGRES_MAJOR}-bookworm
 RUN apt-get update \
     && apt-get install -y --no-install-recommends age rclone ca-certificates util-linux \

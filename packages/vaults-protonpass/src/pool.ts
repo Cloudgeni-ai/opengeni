@@ -181,7 +181,7 @@ export function createProtonPassProviderPool(
   }
 
   return {
-    provider(token, { connectionId, operations } = {}) {
+    provider(token: string, { connectionId, operations }: ProtonPassPoolProviderOptions = {}) {
       const scope =
         connectionId === undefined ? `standalone:${randomUUID()}` : `connection:${connectionId}`;
       return restrictToOperations(tracked(scope, token), operations, FILE_FIELD_PREFIX);

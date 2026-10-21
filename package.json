@@ -155,6 +155,7 @@
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
     "check:migration-lock-order": "bun scripts/check-migration-lock-order.ts",
     "check:migration-deployment-mode": "bun scripts/check-migration-deployment-mode.ts",
+    "check:migration-online-safety": "bun scripts/check-migration-online-safety.ts",
     "check:migration-schema-contract": "bun scripts/check-migration-schema-contract.ts",
     "check:migration-test-budgets": "bun scripts/check-migration-test-budgets.ts",
     "check:public-api": "bun scripts/public-api/check.ts",
@@ -208,7 +209,7 @@
     "@temporalio/activity": "^1.20.2",
     "@temporalio/client": "^1.20.2",
     "@temporalio/worker": "^1.20.2",
-    "@types/bun": "^1.4.0",
+    "@types/bun": "^1.4.3",
     "drizzle-orm": "^0.45.2",
     "hermes-parser": "0.28.1",
     "libnpmpublish": "12.0.0",
@@ -222,6 +223,7 @@
     "postgres": "^3.4.9",
     "sharp": "0.34.5",
     "sigstore": "5.0.0",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "7.0.2",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
@@ -244,13 +246,15 @@
     "vite": "8.1.4",
     "ws": "8.21.1"
   },
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.3",
   "patchedDependencies": {
     "modal@0.9.0": "patches/modal@0.9.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
     "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
     "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
     "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
-    "postgres@3.4.9": "patches/postgres@3.4.9.patch"
+    "postgres@3.4.9": "patches/postgres@3.4.9.patch",
+    "ts-proto@2.12.0": "patches/ts-proto@2.12.0.patch",
+    "postcss-selector-parser@7.1.0": "patches/postcss-selector-parser@7.1.0.patch"
   }
 }

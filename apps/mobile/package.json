@@ -7,7 +7,7 @@
     "dev": "expo start --dev-client",
     "prebuild:ios": "expo prebuild --platform ios --clean",
     "prebuild:android": "expo prebuild --platform android --clean",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.14",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "^5.9.3"
   },
   "expo": {

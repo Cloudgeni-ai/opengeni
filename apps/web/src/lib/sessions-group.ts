@@ -66,6 +66,7 @@ export type RailAggregateStatusKind =
   | "failed"
   | "active"
   | "queued"
+  | "waiting"
   | "unread"
   | "active_work"
   | "neutral";
@@ -94,6 +95,8 @@ export type RailStatusCounts = {
   failed: number;
   active: number;
   queued: number;
+  /** Idle sessions parked on their own wake-up (input or timer), not executing. */
+  waiting: number;
   unread: number;
   activeWork: number;
 };
@@ -112,6 +115,7 @@ export function sessionProjectTotals(
     failed: 0,
     active: 0,
     queued: 0,
+    waiting: 0,
     unread: 0,
     activeWork: 0,
   });
@@ -121,7 +125,14 @@ export function sessionProjectTotals(
   ]);
   for (const group of totals.groups) {
     const id = group.channelId && known.has(group.channelId) ? group.channelId : null;
-    addRailStatusCounts(result.get(id)!, { ...group, sendFailed: 0 });
+    // Server `active` includes input waits for older clients; split them out.
+    const waiting = Math.min(group.waiting ?? 0, group.active);
+    addRailStatusCounts(result.get(id)!, {
+      ...group,
+      active: group.active - waiting,
+      waiting,
+      sendFailed: 0,
+    });
   }
   return result;
 }
@@ -147,9 +158,7 @@ function ownRailStatusCounts(
     failed: session.status === "failed" && session.unread ? 1 : 0,
     active:
       hasActiveEffectiveControl(session) &&
-      (session.status === "running" ||
-        session.status === "recovering" ||
-        Boolean(sessionInputWait(session)))
+      (session.status === "running" || session.status === "recovering")
         ? 1
         : 0,
     queued:
@@ -157,6 +166,7 @@ function ownRailStatusCounts(
       (session.status === "queued" || session.status === "waiting_capacity")
         ? 1
         : 0,
+    waiting: sessionInputWait(session) ? 1 : 0,
     unread: session.unread ? 1 : 0,
     activeWork: session.activelyWorking ? 1 : 0,
   };
@@ -170,6 +180,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.failed += source.failed;
   target.active += source.active;
   target.queued += source.queued;
+  target.waiting += source.waiting;
   target.unread += source.unread;
   target.activeWork += source.activeWork;
 }
@@ -187,6 +198,7 @@ function railStatusCounts(
       "failed",
       "active",
       "queued",
+      "waiting",
       "unread",
       "activeWork",
     ] as const)
@@ -203,8 +215,9 @@ function railStatusCounts(
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
     counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
-    counts.active += stats.runningDescendants + (stats.waitingDescendants ?? 0);
+    counts.active += stats.runningDescendants;
     counts.queued += stats.queuedDescendants;
+    counts.waiting += stats.waitingDescendants ?? 0;
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -258,6 +271,7 @@ export function summarizeRailNodes(
     failed: 0,
     active: 0,
     queued: 0,
+    waiting: 0,
     unread: 0,
     activeWork: 0,
   };
@@ -318,6 +332,14 @@ export function summarizeRailStatusCounts(
       count: counts.queued,
       total: counts.total,
       label: `${counts.queued} waiting to run`,
+    };
+  }
+  if (counts.waiting > 0) {
+    return {
+      kind: "waiting",
+      count: counts.waiting,
+      total: counts.total,
+      label: `${counts.waiting} waiting to resume`,
     };
   }
   if (counts.unread > 0) {

@@ -47,6 +47,12 @@ export async function verifyBunVersionContract(
   if (!rootTypes || rootTypes !== extensionTypes) {
     throw new Error("root and browser-extension @types/bun ranges must be identical");
   }
+  const gatewayManifest = JSON.parse(
+    await readFile(join(root, "apps/site-gateway/package.json"), "utf8"),
+  ) as PackageManifest;
+  if (gatewayManifest.devDependencies?.["@types/bun"] !== rootTypes) {
+    throw new Error("site-gateway @types/bun must mirror the root range");
+  }
   const typeVersion = /^\^(\d+\.\d+\.\d+)$/u.exec(rootTypes)?.[1];
   if (!typeVersion || majorMinor(typeVersion) !== majorMinor(version)) {
     throw new Error(
@@ -63,6 +69,7 @@ export async function verifyBunVersionContract(
     "docker/opengeni.Dockerfile",
     "docker/sandbox.Dockerfile",
     "docker/desktop.Dockerfile",
+    "docker/backup.Dockerfile",
   ]) {
     const source = await readFile(join(root, path), "utf8");
     if (!source.includes(`ARG BUN_VERSION=${version}`)) {

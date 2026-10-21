@@ -19,7 +19,8 @@ configuration, the native (no Docker) path, and the web-app walkthrough.
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
-Typecheck runs on the pinned stable TypeScript 7 `tsc`. See
+CLI typecheck runs on exact-pinned `tsrs`; stable TypeScript 7 remains the declaration
+compiler and tooling API boundary. See
 [`docs/toolchain.md`](docs/toolchain.md) for what runs typecheck/lint/format and why.
 
 ## Checks
