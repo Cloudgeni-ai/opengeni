@@ -121,15 +121,24 @@ default so release N's inserts succeed. Release N+1 drops it with
 **New FORCE-RLS tables and routines.** API and worker startup and worker readiness
 use `packages/db/src/runtime-posture.ts`. Once this forward-compatible binary
 is the **previous production release**, an entirely unknown table in the data
-schema or `opengeni_private` may have runtime grants when RLS is enabled,
+schema or `opengeni_private` may have SELECT, INSERT, UPDATE and DELETE grants when RLS is enabled,
 forced, active for the runtime role, has at least one policy, and the runtime
-does not own it. Ungranted unknown non-RLS tables are harmless; runtime grants
+does not own it, and it has no inheritance or partition relationship. Parent
+queries use the parent's ACL/RLS rather than a known child's contract, so these
+relationships require explicit compatibility review. TRUNCATE, REFERENCES,
+TRIGGER, MAINTAIN and other non-row privileges are never tolerated on unknown
+tables. Ungranted unknown non-RLS tables are harmless; runtime grants
 (including column-only grants) on them still fail readiness. A data-schema
 table declaring RLS but not meeting the secure shape also fails. Private
-owner-only tables without grants remain inert.
+owner-only tables without grants remain inert. Existing default privileges can
+grant DML automatically on new tables; inspect effective grants, not merely the
+presence of GRANT statements in a migration.
 
 Unknown routines may be SECURITY INVOKER, or SECURITY DEFINER only when neither
-runtime nor PUBLIC can execute them. Runtime ownership always fails. A fixed
+runtime nor PUBLIC can execute them and they are not trigger/event-trigger
+functions or bound in `pg_trigger`. PostgreSQL does not check EXECUTE when a
+trigger fires: owner-only trigger definers still require a prior explicit binary
+contract. Runtime ownership always fails. A fixed
 search path and a non-runtime owner cannot prove an unknown definer's body
 safe: it could expose an owner capability or disable owner RLS. Introduce an
 explicit, reviewed compatibility-binary contract before granting EXECUTE on
@@ -147,8 +156,8 @@ column grants do not satisfy its required table-level privileges.
 
 This is structural readiness, not policy/body verification. Migration review
 must still establish tenant isolation and the appropriateness of every grant;
-RLS does not govern TRUNCATE or REFERENCES. The tolerance is not permission to
-grant those operations, install triggers, or add an always-true policy.
+always-true policies remain outside this structural check. Non-row privileges
+and unknown trigger definers fail readiness rather than relying on review alone.
 
 The 0796/0797 headers describe a **historical** previous binary that rejected
 all new protected tables. Leave their bytes and maintenance markers unchanged.
@@ -235,9 +244,12 @@ The historical production source `bcc60cd80f2fd557e9f64beee38c1562d629de8c`
 also runs as a negative control. Against the schema through 0887 it produces
 42 violations: undeclared RLS plus grants for `session_title_operations` and
 `site_session_access`, and 39 private helper EXECUTE expectations. The test
-replays those actual safe catalog shapes under future names, preserving all
-current known objects, and requires both compatibility evaluators to accept
-them without granting EXECUTE. Later additions may add historical violations;
+replays the two safe table shapes and 19 non-trigger owner-only helpers under
+future names, preserving all current known objects, and requires both
+compatibility evaluators to accept them without granting EXECUTE. The other
+20 helpers are SECURITY DEFINER triggers: renamed unknown copies must still
+fail, even with EXECUTE revoked. Treating all 39 as inert would introduce an
+RLS-bypass path. Existing named trigger contracts remain unchanged. Later additions may add historical violations;
 intentional retirement of this witness needs an explicit test update.
 
 **Bootstrap:** the initial pin is explicitly `status: "bootstrap"`, pointing

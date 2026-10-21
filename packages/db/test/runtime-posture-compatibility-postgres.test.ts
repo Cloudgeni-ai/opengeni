@@ -95,16 +95,40 @@ realTest(
       const table = future.tables.find((entry) => entry.name === name)!;
       future.tables.push({ ...table, name: `future_${name}` });
     }
+    const unsafeTriggerNames: string[] = [];
     for (const failure of failures) {
       const prefix = "runtime role lacks EXECUTE on private routine ";
       if (!failure.startsWith(prefix)) continue;
       const name = failure.slice(prefix.length);
       const routine = future.privateRoutines.find((entry) => entry.name === name)!;
       expect(routine.execute).toBe(false);
-      future.privateRoutines.push({ ...routine, name: `future_${name}` });
+      const renamed = { ...routine, name: `future_${name}` };
+      if (routine.securityDefiner && routine.triggerCallable) {
+        // Revoked EXECUTE does not prevent trigger invocation. These additions
+        // require an explicit compatibility contract; never widen their ACLs.
+        unsafeTriggerNames.push(renamed.name);
+      } else {
+        future.privateRoutines.push(renamed);
+      }
     }
     expect(evaluateRuntimeDatabasePosture(future, options)).toEqual([]);
     expect(baseline!.module.evaluateRuntimeDatabasePosture(future, options)).toEqual([]);
+    console.log(
+      "production owner-only trigger definers still require a prior contract",
+      unsafeTriggerNames,
+    );
+    for (const name of unsafeTriggerNames) {
+      const original = future.privateRoutines.find((r) => `future_${r.name}` === name)!;
+      const unsafe = {
+        ...future,
+        privateRoutines: [...future.privateRoutines, { ...original, name }],
+      };
+      for (const module of [{ evaluateRuntimeDatabasePosture }, baseline!.module]) {
+        expect(module.evaluateRuntimeDatabasePosture(unsafe, options)).toContain(
+          `unknown routine opengeni_private.${name} exposes SECURITY DEFINER execution`,
+        );
+      }
+    }
   },
 );
 
@@ -149,6 +173,72 @@ realTest(
       REVOKE ALL ON FUNCTION opengeni_private.future_posture_definer() FROM opengeni_app, PUBLIC;
       RESET ROLE;
     `);
+      await expectReady();
+      for (const privilege of ["TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"]) {
+        await admin.unsafe(`GRANT ${privilege} ON future_posture_rows TO opengeni_app`);
+        await expectUnready(`future_posture_rows grants excess runtime privileges: ${privilege}`);
+        await admin.unsafe(`REVOKE ${privilege} ON future_posture_rows FROM opengeni_app`);
+      }
+      await admin`GRANT REFERENCES (id) ON future_posture_rows TO opengeni_app`;
+      await expectUnready("future_posture_rows grants excess runtime privileges: REFERENCES");
+      await admin`REVOKE REFERENCES (id) ON future_posture_rows FROM opengeni_app`;
+
+      await admin.unsafe(`SET ROLE "${owner}";
+        CREATE TABLE future_parent ();
+        ALTER TABLE future_parent ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE future_parent FORCE ROW LEVEL SECURITY;
+        CREATE POLICY future_parent_any ON future_parent USING (true);
+        GRANT SELECT, DELETE ON future_parent TO opengeni_app;
+        ALTER TABLE deployment_model_catalog INHERIT future_parent;
+        RESET ROLE;`);
+      await expectUnready("future_parent");
+      await admin`ALTER TABLE deployment_model_catalog NO INHERIT future_parent`;
+      await admin`DROP TABLE future_parent`;
+
+      // Partition attachment has the same parent-only ACL/RLS semantics.
+      await admin.unsafe(`SET ROLE "${owner}";
+        CREATE TABLE future_partition_parent(id integer) PARTITION BY RANGE(id);
+        CREATE TABLE future_partition_child PARTITION OF future_partition_parent FOR VALUES FROM (0) TO (10);
+        ALTER TABLE future_partition_parent ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE future_partition_parent FORCE ROW LEVEL SECURITY;
+        CREATE POLICY future_partition_any ON future_partition_parent USING (true);
+        RESET ROLE;`);
+      await expectUnready("future_partition_parent");
+      await admin`DROP TABLE future_partition_parent CASCADE`;
+
+      await admin.unsafe(`SET ROLE "${owner}";
+        CREATE FUNCTION opengeni_private.future_posture_trigger() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 'BEGIN RETURN NEW; END';
+        REVOKE ALL ON FUNCTION opengeni_private.future_posture_trigger() FROM PUBLIC, opengeni_app;
+        CREATE TRIGGER future_posture_trigger BEFORE INSERT ON future_posture_rows FOR EACH ROW EXECUTE FUNCTION opengeni_private.future_posture_trigger();
+        RESET ROLE;`);
+      await expectUnready("future_posture_trigger() exposes SECURITY DEFINER execution");
+      await admin`DROP TRIGGER future_posture_trigger ON future_posture_rows`;
+      // A currently unattached trigger is still callable without an ACL change.
+      await expectUnready("future_posture_trigger() exposes SECURITY DEFINER execution");
+      await admin`DROP FUNCTION opengeni_private.future_posture_trigger()`;
+
+      for (const name of [
+        "subscription_plan_catalog_revisions",
+        "credit_promotion_policy_revisions",
+        "slack_file_upload_operations",
+      ]) {
+        const [column] =
+          await admin`select a.attname from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='opengeni_private' and c.relname=${name} and a.attnum=1`;
+        const quotedColumn = `"${String(column!.attname).replaceAll('"', '""')}"`;
+        await admin.unsafe(
+          `REVOKE SELECT ON opengeni_private.${name} FROM opengeni_app; GRANT SELECT (${quotedColumn}) ON opengeni_private.${name} TO opengeni_app`,
+        );
+        await expectUnready(
+          name === "subscription_plan_catalog_revisions"
+            ? "cannot read the subscription plan catalog"
+            : name === "credit_promotion_policy_revisions"
+              ? "cannot read the credit promotion policy"
+              : "unsafe Slack file upload ledger privileges",
+        );
+        await admin.unsafe(
+          `REVOKE SELECT (${quotedColumn}) ON opengeni_private.${name} FROM opengeni_app; GRANT SELECT ON opengeni_private.${name} TO opengeni_app`,
+        );
+      }
       await expectReady();
       // FORCE RLS actually binds the runtime, not merely catalog flags.
       const rows = await client!.db.execute(
@@ -197,8 +287,9 @@ realTest(
     } finally {
       await admin.unsafe(`
       RESET ROLE;
-      DROP TABLE IF EXISTS future_posture_rows, future_owner_only_rows;
-      DROP FUNCTION IF EXISTS future_posture_invoker(), opengeni_private.future_posture_invoker(), opengeni_private.future_posture_definer();
+      DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid = 'deployment_model_catalog'::regclass AND inhparent = to_regclass('future_parent')) THEN ALTER TABLE deployment_model_catalog NO INHERIT future_parent; END IF; END $$;
+      DROP TABLE IF EXISTS future_posture_rows, future_owner_only_rows, future_parent, future_partition_parent CASCADE;
+      DROP FUNCTION IF EXISTS future_posture_invoker(), opengeni_private.future_posture_invoker(), opengeni_private.future_posture_definer(), opengeni_private.future_posture_trigger();
     `);
     }
   },
