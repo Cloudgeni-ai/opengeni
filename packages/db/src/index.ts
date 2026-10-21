@@ -36814,6 +36814,16 @@ export type ListSessionEventsOptions = {
   authoritativeLatest?: boolean;
 };
 
+/**
+ * LIKE patterns equal to isPresentedSessionToolName: each leaf alone, or after
+ * `__`. One LIKE ANY evaluates the name once per row and costs a fraction of
+ * the equivalent regex, which dominated long scans even on a short column.
+ */
+const PRESENTED_TOOL_NAME_PATTERNS = SESSION_EVENT_PRESENTED_TOOL_LEAVES.flatMap((leaf) => {
+  const literal = leaf.replace(/[\\%_]/g, "\\$&");
+  return [literal, `%\\_\\_${literal}`];
+});
+
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -36822,14 +36832,19 @@ function sessionEventExcludeTypesFilter(
   if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
     return excluded;
   }
-  // The name check reads only created rows (never tool outputs), but it still
-  // detoasts large arguments on each excluded call it scans.
-  const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  // The name check reads only created rows (never tool outputs) and uses the
+  // trigger-filled tool_name column (migration 0889), so it never detoasts a
+  // call's arguments. Rows written before 0889 keep a NULL column; only they
+  // fall back to the payload name, which classifies them exactly as before.
+  const patterns = sql.join(
+    PRESENTED_TOOL_NAME_PATTERNS.map((pattern) => sql`${pattern}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
     and(
       eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
+      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name') like any (array[${patterns}])`,
     ),
   )!;
 }
