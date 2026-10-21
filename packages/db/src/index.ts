@@ -25860,7 +25860,9 @@ export async function getWorkspaceConnectionModelRestrictions(
   subjectId: string,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
   claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
+  workspaceConnections?: Promise<readonly ConnectionMetadata[] | undefined>,
 ) {
+  const sharedMetadata = workspaceConnections?.catch(() => undefined);
   return await resolveWorkspaceConnectionModelRestrictions(
     db,
     workspaceId,
@@ -25868,6 +25870,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     await codexAccountsForModelRestrictions(db, workspaceId, subjectId),
     claudeAuthoritySnapshot,
     claudeCoreRestrictions,
+    sharedMetadata,
   );
 }
 

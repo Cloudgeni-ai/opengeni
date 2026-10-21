@@ -13,6 +13,7 @@ import {
   type WorkspaceSessionDefaults,
   type ClaudeProviderAccountAuthoritySnapshotV1,
   type BillingBalance,
+  type ConnectionMetadata,
   type OrganizationModelDefaults,
 } from "@opengeni/contracts";
 import {
@@ -401,6 +402,7 @@ async function connectionRestrictionsAndXaiReadiness(
   settings: Settings,
   context: WorkspaceModelSelectionContext,
   claudeCoreReadiness: SubscriptionCoreClaudeCatalogReadiness | null,
+  workspaceConnections?: Promise<readonly ConnectionMetadata[] | undefined>,
 ): Promise<{ restrictions: ConnectionModelRestrictions; xaiSubscriptionActive: boolean }> {
   const claudeCore = claudeCoreReadiness?.restrictions;
   const [restrictions, core] = await Promise.all([
@@ -410,6 +412,7 @@ async function connectionRestrictionsAndXaiReadiness(
       context.subjectId,
       context.claudeAuthoritySnapshot,
       claudeCore,
+      workspaceConnections,
     ),
     loadCoreRoutedXaiCatalogReadiness(db, settings, context),
   ]);
@@ -465,12 +468,25 @@ export async function loadWorkspaceModelSelectionInput(
       (kind) => kind !== "claude_subscription" || settings.claudeSubscriptionEnabled,
     ),
   ];
+  // Only pool-backed callers share this read across the independent batches.
+  // A transaction has one LOCAL scope and must retain its batch ordering;
+  // minimal/custom database ports retain the historical fallback as well.
+  const workspaceConnectionsRead =
+    typeof db.transaction === "function" &&
+    typeof (db as Database & { rollback?: unknown }).rollback !== "function"
+      ? listConnectionsMetadata(db, workspaceId, null)
+      : undefined;
+  // The catalog batch still owns this failure. An unavailable shared read
+  // must not replace the input batch's independent restriction error.
+  const restrictionMetadata = workspaceConnectionsRead?.catch(() => undefined);
   const inputRead = (async () => {
     // Claude's provider route and core projection, read once for both
     // readers that need it; the other reads do not wait for it.
     const claudeCore = loadCoreRoutedClaudeCatalogReadiness(db, settings, context);
     return await Promise.all([
-      claudeCore.then((core) => connectionRestrictionsAndXaiReadiness(db, settings, context, core)),
+      claudeCore.then((core) =>
+        connectionRestrictionsAndXaiReadiness(db, settings, context, core, restrictionMetadata),
+      ),
       claudeCore.then((core) =>
         loadWorkspaceClaudeSubscriptionReadiness(db, settings, context, core),
       ),
@@ -496,7 +512,7 @@ export async function loadWorkspaceModelSelectionInput(
   // model catalog route reads them.
   const catalogRead = (async () =>
     Promise.all([
-      listConnectionsMetadata(db, workspaceId, null),
+      workspaceConnectionsRead ?? listConnectionsMetadata(db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(db, { accountId, workspaceId, providerKinds }),
       getOrganizationModelProviderCatalogForWorkspace(db, {
         accountId,
