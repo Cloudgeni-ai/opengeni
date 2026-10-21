@@ -33074,8 +33074,15 @@ async function sessionListTotalsInScope(
             order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
           ) as input_wait
       from nodes
-      join ${schema.sessionEventCursors} cursor on cursor.workspace_id = ${workspaceId}
-        and cursor.session_id = nodes.id and cursor.account_id = nodes.account_id
+      -- Probe only contributing nodes. A workspace-wide cursor scan evaluates
+      -- its session visibility policy even for archived/pinned trees discarded
+      -- by this query. Keep all RLS checks, but key them after node filtering.
+      join lateral (
+        select last_meaningful_sequence from ${schema.sessionEventCursors} cursor
+        where cursor.workspace_id = ${workspaceId}
+          and cursor.session_id = nodes.id and cursor.account_id = nodes.account_id
+        offset 0
+      ) cursor on true
       join roots root on root.id = nodes.root_id
       where not root.archived and not nodes.pinned_path
         ${
