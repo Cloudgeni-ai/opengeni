@@ -36,6 +36,7 @@ use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
 
+use super::disk::{AfterReading, Room};
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
 
@@ -349,9 +350,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Exists(id)));
             return;
         }
-        if let Err(error) = self.can_create(id, &config) {
-            let _ = reply.send(Err(error));
-            return;
+        // Its first wake fetches it, so it must fit as that wake would.
+        match self.can_create(id, &config, true) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
+                self.after_reading(waiting);
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         }
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
@@ -369,6 +379,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         self.preparing.insert(id.0);
+        self.input(self.first_wake(id, &config, true));
         self.claim_copy(
             id,
             Record::new(id, ordinal, allocation, config),

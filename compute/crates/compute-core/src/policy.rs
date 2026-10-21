@@ -467,6 +467,12 @@ pub struct HostPolicy {
 /// [`crate::Notice::HostFull`]. Slow relief, pausing, compressing or saving
 /// idle sandboxes, happens ahead of time instead: the host keeps
 /// [`Admission::buffer`] bytes free in the background.
+///
+/// A create is admitted the same way: a host takes a new sandbox only
+/// while its first wake would fit now, and books that wake
+/// ([`crate::Input::Creating`]) from its yes until the sandbox first
+/// runs, so a burst of creates takes no more sandboxes than the host can
+/// wake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Admission {
     /// Bytes of guest memory the host can hold at once: its capacity for

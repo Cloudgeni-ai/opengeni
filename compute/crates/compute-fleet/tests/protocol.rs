@@ -44,6 +44,8 @@ const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
 const HOST_MEMORY_MIB: u64 = 256 * 1024;
 const SANDBOX_MIB: u64 = 1024;
+/// How many hosts the model tries for one create or adopt.
+const MODEL_TRIES: u32 = 3;
 /// How long a host waits for an archive's answer before it starts another.
 const ARCHIVE_GIVE_UP: Duration = Duration::from_secs(30);
 
@@ -1712,11 +1714,14 @@ impl Sim {
             at,
             row,
             archived,
-            (tries, 3),
         );
         match next {
-            Next::Nothing => {}
-            Next::PlaceElsewhere => self.place_and_send(id, Some(row), op, tries + 1),
+            // The model places without excluding hosts that refused, so it
+            // stops after a few.
+            Next::PlaceElsewhere if tries < MODEL_TRIES => {
+                self.place_and_send(id, Some(row), op, tries + 1);
+            }
+            Next::Nothing | Next::PlaceElsewhere => {}
             // The host holds nothing of it under this epoch: it finished a
             // hand-off the service has not heard of yet, or its copy is
             // behind. Adopt the archive there under a new epoch, so that a

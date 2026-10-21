@@ -1053,6 +1053,18 @@ impl Lab {
             .unwrap()
     }
 
+    async fn remove(&self, id: Id) {
+        let reply = self
+            .client
+            .call(&Request::Remove {
+                id,
+                generation: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply, Reply::Done);
+    }
+
     fn sandbox(status: &HostStatus, id: Id) -> &compute_host::protocol::SandboxStatus {
         status
             .sandboxes

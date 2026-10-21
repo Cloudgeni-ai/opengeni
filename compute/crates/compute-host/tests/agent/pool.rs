@@ -416,11 +416,20 @@ async fn a_build_that_ends_frees_what_an_earlier_vm_of_its_name_kept_counted() {
             && template_state(status) == Some(TemplateState::Ready)
     })
     .await;
+    // The create only started the build: its sandbox's first wake is not
+    // what this counts.
+    lab.remove(id(1)).await;
     assert_eq!(occupied(&lab.status().await), 256 * MIB, "the first VM");
 
     // The first image again: its build ends the first VM, of its name.
     std::fs::write(lab.root.join("base.img"), "base").unwrap();
     lab.create(id(2), NEVER).await;
+    lab.wait_until("the third build", |status| {
+        lab.world.boots.load(Ordering::Relaxed) == 3
+            && template_state(status) == Some(TemplateState::Ready)
+    })
+    .await;
+    lab.remove(id(2)).await;
     lab.wait_until("the third build, and nothing counted", |status| {
         lab.world.boots.load(Ordering::Relaxed) == 3
             && template_state(status) == Some(TemplateState::Ready)

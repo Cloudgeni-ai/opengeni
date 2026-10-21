@@ -152,7 +152,7 @@ impl<S: Store> Service<S> {
             host,
             epoch,
         };
-        match self.settle(row.id, asked, &answered, 0).await?.0 {
+        match self.settle(row.id, asked, &answered).await?.0 {
             Next::Clear(_) => Ok(()),
             _ => Err(match answered.code() {
                 Some(ErrorCode::NotFound) => Failure::Unavailable(

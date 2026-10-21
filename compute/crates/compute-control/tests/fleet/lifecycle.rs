@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use compute_fleet::HostId;
 use compute_protocol::fleet::{HostInfo, REGISTER_PATH, Register, Registered};
-use compute_protocol::host::{ErrorCode, Id, Reply, Request};
+use compute_protocol::host::{ErrorCode, Reply, Request};
 use reqwest::Method;
 use serde_json::json;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -236,7 +236,7 @@ async fn a_create_one_host_refuses_goes_to_another_under_a_later_owner_epoch() {
     let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
     assert_eq!(row["host"], "host-b.example");
     assert_eq!(full.ops(), ["create"]);
-    assert_eq!(room.ops(), ["create", "wake"]);
+    assert_eq!(room.ops(), ["create"]);
     let refused = full.seen()[0].envelope.sent.owner_epoch.unwrap();
     let taken = room.seen()[0].envelope.sent.owner_epoch.unwrap();
     assert!(taken > refused, "{taken} after {refused}");
@@ -258,6 +258,42 @@ async fn a_create_every_host_refuses_leaves_no_sandbox_behind() {
     assert_eq!(all, json!([]), "the refused create left a row");
 }
 
+/// The search for a host has no fixed number of tries: a create that
+/// many hosts refuse, each once, still goes to the one with room.
+#[tokio::test]
+async fn a_create_many_hosts_refuse_goes_to_the_one_with_room() {
+    let fleet = Fleet::start().await;
+    let mut full = Vec::new();
+    for name in ["a", "b", "c", "d", "e"] {
+        let host = fleet.host(&format!("host-{name}.example")).await;
+        // Its ready clones make placement try it before the one with room.
+        host.advertise_ready();
+        host.behave(refuse_creates);
+        full.push(host);
+    }
+    let room = fleet.host("host-f.example").await;
+    let view = std::sync::Arc::clone(fleet.running.service.view());
+    until(
+        Duration::from_secs(3),
+        "the view has the ready clones",
+        async || {
+            ["a", "b", "c", "d", "e"].iter().all(|name| {
+                view.named(&format!("host-{name}.example"))
+                    .is_some_and(|known| !known.capacity.ready.is_empty())
+            })
+        },
+    )
+    .await;
+
+    let sandbox = fleet.create(json!({})).await;
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert_eq!(row["host"], "host-f.example");
+    for host in &full {
+        assert_eq!(host.ops(), ["create"], "asked once");
+    }
+    assert_eq!(room.ops(), ["create"]);
+}
+
 #[tokio::test]
 async fn the_service_keeps_its_side_open_until_a_host_answers() {
     let fleet = Fleet::start().await;
@@ -268,7 +304,7 @@ async fn the_service_keeps_its_side_open_until_a_host_answers() {
     assert_eq!(fleet.post(&format!("{path}/wake"), json!({})).await.0, 200);
     assert_eq!(fleet.delete(&path).await.0, 204);
     let seen = host.seen();
-    assert_eq!(seen.len(), 4, "create, its run, the wake and the remove");
+    assert_eq!(seen.len(), 3);
     for request in seen {
         assert_eq!(
             request.open_until_answer,
@@ -277,118 +313,6 @@ async fn the_service_keeps_its_side_open_until_a_host_answers() {
             op_name(&request.envelope.request)
         );
     }
-}
-
-/// Refuses every wake as a host too full to run another sandbox would.
-fn refuse_wakes(envelope: &compute_protocol::fleet::Envelope) -> Act {
-    match envelope.request {
-        Request::Wake { .. } => Act::Reply(Reply::Error {
-            message: "full".into(),
-            code: ErrorCode::HostFull,
-        }),
-        _ => Act::Ordinary,
-    }
-}
-
-#[tokio::test]
-async fn a_create_its_host_cannot_run_goes_to_another_host() {
-    let fleet = Fleet::start().await;
-    let full = fleet.host("host-a.example").await;
-    // Its ready clones make placement try it first.
-    full.advertise_ready();
-    full.behave(refuse_wakes);
-    let room = fleet.host("host-b.example").await;
-    let view = std::sync::Arc::clone(fleet.running.service.view());
-    until(
-        Duration::from_secs(3),
-        "the view has the ready clones",
-        async || {
-            view.named("host-a.example")
-                .is_some_and(|known| !known.capacity.ready.is_empty())
-        },
-    )
-    .await;
-
-    let sandbox = fleet.create(json!({})).await;
-    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
-    assert_eq!(row["host"], "host-b.example");
-    assert_eq!(full.ops(), ["create", "wake", "remove"]);
-    assert_eq!(full.holds(id(&sandbox)), None, "the full host kept it");
-    assert_eq!(room.ops(), ["create", "wake"]);
-    let removed = full.seen()[0].envelope.sent.owner_epoch.unwrap();
-    let taken = room.seen()[0].envelope.sent.owner_epoch.unwrap();
-    assert!(taken > removed, "{taken} after {removed}");
-    assert_eq!(room.holds(id(&sandbox)), Some(taken));
-}
-
-#[tokio::test]
-async fn a_create_no_host_can_run_leaves_no_sandbox_behind() {
-    let fleet = Fleet::start().await;
-    let full = fleet.host("host-a.example").await;
-    full.behave(refuse_wakes);
-    let (status, body) = fleet
-        .post("/v1/sandboxes", json!({ "vcpus": 1, "memory_mib": 256 }))
-        .await;
-    assert_eq!(status, 503, "{body}");
-    assert_eq!(full.ops(), ["create", "wake", "remove"]);
-    let (_, all) = fleet.get("/v1/sandboxes").await;
-    assert_eq!(all, json!([]), "the create left a row");
-    assert!(full.seen().iter().all(|seen| match &seen.envelope.request {
-        Request::Create { id, .. } => full.holds(*id).is_none(),
-        _ => true,
-    }));
-}
-
-/// A burst of creates on one host whose report fits them all but which can
-/// run only two: all are sent to it, the two it can run are created, and
-/// the rest leave nothing behind, on the host or in the store.
-#[tokio::test]
-async fn a_burst_of_creates_leaves_only_the_sandboxes_its_host_can_run() {
-    let fleet = Fleet::start().await;
-    let host = fleet.host("host-a.example").await;
-    let running = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
-    let woken = std::sync::Arc::clone(&running);
-    host.behave(move |envelope| match envelope.request {
-        Request::Wake { id, .. } => {
-            let mut running = woken.lock().unwrap();
-            if running.contains(&id) || running.len() < 2 {
-                running.insert(id);
-                Act::Ordinary
-            } else {
-                Act::Reply(Reply::Error {
-                    message: "full".into(),
-                    code: ErrorCode::HostFull,
-                })
-            }
-        }
-        _ => Act::Ordinary,
-    });
-    let creates =
-        (0..8).map(|_| fleet.post("/v1/sandboxes", json!({ "vcpus": 1, "memory_mib": 256 })));
-    let answers = futures::future::join_all(creates).await;
-    let made: Vec<&serde_json::Value> = answers
-        .iter()
-        .filter(|(status, _)| *status == 201)
-        .map(|(_, body)| body)
-        .collect();
-    assert_eq!(made.len(), 2, "{answers:?}");
-    assert!(
-        answers
-            .iter()
-            .all(|(status, _)| *status == 201 || *status == 503),
-        "{answers:?}"
-    );
-    let (_, all) = fleet.get("/v1/sandboxes").await;
-    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
-    let held: Vec<Id> = running.lock().unwrap().iter().copied().collect();
-    for made in made {
-        let sandbox = id(made["id"].as_str().unwrap());
-        assert!(held.contains(&sandbox));
-        assert!(host.holds(sandbox).is_some());
-    }
-    let creates = host.ops().iter().filter(|op| **op == "create").count();
-    let removes = host.ops().iter().filter(|op| **op == "remove").count();
-    assert_eq!((creates, removes), (8, 6));
 }
 
 /// Hosts start sandboxes from their one base image, so a create naming

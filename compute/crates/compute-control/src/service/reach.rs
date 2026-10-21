@@ -12,12 +12,15 @@ use crate::store::{SandboxRow, Store, Write, replace};
 use crate::view::Target;
 
 /// How long a host may take to wake a sandbox and answer.
-pub(super) const WAKE_WAIT: Duration = Duration::from_secs(60);
+const WAKE_WAIT: Duration = Duration::from_secs(60);
 /// How long a host may take to adopt a sandbox.
 const ADOPT_WAIT: Duration = Duration::from_secs(30);
 /// How long to wait before asking again after an answer that may change
 /// soon: a host busy, or not yet past a create it may still receive.
 const AGAIN_AFTER: Duration = Duration::from_millis(250);
+/// How many times an adopt asks the host it names before giving up, while
+/// that host refuses it for when it was sent.
+const ASKS_OF_A_NAMED_HOST: u32 = 3;
 
 /// What a caller wants of a sandbox.
 #[derive(Clone, Copy, Debug)]
@@ -117,12 +120,12 @@ impl<S: Store> Service<S> {
                 host,
                 epoch,
             };
-            let (next, now) = self.settle(id, asked, &answered, 0).await?;
+            let (next, now) = self.settle(id, asked, &answered).await?;
             if let Next::AdoptHere(_) = next {
                 // Given back to the same host under a new epoch, to adopt
                 // the archive there; elsewhere if it refuses outright.
                 let row = now.ok_or(Failure::NotFound)?;
-                if let Some(adopted) = self.send_adopt(&row, &target, 1).await?
+                if let Some(adopted) = self.send_adopt(&row, &target).await?
                     && let (Next::PlaceElsewhere, Some(now)) = (adopted.next, adopted.row)
                 {
                     self.adopt(now, None, vec![host]).await?;
@@ -155,10 +158,11 @@ impl<S: Store> Service<S> {
     /// host `on`, or to a host placement picks outside `exclude`, and has
     /// it adopt the latest archive. Each try takes its host's target from
     /// the view as it is then, so the request carries that host's latest
-    /// renewal; a host named by `on` that refuses a request as too old or
-    /// under another registration is tried again. Returns once one
-    /// adopted it, or once the row changed under it, for the caller to read
-    /// again.
+    /// renewal. Every host placement can find is tried once; a host named
+    /// by `on` that refuses a request as too old or under another
+    /// registration is asked again, up to [`ASKS_OF_A_NAMED_HOST`] times in
+    /// all. Returns once one adopted it, or once the row changed under it,
+    /// for the caller to read again.
     pub(super) async fn adopt(
         &self,
         mut row: SandboxRow,
@@ -176,8 +180,8 @@ impl<S: Store> Service<S> {
             .and_then(|class| self.view.class(class))
             .map_or(Prefer::Any, Prefer::Class);
         let demand = self.demand(&row.spec.config, prefer);
-        let mut refused = None;
-        for tries in 1..=self.settings.max_tries {
+        let mut asked = 0;
+        loop {
             let target = match on {
                 Some(host) => self.view.target(host).ok_or_else(|| {
                     Failure::Unavailable("the host asked for was given up on".into())
@@ -206,7 +210,7 @@ impl<S: Store> Service<S> {
                     ));
                 }
             }
-            let Some(adopted) = self.send_adopt(&row, &target, tries).await? else {
+            let Some(adopted) = self.send_adopt(&row, &target).await? else {
                 return Ok(());
             };
             if adopted.answered.outcome() == Outcome::Done {
@@ -227,7 +231,10 @@ impl<S: Store> Service<S> {
                         Some(ErrorCode::Expired | ErrorCode::Unavailable)
                     ) =>
                 {
-                    refused = Some(host_failure(&adopted.answered));
+                    asked += 1;
+                    if asked == ASKS_OF_A_NAMED_HOST {
+                        return Err(host_failure(&adopted.answered));
+                    }
                     row = now;
                     tokio::time::sleep(AGAIN_AFTER).await;
                 }
@@ -235,7 +242,6 @@ impl<S: Store> Service<S> {
                 _ => return Err(host_failure(&adopted.answered)),
             }
         }
-        Err(refused.unwrap_or(Failure::NoCapacity))
     }
 
     /// Sends the adopt `row`'s current owner epoch names to `target` and
@@ -244,7 +250,6 @@ impl<S: Store> Service<S> {
         &self,
         row: &SandboxRow,
         target: &Target,
-        tries: u32,
     ) -> Result<Option<Adopted>, Failure> {
         let epoch = row.ownership.epoch;
         let request = Request::Adopt {
@@ -269,7 +274,7 @@ impl<S: Store> Service<S> {
             host: target.host,
             epoch,
         };
-        let (next, row) = self.settle(row.id, asked, &answered, tries).await?;
+        let (next, row) = self.settle(row.id, asked, &answered).await?;
         Ok(Some(Adopted {
             next,
             answered,

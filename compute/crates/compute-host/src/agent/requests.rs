@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, SandboxId, Step};
+use compute_core::{
+    CreateRoom, DiskSpace, Durability, HoldId, Input, Level, Priority, SandboxId, Size, Step,
+};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, sync_parent};
@@ -20,10 +22,15 @@ use crate::state::{Change, Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::{OwnerEpoch, Store};
 
-use super::disk::AfterReading;
+use super::disk::{AfterReading, Room};
 use super::holds::{Write, hold_id};
 use super::observe::{By, Why};
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
+
+/// How long a new sandbox's first wake stays booked if it is not woken:
+/// long enough for its creator to make it and ask for it, short enough
+/// that room a create never used comes back soon.
+const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
 
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
@@ -469,26 +476,71 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         })
     }
 
-    /// Refuses a new sandbox `id` of `config` that cannot be created here.
-    pub(super) fn can_create(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
+    /// Refuses a new sandbox `id` of `config` that cannot be created here,
+    /// or not woken at once; adopted with `remote`, its first wake fetches
+    /// it. Otherwise says whether it fits now or only the next disk
+    /// reading can tell.
+    pub(super) fn can_create(
+        &self,
+        id: Id,
+        config: &SandboxConfig,
+        remote: bool,
+    ) -> Result<Room, HostError> {
         self.sleep_policy(config).map_err(HostError::Invalid)?;
         if let Some(refused) = self.needs_absent_store(&config.sleep) {
             return Err(refused);
         }
-        // One that could never run here is refused at once, so it can be
-        // placed elsewhere.
-        if let Some(capacity) = self.core.capacity() {
-            let needed = self.size(config, None).request;
-            if needed > capacity.budget {
-                return Err(HostError::HostFull {
-                    id,
-                    resource: Resource::Memory,
-                    needed,
-                    free: capacity.free(),
-                });
-            }
+        self.room_for(id, config, remote, DiskSpace::default())
+    }
+
+    /// Refuses a new sandbox `id` of `config` this host could not wake at
+    /// once, as it would refuse that wake: it would sit here unable to
+    /// run, so it goes elsewhere before anything of it is made. `files` is
+    /// what is written for it before its first wake, booked together with
+    /// that wake. Every create and adopt taken books its first wake with
+    /// [`Self::first_wake`] in the same turn of the agent as a check that
+    /// it fits now, so a burst of them cannot take the same room twice.
+    pub(super) fn room_for(
+        &self,
+        id: Id,
+        config: &SandboxConfig,
+        remote: bool,
+        files: DiskSpace,
+    ) -> Result<Room, HostError> {
+        let size = self.size(config, None);
+        match self.core.create_room(self.now(), id.0, size, remote, files) {
+            CreateRoom::Fits => Ok(Room::Now),
+            CreateRoom::AwaitsReading => Ok(Room::AfterReading),
+            CreateRoom::Short(resource, needed, free) => Err(HostError::HostFull {
+                id,
+                resource,
+                needed,
+                free,
+            }),
         }
-        Ok(())
+    }
+
+    /// What books the first wake of new sandbox `id` of `config`, checked
+    /// with [`Self::room_for`], until it runs or for
+    /// [`FIRST_WAKE_WITHIN`]; see [`Input::Creating`].
+    pub(super) fn first_wake(&self, id: Id, config: &SandboxConfig, remote: bool) -> Input {
+        Input::Creating {
+            sandbox: id.0,
+            size: self.size(config, None),
+            remote,
+            until: self.now() + FIRST_WAKE_WITHIN,
+        }
+    }
+
+    /// Ends the booking of new sandbox `id`'s first wake: its create or
+    /// adopt failed before the sandbox joined the core.
+    pub(super) fn first_wake_unbooked(&mut self, id: Id) {
+        self.input(Input::Creating {
+            sandbox: id.0,
+            size: Size::default(),
+            remote: false,
+            until: self.now(),
+        });
     }
 
     pub(super) fn create(
@@ -523,12 +575,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(answer);
             return;
         }
-        if let Err(error) = self.can_create(id, &config) {
-            let _ = reply.send(Err(error));
-            return;
-        }
+        let room = match self.can_create(id, &config, false) {
+            Ok(room) => room,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
         self.template_used(Shape::of(&config));
-        let unclaimed = if ready {
+        // A ready sandbox is claimed only with room for it now; otherwise
+        // the fresh create waits for the reading that decides it.
+        let unclaimed = if ready && room == Room::Now {
             self.claim(id, config, owner, reply)
         } else {
             Some((config, reply))
@@ -540,7 +597,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Creates sandbox `id` from its shape's template, or cold, once the
-    /// host has its image.
+    /// host has its image, and books its first wake meanwhile.
     pub(super) fn create_fresh(
         &mut self,
         id: Id,
@@ -555,11 +612,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let shape = Shape::of(&config);
         let template = self.template_for(shape);
         // Its first files are written before the core knows it: they are
-        // booked from before the copy until a reading shows them.
+        // booked from before the copy until a reading shows them, and must
+        // fit together with its first wake.
         let template_disk = template.as_ref().map(|t| t.disk());
-        let disk = match self.first_files_fit(id, shape.image, template_disk.as_deref()) {
-            Ok(Some(disk)) => disk,
-            Ok(None) => {
+        let disk = self.first_files_disk(shape.image, template_disk.as_deref());
+        match self.room_for(id, &config, false, disk) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
                 self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
                 return;
             }
@@ -567,7 +626,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = reply.send(Err(error));
                 return;
             }
-        };
+        }
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
@@ -585,7 +644,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        self.input(Input::Writes { key: id.0, disk });
+        self.inputs([
+            Input::Writes { key: id.0, disk },
+            self.first_wake(id, &config, false),
+        ]);
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
         self.prepare(record, template, reply);

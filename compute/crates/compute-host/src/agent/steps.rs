@@ -149,11 +149,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Ok(record) => record,
             Err(error) => {
                 self.ordinals.remove(&ordinal);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(error));
                 return;
             }
         };
         let Ok(policy) = self.sleep_policy(&record.config) else {
+            self.first_wake_unbooked(id);
             return;
         };
         let paths = Paths::of(&self.root, &record);
@@ -162,8 +164,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.insert(id, paths, spec);
         // A new sandbox is a saved one: a disk, with a memory image when it
         // started from a template. An adopted one is in the store alone.
-        // Its first wake boots, restores or fetches it, under the same
-        // admission limits as any wake.
+        // Its first wake boots, restores or fetches it, into the room its
+        // create or adopt booked.
         let (level, durability) = match record.disk {
             Disk::Local => (Level::Saved, Durability::Local),
             Disk::Remote => (Level::Remote, Durability::Remote),

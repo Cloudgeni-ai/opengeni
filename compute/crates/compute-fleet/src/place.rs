@@ -12,10 +12,11 @@
 //! count, and a report is up to a second or so old, so it can still book
 //! a sandbox that is gone. Placement never refuses on either. When no
 //! host fits by them, a live host whose memory could hold the sandbox at
-//! all is asked anyway, and the host's answer decides: a create is
-//! answered only once its host runs the sandbox, and a host too full to
-//! run it removes it, so the create goes to the next host. Only when
-//! every such host has refused is there no capacity.
+//! all is asked anyway, and the host's answer decides: a host takes a
+//! create or adopt only while it has room to run the sandbox now, and
+//! books that room until the sandbox first runs, so a host that cannot
+//! run it refuses it before making anything, and it goes to the next
+//! host. Only when every such host has refused is there no capacity.
 //!
 //! Placement draws two random hosts that fit, from different zones when it
 //! can, and takes the better: one with a ready clone of the shape first,

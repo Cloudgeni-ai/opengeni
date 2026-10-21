@@ -748,8 +748,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (host, fence) = (idle.record.id, idle.record.fence());
         self.ready.claiming.insert(host.0, false);
         // No longer spare, but its VM holds what it did until the claimed
-        // sandbox joins the core.
+        // sandbox joins the core, which books its first wake meanwhile, as
+        // checked before the claim.
         let bytes = self.ready.spares.remove(&host.0).unwrap_or(shape.bytes());
+        let first_wake = self.first_wake(id, &config, false);
         self.inputs([
             Input::Spare {
                 sandbox: host.0,
@@ -763,6 +765,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 bytes,
                 cpu: 0,
             },
+            first_wake,
         ]);
         let template = Arc::clone(&idle.template);
         let filled = &idle.record.config;
@@ -833,6 +836,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         } = claimed;
         let host = idle.record.id;
         let died = self.ready.claiming.remove(&host.0).unwrap_or(false);
+        if !matches!(result, ClaimResult::Claimed(Ok(_))) {
+            // A create that starts over books its first wake again.
+            self.first_wake_unbooked(id);
+        }
         let record = match result {
             ClaimResult::Claimed(Ok(record)) => *record,
             ClaimResult::Stale => {
@@ -876,6 +883,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Err(problem) => {
                 // Checked before the claim; nothing changed it since.
                 tracing::error!(%id, %problem, "a claimed sandbox's settings are invalid");
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(HostError::Invalid(problem)));
                 return;
             }

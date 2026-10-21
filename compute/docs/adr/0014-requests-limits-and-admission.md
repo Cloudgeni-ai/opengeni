@@ -25,6 +25,14 @@ pick a VM.
   object storage before it downloads anything, through its restore. On an
   overdrawn budget (after a restart with less) nothing more wakes, not even
   a resume that takes nothing more.
+- A create, a claim of a ready sandbox and an adoption from object storage
+  are admitted as the first wake they lead to: the host says yes only while
+  that wake would fit now (memory request, processors, disk, and the local
+  copy for an adoption), and books it from that yes until the sandbox
+  first runs, it breaks, or two minutes pass without a wake. A burst of
+  creates therefore never takes more sandboxes than the host can wake; the
+  rest are refused with `host_full` at once and placed elsewhere
+  ([15](0015-placement-and-moves-between-hosts.md)).
 - Admission in create, wake and connect is arithmetic on numbers held in
   memory (microseconds). Inside a request the only relief is instant: ending
   idle VMs that already have a valid saved copy (milliseconds, no I/O). If

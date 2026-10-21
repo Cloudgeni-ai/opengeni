@@ -392,13 +392,9 @@ async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() 
         restore: Duration::from_secs(1),
         ..Delays::default()
     };
-    let lab = Lab::start_configured(Lab::root(), Arc::default(), delays, policy, keeping(1)).await;
-    lab.wait_until("a fill under way", |status| pool(status) == (0, 1, 1))
-        .await;
-
-    // 384 MiB do not fit next to the fill, which books what its template
-    // holds and 64 MiB more until it is ready: the hold waits.
-    let created = lab
+    // A sandbox made before the host kept a ready one.
+    let before = Lab::new(Delays::default(), policy).await;
+    let created = before
         .client
         .call(&Request::Create {
             id: id(1),
@@ -407,6 +403,13 @@ async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() 
         .await
         .unwrap();
     assert_eq!(created, Reply::Done);
+    let (root, world) = before.stop().await;
+    let lab = Lab::start_configured(root, world, delays, policy, keeping(1)).await;
+    lab.wait_until("a fill under way", |status| pool(status) == (0, 1, 1))
+        .await;
+
+    // 384 MiB do not fit next to the fill, which books what its template
+    // holds and 64 MiB more until it is ready: the hold waits.
     let hold = Request::Hold {
         id: id(1),
         generation: None,

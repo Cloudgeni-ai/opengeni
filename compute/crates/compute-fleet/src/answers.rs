@@ -141,9 +141,9 @@ pub enum Next {
 
 /// The answer `outcome`, given `at`, to `op` sent to `host` under `epoch`:
 /// records it in `sends` and says what follows, given the sandbox's row as
-/// it is now, whether an archive of it exists, and how many hosts already
-/// refused it (`tries`, of at most `max_tries`).
-#[expect(clippy::too_many_arguments, reason = "one per fact the rule weighs")]
+/// it is now and whether an archive of it exists. A create or adopt the
+/// host refused goes elsewhere; the caller decides which hosts are left to
+/// try.
 pub fn answered(
     sends: &mut Sends,
     terms: LeaseTerms,
@@ -152,7 +152,6 @@ pub fn answered(
     at: AnsweredAt,
     row: Ownership,
     archived: bool,
-    (tries, max_tries): (u32, u32),
 ) -> Next {
     let still = row.owner == Some(host) && row.epoch == epoch;
     if op.takes() {
@@ -166,9 +165,7 @@ pub fn answered(
     }
     let settled = sends.settled(terms, epoch, at);
     match (op, outcome) {
-        (Op::Create | Op::Adopt, Outcome::Refused) if still && tries < max_tries => {
-            Next::PlaceElsewhere
-        }
+        (Op::Create | Op::Adopt, Outcome::Refused) if still => Next::PlaceElsewhere,
         (Op::Wake, Outcome::NotFound) if still && settled && archived => {
             Next::AdoptHere(row.give(host))
         }
@@ -221,7 +218,7 @@ mod tests {
     fn a_refused_create_goes_elsewhere_only_while_the_row_still_names_that_host() {
         let mut sends = Sends::default();
         sends.send(E, 4);
-        let refused = |sends: &mut Sends, row, tries| {
+        let refused = |sends: &mut Sends, row| {
             answered(
                 sends,
                 TERMS,
@@ -230,17 +227,11 @@ mod tests {
                 at(1, 4),
                 row,
                 false,
-                (tries, 3),
             )
         };
-        assert_eq!(refused(&mut sends, owned_by(A), 0), Next::PlaceElsewhere);
+        assert_eq!(refused(&mut sends, owned_by(A)), Next::PlaceElsewhere);
         assert_eq!(sends.unanswered, None, "answered");
-        assert_eq!(refused(&mut sends, owned_by(B), 0), Next::Nothing);
-        assert_eq!(
-            refused(&mut sends, owned_by(A), 3),
-            Next::Nothing,
-            "tried enough"
-        );
+        assert_eq!(refused(&mut sends, owned_by(B)), Next::Nothing);
     }
 
     #[test]
@@ -255,7 +246,6 @@ mod tests {
                 when,
                 row,
                 true,
-                (0, 3),
             )
         };
         // A create stamped 4 is still on its way: not found means nothing
@@ -278,7 +268,6 @@ mod tests {
             at(1, 7),
             row,
             false,
-            (0, 3),
         );
         assert_eq!(landed, Next::Nothing);
         assert_eq!(sends.landed, Some((E, at(1, 7))));
@@ -294,7 +283,6 @@ mod tests {
             at(1, 9),
             row,
             false,
-            (0, 3),
         );
         assert_eq!(none, Next::Nothing);
     }
@@ -311,7 +299,6 @@ mod tests {
                 at(1, 9),
                 row,
                 true,
-                (0, 3),
             )
         };
         assert_eq!(hand_off(Outcome::Done, row), Next::Clear(row.release()));
