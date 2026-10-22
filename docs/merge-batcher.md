@@ -349,10 +349,14 @@ cancels or lands, and no base-purpose run exists until the controller publishes 
   `package.json` and other toolchain pins, plus role-bound environment: runner
   OS/architecture, image OS/version, Bun and Node versions and concurrency settings
   for `source`, and the same plus PostgreSQL `version()` and files-per-process for
-  units. Product code a guard loads to inspect is compared, never recipe. An
-  executed script that is not tracked is bound as absent. Plan and ready jobs are
-  excluded. Missing or disagreeing evidence leaves the recipe unknown and the run
-  not comparable.
+  units. Harness-owned policy inputs that those sources' code reads directly are
+  recipe too: non-source files under `scripts/` named by repository path, relative
+  path or a bare name beside the reader, such as the public-API breaking-change
+  allowlist and the shard profiles. Product code and data a guard inspects (docs,
+  migrations, catalog data, everything outside `scripts/`) and generated snapshots
+  (`*.gen.*`) are compared, never recipe. An executed script or named policy input
+  that is not tracked is bound as absent. Plan and ready jobs are excluded. Missing
+  or disagreeing evidence leaves the recipe unknown and the run not comparable.
 - **Verification and verdict.** `verifyBaseRun` requires the batch workflow, the
   exact base branch and tip, the latest attempt, a completed run, a base-purpose
   result (`verifyRunResult`; `verifyResult` rejects every non-candidate purpose),

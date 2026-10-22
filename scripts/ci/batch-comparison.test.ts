@@ -3,17 +3,24 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { executionPlan } from "../merge-batcher/base-comparison";
+import {
+  COMPARISON_SCHEMA,
+  compareFailures,
+  executionPlan,
+  SOURCE_STEPS,
+} from "../merge-batcher/base-comparison";
 import { digest } from "../merge-batcher/model";
+import { allowlisted, validateAllowlist } from "../public-api/surface";
 import {
   executedScripts,
   executionStatus,
   expectedUnits,
+  policyInputs,
   RECIPE_ENTRIES,
   recipePaths,
   trackedBlobs,
 } from "./batch-comparison";
-import { classifyBatchExit } from "./batch-result";
+import { buildComparisonEvidence, classifyBatchExit } from "./batch-result";
 import {
   deterministicUnitTestShards,
   shardProcessPlan,
@@ -200,6 +207,144 @@ describe("recipe identity", () => {
     ]);
     // Recursion terminates; unknown names bind nothing.
     expect(executedScripts("bun run loop && bun run missing", true, scripts)).toEqual([]);
+  });
+
+  test("harness policy inputs read directly are recipe; product data and snapshots are not", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const before = recipePaths(blobs, read);
+    const bound = new Map(before);
+    // Read by the public-API guard and the shard planner, never imported.
+    for (const path of [
+      "scripts/public-api/breaking-changes.json",
+      "scripts/ci/e2e-shard-profile.json",
+    ]) {
+      expect(bound.get(path)).toBe(blobs.get(path)!);
+      const changed = new Map(blobs).set(path, "0".repeat(40));
+      expect(digest(recipePaths(changed, read))).not.toBe(digest(before));
+    }
+    // A named harness input that is absent is bound as absent.
+    expect(bound.has("scripts/ci/integration-shard-profile.json")).toBe(true);
+    expect(bound.get("scripts/ci/integration-shard-profile.json")).toBe(
+      blobs.get("scripts/ci/integration-shard-profile.json") ?? null,
+    );
+    // What guards inspect is compared: the generated API snapshot, catalog
+    // data, docs and migrations stay out of the recipe.
+    for (const path of [
+      "scripts/public-api/surface.gen.json",
+      "data/catalog/curated.json",
+      "docs/deployment.md",
+      "README.md",
+      "packages/db/drizzle/0017_sandbox_leases.sql",
+    ]) {
+      expect(blobs.has(path)).toBe(true);
+      expect(bound.has(path)).toBe(false);
+      const changed = new Map(blobs).set(path, "0".repeat(40));
+      expect(digest(recipePaths(changed, read))).toBe(digest(before));
+    }
+  });
+
+  test("a guard policy change is a recipe change, so the comparison holds", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const path = "scripts/public-api/breaking-changes.json";
+    const allowlist = validateAllowlist(JSON.parse(read(path)));
+    const entry = allowlist[0]!;
+    const finding = { id: entry.ids[0]!, breaking: true, message: "reviewed breaking change" };
+    const narrowed = allowlist.filter((row) => !row.ids.includes(finding.id));
+    // The same finding passes the base policy and fails the candidate policy.
+    const baseMajor = entry.removedInMajor - 1;
+    expect(allowlisted(finding as never, allowlist, baseMajor)).not.toBeNull();
+    expect(allowlisted(finding as never, narrowed, baseMajor)).toBeNull();
+    const text = `${JSON.stringify(narrowed, null, 2)}\n`;
+    const oid = new Bun.CryptoHasher("sha1")
+      .update(`blob ${Buffer.byteLength(text)}\0`)
+      .update(text)
+      .digest("hex");
+    const baseRecipe = recipePaths(blobs, read);
+    const candidateRecipe = recipePaths(new Map(blobs).set(path, oid), (file) =>
+      file === path ? text : read(file),
+    );
+    expect(digest(candidateRecipe)).not.toBe(digest(baseRecipe));
+    const plan = executionPlan({
+      schemaVersion: 1,
+      unitTests: [],
+      typecheckProjects: [],
+      guards: ["public-api"],
+      exampleBuildProjects: [],
+      buildPackages: [],
+    });
+    const identity = {
+      batchId: "a".repeat(64),
+      headSha: "b".repeat(40),
+      runId: "1",
+      runAttempt: 1,
+    };
+    const evidence = (purpose: string, guards: number, recipe: [string, string | null][]) =>
+      buildComparisonEvidence({
+        identity,
+        unitShards: 0,
+        verifiedJobs: ["plan", "source"],
+        sidecars: [
+          {
+            schemaVersion: 1,
+            comparisonSchema: COMPARISON_SCHEMA,
+            ...identity,
+            job: "source",
+            environment: { runnerOs: "Linux" },
+            steps: SOURCE_STEPS.map((step) => ({ step, exitCode: step === "guards" ? guards : 0 })),
+          },
+        ],
+        batch: { purpose, baseSha: "c".repeat(40), planDigest: digest(plan) },
+        plan,
+        inventory: {
+          schemaVersion: 1,
+          comparisonSchema: COMPARISON_SCHEMA,
+          planDigest: digest(plan),
+          shards: 0,
+          absent: [],
+          units: [],
+          recipePaths: recipe,
+        },
+      })!;
+    const base = evidence("base-comparison", 0, baseRecipe);
+    const candidate = evidence("candidate", 1, candidateRecipe);
+    expect(base.coverage.complete && candidate.coverage.complete).toBe(true);
+    expect(
+      compareFailures({ outcome: "code_failure", evidence: candidate }, { evidence: base }),
+    ).toMatchObject({ verdict: "not-comparable" });
+  });
+
+  test("policy inputs: named, relative or beside, in code only, inside the harness", () => {
+    const oid = "1".repeat(40);
+    const blobs = new Map(
+      [
+        "scripts/x/policy.json",
+        "scripts/x/beside.json",
+        "scripts/y/up.jq",
+        "scripts/x/api.gen.json",
+        "docs/rules.md",
+      ].map((path) => [path, oid]),
+    );
+    const source = [
+      '/** Reads "scripts/x/commented.json" only in prose. */',
+      'const a = readFileSync("scripts/x/policy.json");',
+      'const b = readFileSync(join(import.meta.dir, "beside.json"));',
+      'const c = new URL("../y/up.jq", import.meta.url);',
+      'const d = "scripts/x/api.gen.json";',
+      'const e = "docs/rules.md";',
+      'const f = "scripts/x/missing.json";',
+      'const g = "not-beside.json";',
+      'const h = "scripts/x/other.ts";',
+      "// readFileSync('scripts/x/line-comment.json')",
+    ].join("\n");
+    const inputs = policyInputs("scripts/x/check.ts", source, blobs);
+    expect(inputs.tracked.sort()).toEqual([
+      "scripts/x/beside.json",
+      "scripts/x/policy.json",
+      "scripts/y/up.jq",
+    ]);
+    expect(inputs.absent).toEqual(["scripts/x/missing.json"]);
   });
 
   test("tree listings keep only blobs and reject unreadable entries", () => {

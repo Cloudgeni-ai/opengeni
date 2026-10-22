@@ -73,6 +73,10 @@ const ARRAY_RUN = /["']bun["']\s*,\s*["']run["']\s*,\s*["']([\w:.-]+)["']/g;
 /** Shell command text (package scripts, workflow steps): `bun <script>`, `bun run <name>`. */
 const SHELL_SCRIPT = new RegExp(String.raw`\bbun\s+(?:--[\w-]+(?:=\S+)?\s+)*${SCRIPT_PATH}`, "g");
 const SHELL_RUN = /\bbun\s+run\s+([\w:.-]+)/g;
+/** A quoted path literal naming a non-source file (`.json`, `.jq`, `.sh`, ...). */
+const DATA_LITERAL = /["'`]((?:\.{1,2}\/)*[\w@-][\w.@-]*(?:\/[\w.@-]+)*\.[A-Za-z0-9]+)["'`]/g;
+/** Generated snapshots are derived from product code and checked for freshness. */
+const GENERATED = /(?:^|\/)[^/]*\.gen\.[^/]+$/;
 const SOURCE = /\.(?:ts|tsx|js|mjs)$/;
 
 /**
@@ -98,6 +102,43 @@ export function executedScripts(
     found.push(...executedScripts(command, true, scripts, seen));
   }
   return found;
+}
+
+let policyTranspiler: Bun.Transpiler | undefined;
+/**
+ * Harness-owned policy inputs a harness source reads directly: non-source files
+ * inside the harness tree that its code (not its comments) names by repository
+ * path, by a relative path, or by a bare file name beside itself (as in a
+ * `join(import.meta.dir, ...)` read). These decide verdicts as much as the code
+ * does, for example the public-API breaking-change allowlist. Product inputs a
+ * guard inspects (docs, migrations, catalog data, everything outside `scripts/`)
+ * and generated snapshots (`*.gen.*`, derived from product code) are code under
+ * comparison, never recipe. A repository-path input that is not tracked is
+ * returned as absent, so adding it later changes the recipe.
+ */
+export function policyInputs(
+  from: string,
+  text: string,
+  blobs: ReadonlyMap<string, string>,
+): { tracked: string[]; absent: string[] } {
+  const tracked = new Set<string>();
+  const absent = new Set<string>();
+  const beside = (literal: string) => posix.normalize(posix.join(posix.dirname(from), literal));
+  // Comments name files without reading them; the transpiler drops them.
+  const code = (policyTranspiler ??= new Bun.Transpiler({ loader: "ts" })).transformSync(
+    text.replace(/^#!.*/, ""),
+  );
+  for (const match of code.matchAll(DATA_LITERAL)) {
+    const literal = match[1]!;
+    if (SOURCE.test(literal)) continue;
+    const relative = literal.startsWith("./") || literal.startsWith("../");
+    const named = relative ? null : posix.normalize(literal);
+    const target = named && blobs.has(named) ? named : beside(literal);
+    if (!target.startsWith(HARNESS_ROOT) || GENERATED.test(target)) continue;
+    if (blobs.has(target)) tracked.add(target);
+    else if (named?.startsWith(HARNESS_ROOT) && !GENERATED.test(named)) absent.add(named);
+  }
+  return { tracked: [...tracked], absent: [...absent] };
 }
 
 /** Exact tracked blobs of a commit: path -> object id. */
@@ -129,10 +170,11 @@ function resolveLocalImport(from: string, specifier: string, blobs: Map<string, 
  * Recipe identity: the transitive local import closure of every harness entry,
  * every harness script those files execute (subprocesses and root package
  * scripts, with their own imports and executions inside the harness tree), the
- * workflow, tool configuration, toolchain pins, lockfile and every package
- * manifest. Package imports resolve through the lockfile and manifests, which
- * are bound here. An executed harness script that is not tracked is bound as
- * absent (null), so adding it later changes the recipe.
+ * harness-owned policy inputs those sources read (`policyInputs`), the workflow,
+ * tool configuration, toolchain pins, lockfile and every package manifest.
+ * Package imports resolve through the lockfile and manifests, which are bound
+ * here. An executed harness script or named policy input that is not tracked is
+ * bound as absent (null), so adding it later changes the recipe.
  */
 export function recipePaths(
   blobs: Map<string, string>,
@@ -188,6 +230,13 @@ export function recipePaths(
         executed.push(resolveLocalImport(path, specifier, blobs));
     }
     execute(path, false);
+  }
+  // Phase 3: harness-owned policy inputs the bound harness sources read directly.
+  for (const path of [...closure]) {
+    if (!SOURCE.test(path)) continue;
+    const inputs = policyInputs(path, read(path), blobs);
+    for (const input of inputs.tracked) closure.add(input);
+    for (const input of inputs.absent) absent.add(input);
   }
   const manifests = [...blobs.keys()].filter(
     (path) => path === "package.json" || path.endsWith("/package.json"),
