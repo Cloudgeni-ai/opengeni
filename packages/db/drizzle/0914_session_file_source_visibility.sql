@@ -616,7 +616,7 @@ CREATE TRIGGER freeze_slack_source_audience_0913
 -- deferred check permits a source session and its interaction to be removed
 -- together while refusing to leave any surviving member of that tree.
 CREATE FUNCTION retain_slack_source_audience_0914() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
 BEGIN
   IF EXISTS (SELECT 1 FROM sessions source_session
     WHERE source_session.account_id = OLD.account_id
@@ -639,7 +639,7 @@ CREATE CONSTRAINT TRIGGER retain_slack_source_audience_0914
 -- missing Slack interaction was workspace-shared. This also fences direct
 -- app-role writes if a historical row is introduced after the preflight.
 CREATE FUNCTION require_source_slack_audience_0914() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
 DECLARE source_id uuid;
 BEGIN
   IF TG_TABLE_NAME = 'files' THEN

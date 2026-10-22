@@ -278,7 +278,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         maxSizeBytes: objectStorage.maxSinglePutSizeBytes,
         access: await fileAccessFor(db, {
           workspace,
-          file: { scope: personal ? "personal" : "workspace", ownerSubjectId: privateOwner },
+          file: upload.file,
         }),
       }),
       201,

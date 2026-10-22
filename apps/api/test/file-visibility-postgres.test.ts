@@ -14,6 +14,7 @@ import {
   type AccessGrant,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  signDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
   bindSlackInteractionSession,
@@ -913,6 +914,52 @@ test("a private Slack source keeps its File ID private", async () => {
     sessionId: session.id,
   });
   expect(await sourceSessionRequiresHumanShare(db.db, f.workspace.id, session.id)).toBe(true);
+  await initializeSessionStartAtomically(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(db.db, f.workspace.id, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("Could not claim Slack agent attempt");
+  const agentToken = await signDelegatedAccessToken("test-delegation-secret", {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker:file-visibility-test",
+    principalKind: "agent_attempt",
+    permissions: ["files:read", "files:upload"],
+    sessionId: session.id,
+    turnId: claim.turn.id,
+    attemptId,
+    executionGeneration: claim.turn.executionGeneration,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const uploadResponse = await f.call(
+    { headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" } },
+    "POST",
+    "/files/uploads",
+    { filename: "agent-output.txt", contentType: "text/plain", sizeBytes: 4 },
+  );
+  expect(uploadResponse.status, await uploadResponse.clone().text()).toBe(201);
+  const agentUpload = (await uploadResponse.json()) as {
+    fileId: string;
+    access: { visibility: string };
+  };
+  expect(agentUpload.access.visibility).toBe("private");
+  const [agentFile] = await shared.admin`
+    select source_session_owner_subject_id as owner,
+      source_session_shared_unrestricted as shared
+    from files where id = ${agentUpload.fileId}`;
+  expect(agentFile).toMatchObject({ owner: f.owner.subjectId, shared: false });
   const fileId = crypto.randomUUID();
   await withSessionRlsActorContext(
     { subjectId: f.owner.subjectId, privateFileOwnerSubjectId: f.owner.subjectId },
@@ -954,6 +1001,20 @@ test("a private Slack source keeps its File ID private", async () => {
   await expect(
     (async () => await shared.admin`delete from slack_interactions where id = ${interaction.id}`)(),
   ).rejects.toThrow("Slack source audience must survive its session tree");
+  let appDeleteError: unknown;
+  try {
+    await withRlsContext(
+      db.db,
+      { accountId: f.workspace.accountId, workspaceId: f.workspace.id },
+      async (tx) => await tx.execute(sql`delete from slack_interactions where id = ${interaction.id}`),
+    );
+  } catch (error) {
+    appDeleteError = error;
+  }
+  expect(appDeleteError).toBeDefined();
+  const survivingInteraction = await shared.admin`
+    select id from slack_interactions where id = ${interaction.id}`;
+  expect(survivingInteraction).toHaveLength(1);
   const laterFileId = crypto.randomUUID();
   await withSessionRlsActorContext(
     { subjectId: f.owner.subjectId, privateFileOwnerSubjectId: f.owner.subjectId },
@@ -976,6 +1037,62 @@ test("a private Slack source keeps its File ID private", async () => {
   expect((await f.call(f.other, "GET", `/files/${laterFileId}`)).status).toBe(404);
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+  const { interaction: hiddenInteraction } = await getOrCreateSlackInteraction(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    connectionId: connection!.id,
+    slackTeamId: `T_${suffix}`,
+    slackChannelId: `D_hidden_${suffix}`,
+    slackThreadTs: "1710000000.000002",
+    routeKey: `D_hidden_${suffix}:1710000000.000002`,
+    triggeringProviderEventId: `E_hidden_${suffix}`,
+    owningSubjectId: f.owner.subjectId,
+    visibility: "private",
+  });
+  const hiddenSession = await createSession(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    requestedSessionId: hiddenInteraction.sessionReservationId,
+    initialMessage: "Another example request",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    createdByContext: {},
+  });
+  await bindSlackInteractionSession(db.db, {
+    ...hiddenInteraction,
+    owningSubjectId: f.owner.subjectId,
+    sessionId: hiddenSession.id,
+  });
+  await transitionSessionVisibility(db.db, {
+    workspaceId: f.workspace.id,
+    sessionId: hiddenSession.id,
+    actorSubjectId: f.owner.subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: `file-visibility:${crypto.randomUUID()}`,
+  });
+  const [privateSource] = await shared.admin`
+    select visibility from sessions where id = ${hiddenSession.id}`;
+  expect(privateSource?.visibility).toBe("user_private");
+  let hiddenSourceDeleteError: unknown;
+  try {
+    await withRlsContext(
+      db.db,
+      { accountId: f.workspace.accountId, workspaceId: f.workspace.id },
+      async (tx) =>
+        await tx.execute(sql`delete from slack_interactions where id = ${hiddenInteraction.id}`),
+    );
+  } catch (error) {
+    hiddenSourceDeleteError = error;
+  }
+  expect(hiddenSourceDeleteError).toBeDefined();
+  expect(await shared.admin`select id from slack_interactions where id = ${hiddenInteraction.id}`).toHaveLength(1);
+  await shared.admin`delete from sessions where id = ${hiddenSession.id}`;
   await shared.admin`delete from sessions where id = ${session.id}`;
   await shared.admin`delete from connections where id = ${connection!.id}`;
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
