@@ -79,7 +79,10 @@ export function SiteViewRoute({
     return () => abort.abort();
   }, [client, siteAttempt, siteId, workspaceId]);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col">
+    <div
+      className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
+      data-workspace-scroll-owner="self-managed"
+    >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <SiteView
           client={client}
