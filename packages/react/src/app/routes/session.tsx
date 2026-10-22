@@ -2711,6 +2711,7 @@ function SessionChatPane(props: {
     },
     onDeliveryError: (error, input, delivery) => {
       personalAttachment.onDeliveryError(error, input, delivery);
+      connectionAccounts.onSelectionError(error);
       // Retrying cannot help: re-read the catalog so the composer offers a
       // replacement, and open the picker so the next step is visible.
       if (isModelUnavailableSubmissionError(error)) {

@@ -10,6 +10,7 @@ import {
   canonicalConfiguredModel,
   modelUnavailableHttpException,
 } from "../../../packages/core/src/domain/sessions";
+import { mcpAccountBindingsFromVisibleConnections } from "../../../packages/core/src/domain/mcp-account-bindings";
 import { createApp } from "../src/app";
 import { parseSessionEventAdmission, parseSteerSessionAdmission } from "../src/routes/sessions";
 
@@ -310,5 +311,44 @@ describe("session admission error envelope", () => {
       },
     );
     expect(response.status).toBe(401);
+  });
+});
+
+test("a removed connector selection reaches clients as a typed recovery refusal", async () => {
+  const server = app();
+  const removedId = "00000000-0000-4000-8000-000000000099";
+  server.post("/v1/test/stale-connector-account", () => {
+    mcpAccountBindingsFromVisibleConnections({
+      accountId: workspaceId,
+      workspaceId,
+      subjectId: "sender",
+      servers: [
+        {
+          id: "mail",
+          url: "https://mail.example.test/mcp",
+          cacheToolsList: false,
+          connectionRef: { providerDomain: "mail.example.test", kind: "oauth2" },
+        },
+      ],
+      connections: [],
+      selections: [{ serverId: "mail", connectionId: removedId }],
+    });
+    throw new Error("stale account unexpectedly accepted");
+  });
+  const response = await server.request("/v1/test/stale-connector-account", { method: "POST" });
+  expect(response.status).toBe(422);
+  expect(await response.json()).toMatchObject({
+    error: {
+      code: "validation_failed",
+      retryable: false,
+      message:
+        "A selected connector account is unavailable. Review your connected accounts before sending again.",
+      details: {
+        code: "connection_account_selection_unavailable",
+        version: 1,
+        reason: "selected_account_unavailable",
+        accounts: [{ serverId: "mail", connectionId: removedId, reason: "account_not_visible" }],
+      },
+    },
   });
 });

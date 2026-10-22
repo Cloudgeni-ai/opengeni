@@ -3048,7 +3048,9 @@ the ordinary version-fenced API; child ceilings and accepted turn snapshots stay
 unchanged. `packages/react/src/session-capability-policy.ts` owns that client
 review/apply plan. Skills retain workspace scope/reviewed hashes.
 Messages authorize sender accounts; queues, retries and children retain that
-identity. Personal schedules have immutable owners. Personal/Workspace setup
+identity. Typed account-selection refusals preserve their diagnostic through the
+HTTP envelope. Composers refresh the visible inventory without changing explicit
+pins or retrying the refused input; the human reviews accounts and sends again. Personal schedules have immutable owners. Personal/Workspace setup
 uses provider defaults unless explicitly chosen; reconnect preserves ownership.
 See [sender-owned connections](design/sender-owned-connections.md) for account
 selection, provider checks and migration.
