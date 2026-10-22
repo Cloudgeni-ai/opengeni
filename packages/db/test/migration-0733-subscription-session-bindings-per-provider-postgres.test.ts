@@ -417,6 +417,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      // 0909 message search text.
+      "session_message_search_texts",
       "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",
