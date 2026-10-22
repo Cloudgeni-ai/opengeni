@@ -140,6 +140,9 @@ const withheldMigrations = [
   "0888_session_list_invalidation.sql",
   // Adds a schedule-spec hint using 0888's notify function; replay after it.
   "0905_schedule_timing_session_list_hints.sql",
+  // Patches the scheduled admission and live-authority routines that withheld
+  // 0478/0534/0539 install by exact anchors; replay after them.
+  "0906_scheduled_shared_slack_authority.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 
