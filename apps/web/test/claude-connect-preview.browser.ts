@@ -30,6 +30,9 @@ try {
     [1100, "dark"],
     [390, "light"],
     [390, "dark"],
+    // Either side of where the footer stacks: three actions must not wrap the primary.
+    [430, "light"],
+    [520, "dark"],
   ] as const) {
     for (const flow of ["org", "workspace"] as const) {
       if (
@@ -49,6 +52,14 @@ try {
       });
       let n = 0;
       const tag = `${flow}-${width}-${theme}`;
+      const primary = page.locator('button[type="submit"]');
+      // Account for Playwright scrolling the page to reach a control.
+      const primaryPosition = () =>
+        primary.evaluate((el) => ({
+          top: el.getBoundingClientRect().top + scrollY,
+          left: el.getBoundingClientRect().left,
+          width: el.getBoundingClientRect().width,
+        }));
       const shot = async (name: string) => {
         n += 1;
         await page.waitForTimeout(250);
@@ -91,6 +102,7 @@ try {
           .filter({ hasText: "Browser" })
           .click();
       await shot("token-closed");
+      const initialPosition = before ? undefined : await primaryPosition();
       // Start sign-in: a popup opens on the (stubbed) Claude page.
       const popup = page.waitForEvent("popup");
       await page.getByRole("button", { name: /Sign in to Claude|Continue/ }).click();
@@ -99,18 +111,12 @@ try {
       await page.getByRole("button", { name: "Complete sign-in", exact: true }).waitFor();
       await authWindow.close();
       await page.getByLabel(/authorization code/i).waitFor({ state: "visible" });
-      const primary = page.locator('button[type="submit"]');
-      const stable = async () => {
-        if (before) return;
-        // Account for Playwright scrolling the page to reach a control.
-        const position = await primary.evaluate((el) => ({
-          top: el.getBoundingClientRect().top + scrollY,
-          left: el.getBoundingClientRect().left,
-          width: el.getBoundingClientRect().width,
-        }));
-        return position;
-      };
+      const stable = async () => (before ? undefined : primaryPosition());
       const waitingPosition = await stable();
+      assert(
+        JSON.stringify(waitingPosition) === JSON.stringify(initialPosition),
+        `${tag}: action moved when sign-in started: ${JSON.stringify(waitingPosition)} vs ${JSON.stringify(initialPosition)}`,
+      );
       const assertStable = async (step: string) => {
         if (before) return;
         const position = await stable();

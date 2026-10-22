@@ -159,42 +159,46 @@ export function ClaudeSignInPage({
       }}
       submitDisabled={submitDisabled}
       footer={
-        <div className="flex w-full flex-wrap items-center justify-end gap-2">
-          {attempt && !legacy ? (
+        // Stack by the footer's own width, before three actions stop fitting on one row,
+        // so "Start again" appearing never moves the primary action.
+        <div className="@container/claude-actions w-full">
+          <div className="flex w-full flex-wrap items-center justify-end gap-2">
+            {attempt && !legacy ? (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={pending}
+                onClick={reset}
+                className="mr-auto pointer-coarse:h-11"
+              >
+                Start again
+              </Button>
+            ) : null}
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               disabled={pending}
-              onClick={reset}
-              className="mr-auto pointer-coarse:h-11"
+              onClick={() => {
+                reset();
+                onClose();
+              }}
+              className="pointer-coarse:h-11"
             >
-              Start again
+              Cancel
             </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="outline"
-            disabled={pending}
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-            className="pointer-coarse:h-11"
-          >
-            Cancel
-          </Button>
-          <Button
-            type="submit"
-            disabled={submitDisabled}
-            aria-disabled={pending || undefined}
-            aria-describedby={statusId}
-            className="w-52 pointer-coarse:h-11 max-[420px]:order-first max-[420px]:w-full"
-          >
-            {pending ? (
-              <LoaderCircleIcon aria-hidden="true" className="motion-safe:animate-spin" />
-            ) : null}
-            {pending ? pendingLabel : submitLabel}
-          </Button>
+            <Button
+              type="submit"
+              disabled={submitDisabled}
+              aria-disabled={pending || undefined}
+              aria-describedby={statusId}
+              className="w-52 pointer-coarse:h-11 @max-[30rem]/claude-actions:order-first @max-[30rem]/claude-actions:w-full"
+            >
+              {pending ? (
+                <LoaderCircleIcon aria-hidden="true" className="motion-safe:animate-spin" />
+              ) : null}
+              {pending ? pendingLabel : submitLabel}
+            </Button>
+          </div>
         </div>
       }
       onSubmit={async () => {
