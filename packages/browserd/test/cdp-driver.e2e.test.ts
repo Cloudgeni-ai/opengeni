@@ -91,6 +91,70 @@ e2e(
 );
 
 e2e(
+  "runs one batch across a page load, a late element and a form that enables late",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-locator-wait-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const page =
+          new URL(request.url).pathname === "/account"
+            ? `<!doctype html><title>Account</title><main></main>
+              <script>
+                setTimeout(() => {
+                  const edit = document.createElement("button");
+                  edit.textContent = "Edit billing";
+                  edit.onclick = () => {
+                    document.querySelector("main").innerHTML =
+                      '<label>Seats <input disabled></label><button disabled>Save changes</button><output></output>';
+                    const [input, save] = [document.querySelector("input"), document.querySelector("button")];
+                    save.onclick = () => { document.querySelector("output").textContent = "Saved " + input.value; };
+                    setTimeout(() => { input.disabled = false; save.disabled = false; }, 400);
+                  };
+                  document.querySelector("main").append(edit);
+                }, 300);
+              </script>`
+            : `<!doctype html><title>Accounts</title><a href="/account">Birch Holdings</a>`;
+        return new Response(page, { headers: { "content-type": "text/html" } });
+      },
+    });
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      const initial = await driver.start(String(server.url));
+      const observation = await driver.dispatch(
+        command(initial, {
+          type: "batch",
+          actions: [
+            { type: "click", locator: { kind: "role", role: "link", name: "Birch Holdings" } },
+            { type: "click", locator: { kind: "role", role: "button", name: "Edit billing" } },
+            { type: "fill", locator: { kind: "label", text: "Seats" }, value: "21" },
+            { type: "click", locator: { kind: "role", role: "button", name: "Save changes" } },
+          ],
+        }),
+      );
+      expect(names(observation)).toContain("Saved 21");
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
   "counts a page's own failed request but not the browser's missing-icon fetch",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-icon-failure-");
