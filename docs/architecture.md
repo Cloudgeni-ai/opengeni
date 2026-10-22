@@ -3111,7 +3111,9 @@ Organization sharing may cover all or selected same-organization workspaces.
 Schedules and interactive turns use the same selected bot tools; a saved legacy
 destination is a default, never a grant to add excluded tools. Bot preparation and
 physical delivery retain exact attempt, connection/version, workspace and sharing
-generation checks. Personal Slack Add and Reconnect use distinct creation and
+generation checks. SQL scheduled-run admission and live claim lock the selected
+installation before its sharing row and validate the frozen sharing generation
+and target workspace; neither requires installing another bot locally. Personal Slack Add and Reconnect use distinct creation and
 exact-identity replacement semantics. See [Slack](slack-bot.md).
 
 Workspace `defaultExecutionTarget` selects the placement of new root chats.
