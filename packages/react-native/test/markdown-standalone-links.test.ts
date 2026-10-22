@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   isStandaloneLinkGroup,
+  soleTextGroupOf,
   type MarkdownAstNode,
 } from "../src/timeline/markdown-standalone-links";
 
@@ -77,6 +78,59 @@ describe("standalone links in native Markdown", () => {
     ]);
     expect(links("Before\\\n[Order 42](app:order/42)")).toEqual([
       { text: "Order 42", standalone: false },
+    ]);
+  });
+});
+
+/**
+ * For each list item: whether its only content is a text group, and whether
+ * that group is the one holding its standalone link (so the item drops its marker).
+ */
+function listItems(source: string): Array<{ sole: boolean; standaloneLink: boolean }> {
+  const tree = parser(source, (ast) => ast, markdownIt);
+  const found: Array<{ sole: boolean; standaloneLink: boolean }> = [];
+  const standaloneGroups = new Set<MarkdownAstNode>();
+  const collect = (node: MarkdownAstNode, parents: MarkdownAstNode[]) => {
+    if (node.type === "link") {
+      const [group, container] = parents;
+      if (group && isStandaloneLinkGroup(group, container)) standaloneGroups.add(group);
+    }
+    for (const child of node.children ?? []) collect(child, [node, ...parents]);
+  };
+  const walk = (node: MarkdownAstNode) => {
+    if (node.type === "list_item") {
+      const group = soleTextGroupOf(node);
+      found.push({
+        sole: group !== undefined,
+        standaloneLink: !!group && standaloneGroups.has(group),
+      });
+    }
+    for (const child of node.children ?? []) walk(child);
+  };
+  for (const node of tree) collect(node, []);
+  for (const node of tree) walk(node);
+  return found;
+}
+
+describe("list items that hold only a standalone link", () => {
+  test("tight and loose lists of lone links are found", () => {
+    expect(listItems("- [Order 42](app:order/42)\n- [Order 43](app:order/43)")).toEqual([
+      { sole: true, standaloneLink: true },
+      { sole: true, standaloneLink: true },
+    ]);
+    expect(listItems("1. [Order 42](app:order/42)\n\n2. [Order 43](app:order/43)")).toEqual([
+      { sole: true, standaloneLink: true },
+      { sole: true, standaloneLink: true },
+    ]);
+  });
+
+  test("items with other content keep their marker", () => {
+    expect(listItems("- Order: [Order 42](app:order/42)\n- plain text")).toEqual([
+      { sole: true, standaloneLink: false },
+      { sole: true, standaloneLink: false },
+    ]);
+    expect(listItems("- [Order 42](app:order/42)\n\n  More about it.")).toEqual([
+      { sole: false, standaloneLink: false },
     ]);
   });
 });
