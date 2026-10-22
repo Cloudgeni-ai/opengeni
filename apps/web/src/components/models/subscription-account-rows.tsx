@@ -12,6 +12,7 @@ import { reachesWorkspace } from "./organization-codex-models";
 import { SubscriptionAccountRow } from "@/components/models/subscription-account-ui";
 import type { SubscriptionAccountPlaces } from "./subscription-account-detail";
 import {
+  splitSubscriptionPool,
   subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
@@ -39,15 +40,14 @@ export function subscriptionListedCount<T extends Account>(
 ) {
   if (pool.unavailable || pool.loading) return 0;
   if (pool.loadError || pool.pending) return 1;
+  const { shared, own } = splitSubscriptionPool(pool);
   return (
-    (pool.inherited ? 0 : pool.accounts.length) +
+    own.length +
     (organization
       ? organization.pool.loadError
         ? 1
         : organization.pool.accounts.length
-      : pool.inherited
-        ? pool.accounts.length
-        : 0)
+      : shared.length)
   );
 }
 
@@ -87,7 +87,9 @@ export function SubscriptionAccountPoolRows<T extends Account>({
         </ErrorMessage>
       </li>
     );
-  const own = pool.inherited ? [] : pool.accounts;
+  // The organization's accounts serving here are listed once, as the
+  // organization's (in use), never again as this workspace's own.
+  const { shared, own } = splitSubscriptionPool(pool);
   return (
     <>
       {organization?.pool.loadError ? (
@@ -104,9 +106,7 @@ export function SubscriptionAccountPoolRows<T extends Account>({
         </li>
       ) : organization ? (
         organization.pool.accounts.map((account) => {
-          const live = pool.inherited
-            ? pool.accounts.find((candidate) => candidate.id === account.id)
-            : undefined;
+          const live = shared.find((candidate) => candidate.id === account.id);
           return (
             <SharedRow
               key={account.id}
@@ -122,13 +122,13 @@ export function SubscriptionAccountPoolRows<T extends Account>({
             />
           );
         })
-      ) : pool.inherited ? (
-        pool.accounts.map((account) => (
+      ) : (
+        shared.map((account) => (
           <Fragment key={account.id}>
             {renderRow(account, () => places.openAccount(account.id))}
           </Fragment>
         ))
-      ) : null}
+      )}
       {own.map((account) => (
         <Fragment key={account.id}>
           {renderRow(account, () => places.openAccount(account.id))}

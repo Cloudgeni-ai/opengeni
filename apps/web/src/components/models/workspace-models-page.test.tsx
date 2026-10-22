@@ -1873,6 +1873,64 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("an organization account serving beside this workspace's own is listed once, in use", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    const grok = (id: string, label: string, scope: "workspace" | "organization") => ({
+      id,
+      label,
+      scope,
+      subject: id,
+      plan: "SuperGrok Heavy",
+      status: "active" as const,
+      active: false,
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+    });
+    const settings = {
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      activeCredentialId: null,
+    };
+    // Automatic source: this workspace's own account makes `source` the
+    // workspace's, and the organization's shared account still serves here.
+    client.listSuperGrokAccounts.mockImplementation(async () => ({
+      accounts: [
+        grok("grok-own", "Design grok", "workspace"),
+        grok("grok-org", "Company grok", "organization"),
+      ],
+      activeAccountId: null,
+      source: "workspace",
+      settings,
+    }));
+    client.listOrganizationSuperGrokAccounts.mockImplementation(async () => ({
+      accounts: [grok("grok-org", "Company grok", "organization")],
+      activeAccountId: null,
+      settings,
+    }));
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [{ id: "workspace-a", name: "Design preview" }],
+      models: [],
+      personalWorkspacesSupported: true,
+    }));
+    const view = await render();
+    try {
+      await flush();
+      const rows = (name: string) =>
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].filter(
+          (candidate) => candidate.textContent?.includes(name),
+        );
+      expect(rows("Company grok")).toHaveLength(1);
+      expect(rows("Company grok")[0]!.textContent).toContain("Everyone in Acme");
+      expect(rows("Company grok")[0]!.textContent).not.toContain("Set aside");
+      expect(rows("Company grok")[0]!.textContent).not.toContain("Not in use");
+      expect(rows("Design grok")).toHaveLength(1);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("an administrator's own organization account: the notice counts the others, its tag waits for its reach, and an access save re-reads both lists", async () => {
     organizationAdmin = true;
     const ownAccount = codexAccount({ id: "own-1", label: "Team plan", source: "workspace" });
