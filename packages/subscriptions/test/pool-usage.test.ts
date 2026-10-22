@@ -596,6 +596,116 @@ describe("calendar profiles and bounded trend", () => {
   });
 });
 
+describe("capacity usable across both limits", () => {
+  function short(row: Input["accounts"][number], used: number, resetHours: number | null) {
+    row.windows.push({
+      id: "five_hour",
+      usedPercent: used,
+      observedAt: NOW,
+      resetsAt: resetHours === null ? null : NOW + resetHours * HOUR,
+    });
+  }
+
+  test("reported six-account Claude case has no usable capacity despite 44% weekly on one Max", () => {
+    const data = input();
+    for (let index = 0; index < 6; index++) {
+      const row = account(
+        data,
+        `${index}`,
+        "weekly",
+        index === 3 ? 56 : 100,
+        48 + index,
+        index === 0 ? 1 : 5,
+      );
+      short(row, index === 3 ? 100 : 0, index === 3 ? 2 : null);
+    }
+    const weekly = result(data, "weekly");
+    expect(weekly.accounts[3]!.remainingPercent).toBe(44);
+    expect(weekly.remainingPercent).toBe(0);
+    expect(weekly.forecast).toMatchObject({
+      kind: "runs_out",
+      runsOutAt: NOW,
+      nextResetAt: NOW + 2 * HOUR,
+    });
+    // The weekly-only total used to be 8.46%, rounded to the screenshot's 8%.
+    data.accounts[3]!.windows.pop();
+    expect(result(data, "weekly").remainingPercent).toBeCloseTo((44 * 5) / 26);
+  });
+
+  test("mixed pool keeps blocked capacity in the denominator but not the available numerator", () => {
+    const data = input();
+    account(data, "open", "weekly", 40, 48, 1);
+    short(account(data, "held", "weekly", 10, 48, 5), 100, 2);
+    expect(result(data, "weekly").remainingPercent).toBe(10);
+    expect(result(data, "weekly").accounts[1]!.remainingPercent).toBe(90);
+  });
+
+  test("both limits must end before an account returns, then choose the earliest usable account", () => {
+    const data = input();
+    short(account(data, "both", "weekly", 100, 1), 100, 3);
+    short(account(data, "other", "weekly", 100, 2), 100, 0.5);
+    for (const window of buildSubscriptionUsagePool(data).windows) {
+      expect(window.remainingPercent).toBe(0);
+      expect(window.forecast.nextResetAt).toBe(NOW + 2 * HOUR);
+    }
+  });
+
+  test("unknown-duration rejection blocks capacity without inventing a return time", () => {
+    const data = input();
+    const row = account(data, "held", "weekly", 56, 48);
+    row.blocked = { five_hour: null };
+    expect(result(data, "weekly")).toMatchObject({
+      remainingPercent: 0,
+      forecast: { nextResetAt: null },
+    });
+    expect(result(data, "five_hour").accounts[0]).toMatchObject({
+      remainingPercent: 0,
+      resetsAt: null,
+    });
+  });
+
+  test("a known binding limit is zero usable capacity even when the weekly reading is missing", () => {
+    const data = input();
+    account(data, "held", "five_hour", 100, 2);
+    expect(result(data, "weekly")).toMatchObject({
+      remainingPercent: 0,
+      forecast: { nextResetAt: null },
+    });
+    expect(result(data, "weekly").accounts[0]!.remainingPercent).toBeNull();
+  });
+
+  test("an expired short-window block does not keep withholding current weekly capacity", () => {
+    const data = input();
+    const row = account(data, "held", "weekly", 56, 48);
+    short(row, 100, 0);
+    row.blocked = { five_hour: NOW - 1 };
+    expect(result(data, "weekly").remainingPercent).toBe(44);
+    expect(result(data, "five_hour").remainingPercent).toBeNull();
+  });
+
+  test("forecast cannot consume held capacity and names its return rather than a weekly reset", () => {
+    const data = input();
+    account(data, "open", "weekly", 90, 48);
+    short(account(data, "held", "weekly", 80, 48), 100, 2);
+    pace(data, "open", [70, 80, 90], "weekly");
+    pace(data, "held", [60, 70, 80], "weekly");
+    expect(result(data, "weekly")).toMatchObject({
+      remainingPercent: 5,
+      forecast: { kind: "runs_out", nextResetAt: NOW + 2 * HOUR },
+    });
+    expect(result(data, "weekly").forecast.runsOutAt).toBeCloseTo(NOW + 0.5 * HOUR, 0);
+  });
+
+  test("a short-window return reopens remaining weekly capacity in a mixed pool", () => {
+    const data = input();
+    account(data, "open", "weekly", 90, 4);
+    short(account(data, "held", "weekly", 0, 4), 100, 0.25);
+    pace(data, "open", [70, 80, 90], "weekly");
+    pace(data, "held", [0, 0, 0], "weekly");
+    expect(result(data, "weekly").forecast.kind).toBe("unused");
+  });
+});
+
 describe("unknown and stale coverage", () => {
   test("both limits remain visible when every window is absent", () => {
     const data = input();

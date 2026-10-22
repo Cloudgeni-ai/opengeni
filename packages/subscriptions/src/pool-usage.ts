@@ -17,8 +17,9 @@ export type SubscriptionUsagePoolInput = {
     /**
      * The provider refuses this window until the given time (a usage-limit
      * response), whatever its last percentage said: none of it is left.
+     * Null means the provider refused it without reporting when it resets.
      */
-    blocked?: Partial<Record<SubscriptionUsagePoolWindowId, number>>;
+    blocked?: Partial<Record<SubscriptionUsagePoolWindowId, number | null>>;
     windows: Array<{
       id: SubscriptionUsagePoolWindowId;
       usedPercent: number | null;
@@ -116,6 +117,11 @@ function hourOfWeek(at: number): number {
  * within a window, so an older reading is still what the account list shows. The total
  * and forecast cover the accounts with a current reading; accounts without one are
  * listed with an unknown remaining so the caller can say they are left out.
+ * An account at its other window's limit (a weekly account at its five-hour limit, or
+ * the reverse) serves nothing until that limit resets: each account keeps its own
+ * reading, but the window's total counts none of it as usable now, and the forecast
+ * makes it usable again only when that limit ends. A pool with nothing usable now
+ * reports when capacity next returns instead of a runout.
  * Call units never set demand magnitude: stable percentage movements include usage
  * outside this application. Calibration is only a relative proxy for usable capacity.
  */
@@ -164,7 +170,7 @@ export function buildSubscriptionUsagePool(
     readingsByAccount.set(reading.connectionId, windows);
   }
 
-  const windows = WINDOW_IDS.map((id) => {
+  const readWindows = WINDOW_IDS.map((id) => {
     const duration = WINDOW_DURATION[id];
     const data = input.accounts.map((account) => {
       // Newest supplied snapshot wins; an explicit null must not resurrect older quota.
@@ -177,8 +183,8 @@ export function buildSubscriptionUsagePool(
           : null;
       const observedReset = finite(snapshot?.resetsAt) ? snapshot.resetsAt : null;
       const blockedUntil = account.blocked?.[id];
-      const blocked = finite(blockedUntil) && blockedUntil > input.now;
-      const resetsAt = blocked ? blockedUntil : observedReset;
+      const blocked = blockedUntil === null || (finite(blockedUntil) && blockedUntil > input.now);
+      const resetsAt = blocked ? (blockedUntil ?? null) : observedReset;
       const current =
         observedAt !== null &&
         (observedReset === null
@@ -233,17 +239,38 @@ export function buildSubscriptionUsagePool(
       weightBasis: row.calibrated === null ? "plan_estimate" : "observed",
       observedAt: row.observedAt,
     }));
+    // Until when each account is at this window's own limit (unknown end: never).
+    const limitedUntil = accounts.map((account) =>
+      account.remainingPercent === 0 ? (account.resetsAt ?? Infinity) : null,
+    );
+    return { id, duration, data, accounts, limitedUntil };
+  });
+
+  const windows = readWindows.map(({ id, duration, data, accounts }) => {
+    // The latest end of any OTHER window's limit holds the account in this one.
+    const heldUntil = accounts.map((_, index) =>
+      readWindows.reduce<number | null>((until, other) => {
+        const limit = other.id === id ? null : other.limitedUntil[index]!;
+        return limit === null ? until : Math.max(until ?? limit, limit);
+      }, null),
+    );
     // Accounts without a current reading are left out of the total and forecast
     // (and stay listed as unknown), rather than hiding what the others report.
     const knownIndexes = accounts.flatMap((account, index) =>
-      account.remainingPercent === null ? [] : [index],
+      account.remainingPercent === null && heldUntil[index] === null ? [] : [index],
     );
     const known = knownIndexes.map((index) => accounts[index]!);
+    const held = knownIndexes.map((index) => heldUntil[index]!);
     const totalWeight = sum(known.map((account) => account.weight));
     const complete = known.length > 0;
+    // Capacity usable now: an account held by its other limit serves nothing yet.
     const remainingPercent = complete
       ? clamp(
-          sum(known.map((account) => account.weight * account.remainingPercent!)) / totalWeight,
+          sum(
+            known.map((account, index) =>
+              held[index] === null ? account.weight * account.remainingPercent! : 0,
+            ),
+          ) / totalWeight,
           0,
           100,
         )
@@ -272,17 +299,34 @@ export function buildSubscriptionUsagePool(
     if (!complete) {
       forecast = insufficient("No account has a current observation for this window.");
     } else if (remainingPercent === 0) {
+      // Nothing is usable now: report when the first account can serve again, which
+      // is when the later of its own limit and any other window's limit ends.
+      const returns = known
+        .map((account, index) =>
+          Math.max(
+            account.remainingPercent === null
+              ? Infinity
+              : account.remainingPercent === 0
+                ? (account.resetsAt ?? Infinity)
+                : -Infinity,
+            held[index] ?? -Infinity,
+          ),
+        )
+        .filter((at) => Number.isFinite(at) && at > input.now);
       forecast = {
         kind: "runs_out",
         basis: "Observed pool exhaustion.",
         runsOutAt: input.now,
-        nextResetAt,
+        nextResetAt: returns.length ? Math.min(...returns) : null,
         unusedPercent: null,
         utilizationPercent: 100,
         lowestPercent: 0,
         historyDays,
       };
-    } else if (resets.length !== known.length) {
+    } else if (
+      known.some((account) => account.remainingPercent === null) ||
+      resets.length !== known.length
+    ) {
       forecast = insufficient(
         "A future reset is unknown; remaining limits are observed, not forecast.",
       );
@@ -314,6 +358,7 @@ export function buildSubscriptionUsagePool(
         ].join("; ");
         forecast = simulate(
           known,
+          held,
           profile.map((rate) => rate * scale),
           input.now,
           duration,
@@ -544,6 +589,8 @@ function lastHourAdjustment(paces: Pace[], now: number): number {
 
 function simulate(
   accounts: SubscriptionUsagePoolAccount[],
+  /** When an account held by its other window's limit can serve again; null: now. */
+  heldUntil: Array<number | null>,
   profile: number[],
   now: number,
   duration: number,
@@ -553,24 +600,40 @@ function simulate(
   const total = sum(accounts.map((account) => account.weight));
   const remaining = accounts.map((account) => (account.weight * account.remainingPercent!) / 100);
   const resets = accounts.map((account) => account.resetsAt!);
+  const releases = heldUntil.filter(
+    (at): at is number => at !== null && Number.isFinite(at) && at > now,
+  );
+  // A held account with something left returns capacity when its other limit ends.
+  const returns = heldUntil.filter(
+    (at, index): at is number =>
+      at !== null && Number.isFinite(at) && at > now && remaining[index]! > 0,
+  );
+  const reliefs = resets.map((reset, index) => Math.max(reset, heldUntil[index] ?? reset));
+  const open = (at: number) => heldUntil.map((until) => until === null || until <= at);
+  const usable = (serving: boolean[]) => sum(remaining.filter((_, index) => serving[index]));
   const horizon = Math.min(now + duration, Math.max(...resets));
   let at = now;
-  let lowest = sum(remaining);
+  let lowest = usable(open(now));
   let unused = 0;
   let runsOutAt: number | null = null;
   while (at < horizon) {
-    const nextReset = Math.min(...resets.filter((reset) => reset > at));
-    const end = Math.min(horizon, (Math.floor(at / HOUR) + 1) * HOUR, nextReset);
+    const nextRelief = Math.min(...[...reliefs, ...returns].filter((event) => event > at));
+    const end = Math.min(
+      horizon,
+      (Math.floor(at / HOUR) + 1) * HOUR,
+      ...[...resets, ...releases].filter((event) => event > at),
+    );
     const rate = profile[hourOfWeek(at)]!;
     const demand = (rate * (end - at)) / HOUR;
-    const available = sum(remaining);
+    const serving = open(at);
+    const available = usable(serving);
     if (rate > 0 && demand >= available && runsOutAt === null) {
       const exhaustedAt = at + (available / rate) * HOUR;
-      // Empty exactly as a reset refills the pool is not a period without capacity.
-      if (exhaustedAt < nextReset - 0.001) runsOutAt = exhaustedAt;
+      // Empty exactly as a reset or return refills the pool is not a period without capacity.
+      if (exhaustedAt < nextRelief - 0.001) runsOutAt = exhaustedAt;
     }
-    consume(remaining, accounts, Math.min(demand, available));
-    lowest = Math.min(lowest, sum(remaining));
+    consume(remaining, accounts, serving, Math.min(demand, available));
+    lowest = Math.min(lowest, usable(serving));
     // Do not carry unserved demand as debt into the next account's renewed window.
     for (let index = 0; index < accounts.length; index++) {
       if (resets[index] === end) {
@@ -580,7 +643,9 @@ function simulate(
     }
     at = end;
   }
-  const nextResetAt = Math.min(...resets.filter((reset) => reset >= (runsOutAt ?? now)));
+  const nextResetAt = Math.min(
+    ...[...reliefs, ...returns].filter((event) => event >= (runsOutAt ?? now)),
+  );
   return {
     kind: runsOutAt === null ? "unused" : "runs_out",
     basis,
@@ -597,11 +662,12 @@ function simulate(
 function consume(
   remaining: number[],
   accounts: SubscriptionUsagePoolAccount[],
+  serving: boolean[],
   demand: number,
 ): void {
   let active = remaining
     .map((amount, index) => ({ amount, index }))
-    .filter((row) => row.amount > 0);
+    .filter((row) => row.amount > 0 && serving[row.index]);
   while (demand > EPSILON && active.length) {
     const totalWeight = sum(active.map((row) => accounts[row.index]!.weight));
     let consumed = 0;
