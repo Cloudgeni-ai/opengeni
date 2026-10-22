@@ -2980,7 +2980,13 @@ export async function inspectRuntimeDatabasePosture(
 
   return await db.transaction(
     async (tx) => {
-      const identityRows = resultRows<IdentityRow>(
+      const identityRows = resultRows<
+        IdentityRow & {
+          variable_set_cutover_present: boolean;
+          codex_cutover_activation_present: boolean;
+          receipt_reader_present: boolean;
+        }
+      >(
         await tx.execute(sql`
           select
             current_user::text as current_user,
@@ -2995,7 +3001,13 @@ export async function inspectRuntimeDatabasePosture(
             r.rolcreaterole,
             r.rolcreatedb,
             r.rolreplication,
-            r.rolbypassrls
+            r.rolbypassrls,
+            to_regprocedure('opengeni_private.session_variable_set_attachments_protocol_v1_active()')
+              is not null as variable_set_cutover_present,
+            to_regprocedure('opengeni_private.subscription_codex_cutover_v1_active()')
+              is not null as codex_cutover_activation_present,
+            to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)')
+              is not null as receipt_reader_present
           from pg_roles r
           join pg_database d on d.datname = current_database()
           where r.rolname = current_user
@@ -3022,15 +3034,8 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
-      const variableSetCutoverRows = resultRows<{ present: boolean }>(
-        await tx.execute(sql`
-          select to_regprocedure(
-            'opengeni_private.session_variable_set_attachments_protocol_v1_active()'
-          ) is not null as present
-        `),
-      );
       const sessionVariableSetAttachmentsCutoverPresent =
-        variableSetCutoverRows[0]?.present === true;
+        identity.variable_set_cutover_present === true;
       // Migration 0751: any retired subscription object still present (a
       // dropped one, or the Codex name of a renamed one) means the drained
       // retirement migration has not run. Read from the catalogs by name (no
@@ -3087,22 +3092,12 @@ export async function inspectRuntimeDatabasePosture(
           order by object collate "C"
         `),
       ).map((row) => row.object);
-      const codexCutoverActivationRows = resultRows<{ present: boolean }>(
-        await tx.execute(sql`select to_regprocedure(
-          'opengeni_private.subscription_codex_cutover_v1_active()'
-        ) is not null as present`),
-      );
       const subscriptionCodexCutoverActivationPresent =
-        codexCutoverActivationRows[0]?.present === true;
+        identity.codex_cutover_activation_present === true;
       // The receipt is read through its boolean readiness function only:
       // committed_at is never read as a date ('-infinity' for Codex).
-      const receiptReaderRows = resultRows<{ present: boolean }>(
-        await tx.execute(sql`select to_regprocedure(
-          'opengeni_private.subscription_provider_cutover_committed(text)'
-        ) is not null as present`),
-      );
       const subscriptionProviderCutoverReceipts =
-        receiptReaderRows[0]?.present === true
+        identity.receipt_reader_present === true
           ? resultRows<{ provider: string }>(
               await tx.execute(sql`select provider from jsonb_array_elements_text(${JSON.stringify(
                 Object.keys(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS),
@@ -3182,7 +3177,10 @@ export async function inspectRuntimeDatabasePosture(
         `),
       ).map((row) => row.name);
 
-      const tables = resultRows<{
+      // Inspect both namespaces together: their catalog and privilege probes
+      // are identical. Keep evaluation live on every readiness check.
+      const tableRows = resultRows<{
+        private_schema: boolean;
         name: string;
         owner: string;
         rls_enabled: boolean;
@@ -3204,22 +3202,15 @@ export async function inspectRuntimeDatabasePosture(
       }>(
         await tx.execute(sql`
           select
+            (n.nspname = 'opengeni_private') as private_schema,
             c.relname::text as name,
             pg_get_userbyid(c.relowner)::text as owner,
             c.relrowsecurity as rls_enabled,
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
-            (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            exists(
-              select 1 from pg_policy policy
-              where policy.polrelid = c.oid
-                and policy.polname = 'editable_artifact_outbox_dispatcher'
-            ) as artifact_outbox_dispatcher_policy,
-            exists(
-              select 1 from pg_policy policy
-              where policy.polrelid = c.oid
-                and policy.polname = 'editable_artifact_materializer_owner'
-            ) as artifact_materializer_policy,
+            coalesce(policies.policy_count, 0) as policy_count,
+            coalesce(policies.artifact_outbox_dispatcher_policy, false) as artifact_outbox_dispatcher_policy,
+            coalesce(policies.artifact_materializer_policy, false) as artifact_materializer_policy,
             has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
             has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
             has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
@@ -3238,98 +3229,63 @@ export async function inspectRuntimeDatabasePosture(
               WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = ${targetSchema}
+          left join (
+            select polrelid, count(*)::int as policy_count,
+              bool_or(polname = 'editable_artifact_outbox_dispatcher') as artifact_outbox_dispatcher_policy,
+              bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
+            from pg_policy group by polrelid
+          ) policies on policies.polrelid = c.oid
+          where n.nspname in (${targetSchema}, 'opengeni_private')
             and c.relkind in ('r', 'p')
           order by c.relname
         `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        rlsEnabled: row.rls_enabled,
-        rlsForced: row.rls_forced,
-        rlsActive: row.rls_active,
-        policyCount: row.policy_count,
-        artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
-        artifactMaterializerPolicy: row.artifact_materializer_policy,
-        select: row.can_select,
-        insert: row.can_insert,
-        update: row.can_update,
-        delete: row.can_delete,
-        truncate: row.can_truncate,
-        references: row.can_references,
-        trigger: row.can_trigger,
-        columnPrivileges: row.column_privileges,
-        extraPrivileges: row.extra_privileges,
-        hasInheritance: row.has_inheritance,
-      }));
+      );
+      const tables = tableRows
+        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          rlsEnabled: row.rls_enabled,
+          rlsForced: row.rls_forced,
+          rlsActive: row.rls_active,
+          policyCount: row.policy_count,
+          artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
+          artifactMaterializerPolicy: row.artifact_materializer_policy,
+          select: row.can_select,
+          insert: row.can_insert,
+          update: row.can_update,
+          delete: row.can_delete,
+          truncate: row.can_truncate,
+          references: row.can_references,
+          trigger: row.can_trigger,
+          columnPrivileges: row.column_privileges,
+          extraPrivileges: row.extra_privileges,
+          hasInheritance: row.has_inheritance,
+        }));
 
-      const privateTables = resultRows<{
-        name: string;
-        owner: string;
-        rls_enabled: boolean;
-        rls_forced: boolean;
-        rls_active: boolean;
-        policy_count: number;
-        can_select: boolean;
-        can_insert: boolean;
-        can_update: boolean;
-        can_delete: boolean;
-        can_truncate: boolean;
-        can_references: boolean;
-        can_trigger: boolean;
-        extra_privileges: string[];
-        column_privileges: string[];
-        has_inheritance: boolean;
-      }>(
-        await tx.execute(sql`
-          select
-            c.relname::text as name,
-            pg_get_userbyid(c.relowner)::text as owner,
-            c.relrowsecurity as rls_enabled,
-            c.relforcerowsecurity as rls_forced,
-            row_security_active(c.oid) as rls_active,
-            (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
-            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
-            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
-            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
-            has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
-            has_table_privilege(current_user, c.oid, 'REFERENCES') as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
-            exists(select 1 from pg_inherits i where i.inhrelid = c.oid or i.inhparent = c.oid) as has_inheritance,
-            ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges,
-            ARRAY(
-              SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
-              WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
-                AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
-              ORDER BY acl.privilege_type
-            ) AS extra_privileges
-          from pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          where n.nspname = 'opengeni_private'
-            and c.relkind in ('r', 'p')
-        `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        rlsEnabled: row.rls_enabled,
-        rlsForced: row.rls_forced,
-        rlsActive: row.rls_active,
-        policyCount: row.policy_count,
-        select: row.can_select,
-        insert: row.can_insert,
-        update: row.can_update,
-        delete: row.can_delete,
-        truncate: row.can_truncate,
-        references: row.can_references,
-        trigger: row.can_trigger,
-        ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
-        columnPrivileges: row.column_privileges,
-        hasInheritance: row.has_inheritance,
-      }));
+      const privateTables = tableRows
+        .filter((row) => row.private_schema)
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          rlsEnabled: row.rls_enabled,
+          rlsForced: row.rls_forced,
+          rlsActive: row.rls_active,
+          policyCount: row.policy_count,
+          select: row.can_select,
+          insert: row.can_insert,
+          update: row.can_update,
+          delete: row.can_delete,
+          truncate: row.can_truncate,
+          references: row.can_references,
+          trigger: row.can_trigger,
+          ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
+          columnPrivileges: row.column_privileges,
+          hasInheritance: row.has_inheritance,
+        }));
 
-      const targetRoutines = resultRows<{
+      const routineRows = resultRows<{
+        private_schema: boolean;
         name: string;
         owner: string;
         can_execute: boolean;
@@ -3341,6 +3297,7 @@ export async function inspectRuntimeDatabasePosture(
       }>(
         await tx.execute(sql`
           select
+            (n.nspname = 'opengeni_private') as private_schema,
             (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
@@ -3356,11 +3313,13 @@ export async function inspectRuntimeDatabasePosture(
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = ${targetSchema}
+          where n.nspname in (${targetSchema}, 'opengeni_private')
             and p.prokind in ('f', 'p')
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
-      )
+      );
+      const targetRoutines = routineRows
+        .filter((row) => !row.private_schema || targetSchema === "opengeni_private")
         .map((row) => ({
           name: row.name,
           owner: row.owner,
@@ -3373,47 +3332,18 @@ export async function inspectRuntimeDatabasePosture(
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
 
-      const privateRoutines = resultRows<{
-        name: string;
-        owner: string;
-        can_execute: boolean;
-        public_execute: boolean;
-        security_definer: boolean;
-        trigger_callable: boolean;
-        has_dependents: boolean;
-        configuration: string[] | null;
-      }>(
-        await tx.execute(sql`
-          select
-            (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
-            pg_get_userbyid(p.proowner)::text as owner,
-            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
-            ) as public_execute,
-            p.prosecdef as security_definer,
-            (p.prorettype in ('pg_catalog.trigger'::regtype, 'pg_catalog.event_trigger'::regtype)
-              or exists(select 1 from pg_trigger t where t.tgfoid = p.oid)) as trigger_callable,
-            exists(select 1 from pg_depend d where d.refclassid = 'pg_catalog.pg_proc'::regclass and d.refobjid = p.oid) as has_dependents,
-            p.proconfig as configuration
-          from pg_proc p
-          join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'opengeni_private'
-            and p.prokind in ('f', 'p')
-          order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
-        `),
-      ).map((row) => ({
-        name: row.name,
-        owner: row.owner,
-        execute: row.can_execute,
-        publicExecute: row.public_execute,
-        securityDefiner: row.security_definer,
-        triggerCallable: row.trigger_callable,
-        hasDependents: row.has_dependents,
-        configuration: row.configuration,
-      }));
+      const privateRoutines = routineRows
+        .filter((row) => row.private_schema)
+        .map((row) => ({
+          name: row.name,
+          owner: row.owner,
+          execute: row.can_execute,
+          publicExecute: row.public_execute,
+          securityDefiner: row.security_definer,
+          triggerCallable: row.trigger_callable,
+          hasDependents: row.has_dependents,
+          configuration: row.configuration,
+        }));
 
       const subscriptionOwnerRoutines = resultRows<RuntimeRoutinePosture>(
         await tx.execute(sql`
