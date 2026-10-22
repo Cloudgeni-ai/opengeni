@@ -46,12 +46,26 @@ export function writable(value: ObjectValue): ObjectValue {
 }
 // Ruleset lists are sets, including rules/bypass actors/ref patterns. Preserve
 // multiplicity so an unexpected duplicate still fails the readback comparison.
-function canonical(value: Json): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).sort().join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value)
+function canonical(value: Json, rule = false): string {
+  if (Array.isArray(value))
+    return `[${value
+      .map((item) => canonical(item, rule))
       .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonical(value[key]!)}`)
+      .join(",")}]`;
+  if (value && typeof value === "object") {
+    // GitHub stores the default update rule without parameters. Normalize only
+    // that exact rule shape, in rules arrays, on both comparison sides. Explicit
+    // false already has this form; empty/null/extra fields must remain different.
+    const normalized: ObjectValue =
+      rule && value.type === "update" && Object.keys(value).length === 1
+        ? { type: "update", parameters: { update_allows_fetch_and_merge: false } }
+        : value;
+    return `{${Object.keys(normalized)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonical(normalized[key]!, key === "rules" && writableKeys.every((field) => field in normalized))}`,
+      )
       .join(",")}}`;
   }
   return JSON.stringify(value);

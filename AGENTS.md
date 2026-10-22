@@ -827,7 +827,11 @@ prerequisite for that read-only determination. A partial transition, inaccessibl
 effective-policy readback or unknown mode is **hold**: do not merge. Once the
 readable effective policy shows the complete intended main writer restriction
 alongside admission and immutable protection, choose queue-only (never direct
-merge) without requiring hidden bypass data. The batcher
+merge) without requiring hidden bypass data. For the update rule, exactly
+`{type:"update"}` (parameters absent) is equivalent to exactly
+`{type:"update",parameters:{update_allows_fetch_and_merge:false}}`.
+Explicit true, empty/null parameters, nonboolean values, extra fields or duplicate
+rules are not that equivalence; unknown or mixed policy remains hold. The batcher
 is the **only normal path to main**; this queue-only instruction takes effect with
 that activation without waiting for another source edit. Submit the documented
 ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and

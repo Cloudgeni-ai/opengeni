@@ -173,6 +173,13 @@ originals. Retain older evidence rather than overwriting it. Every verification
 reconstructs the proposed payloads from the original snapshot and assigned IDs;
 edited parallel files or edited plan payloads cannot remove exclusivity or add
 an admin bypass.
+For comparison only, an exact update rule with parameters absent is equivalent
+to the exact explicit `update_allows_fetch_and_merge:false` form. GitHub can omit
+this default in stored readbacks. This applies to both sides, including unchanged
+original inventories; saved originals and request payloads are not rewritten.
+True, empty/null parameters, nonboolean values, extra keys and duplicate/extra
+rules remain mismatches. A failed prior drill's receipts/intents stay quarantined;
+this compatibility rule does not authorize fabricating a receipt or reusing them.
 `restore.json` retains the original writable fields, including original bypass
 actors and every PR parameter. API-generated timestamps/links are retained in
 the raw snapshot but are not valid PUT fields. `guard.json`, `namespace.json`,
@@ -274,7 +281,8 @@ report the drift rather than ignore it.
   and use normal head-pinned squash, never an admin bypass.
 - **Queue-only:** the readable effective policy and complete inventory show the
   intended main creation/update writer restriction
-  (`update_allows_fetch_and_merge=false`), PR admission and separate immutable
+  (`update_allows_fetch_and_merge=false`, or exactly `{type:"update"}` with
+  parameters absent), PR admission and separate immutable
   non-FF/deletion protection with the expected active scopes. Ordinary agents may
   safely queue rather than directly merge even when `bypass_actors` is omitted.
   This does not certify the App identity or hidden bypass scope, grant activation

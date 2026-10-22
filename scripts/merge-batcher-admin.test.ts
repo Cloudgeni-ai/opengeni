@@ -83,6 +83,93 @@ function staged(plan: Plan, phase: "guard" | "namespace" | "applied") {
 }
 
 describe("offline batcher administration contract", () => {
+  test("observed GitHub omitted update default verifies plan, apply and exact reverse phases", () => {
+    for (const omittedPlan of [false, true]) {
+      const plan = prepare(fixture(), 5425399, 174101112);
+      if (omittedPlan) plan.namespace.rules = [{ type: "creation" }, { type: "update" }];
+      expect(() => validatePlan(plan)).not.toThrow();
+      const { current, receipts } = structuredClone(staged(plan, "applied"));
+      // Exact policy fields from the live POST/GET writer response; the provider
+      // omitted parameters although the submitted payload explicitly said false.
+      receipts.namespace.rules = omittedPlan
+        ? [
+            { type: "creation" },
+            { type: "update", parameters: { update_allows_fetch_and_merge: false } },
+          ]
+        : [{ type: "creation" }, { type: "update" }];
+      expect(() => verify(plan, current, "applied", receipts)).not.toThrow();
+      current.rulesets[0] = { ...plan.restore, id: plan.admissionId };
+      expect(() => verify(plan, current, "namespace", receipts)).not.toThrow();
+      current.rulesets = current.rulesets.filter((r) => r.id !== receipts.namespace.id);
+      expect(() => verify(plan, current, "guard", receipts)).not.toThrow();
+      current.rulesets = current.rulesets.filter((r) => r.id !== receipts.guard.id);
+      expect(() => verify(plan, current, "restored")).not.toThrow();
+    }
+  });
+  test("unchanged original update rules compare symmetrically without rewriting saved originals", () => {
+    for (const omitted of [false, true]) {
+      const before = fixture();
+      before.rulesets[2]!.rules = omitted
+        ? [{ type: "update" }]
+        : [{ type: "update", parameters: { update_allows_fetch_and_merge: false } }];
+      const saved = JSON.stringify(before);
+      const plan = prepare(before, 501, 999);
+      const current = structuredClone(before);
+      current.rulesets[2]!.rules = omitted
+        ? [{ type: "update", parameters: { update_allows_fetch_and_merge: false } }]
+        : [{ type: "update" }];
+      expect(() => verify(plan, current, "original")).not.toThrow();
+      expect(() => verify(plan, current, "restored")).not.toThrow();
+      expect(JSON.stringify(before)).toBe(saved);
+      expect(JSON.stringify(plan.before)).toBe(saved);
+    }
+  });
+  for (const update of [
+    { type: "update", parameters: { update_allows_fetch_and_merge: true } },
+    { type: "update", parameters: {} },
+    { type: "update", parameters: null },
+    { type: "update", parameters: { update_allows_fetch_and_merge: "false" } },
+    { type: "update", parameters: { update_allows_fetch_and_merge: 0 } },
+    { type: "update", parameters: { update_allows_fetch_and_merge: false, extra: false } },
+    { type: "update", extra: false },
+    { type: "update", parameters: { update_allows_fetch_and_merge: false }, extra: false },
+  ])
+    test(`update default comparison refuses ${JSON.stringify(update)}`, () => {
+      const plan = prepare(fixture(), 501, 999);
+      const badPlan = structuredClone(plan);
+      badPlan.namespace.rules = [{ type: "creation" }, update];
+      expect(() => validatePlan(badPlan)).toThrow();
+      const { current, receipts } = structuredClone(staged(plan, "applied"));
+      receipts.namespace.rules = [{ type: "creation" }, update];
+      expect(() => verify(plan, current, "applied", receipts)).toThrow();
+      const original = structuredClone(plan.before);
+      original.rulesets[2]!.rules = [{ type: "update" }];
+      const originalPlan = prepare(original, 501, 999);
+      const drifted = structuredClone(original);
+      drifted.rulesets[2]!.rules = [update];
+      expect(() => verify(originalPlan, drifted, "original")).toThrow();
+      expect(() => verify(originalPlan, drifted, "restored")).toThrow();
+    });
+  test("default equivalence preserves rule multiplicity, extra rules and non-rule objects", () => {
+    const plan = prepare(fixture(), 501, 999);
+    for (const extra of [{ type: "update" }, { type: "deletion" }]) {
+      const badPlan = structuredClone(plan);
+      (badPlan.namespace.rules as unknown[]).push(extra);
+      expect(() => validatePlan(badPlan)).toThrow();
+      const { current, receipts } = structuredClone(staged(plan, "applied"));
+      (receipts.namespace.rules as unknown[]).push(extra);
+      expect(() => verify(plan, current, "applied", receipts)).toThrow();
+    }
+    const before = fixture();
+    // A similarly named nested value outside a ruleset is not a rule.
+    before.rulesets[2]!.conditions = { rules: [{ type: "update" }] };
+    const otherPlan = prepare(before, 501, 999);
+    const current = structuredClone(before);
+    current.rulesets[2]!.conditions = {
+      rules: [{ type: "update", parameters: { update_allows_fetch_and_merge: false } }],
+    };
+    expect(() => verify(otherPlan, current, "original")).toThrow();
+  });
   test("all prepared shell blocks are syntactically valid without execution", async () => {
     const guide = await readFile(
       new URL("../docs/merge-batcher-admin/README.md", import.meta.url),
@@ -240,6 +327,10 @@ describe("offline batcher administration contract", () => {
     ]);
     expect(readback).toContain("Those exact identity/bypass checks are activation gates");
     expect(readback).toContain("not prerequisites for an ordinary agent to choose queue-only");
+    expect(agents).toContain('`{type:"update"}` (parameters absent) is equivalent to exactly');
+    expect(agents).toContain("unknown or mixed policy remains hold");
+    expect(readback).toContain('or exactly `{type:"update"}`');
+    expect(readback).toContain("saved originals and request payloads are not rewritten");
   });
   test("restore preserves exact original writable fields, not API metadata", () => {
     const before = fixture();
