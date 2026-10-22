@@ -16,9 +16,11 @@ import {
   fileAccessFor,
   fileOwnerContextForAccess,
   fileOwnerContextForAgent,
+  grantHasAgentAttemptAuthority,
   recordWorkspaceUsage,
   requireLimit,
   resolveNewFileAudience,
+  sourceSessionRequiresHumanShare,
   type ApiRouteDeps,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
@@ -53,8 +55,8 @@ const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
 
 /**
  * Original bytes inherit the already-authorized source session's audience:
- * Only me in an Only me chat, else the workspace. An explicit `visibility`
- * wins on the owner's behalf. Republishing a file that already exists keeps
+ * Only me in an Only me chat, else the workspace. A person may explicitly
+ * share a private-chat file; an agent may not widen it. Republishing keeps
  * the audience its owner has given it unless a visibility is asked for.
  */
 export async function publishSandboxFileArtifact(
@@ -70,7 +72,7 @@ export async function publishSandboxFileArtifact(
 ): Promise<SandboxFileArtifactReceipt> {
   const actor = input.authorization
     ? await fileOwnerContextForAccess(deps, input.authorization, "files:upload")
-    : input.grant.principalKind === "agent_attempt"
+    : grantHasAgentAttemptAuthority(input.grant)
       ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
       : { subjectId: input.grant.subjectId, privateFileOwnerSubjectId: null };
   return withSessionRlsActorContext(actor, async () => {
@@ -83,6 +85,15 @@ export async function publishSandboxFileArtifact(
       authority.visibility === "user_private" ||
       authority.memoryScope === "user" ||
       workspace.kind === "personal";
+    if (
+      grantHasAgentAttemptAuthority(input.grant) &&
+      input.visibility === "workspace" &&
+      (await sourceSessionRequiresHumanShare(deps.db, input.grant.workspaceId, input.session.id))
+    ) {
+      throw new HTTPException(403, {
+        message: "Only the person can share a private chat file with the workspace",
+      });
+    }
     const expectedOwner =
       authority.visibility === "user_private"
         ? authority.ownerSubjectId
@@ -95,10 +106,9 @@ export async function publishSandboxFileArtifact(
       });
     // The person this publication acts for: the human caller, or the human
     // whose turn the agent is running. Keys and services act for nobody.
-    const person =
-      input.grant.principalKind === "agent_attempt"
-        ? (actor.initiatingHumanSubjectId ?? null)
-        : (actor.privateFileOwnerSubjectId ?? null);
+    const person = grantHasAgentAttemptAuthority(input.grant)
+      ? (actor.initiatingHumanSubjectId ?? null)
+      : (actor.privateFileOwnerSubjectId ?? null);
     const audience = await resolveNewFileAudience({
       db: deps.db,
       settings: deps.settings,
@@ -144,10 +154,9 @@ export async function changeWorkspaceFileVisibility(
     visibility: WorkspaceArtifactVisibility;
   },
 ): Promise<FileAccessReceipt> {
-  const actor =
-    input.grant.principalKind === "agent_attempt"
-      ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
-      : { subjectId: input.grant.subjectId, privateFileOwnerSubjectId: null };
+  const actor = grantHasAgentAttemptAuthority(input.grant)
+    ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
+    : { subjectId: input.grant.subjectId, privateFileOwnerSubjectId: null };
   return withSessionRlsActorContext(actor, async () => {
     const workspace = await requireWorkspace(deps.db, input.grant.workspaceId);
     const fileId =
@@ -293,6 +302,7 @@ async function publishSandboxFileArtifactInScope(
       bucket: storage.bucket,
       objectKey,
       privateOwnerSubjectId: input.privateOwnerSubjectId,
+      sourceSessionId: input.session.id,
       expiresAt: new Date(
         Date.now() +
           (content.kind === "box" ? SANDBOX_EXPORT_URL_TTL_SECONDS * 1_000 : UPLOAD_INTENT_TTL_MS),
@@ -383,7 +393,16 @@ async function publishSandboxFileArtifactInScope(
     fileId: file.id,
     sourceSessionId: input.session.id,
   });
-  if (!newlyPrepared && input.visibility && input.workspace.kind !== "personal") {
+  const firstHumanShare =
+    newlyPrepared &&
+    input.visibility === "workspace" &&
+    input.workspace.kind !== "personal" &&
+    (await sourceSessionRequiresHumanShare(deps.db, input.grant.workspaceId, input.session.id));
+  if (
+    input.visibility &&
+    input.workspace.kind !== "personal" &&
+    (!newlyPrepared || firstHumanShare)
+  ) {
     file = (
       await changeFileVisibility({
         db: deps.db,

@@ -5,19 +5,32 @@ import type {
   WorkspaceArtifactVisibility,
   Workspace,
 } from "@opengeni/contracts";
-import { getManagedUserProfilesByIds, updateFileVisibility, type Database } from "@opengeni/db";
+import {
+  getManagedUserProfilesByIds,
+  getFileSourceSessionReference,
+  getSessionAuthorityProjection,
+  getSlackInteractionSessionAccess,
+  updateFileVisibility,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 import type { PrivacySettings } from "../application/organization-privacy";
 import { mayStartOnlyMe } from "./scheduled-task-audience";
+import {
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  grantHasAgentAttemptAuthority,
+} from "../session-authorization";
+import type { ApiRouteDeps } from "../dependencies";
 
 /**
  * A file has the same two audiences as a Site or a chat: Only me (only its
  * owner can open it) or the whole workspace. One rule decides a new file's
  * audience on every path an agent makes files through: it follows the chat,
  * so a file made in an Only me chat stays Only me until its owner shares it.
- * An explicit choice wins, on the owner's behalf. The owner (or their agent)
- * can later share one file or limit it again; nobody else can.
+ * A person can explicitly share a private-chat file; an agent cannot widen
+ * that audience on its own.
  */
 
 export const FILE_PRIVATE_OWNER_MESSAGE = "Only a person can have an Only me file.";
@@ -27,6 +40,63 @@ export const FILE_NOT_SHAREABLE_MESSAGE =
   "Session screenshots and saved tool output stay with their chat and can't be shared.";
 export const FILE_PERSONAL_WORKSPACE_MESSAGE =
   "Files in a personal workspace are only yours; there is nobody to share them with.";
+
+/** Fail closed when an agent asks to publish a private source to the workspace. */
+export async function sourceSessionRequiresHumanShare(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const source = await getSessionAuthorityProjection(db, workspaceId, sessionId);
+  if (!source) return true;
+  if (
+    source.visibility === "user_private" ||
+    source.memoryScope === "user" ||
+    source.siteAccessRootId !== null
+  )
+    return true;
+  const slack = await getSlackInteractionSessionAccess(db, workspaceId, source.rootSessionId);
+  return slack?.visibility === "private";
+}
+
+/** A host that denies the live source chat also denies its inherited File ID.
+ * Document origin reads request a fresh File-RLS check because their separate
+ * Document authority can return an origin File hidden from generic File reads. */
+export async function fileSourceVisibleToHost(
+  deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
+  grant: AccessGrant,
+  fileId: string,
+  fileWorkspaceId = grant.workspaceId,
+  requireFileRls = false,
+): Promise<boolean> {
+  if (!deps.sessionAuthorization && !requireFileRls) return true;
+  const source = await getFileSourceSessionReference(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: fileWorkspaceId,
+    subjectId: grant.subjectId,
+    fileId,
+  });
+  if (!source) return false;
+  if (!deps.sessionAuthorization) return true;
+  if (!source.sessionId || source.audienceExplicit) return true;
+  const live = await getSessionAuthorityProjection(deps.db, fileWorkspaceId, source.sessionId);
+  if (!live) return true; // The file policy already applied the deletion snapshot.
+  try {
+    await requireSessionAuthorization(
+      deps,
+      { ...grant, workspaceId: fileWorkspaceId },
+      {
+        sessionId: source.sessionId,
+        operation: "session.read",
+        surface: "http",
+      },
+    );
+    return true;
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) return false;
+    throw error;
+  }
+}
 
 /** The stored audience of a file, in Site vocabulary. */
 export function fileVisibility(file: Pick<FileAsset, "scope">): WorkspaceArtifactVisibility {
@@ -132,6 +202,7 @@ export async function changeFileVisibility(input: {
     visibility: input.visibility,
     actorSubjectId: input.person,
     auditSubjectId: input.grant.subjectId,
+    agentAttempt: grantHasAgentAttemptAuthority(input.grant),
   });
   switch (result.kind) {
     case "changed":

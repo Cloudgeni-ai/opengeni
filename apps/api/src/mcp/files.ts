@@ -2,6 +2,7 @@ import type { AccessGrant } from "@opengeni/contracts";
 import { recordAuditEvent, requireFileForSubject, withSessionRlsActorContext } from "@opengeni/db";
 import {
   hasPermission,
+  fileSourceVisibleToHost,
   fileOwnerContextForAccess,
   fileOwnerContextForAgent,
   type AccessGrantAuthorization,
@@ -61,6 +62,9 @@ export function buildFilesMcpServer(
           subjectId: grant.subjectId,
           fileId,
         });
+        if (!(await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId))) {
+          throw new Error("file not found");
+        }
         if (file.status !== "ready") {
           throw new Error(`file is ${file.status}`);
         }

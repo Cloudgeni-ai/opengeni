@@ -349,6 +349,9 @@ describe("durable video generation operation", () => {
         nextReconcileAt: new Date(),
         error: "transient retention error",
       });
+      if (!personal) {
+        await shared!.admin`delete from sessions where id = ${session.id}`;
+      }
       const settled = await settleVideoGenerationReady(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -371,6 +374,11 @@ describe("durable video generation operation", () => {
       });
       expect(settled.artifact.id).toBe(artifactId);
       expect(settled.artifact.primaryFileId).toBe(fileId);
+      const [source] = await shared!.admin`
+        select source_session_id as session_id, source_session_shared_unrestricted as shared
+        from files where id = ${fileId}`;
+      expect(source?.session_id).toBe(session.id);
+      expect(source?.shared).toBe(true);
       expect(settled.artifact.id).not.toBe(fileId);
       expect(settled.operation.lastError).toBeNull();
       expect((await withOwner(() => getFile(client.db, grant.workspaceId, fileId)))?.scope).toBe(

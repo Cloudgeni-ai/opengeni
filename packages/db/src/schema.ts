@@ -6248,6 +6248,18 @@ export const files = pgTable(
     ownerSubjectId: text("owner_subject_id").default(sql`coalesce(
       nullif(current_setting('opengeni.private_file_owner',true),''),
       nullif(current_setting('opengeni.initiating_human_subject_id',true),''))`),
+    // Immutable provenance remains after chat deletion; its owner keeps access.
+    sourceSessionId: uuid("source_session_id"),
+    sourceSessionOwnerSubjectId: text("source_session_owner_subject_id"),
+    sourceSessionAudienceExplicit: boolean("source_session_audience_explicit")
+      .notNull()
+      .default(false),
+    sourceSessionProvenanceMissing: boolean("source_session_provenance_missing")
+      .notNull()
+      .default(false),
+    sourceSessionSharedUnrestricted: boolean("source_session_shared_unrestricted")
+      .notNull()
+      .default(false),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -6276,6 +6288,9 @@ export const files = pgTable(
       table.id,
     ),
     status: index("files_status_idx").on(table.status),
+    sourceSession: index("files_source_session_idx")
+      .on(table.workspaceId, table.sourceSessionId)
+      .where(sql`${table.sourceSessionId} is not null`),
   }),
 );
 
@@ -6712,6 +6727,11 @@ export const videoGenerationOperations = pgTable(
     sessionId: uuid("session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
+    sourceSessionIdSnapshot: uuid("source_session_id_snapshot"),
+    sourceSessionOwnerSubjectId: text("source_session_owner_subject_id"),
+    sourceSessionSharedUnrestricted: boolean("source_session_shared_unrestricted")
+      .notNull()
+      .default(false),
     turnId: uuid("turn_id"),
     attemptId: uuid("attempt_id"),
     toolCallId: text("tool_call_id").notNull(),

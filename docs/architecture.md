@@ -1679,6 +1679,17 @@ A file attached to a human prompt is eager model/compute input only for that
 accepted turn. Accepted private uploads gain session read grants; original ownership
 and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
 See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
+Session-produced Files keep source-chat provenance. Ordinary File reads follow
+the chat's live visibility unless the File owner explicitly shares that File;
+after chat deletion, retained output keeps the chat's last audience. Historical
+output whose source chat cannot be recovered is restricted to its recorded owner.
+Migrations 0909–0910 stage private operator decisions for ambiguous historical
+shared originals and legacy shares, then enforce source visibility. Verified
+human-shared files keep their audience; unresolved originals stay owner-only.
+The enforcement migration stops if a shared original has no decision or a
+restricted file has no recoverable owner.
+Ordinary Document originals without session provenance keep Document access;
+source-bearing or uncertain originals also require the File source policy.
 
 An app-shot is an image upload whose `files.app_shot` column records the captured
 window (app, title, capture time, accessibility text up to 32,000 characters, and the

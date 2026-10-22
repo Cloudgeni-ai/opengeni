@@ -7602,6 +7602,7 @@ export async function createFileUpload(
     workspaceId: string;
     fileId: string;
     privateOwnerSubjectId?: string | null;
+    sourceSessionId?: string | null;
     filename: string;
     safeFilename: string;
     contentType: string;
@@ -7626,6 +7627,29 @@ export async function createFileUpload(
             privateOwnerSubjectIds: input.privateOwnerSubjectId
               ? [input.privateOwnerSubjectId]
               : null,
+            sourceSessionId: input.sourceSessionId ?? null,
+            sourceSessionOwnerSubjectId: input.sourceSessionId
+              ? sql`(SELECT file_source_owner_snapshot_0913(
+                    CASE WHEN source.visibility = 'user_private' THEN coalesce(source.owner_subject_id,'') END,
+                    CASE WHEN source.site_access_root_id IS NOT NULL THEN coalesce(source.site_owner_subject_id,'') END,
+                    CASE WHEN slack.id IS NOT NULL THEN coalesce(slack.owning_subject_id,'') END,
+                    CASE WHEN source.memory_scope = 'user' THEN coalesce(source.scope_subject_id,'') END)
+                  FROM sessions source LEFT JOIN slack_interactions slack
+                    ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                    AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+                  WHERE source.account_id = ${input.accountId}::uuid
+                    AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${input.sourceSessionId}::uuid)`
+              : null,
+            sourceSessionSharedUnrestricted: input.sourceSessionId
+              ? sql`coalesce((SELECT source.visibility = 'workspace_shared'
+                    AND source.memory_scope <> 'user'
+                    AND source.site_access_root_id IS NULL AND slack.id IS NULL
+                  FROM sessions source LEFT JOIN slack_interactions slack
+                    ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                    AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+                  WHERE source.account_id = ${input.accountId}::uuid
+                    AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${input.sourceSessionId}::uuid), false)`
+              : false,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             filename: input.filename,
@@ -7687,6 +7711,7 @@ export type PrepareGeneratedWorkspaceFileInput = {
    * An existing file keeps whatever audience its owner has since given it.
    */
   privateOwnerSubjectId?: string | null;
+  sourceSessionId?: string | null;
 };
 
 /**
@@ -7754,6 +7779,29 @@ export async function prepareGeneratedWorkspaceFile(
           .values({
             id: input.fileId,
             privateOwnerSubjectIds: privateOwner ? [privateOwner] : null,
+            sourceSessionId: input.sourceSessionId ?? null,
+            sourceSessionOwnerSubjectId: input.sourceSessionId
+              ? sql`(SELECT file_source_owner_snapshot_0913(
+                    CASE WHEN source.visibility = 'user_private' THEN coalesce(source.owner_subject_id,'') END,
+                    CASE WHEN source.site_access_root_id IS NOT NULL THEN coalesce(source.site_owner_subject_id,'') END,
+                    CASE WHEN slack.id IS NOT NULL THEN coalesce(slack.owning_subject_id,'') END,
+                    CASE WHEN source.memory_scope = 'user' THEN coalesce(source.scope_subject_id,'') END)
+                  FROM sessions source LEFT JOIN slack_interactions slack
+                    ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                    AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+                  WHERE source.account_id = ${input.accountId}::uuid
+                    AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${input.sourceSessionId}::uuid)`
+              : null,
+            sourceSessionSharedUnrestricted: input.sourceSessionId
+              ? sql`coalesce((SELECT source.visibility = 'workspace_shared'
+                    AND source.memory_scope <> 'user'
+                    AND source.site_access_root_id IS NULL AND slack.id IS NULL
+                  FROM sessions source LEFT JOIN slack_interactions slack
+                    ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                    AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+                  WHERE source.account_id = ${input.accountId}::uuid
+                    AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${input.sourceSessionId}::uuid), false)`
+              : false,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             status: "pending_upload",
@@ -7807,7 +7855,8 @@ function assertGeneratedWorkspaceFileMatches(
     file.sizeBytes !== input.sizeBytes ||
     file.sha256 !== input.sha256 ||
     file.bucket !== input.bucket ||
-    file.objectKey !== input.objectKey
+    file.objectKey !== input.objectKey ||
+    file.sourceSessionId !== (input.sourceSessionId ?? null)
   ) {
     throw new Error(`Generated workspace file identity conflict: ${input.fileId}`);
   }
@@ -7868,6 +7917,7 @@ export async function updateFileVisibility(
     actorSubjectId: string;
     /** Audit subject: the caller's own subject (an agent's technical subject). */
     auditSubjectId: string;
+    agentAttempt?: boolean;
   },
 ): Promise<FileVisibilityChangeResult> {
   return await withRlsContext(
@@ -7884,13 +7934,29 @@ export async function updateFileVisibility(
         .limit(1);
       if (!row) return { kind: "not_found" };
       const current = row.privateOwnerSubjectIds ? "private" : "workspace";
-      if (current === input.visibility) return { kind: "unchanged", file: mapFile(row) };
+      const explicitShare =
+        input.visibility === "workspace" &&
+        (row.sourceSessionId !== null || row.sourceSessionProvenanceMissing) &&
+        !row.sourceSessionAudienceExplicit;
+      if (
+        input.agentAttempt &&
+        input.visibility === "workspace" &&
+        (row.sourceSessionId !== null || row.sourceSessionProvenanceMissing)
+      )
+        return { kind: "not_changeable" };
+      if (current === input.visibility && !explicitShare)
+        return { kind: "unchanged", file: mapFile(row) };
       if (row.status !== "ready" || UNSHAREABLE_FILE_OBJECT_KEY.test(row.objectKey))
         return { kind: "not_changeable" };
       const sharing = input.visibility === "workspace";
       if (
         sharing
-          ? !row.privateOwnerSubjectIds?.includes(input.actorSubjectId)
+          ? !(
+              row.privateOwnerSubjectIds?.includes(input.actorSubjectId) ||
+              (explicitShare &&
+                (row.ownerSubjectId === input.actorSubjectId ||
+                  row.sourceSessionOwnerSubjectId === input.actorSubjectId))
+            )
           : row.ownerSubjectId !== input.actorSubjectId
       )
         return { kind: "not_owner" };
@@ -7909,6 +7975,10 @@ export async function updateFileVisibility(
         .update(schema.files)
         .set({
           privateOwnerSubjectIds: sharing ? null : [input.actorSubjectId],
+          sourceSessionAudienceExplicit:
+            sharing && (row.sourceSessionId !== null || row.sourceSessionProvenanceMissing)
+              ? true
+              : row.sourceSessionAudienceExplicit,
           ownerSubjectId: sharing
             ? (row.ownerSubjectId ?? input.actorSubjectId)
             : input.actorSubjectId,
@@ -8015,6 +8085,11 @@ export async function requireFileForSubject(
  * portable-owner authority, and provider ACL before returning origin metadata;
  * it never grants generic visibility into the origin workspace's Files.
  */
+export type DocumentOriginalFile = FileAsset & {
+  sourceSessionId: string | null;
+  sourceSessionProvenanceMissing: boolean;
+};
+
 export async function resolveDocumentOriginalFileForSubject(
   db: Database,
   input: {
@@ -8023,13 +8098,13 @@ export async function resolveDocumentOriginalFileForSubject(
     subjectId: string;
     documentId: string;
   },
-): Promise<FileAsset | null> {
+): Promise<DocumentOriginalFile | null> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, input.subjectId);
-      const rows = await rawRows<FileAsset>(
+      const rows = await rawRows<DocumentOriginalFile>(
         scopedDb,
         sql`select
           original_file.id as "id",
@@ -8044,7 +8119,9 @@ export async function resolveDocumentOriginalFileForSubject(
           original_file.bucket as "bucket",
           original_file.object_key as "objectKey",
           original_file.created_at::text as "createdAt",
-          original_file.updated_at::text as "updatedAt"
+          original_file.updated_at::text as "updatedAt",
+          original_file.source_session_id as "sourceSessionId",
+          original_file.source_session_provenance_missing as "sourceSessionProvenanceMissing"
         from resolve_document_original_file(
           ${input.accountId}::uuid,
           ${input.workspaceId}::uuid,
@@ -8069,7 +8146,7 @@ export async function listFilesForSubject(
     limit?: number;
     cursor?: string | undefined;
   },
-): Promise<{ files: FileAsset[]; nextCursor: string | null }> {
+): Promise<{ files: FileAsset[]; fileCursors: string[]; nextCursor: string | null }> {
   const limit = input.limit ?? 30;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50)
     throw new RangeError("Invalid file page size");
@@ -8118,17 +8195,41 @@ export async function listFilesForSubject(
         .limit(limit + 1);
       const page = rows.slice(0, limit),
         last = page.at(-1);
+      const fileCursors = page.map((row) =>
+        Buffer.from(JSON.stringify({ id: row.file.id, at: row.position })).toString("base64url"),
+      );
       return {
         files: page.map((row) => mapFile(row.file)),
-        nextCursor:
-          rows.length > limit && last
-            ? Buffer.from(JSON.stringify({ id: last.file.id, at: last.position })).toString(
-                "base64url",
-              )
-            : null,
+        fileCursors,
+        nextCursor: rows.length > limit && last ? fileCursors.at(-1)! : null,
       };
     },
   );
+}
+
+/** Source session for a visible File ID; the host may add a read restriction. */
+export async function getFileSourceSessionReference(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; fileId: string },
+): Promise<{ sessionId: string | null; audienceExplicit: boolean } | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, input.subjectId);
+    const [row] = await scopedDb
+      .select({
+        sessionId: schema.files.sourceSessionId,
+        audienceExplicit: schema.files.sourceSessionAudienceExplicit,
+      })
+      .from(schema.files)
+      .where(
+        and(
+          eq(schema.files.accountId, input.accountId),
+          eq(schema.files.workspaceId, input.workspaceId),
+          eq(schema.files.id, input.fileId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
 }
 
 export async function getFilesForSubject(
@@ -8502,6 +8603,29 @@ export async function prepareRetainedScreenshotArtifact(
           .values({
             id: input.artifactId,
             privateOwnerSubjectIds: sql`CASE WHEN nullif(current_setting('opengeni.private_file_owner',true),'') IS NULL THEN NULL ELSE ARRAY[current_setting('opengeni.private_file_owner',true)] END`,
+            sourceSessionId: input.sessionId,
+            sourceSessionOwnerSubjectId: input.sessionId
+              ? sql`(SELECT file_source_owner_snapshot_0913(
+                    CASE WHEN source.visibility = 'user_private' THEN coalesce(source.owner_subject_id,'') END,
+                    CASE WHEN source.site_access_root_id IS NOT NULL THEN coalesce(source.site_owner_subject_id,'') END,
+                    CASE WHEN slack.id IS NOT NULL THEN coalesce(slack.owning_subject_id,'') END,
+                    CASE WHEN source.memory_scope = 'user' THEN coalesce(source.scope_subject_id,'') END)
+                  FROM sessions source LEFT JOIN slack_interactions slack
+                    ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                    AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+                  WHERE source.account_id = ${input.accountId}::uuid
+                    AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${input.sessionId}::uuid)`
+              : null,
+            sourceSessionSharedUnrestricted: input.sessionId
+              ? sql`coalesce((SELECT source.visibility = 'workspace_shared'
+                    AND source.memory_scope <> 'user'
+                    AND source.site_access_root_id IS NULL AND slack.id IS NULL
+                  FROM sessions source LEFT JOIN slack_interactions slack
+                    ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                    AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+                  WHERE source.account_id = ${input.accountId}::uuid
+                    AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${input.sessionId}::uuid), false)`
+              : false,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             status: "pending_upload",
@@ -88941,12 +89065,18 @@ export function fileAssetFromRow(row: typeof schema.files.$inferSelect): FileAss
 }
 
 function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
+  const inheritedPrivate =
+    !row.sourceSessionAudienceExplicit &&
+    ((row.sourceSessionId !== null && row.sourceSessionOwnerSubjectId !== null) ||
+      row.sourceSessionProvenanceMissing);
   return {
-    scope: row.privateOwnerSubjectIds ? "personal" : "workspace",
+    scope: row.privateOwnerSubjectIds || inheritedPrivate ? "personal" : "workspace",
     // Private files made before owners were recorded belong to their one private owner.
     ownerSubjectId:
       row.ownerSubjectId ??
-      (row.privateOwnerSubjectIds?.length === 1 ? row.privateOwnerSubjectIds[0]! : null),
+      (row.privateOwnerSubjectIds?.length === 1
+        ? row.privateOwnerSubjectIds[0]!
+        : row.sourceSessionOwnerSubjectId),
     id: row.id,
     workspaceId: row.workspaceId,
     status: row.status as FileStatus,

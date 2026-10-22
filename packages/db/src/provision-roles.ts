@@ -1532,6 +1532,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.file_source_session_exists_0913(uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.file_source_session_exists_0913(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.file_source_session_exists_0913(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.session_private_actor_visible_keys()',
         ${literal(schema)}
       )

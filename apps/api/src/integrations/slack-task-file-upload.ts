@@ -6,6 +6,7 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  fileSourceVisibleToHost,
   fileOwnerContextForAgent,
   hasPermission,
   requireOpenGeniSlackBotConnection,
@@ -114,6 +115,8 @@ export async function uploadSlackTaskFile(
         message: "Select a retained file from this Slack task's workspace",
       });
     }
+    if (!(await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId)))
+      throw new HTTPException(404, { message: "Retained file not found" });
     assertSlackTaskUploadFile(file, target.interaction.visibility);
     const connection = await requireOpenGeniSlackBotConnection(
       deps.db,
@@ -208,6 +211,8 @@ export async function uploadSlackTaskFile(
         subjectId: grant.subjectId,
         fileId: file.id,
       });
+      if (!(await fileSourceVisibleToHost(deps, grant, currentFile.id, currentFile.workspaceId)))
+        throw new HTTPException(404, { message: "Retained file not found" });
       assertSlackTaskUploadFile(currentFile, currentTarget.interaction.visibility);
       if (
         currentFile.sha256 !== file.sha256 ||

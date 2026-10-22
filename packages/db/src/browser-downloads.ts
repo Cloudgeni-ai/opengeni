@@ -210,6 +210,25 @@ export async function prepareBrowserDownloadSave(
             sha256: download.sha256,
             bucket,
             objectKey,
+            sourceSessionId,
+            sourceSessionOwnerSubjectId: sql`(SELECT file_source_owner_snapshot_0913(
+                CASE WHEN source.visibility = 'user_private' THEN coalesce(source.owner_subject_id,'') END,
+                CASE WHEN source.site_access_root_id IS NOT NULL THEN coalesce(source.site_owner_subject_id,'') END,
+                CASE WHEN slack.id IS NOT NULL THEN coalesce(slack.owning_subject_id,'') END,
+                CASE WHEN source.memory_scope = 'user' THEN coalesce(source.scope_subject_id,'') END)
+              FROM sessions source LEFT JOIN slack_interactions slack
+                ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+              WHERE source.account_id = ${input.accountId}::uuid
+                AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${sourceSessionId}::uuid)`,
+            sourceSessionSharedUnrestricted: sql`coalesce((SELECT source.visibility = 'workspace_shared'
+                AND source.memory_scope <> 'user'
+                AND source.site_access_root_id IS NULL AND slack.id IS NULL
+              FROM sessions source LEFT JOIN slack_interactions slack
+                ON slack.account_id = source.account_id AND slack.workspace_id = source.workspace_id
+                AND slack.session_reservation_id = source.root_session_id AND slack.visibility = 'private'
+              WHERE source.account_id = ${input.accountId}::uuid
+                AND source.workspace_id = ${input.workspaceId}::uuid AND source.id = ${sourceSessionId}::uuid), false)`,
           });
           [upload] = await tx
             .insert(schema.fileUploads)

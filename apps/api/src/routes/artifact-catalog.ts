@@ -16,6 +16,7 @@ import {
   editableArtifactScope,
   EDITABLE_ARTIFACT_READ_BATCH_LIMIT,
   fileOwnerContextForAccess,
+  fileSourceVisibleToHost,
   grantHasAgentAttemptAuthority,
   hasPermission,
   requireAccessGrantAuthorization,
@@ -141,7 +142,11 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           subjectId,
           fileIds: [artifactId],
         });
-        if (!file || file.status !== "ready")
+        if (
+          !file ||
+          file.status !== "ready" ||
+          !(await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId))
+        )
           throw new HTTPException(404, { message: "Artifact not found" });
       }
       try {
@@ -397,15 +402,19 @@ async function loadCandidateFiles(
   const fileIds = candidates
     .filter((candidate) => candidate.kind === "file" || candidate.kind === "image")
     .map((candidate) => candidate.id);
+  const readable = await getFilesForSubject(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: fileSubject,
+    fileIds,
+  });
+  const visible = await Promise.all(
+    readable.map(async (file) =>
+      (await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId)) ? file : null,
+    ),
+  );
   const files = new Map(
-    (
-      await getFilesForSubject(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        subjectId: fileSubject,
-        fileIds,
-      })
-    ).map((file) => [file.id, file]),
+    visible.filter((file): file is FileAsset => file !== null).map((file) => [file.id, file]),
   );
   const generatedIds = candidates
     .filter(

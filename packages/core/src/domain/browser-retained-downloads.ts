@@ -157,6 +157,7 @@ async function retainCompletedBrowserDownloadsAs(
         workspaceId: input.workspaceId,
         fileId,
         privateOwnerSubjectId,
+        sourceSessionId: input.sourceSessionId,
         filename: download.filename,
         safeFilename,
         contentType,

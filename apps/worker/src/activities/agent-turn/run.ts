@@ -461,6 +461,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       observability,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
       attemptId: input.attemptId,
       getModelRunSettings: () => eventing.modelRunSettings,
       getSandboxFileDownloadBackend: () => media.sandboxFileDownloadBackend,

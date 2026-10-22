@@ -16,6 +16,7 @@ import {
 } from "@opengeni/contracts";
 import {
   prepareKnowledgeFile,
+  fileSourceVisibleToHost,
   prepareKnowledgeSave,
   searchKnowledgeEntries,
   KnowledgeVectorCreditsDisabledError,
@@ -204,7 +205,8 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       );
       const entryId = Id.parse(c.req.param("entryId"));
       const file = await getKnowledgeOriginalFile(deps.db, context, entryId, revisionId);
-      if (!file) throw new HTTPException(404, { message: "Original file unavailable" });
+      if (!file || !(await fileSourceVisibleToHost(deps, access.grant, file.id, file.workspaceId)))
+        throw new HTTPException(404, { message: "Original file unavailable" });
       if (!deps.objectStorage)
         throw new HTTPException(503, { message: "File storage is unavailable" });
       if (

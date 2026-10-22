@@ -62,6 +62,7 @@ type TurnFixture = WorkspaceFixture & {
   sessionId: string;
   turnId: string;
   attemptId: string;
+  privateOwnerSubjectId?: string;
 };
 
 type StoredObject = {
@@ -224,6 +225,7 @@ async function freshTurn(privateChat = false): Promise<TurnFixture> {
     sessionId: session.id,
     turnId: claim.turn.id,
     attemptId,
+    ...(privateWorkspace ? { privateOwnerSubjectId: privateWorkspace.owner } : {}),
   };
 }
 
@@ -554,20 +556,32 @@ describe("retained screenshot lifecycle fences", () => {
     if (!available) return;
     const fixture = await freshTurn(true);
     const memory = storageFixture();
-    const prepared = await prepareArtifact(fixture, memory.storage, {
-      expiresAt: new Date(Date.now() - 1_000),
-    });
+    const asOwner = <T>(fn: () => Promise<T>) =>
+      withSessionRlsActorContext(
+        {
+          subjectId: fixture.privateOwnerSubjectId!,
+          privateFileOwnerSubjectId: fixture.privateOwnerSubjectId!,
+        },
+        fn,
+      );
+    const prepared = await asOwner(() =>
+      prepareArtifact(fixture, memory.storage, {
+        expiresAt: new Date(Date.now() - 1_000),
+      }),
+    );
     await memory.storage.putObject({
       key: prepared.objectKey,
       contentType: "image/png",
       body: PNG,
       sha256: SCREENSHOT.sha256,
     });
-    await settleRetainedScreenshotArtifactReady(db, {
-      ...fixture,
-      artifactId: prepared.artifactId,
-      settlementKey: prepared.settlementKey,
-    });
+    await asOwner(() =>
+      settleRetainedScreenshotArtifactReady(db, {
+        ...fixture,
+        artifactId: prepared.artifactId,
+        settlementKey: prepared.settlementKey,
+      }),
+    );
     // A private chat is invisible to any other acting subject, including a
     // service subject; maintenance must still settle its expiry.
     const [session] = await admin<Array<{ visibility: string }>>`

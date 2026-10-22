@@ -1,4 +1,9 @@
-import { fileOwnerContextForAccess } from "@opengeni/core";
+import {
+  fileOwnerContextForAccess,
+  fileSourceVisibleToHost,
+  grantHasAgentAttemptAuthority,
+  sourceSessionRequiresHumanShare,
+} from "@opengeni/core";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   AddDocumentRequest,
@@ -410,7 +415,13 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       documentId: c.req.param("documentId"),
       access: { viewerSubjectId: grant.subjectId },
     });
-    if (!file) {
+    // Document authority is independent for ordinary originals. A source-born
+    // File must also pass its own RLS because the Document resolver is a definer.
+    if (
+      !file ||
+      ((file.sourceSessionId !== null || file.sourceSessionProvenanceMissing) &&
+        !(await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId, true)))
+    ) {
       throw new HTTPException(404, { message: "document file not found" });
     }
     return c.json(FileAsset.parse(file));
@@ -431,7 +442,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         documentId: c.req.param("documentId"),
         access: { viewerSubjectId: grant.subjectId },
       });
-      if (!file) {
+      if (
+        !file ||
+        ((file.sourceSessionId !== null || file.sourceSessionProvenanceMissing) &&
+          !(await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId, true)))
+      ) {
         throw new HTTPException(404, { message: "document file not found" });
       }
       if (file.status !== "ready") {
@@ -597,11 +612,24 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = await parseRequestJson(c, CreateKnowledgeDropRequest);
+    const fileActor = await fileOwnerContextForAccess(deps, access, "documents:manage");
+    if (
+      grantHasAgentAttemptAuthority(grant) &&
+      payload.authorityKind !== "personal" &&
+      payload.visibility !== "private" &&
+      (!fileActor.sessionAttachmentReadAccess?.sessionId ||
+        (await sourceSessionRequiresHumanShare(
+          db,
+          workspaceId,
+          fileActor.sessionAttachmentReadAccess.sessionId,
+        )))
+    ) {
+      throw new HTTPException(403, {
+        message: "Only the person can publish a private chat file to shared Knowledge",
+      });
+    }
     const personalFileOwner =
-      payload.authorityKind === "personal"
-        ? (await fileOwnerContextForAccess(deps, access, "documents:manage"))
-            .privateFileOwnerSubjectId
-        : null;
+      payload.authorityKind === "personal" ? fileActor.privateFileOwnerSubjectId : null;
     if (payload.authorityKind === "personal" && !personalFileOwner)
       throw new HTTPException(403, {
         message: "Personal source retention requires verified ownership",
@@ -635,6 +663,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           fileId: newFileId,
           privateOwnerSubjectId: personalFileOwner ?? null,
+          sourceSessionId: grantHasAgentAttemptAuthority(grant)
+            ? (fileActor.sessionAttachmentReadAccess?.sessionId ?? null)
+            : null,
           filename,
           safeFilename,
           contentType: "text/plain; charset=utf-8",

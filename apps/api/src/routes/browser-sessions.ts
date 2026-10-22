@@ -167,6 +167,7 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  fileSourceVisibleToHost,
   requireAccessGrant,
   requireSessionAuthorization,
   withSessionAuthorizationReadReuse,
@@ -1641,6 +1642,16 @@ export function registerBrowserSessionRoutes(
                 fileIds: workspaceFileIds,
               });
               const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
+              if (
+                !(
+                  await Promise.all(
+                    ordered.map((file) =>
+                      fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId),
+                    ),
+                  )
+                ).every(Boolean)
+              )
+                throw new HTTPException(404, { message: "Workspace file not found" });
               const authorities = await Promise.all(
                 ordered.map(async (file) => {
                   const signed = await deps.objectStorage!.createGetUrl({

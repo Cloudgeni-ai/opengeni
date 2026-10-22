@@ -216,6 +216,10 @@ describe("browser download saves", () => {
       fileId: input.fileId,
       uploadId: expect.any(String),
     });
+    const [provenance] = await shared!.admin`
+      select source_session_id as source, source_session_shared_unrestricted as shared
+      from files where id = ${input.fileId}`;
+    expect(provenance).toMatchObject({ source: scope.sourceSessionId, shared: true });
     expect(await findBrowserDownloadSave(client.db, input)).toMatchObject({
       state: "prepared",
       replayed: true,

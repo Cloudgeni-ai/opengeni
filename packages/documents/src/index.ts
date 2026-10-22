@@ -49,6 +49,7 @@ import {
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   type Database,
+  type DocumentOriginalFile,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
@@ -2004,7 +2005,7 @@ export async function getDocumentOriginalFile(
     documentId: string;
     access: DocumentAccessFilter;
   },
-): Promise<FileAsset | null> {
+): Promise<DocumentOriginalFile | null> {
   const subjectId = cleanString(input.access.viewerSubjectId ?? null);
   if (!subjectId || input.access.agentOnly) return null;
   return await resolveDocumentOriginalFileForSubject(db, {

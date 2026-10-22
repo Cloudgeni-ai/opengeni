@@ -40,6 +40,7 @@ export type ToolResultSpillDeps = {
   observability: Observability;
   accountId: string;
   workspaceId: string;
+  sessionId: string;
   attemptId: string;
   getModelRunSettings: () => Settings;
   getSandboxFileDownloadBackend: () => Settings["sandboxBackend"];
@@ -94,6 +95,7 @@ export class ToolResultSpill {
       sha256,
       bucket: objectStorage.bucket,
       objectKey,
+      sourceSessionId: this.deps.sessionId,
       expiresAt: new Date(Date.now() + UPLOAD_INTENT_TTL_MS),
     });
     let file = prepared.file;

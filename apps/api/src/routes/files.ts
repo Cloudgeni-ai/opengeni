@@ -51,9 +51,11 @@ import { HTTPException } from "hono/http-exception";
 import {
   changeFileVisibility,
   fileAccessFor,
+  fileSourceVisibleToHost,
+  grantHasAgentAttemptAuthority,
+  sourceSessionRequiresHumanShare,
   fileOwnerContextForAccess,
   requireAccessGrantAuthorization,
-  grantHasAgentAttemptAuthority,
   requireAccessGrant,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
@@ -79,7 +81,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   const fileRequestAuthority = new WeakMap<
     Request,
-    { owner: string | null; agent: boolean; person: string | null }
+    { owner: string | null; agent: boolean; person: string | null; sourceSessionId: string | null }
   >();
   /** Who can open a file, for the person or agent that uploaded or shared it. */
   const withFileAccess = async (workspaceId: string, file: FileAsset): Promise<FileAsset> => ({
@@ -103,10 +105,11 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         permission,
       );
       const actor = await fileOwnerContextForAccess(deps, access, permission);
-      const agent = access.grant.principalKind === "agent_attempt";
+      const agent = grantHasAgentAttemptAuthority(access.grant);
       fileRequestAuthority.set(c.req.raw, {
         owner: actor.privateFileOwnerSubjectId ?? null,
         agent,
+        sourceSessionId: agent ? (actor.sessionAttachmentReadAccess?.sessionId ?? null) : null,
         // The human this request acts for: the caller, or an agent's turn initiator.
         person: agent
           ? (actor.initiatingHumanSubjectId ?? null)
@@ -187,9 +190,20 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const authority = fileRequestAuthority.get(c.req.raw);
     const privateOwner = authority?.owner ?? null;
     const workspace = await requireWorkspace(db, workspaceId);
+    if (authority?.agent && !authority.sourceSessionId) {
+      throw new HTTPException(403, { message: "Agent file source is unavailable" });
+    }
+    if (
+      authority?.agent &&
+      payload.scope === "workspace" &&
+      (await sourceSessionRequiresHumanShare(db, workspaceId, authority.sourceSessionId!))
+    ) {
+      throw new HTTPException(403, {
+        message: "Only the person can share a private chat file with the workspace",
+      });
+    }
     // A person's upload is shared unless they choose Only me. An agent's
-    // follows its chat (Only me in an Only me chat) unless it chooses, on its
-    // owner's behalf; a personal workspace keeps an agent's uploads private.
+    // upload follows its chat; an agent cannot widen a private chat's audience.
     const personal =
       payload.scope && !(authority?.agent && workspace.kind === "personal")
         ? payload.scope === "personal"
@@ -224,6 +238,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       fileId,
       privateOwnerSubjectId: personal ? privateOwner : null,
+      sourceSessionId: authority?.sourceSessionId ?? null,
       filename: payload.filename,
       safeFilename,
       contentType: payload.contentType,
@@ -446,19 +461,51 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     if (!parsed.success) throw new HTTPException(422, { message: "Invalid file list request" });
     c.header("cache-control", "private, no-store");
+    const listPage = (limit: number, cursor?: string) =>
+      listFilesForSubject(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        ...parsed.data,
+        limit,
+        cursor,
+      });
+    const onInvalidCursor = (error: unknown): never => {
+      if (error instanceof ZodError)
+        throw new HTTPException(422, { message: "Invalid file cursor" });
+      throw error;
+    };
+    if (!deps.sessionAuthorization) {
+      const page = await listPage(parsed.data.limit ?? 30, parsed.data.cursor).catch(
+        onInvalidCursor,
+      );
+      return c.json(FileListResponse.parse({ files: page.files, nextCursor: page.nextCursor }));
+    }
+    // Host-denied rows must not appear in a reversible position cursor.
+    const limit = parsed.data.limit ?? 30;
+    const files: FileAsset[] = [];
+    let cursor = parsed.data.cursor;
+    let lastVisibleCursor: string | null = null;
+    let moreVisible = false;
+    while (true) {
+      const page = await listPage(50, cursor).catch(onInvalidCursor);
+      const visible = await Promise.all(
+        page.files.map((file) => fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId)),
+      );
+      for (let index = 0; index < page.files.length; index++) {
+        if (!visible[index]) continue;
+        if (files.length === limit) {
+          moreVisible = true;
+          break;
+        }
+        files.push(page.files[index]!);
+        lastVisibleCursor = page.fileCursors[index]!;
+      }
+      if (moreVisible || !page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
     return c.json(
-      FileListResponse.parse(
-        await listFilesForSubject(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          ...parsed.data,
-        }).catch((error: unknown) => {
-          if (error instanceof ZodError)
-            throw new HTTPException(422, { message: "Invalid file cursor" });
-          throw error;
-        }),
-      ),
+      FileListResponse.parse({ files, nextCursor: moreVisible ? lastVisibleCursor : null }),
     );
   });
 
@@ -470,14 +517,20 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.query("sessionId");
     if (sessionId) {
       if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(sessionId)) return null;
-      return (await readSessionAttachmentFiles(deps, grant, sessionId, [fileId]))[0] ?? null;
+      const file = (await readSessionAttachmentFiles(deps, grant, sessionId, [fileId]))[0] ?? null;
+      return file && (await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId))
+        ? file
+        : null;
     }
-    return requireFileForSubject(db, {
+    const file = await requireFileForSubject(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
       fileId,
     }).catch(() => null);
+    return file && (await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId))
+      ? file
+      : null;
   };
 
   app.get("/v1/workspaces/:workspaceId/files/:fileId", async (c) => {
@@ -539,6 +592,8 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       artifactId,
     });
     if (!artifact) return await artifactNotVisible(c, grant, artifactId);
+    if (!(await fileSourceVisibleToHost(deps, grant, artifact.file.id, artifact.file.workspaceId)))
+      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     return c.json(artifact.metadata);
   });
 
@@ -553,6 +608,8 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       artifactId,
     });
     if (!artifact) return await artifactNotVisible(c, grant, artifactId);
+    if (!(await fileSourceVisibleToHost(deps, grant, artifact.file.id, artifact.file.workspaceId)))
+      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
 
     return await serveRetainedArtifactContent(
       c,
@@ -574,6 +631,8 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!retained || retained.artifact.deletedAt) {
       throw new HTTPException(404, { message: "generated video not found" });
     }
+    if (!(await fileSourceVisibleToHost(deps, grant, retained.file.id, retained.file.workspaceId)))
+      throw new HTTPException(404, { message: "generated video not found" });
     if (retained.file.status !== "ready") {
       throw new HTTPException(409, { message: `generated video is ${retained.file.status}` });
     }
@@ -617,14 +676,11 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // These two retained-screenshot routes are registered before the session
   // route module, so its `/sessions/:sessionId/*` authorization middleware
-  // does not cover them: an agent attempt must pass the same core seam here
-  // (private sessions, Slack ownership, and the 0426 agent-access scope) so a
-  // known artifact id cannot read into a tree the attempt may not reach.
+  // does not cover them. Apply the same source authorization here.
   const requireAgentSessionAccess = async (
     c: Context,
     grant: Awaited<ReturnType<typeof requireAccessGrant>>,
   ): Promise<void> => {
-    if (!grantHasAgentAttemptAuthority(grant)) return;
     try {
       await requireSessionAuthorization(deps, grant, {
         sessionId: c.req.param("sessionId") ?? "",
@@ -648,7 +704,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    await requireAgentSessionAccess(c, grant);
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
     const artifact = await getRetainedScreenshotArtifact(
       db,
@@ -659,6 +714,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
+    await requireAgentSessionAccess(c, grant);
     return c.json(retainedScreenshotMetadata(artifact));
   });
 
@@ -667,7 +723,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-      await requireAgentSessionAccess(c, grant);
       const artifactId = retainedArtifactId(c.req.param("artifactId"));
       const artifact = await getRetainedScreenshotArtifact(
         db,
@@ -678,6 +733,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!artifact) {
         return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
       }
+      await requireAgentSessionAccess(c, grant);
       return await serveRetainedArtifactContent(
         c,
         objectStorage,
@@ -919,7 +975,7 @@ export async function fileAuthoritySubjectIdForGrant(
   deps: Pick<ApiRouteDeps, "db">,
   grant: import("@opengeni/contracts").AccessGrant,
 ): Promise<string | null> {
-  if (grant.principalKind !== "agent_attempt") return grant.subjectId;
+  if (!grantHasAgentAttemptAuthority(grant)) return grant.subjectId;
   const sessionId = grant.metadata?.["sessionId"];
   if (typeof sessionId !== "string") {
     throw new HTTPException(404, { message: "file not found" });
