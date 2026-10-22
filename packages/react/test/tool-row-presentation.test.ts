@@ -21,6 +21,57 @@ function call(partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">): Tool
 }
 
 describe("shared tool row presentation", () => {
+  test("skill steps say skill and name which one", () => {
+    const skillOutput = {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            skillId: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53",
+            files: [
+              {
+                path: "SKILL.md",
+                content:
+                  "---\nname: operate-smart-home\ndescription: Use for the house.\n---\n# Home",
+              },
+            ],
+          }),
+        },
+      ],
+    };
+    const read = toolRowPresentation(
+      englishText,
+      call({
+        name: "skill_read",
+        arguments: { skill: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53" },
+        output: skillOutput,
+      }),
+    );
+    expect(read.title).toBe("Read skill");
+    expect(read.preview).toEqual({ kind: "text", text: "Operate smart home" });
+    const running = toolRowPresentation(
+      englishText,
+      call({ name: "skill_read", status: "running", arguments: { skill: "builtin:documents" } }),
+    );
+    expect(running.title).toBe("Reading skill");
+    expect(running.preview).toMatchObject({ text: "Documents" });
+    const byId = toolRowPresentation(
+      englishText,
+      call({
+        name: "skill_read",
+        arguments: { skill: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53" },
+        output: { content: [{ type: "text", text: '{"alreadyInContext":true}' }] },
+      }),
+    );
+    expect(byId.preview).toEqual({ kind: "text", text: "Done" });
+    const search = toolRowPresentation(
+      englishText,
+      call({ name: "skill_search", arguments: { query: "excel" }, output: "[]" }),
+    );
+    expect(search.title).toBe("Searched skills");
+    expect(search.preview).toEqual({ kind: "text", text: "excel" });
+  });
+
   test("tool_search reads as a lookup with the disclosed tools", () => {
     const row = toolRowPresentation(
       englishText,

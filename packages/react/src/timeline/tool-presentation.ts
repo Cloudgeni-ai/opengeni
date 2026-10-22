@@ -74,7 +74,7 @@ export type ToolIconKind =
   | "archive"
   | "folder"
   | "site"
-  | "guide"
+  | "skill"
   | "settings"
   | "bell"
   | "inbox"
@@ -799,6 +799,64 @@ export function goalToolPreview(name: string, args: unknown): string | null {
   return text ? truncatePreview(text, 90) : null;
 }
 
+const SKILL_TOOLS: ReadonlySet<string> = new Set([
+  "skill_read",
+  "repository_skill_read",
+  "skill_checkout",
+  "skill_search",
+  "skill_save",
+  "skill_publish",
+  "skill_install",
+  "skill_remove",
+]);
+const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** "operate-smart-home" → "Operate smart home"; "builtin:documents" → "Documents". */
+function readableSkillName(name: string): string | null {
+  const plain = name
+    .trim()
+    .replace(/^builtin:/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!plain || UUID_LIKE.test(name.trim())) return null;
+  return plain.charAt(0).toUpperCase() + plain.slice(1);
+}
+
+/** The `name:` in a returned SKILL.md's front matter, read from raw or JSON-escaped text. */
+function skillNameInOutput(output: unknown): string | null {
+  const { text } = unwrapMcpOutput(output);
+  const head = text.slice(0, 4_000).replace(/\\n/g, "\n");
+  const match = /(?:^|\n|")---\s*\n(?:[^\n]*\n)*?name:\s*["']?([^"'\n\\]+?)["']?\s*\n/.exec(head);
+  return match?.[1]?.trim() || null;
+}
+
+/**
+ * Which skill a skill step used: the name in the SKILL.md it returned, else the
+ * name or query it was called with. A bare id is never shown.
+ */
+export function skillToolPreview(item: ToolCallItem): string | null {
+  const leaf = mcpToolLeaf(item.name);
+  if (!SKILL_TOOLS.has(leaf)) return null;
+  const args = parseToolArgs(item.arguments);
+  if (leaf === "skill_search") {
+    return typeof args.query === "string" && args.query.trim()
+      ? truncatePreview(args.query, 72)
+      : null;
+  }
+  const returned = item.status === "running" ? null : skillNameInOutput(item.output);
+  const requested =
+    typeof args.skill === "string"
+      ? args.skill
+      : typeof args.name === "string"
+        ? args.name
+        : typeof args.skillId === "string"
+          ? args.skillId
+          : null;
+  const name = readableSkillName(returned ?? requested ?? "");
+  return name ? truncatePreview(name, 72) : null;
+}
+
 /**
  * The icon for each built-in step. Tools that read as the same step share its
  * icon, so a row's icon always matches its words ("Opened the browser" draws
@@ -828,10 +886,10 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   updateInstructions: "brain",
   coordinateWork: "sessions",
   // Guides (Skills)
-  readGuide: "guide",
-  findGuides: "guide",
-  saveGuide: "guide",
-  removeGuide: "guide",
+  readGuide: "skill",
+  findGuides: "skill",
+  saveGuide: "skill",
+  removeGuide: "skill",
   // Computers
   findComputers: "server",
   switchComputer: "server",
@@ -970,7 +1028,7 @@ export function genericToolIconKind(name: string): ToolIconKind {
                                 : leaf.includes("document")
                                   ? "file-search"
                                   : leaf.startsWith("skill_")
-                                    ? "guide"
+                                    ? "skill"
                                     : "wrench";
 }
 
@@ -1213,7 +1271,8 @@ function computerActPreview(action: ComputerActAction): string | undefined {
  * status preview (Running… / Done / error snippet).
  */
 export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
-  const goalPreview = goalToolPreview(item.name, parseToolArgs(item.arguments));
+  const goalPreview =
+    goalToolPreview(item.name, parseToolArgs(item.arguments)) ?? skillToolPreview(item);
   const title = toolDisplayName(t, item.name, item.display, callStepPhase(item));
   if (item.status !== "running") {
     const { text: outText, isError } = unwrapMcpOutput(item.output);
