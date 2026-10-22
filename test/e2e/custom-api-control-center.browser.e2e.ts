@@ -62,6 +62,8 @@ describe("custom API control center diagnostics", () => {
       "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false",
       "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true",
       "view=page&limit=1&projection=summary&pinsOnly=true",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false&siteConversations=group",
+      "view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include",
     ]) {
       expect(
         isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
@@ -97,6 +99,17 @@ describe("custom API control center diagnostics", () => {
     for (const [method, url, error] of [
       ["GET", `${sessionsUrl}?${totalsQuery}&unexpected=true`, "net::ERR_ABORTED"],
       ["GET", `${sessionsUrl}?${totalsQuery}&includeTotals=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${totalsQuery}&siteConversations=include`, "net::ERR_ABORTED"],
+      [
+        "GET",
+        `${sessionsUrl}?${totalsQuery}&siteConversations=group&siteConversations=group`,
+        "net::ERR_ABORTED",
+      ],
+      [
+        "GET",
+        `${sessionsUrl}?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=group`,
+        "net::ERR_ABORTED",
+      ],
       [
         "GET",
         `${sessionsUrl}?${totalsQuery.replace("includeTotals=true", "includeTotals=false")}`,
@@ -583,10 +596,12 @@ function isExpectedSessionPageCancellation(
     "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
     "archiveStatus=active&includePinned=false&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
     "archiveStatus=active&includePinned=false&includeTotals=true&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&includeTotals=true&limit=4&parentSessionId=null&projection=summary&siteConversations=group&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
     "limit=1&pinsOnly=true&projection=summary&view=page",
+    "limit=1&pinsOnly=true&projection=summary&siteConversations=include&view=page",
   ]).has(actual);
 }
 
