@@ -587,15 +587,16 @@ export function OrganizationModelsList({
             primary={account.active}
             meta={[account.scope === "user" ? yours : tag, claudePlan(account)]}
             cells={{
-              usage: (
-                <ClaudeAccountUsageReadout
-                  client={client}
-                  scope="workspace"
-                  scopeId={workspace.id}
-                  account={account}
-                  canManage={workspace.canManage && account.scope !== "organization"}
-                />
-              ),
+              usage:
+                account.status === "active" ? (
+                  <ClaudeAccountUsageReadout
+                    client={client}
+                    scope="workspace"
+                    scopeId={workspace.id}
+                    account={account}
+                    canManage={workspace.canManage && account.scope !== "organization"}
+                  />
+                ) : null,
             }}
             indicator={
               account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"

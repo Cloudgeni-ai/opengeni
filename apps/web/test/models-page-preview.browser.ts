@@ -77,6 +77,33 @@ try {
     await noOverflow();
     await shot("list");
 
+    // Many accounts: a fact with no room drops out whole; no row is left
+    // showing a separator dot with nothing after it.
+    await open("many=1");
+    await page.getByText("Ada's plan", { exact: true }).first().waitFor();
+    const loneDots = await page.evaluate(() =>
+      [...document.querySelectorAll("span[aria-hidden='true']")]
+        .filter((dot) => dot.textContent === "·")
+        .filter((dot) => {
+          const part = dot.parentElement!.getBoundingClientRect();
+          const line = (
+            dot.closest("p") ?? dot.parentElement!.parentElement!
+          ).getBoundingClientRect();
+          const text = dot.nextElementSibling?.getBoundingClientRect();
+          const shown =
+            part.width > 0 &&
+            part.top < line.bottom &&
+            part.bottom > line.top &&
+            part.left < line.right &&
+            part.right > line.left;
+          return shown && text !== undefined && text.width < 8;
+        })
+        .map((dot) => dot.nextElementSibling?.textContent ?? ""),
+    );
+    assert(loneDots.length === 0, `meta parts shown as a lone dot: ${loneDots.join(", ")}`);
+    await noOverflow();
+    await shot("many");
+
     assert(errors.length === 0, `page errors: ${errors.join("; ")}`);
     await page.close();
   }
