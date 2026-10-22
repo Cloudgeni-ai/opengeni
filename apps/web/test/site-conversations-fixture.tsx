@@ -48,11 +48,7 @@ function Fixture() {
           summary={{ kind: "active", count: 1, total: 3, label: "1 working" }}
           count={3}
         />
-        {expanded && (
-          <p className="px-9 py-2 text-xs text-fg-muted">
-            Conversations expand here
-          </p>
-        )}
+        {expanded && <p className="px-9 py-2 text-xs text-fg-muted">Conversations expand here</p>}
         <h2 className="px-2 pb-2 pt-8 text-xs text-fg-muted">Growth project</h2>
         <div className="flex items-center gap-1 rounded-md bg-surface-2 px-2 py-2 text-sm">
           <SiteOriginLink session={sessions[0]!} compact />
@@ -61,9 +57,7 @@ function Fixture() {
       </aside>
       <section className="min-w-0 flex-1">
         <header className="flex items-center justify-between gap-4 border-b border-border p-4">
-          <h1 className="truncate text-sm font-medium">
-            Review conversion trends
-          </h1>
+          <h1 className="truncate text-sm font-medium">Review conversion trends</h1>
           <SiteOriginLink session={sessions[0]!} />
         </header>
         <div className="p-8">
@@ -74,12 +68,9 @@ function Fixture() {
             title={origin.title}
             client={{
               listSessionPage: async (_workspace, options = {}) => {
-                if (options.siteAccessId !== siteId)
-                  throw new Error("Missing Site filter");
+                if (options.siteAccessId !== siteId) throw new Error("Missing Site filter");
                 const matches = sessions.filter((s) =>
-                  s
-                    .title!.toLowerCase()
-                    .includes(options.search?.toLowerCase() ?? ""),
+                  s.title!.toLowerCase().includes(options.search?.toLowerCase() ?? ""),
                 );
                 return {
                   pinned: [],
@@ -89,11 +80,7 @@ function Fixture() {
                       ? matches.slice(2)
                       : matches.slice(0, 2),
                   nextCursor:
-                    !options.archivedOnly &&
-                    !options.cursor &&
-                    matches.length > 2
-                      ? "older"
-                      : null,
+                    !options.archivedOnly && !options.cursor && matches.length > 2 ? "older" : null,
                   filtersApplied: true,
                   siteAccessId: siteId,
                 };
@@ -112,6 +99,4 @@ const router = createRouter({
   routeTree: createRootRoute({ component: Fixture }),
   history: createMemoryHistory({ initialEntries: ["/"] }),
 });
-createRoot(document.getElementById("root")!).render(
-  <RouterProvider router={router} />,
-);
+createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

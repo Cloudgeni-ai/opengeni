@@ -10,10 +10,7 @@ import type { Database } from "./database";
 import * as schema from "./schema";
 import { excludeUnclaimedHumanPromptEventFilter } from "./session-prompt-visibility";
 import { readSessionMessageSliceInScope } from "./session-event-slices";
-import {
-  fromPostgresLosslessJson,
-  LOSSLESS_JSON_STRING_PREFIX,
-} from "./lossless-json";
+import { fromPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "./lossless-json";
 
 const Position = z
   .object({
@@ -76,10 +73,7 @@ let caseClasses: ReadonlyMap<number, readonly number[]> | undefined;
  * against its `iu` matching, so the database filter agrees with the exact
  * JavaScript matcher (including K/k/U+212A, s/S/U+017F and the Greek sigmas).
  */
-export function sessionMessageCaseClasses(): ReadonlyMap<
-  number,
-  readonly number[]
-> {
+export function sessionMessageCaseClasses(): ReadonlyMap<number, readonly number[]> {
   if (caseClasses) return caseClasses;
   const edges = new Map<number, Set<number>>();
   const link = (a: number, b: number) => {
@@ -103,8 +97,7 @@ export function sessionMessageCaseClasses(): ReadonlyMap<
   for (const start of edges.keys()) {
     if (classes.has(start)) continue;
     const members = new Set([start]);
-    for (const member of members)
-      for (const next of edges.get(member) ?? []) members.add(next);
+    for (const member of members) for (const next of edges.get(member) ?? []) members.add(next);
     const sorted = [...members].sort((a, b) => a - b);
     for (const member of sorted) classes.set(member, sorted);
   }
@@ -146,11 +139,7 @@ export function sessionMessageTextMatchSql(
   };
 }
 
-export function sessionMessageSearchSnippet(
-  text: string,
-  start: number,
-  length: number,
-) {
+export function sessionMessageSearchSnippet(text: string, start: number, length: number) {
   let left = Math.max(0, start - 120);
   let right = Math.min(text.length, start + length + 120);
   if (left > 0 && /[\uDC00-\uDFFF]/.test(text[left]!)) left--;
@@ -202,9 +191,7 @@ export async function scanSessionMessages(
         cursor.matched > cursor.scanned ||
         cursor.matched > cursor.occurrences ||
         (cursor.position.skipSession &&
-          (request.groupBy !== "session" ||
-            !cursor.position.done ||
-            !cursor.position.matched))
+          (request.groupBy !== "session" || !cursor.position.done || !cursor.position.matched))
       )
         throw new Error();
       position = cursor.position;
@@ -215,10 +202,7 @@ export async function scanSessionMessages(
       throw new SessionMessageSearchCursorError();
     }
   }
-  const pattern = new RegExp(
-    sessionMessageLiteralPattern(request.query),
-    "giu",
-  );
+  const pattern = new RegExp(sessionMessageLiteralPattern(request.query), "giu");
   const matches: SessionMessageSearchMatch[] = [];
   let exhausted = false;
   const e = schema.sessionEvents;
@@ -246,10 +230,7 @@ export async function scanSessionMessages(
     // Suppression requires the competing copy to retain searchable string text
     // itself: a later text-less completion (failed/empty retry sharing the
     // provider message id) must never hide the earlier complete text.
-    const textMatch = sessionMessageTextMatchSql(
-      request.query,
-      sql`${e.payload}->>'text'`,
-    );
+    const textMatch = sessionMessageTextMatchSql(request.query, sql`${e.payload}->>'text'`);
     const rows: CandidateRow[] = await db.execute<CandidateRow>(sql`
       with eligible as materialized (
         select ${e.id} as id, ${e.sessionId} as session_id, ${e.sequence} as sequence,
@@ -353,11 +334,7 @@ export async function scanSessionMessages(
     const visitedBefore = scanned - (position && !position.done ? 1 : 0);
     const budgetStarted = performance.now();
     let identityIndex = 0;
-    for (
-      let window = 0;
-      window < 32 && matches.length < (request.limit ?? 20);
-      window++
-    ) {
+    for (let window = 0; window < 32 && matches.length < (request.limit ?? 20); window++) {
       signal?.throwIfAborted();
       if (window > 0 && performance.now() - budgetStarted >= 1_500) break;
       const identity = identities[identityIndex];
@@ -386,15 +363,11 @@ export async function scanSessionMessages(
       }
       const offset = position!.offset;
       const utf16Offset = position!.utf16Offset;
-      const smallText = fromPostgresLosslessJson(
-        identity.smallText,
-        identity.codec,
-      );
+      const smallText = fromPostgresLosslessJson(identity.smallText, identity.codec);
       // Amortize full-source detoasting/codec validation over adjacent windows,
       // not a larger request budget. A four-window read consumes four of the
       // original 32 slots, even if a match/short source ends it early.
-      const scalarWindows =
-        typeof smallText === "string" ? 1 : Math.min(4, 32 - window);
+      const scalarWindows = typeof smallText === "string" ? 1 : Math.min(4, 32 - window);
       const slice =
         typeof smallText === "string"
           ? {
@@ -426,19 +399,10 @@ export async function scanSessionMessages(
         identityIndex++;
         continue;
       }
-      pattern.lastIndex = Math.max(
-        0,
-        position!.minimumMatchOffset - utf16Offset,
-      );
+      pattern.lastIndex = Math.max(0, position!.minimumMatchOffset - utf16Offset);
       let found: RegExpExecArray | null;
-      const messageId = fromPostgresLosslessJson(
-        identity.messageId,
-        identity.codec,
-      );
-      while (
-        matches.length < (request.limit ?? 20) &&
-        (found = pattern.exec(slice.text))
-      ) {
+      const messageId = fromPostgresLosslessJson(identity.messageId, identity.codec);
+      while (matches.length < (request.limit ?? 20) && (found = pattern.exec(slice.text))) {
         matches.push({
           sessionId: identity.sessionId,
           sessionTitle: identity.sessionTitle,
@@ -448,11 +412,7 @@ export async function scanSessionMessages(
           role: identity.type === "user.message" ? "user" : "assistant",
           messageId: typeof messageId === "string" ? messageId : null,
           messageMatchOffset: utf16Offset + found.index,
-          snippet: sessionMessageSearchSnippet(
-            slice.text,
-            found.index,
-            found[0].length,
-          ),
+          snippet: sessionMessageSearchSnippet(slice.text, found.index, found[0].length),
         });
         if (!position!.matched) matched++;
         occurrences++;
@@ -475,10 +435,7 @@ export async function scanSessionMessages(
         } while (identities[identityIndex]?.sessionId === identity.sessionId);
         continue;
       }
-      const units =
-        slice.unit === "utf16"
-          ? slice.text.length
-          : Array.from(slice.text).length;
+      const units = slice.unit === "utf16" ? slice.text.length : Array.from(slice.text).length;
       if (matches.length >= (request.limit ?? 20)) {
         if (
           offset + units >= slice.total &&
@@ -511,15 +468,11 @@ export async function scanSessionMessages(
         ...position!,
         offset: offset + advance,
         utf16Offset: utf16Offset + prefix.length,
-        minimumMatchOffset: Math.max(
-          position!.minimumMatchOffset,
-          utf16Offset + prefix.length,
-        ),
+        minimumMatchOffset: Math.max(position!.minimumMatchOffset, utf16Offset + prefix.length),
         done: false,
       };
     }
-    if (identityIndex >= identities.length && identities.length < 33)
-      exhausted = true;
+    if (identityIndex >= identities.length && identities.length < 33) exhausted = true;
     if (exhausted) scanned = visitedBefore + visited;
   }
   signal?.throwIfAborted();
