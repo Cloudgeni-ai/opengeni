@@ -1,5 +1,5 @@
 import { and, eq, sql, type SQL } from "drizzle-orm";
-import { type Database, rawRows, withRlsContext } from "./database";
+import { type Database, isTransactionHandle, rawRows, withRlsContext } from "./database";
 import * as schema from "./schema";
 
 /**
@@ -57,6 +57,18 @@ export async function sessionsWithToolRouterHistory(
       workspaceId: input.workspaceId,
       sessionId: sql`requested.session_id`,
     });
+    // Only a plain index scan stops each probe at its first router item. The
+    // planner prices a probe for an unknown requested session at a few rows, so
+    // a bitmap scan costs within a few percent and wins on small statistics
+    // shifts; it collects every router item of the session before LIMIT 1 can
+    // stop. Rule bitmap scans out for this scope only.
+    const [previous] = isTransactionHandle(db)
+      ? await rawRows<{ setting: string }>(
+          scopedDb,
+          sql`select current_setting('enable_bitmapscan') as setting`,
+        )
+      : [];
+    await scopedDb.execute(sql`select set_config('enable_bitmapscan', 'off', true)`);
     const rows = await rawRows<{ sessionId: string }>(
       scopedDb,
       sql`
@@ -65,6 +77,13 @@ export async function sessionsWithToolRouterHistory(
       cross join lateral (${probe}) found
     `,
     );
+    // A released savepoint keeps transaction-local settings; restore the
+    // caller's. A failed probe rolls the savepoint, and the setting, back.
+    if (previous) {
+      await scopedDb.execute(
+        sql`select set_config('enable_bitmapscan', ${previous.setting}, true)`,
+      );
+    }
     return new Set(rows.map((row) => row.sessionId));
   });
 }

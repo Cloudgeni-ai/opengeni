@@ -263,6 +263,7 @@ test("response pages batch router probes in one transaction, without scanning re
   let statements = 0;
   let transactions = 0;
   let batchQuery: { text: string; params: unknown[] } | undefined;
+  let plannerStatement: string | undefined;
   const measurements: {
     operation: string;
     statements: number;
@@ -283,6 +284,7 @@ test("response pages batch router probes in one transaction, without scanning re
       if (query.includes("cross join lateral") && query.includes("requested.session_id")) {
         batchQuery = { text: query, params: [...params] };
       }
+      if (query.includes("set_config('enable_bitmapscan'")) plannerStatement = query;
     };
     for (let index = 0; index < 3; index++) {
       await measure("individual", async () => {
@@ -310,14 +312,19 @@ test("response pages batch router probes in one transaction, without scanning re
   for (const row of measurements) {
     expect(row.transactions).toBe(row.operation === "batch" ? 1 : 50);
     // The first single reads may also describe driver types on new connections.
-    if (row.operation === "batch") expect(row.statements).toBe(4);
+    // Batch: begin, RLS scope, planner setting, probe, commit.
+    if (row.operation === "batch") expect(row.statements).toBe(5);
   }
   if (process.env.OPENGENI_BENCH_ROUTER_HISTORY === "1")
     console.log(JSON.stringify({ routerHistory: measurements }));
   if (!batchQuery) throw new Error("No batch query captured");
+  if (!plannerStatement) throw new Error("No batch planner setting captured");
   await shared.admin`analyze session_history_items`;
   const query = batchQuery;
+  const planner = plannerStatement;
   await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+    // Replay the batch transaction exactly as the product sent it.
+    await tx.execute(sql.raw(planner));
     const fragments = query.text
       .split(/\$(\d+)/g)
       .map((part, index) =>
@@ -345,6 +352,13 @@ test("response pages batch router probes in one transaction, without scanning re
     expect(
       probes.reduce((sum, node) => sum + node["Actual Rows"] * node["Actual Loops"], 0),
     ).toBeLessThanOrEqual(50);
+  });
+  // Inside a caller's transaction the probe runs in a savepoint; the caller
+  // keeps its own planner setting afterwards.
+  await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+    expect(await sessionsWithToolRouterHistory(tx, input)).toEqual(new Set([f.sessionId]));
+    const [setting] = await tx.execute<{ enable_bitmapscan: string }>(sql`show enable_bitmapscan`);
+    expect(setting?.enable_bitmapscan).toBe("on");
   });
 }, 180_000);
 
