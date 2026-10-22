@@ -60,6 +60,9 @@ test.each([
       await rm(directory, { recursive: true, force: true });
     }
   },
+  // Each child intentionally exhausts the fixture's bounded Docker retry path.
+  // Match the canonical unit runner when this file is run directly as well.
+  30_000,
 );
 
 test("dedicated-schema proof fails when its required PostgreSQL fixture is unavailable", async () => {
