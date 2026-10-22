@@ -29,6 +29,8 @@ type StoredHumanInputDraft = {
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
 
 const STORAGE_PREFIX = "opengeni.human-input-draft.v1:";
+/** Who the tab's drafts belong to; outside STORAGE_PREFIX so it is never a draft. */
+const OWNER_STORAGE_KEY = "opengeni.human-input-draft-owner.v1";
 /** Most unsent request drafts kept per tab; the oldest are dropped first. */
 export const HUMAN_INPUT_DRAFT_MAX_ENTRIES = 20;
 /** Unsent drafts older than this are discarded. */
@@ -37,6 +39,7 @@ export const HUMAN_INPUT_DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_SERIALIZED_LENGTH = 64 * 1024;
 
 const memory = new Map<string, StoredHumanInputDraft>();
+let memoryOwner: string | null = null;
 
 function browserStorage(): DraftStorage | null {
   try {
@@ -226,6 +229,37 @@ export function forgetAllHumanInputDrafts(): void {
   const storage = browserStorage();
   for (const key of [...memory.keys()]) removeKey(key, storage);
   if (storage) for (const key of storageKeys(storage)) removeKey(key, storage);
+  memoryOwner = null;
+  try {
+    storage?.removeItem(OWNER_STORAGE_KEY);
+  } catch {
+    // Best effort.
+  }
+}
+
+/**
+ * Record who is signed in to this tab. When a different person than the one
+ * the drafts belong to signs in, every unsent answer is forgotten first; the
+ * same person (a reload, a re-authentication, an interrupted account switch)
+ * keeps them.
+ */
+export function claimHumanInputDraftOwner(ownerId: string): void {
+  const storage = browserStorage();
+  let previous = memoryOwner;
+  if (previous === null) {
+    try {
+      previous = storage?.getItem(OWNER_STORAGE_KEY) ?? null;
+    } catch {
+      previous = null;
+    }
+  }
+  if (previous !== null && previous !== ownerId) forgetAllHumanInputDrafts();
+  memoryOwner = ownerId;
+  try {
+    storage?.setItem(OWNER_STORAGE_KEY, ownerId);
+  } catch {
+    // The in-memory owner still guards in-app account switches.
+  }
 }
 
 /**
@@ -288,4 +322,5 @@ function enforceBounds(storage: DraftStorage | null, now: number, current: strin
 /** Test seam: forget the in-memory map (simulates a reload). */
 export function resetHumanInputDraftMemoryForTests(): void {
   memory.clear();
+  memoryOwner = null;
 }

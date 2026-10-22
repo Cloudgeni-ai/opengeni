@@ -30,7 +30,7 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage } from "../lib/format";
-import { forgetAllHumanInputDrafts } from "../human-input-draft-store";
+import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
 import {
@@ -317,6 +317,12 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
+  // Unsent answers to agent questions belong to the person signed in to this
+  // tab: a different person signing in forgets them; the same person keeps them.
+  const authUserId = authSession?.user.id ?? null;
+  useEffect(() => {
+    if (authUserId) claimHumanInputDraftOwner(authUserId);
+  }, [authUserId]);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const accessContextRef = useRef(accessContext);
@@ -2185,7 +2191,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setWorkspaces([]);
       setAccessError(null);
     });
-    forgetAllHumanInputDrafts();
     configureManagedActorEpoch(transition.to?.actorEpoch ?? null);
     // Create the next client only after the old actor's transport and client
     // generation have been invalidated. This also reconnects streams for two

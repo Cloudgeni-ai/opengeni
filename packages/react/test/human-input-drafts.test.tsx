@@ -14,6 +14,7 @@ const { HumanInputForm, HumanInputSurface, useHumanInputRequests } = await impor
 const {
   HUMAN_INPUT_DRAFT_MAX_AGE_MS,
   HUMAN_INPUT_DRAFT_MAX_ENTRIES,
+  claimHumanInputDraftOwner,
   forgetAllHumanInputDrafts,
   forgetHumanInputDraft,
   humanInputDraftKey,
@@ -607,6 +608,27 @@ describe("human-input draft lifecycle edges", () => {
     resetHumanInputDraftMemoryForTests();
     expect(readHumanInputDraft(scope, { questions })).toBeNull();
     expect(readHumanInputDraft(elsewhere, { questions })).toBeNull();
+  });
+
+  test("drafts survive the same person signing in again but not another person", () => {
+    const typed = { summary: { values: ["mine"], other: "", otherSelected: false } };
+    claimHumanInputDraftOwner("user-a");
+    writeHumanInputDraft(scope, questions, typed);
+
+    // Reload, re-authentication or an interrupted switch: same person.
+    resetHumanInputDraftMemoryForTests();
+    claimHumanInputDraftOwner("user-a");
+    expect(readHumanInputDraft(scope, { questions })).not.toBeNull();
+
+    // A different person in the same tab, even after a reload.
+    resetHumanInputDraftMemoryForTests();
+    claimHumanInputDraftOwner("user-b");
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
+
+    // In-app switch back and forth without storage still clears per person.
+    writeHumanInputDraft(scope, questions, typed);
+    claimHumanInputDraftOwner("user-a");
+    expect(readHumanInputDraft(scope, { questions })).toBeNull();
   });
 
   test("a denied pending-list read forgets that session's drafts", async () => {

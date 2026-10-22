@@ -216,7 +216,14 @@ Other text and selections) are kept per browser tab
 size and age) and restored when the card mounts again, for example after
 visiting Settings. A draft is forgotten when the answer is accepted or skipped,
 when the request has expired, and when `useHumanInputRequests` reads a pending
-list that no longer contains it. Secret answers are never stored.
+list that no longer contains it; a denied (401/403/404) pending-list read forgets
+every draft of that session. Secret answers are never stored. Drafts belong to
+the person signed in to the tab: the stock app calls
+`claimHumanInputDraftOwner(userId)` when the signed-in user is known (a
+different person forgets every draft; the same person keeps them across a
+reload or re-authentication) and `forgetAllHumanInputDrafts()` on sign-out.
+Embedding hosts whose signed-in person can change within one tab should call
+the same two functions from `@opengeni/react`.
 
 The stock Opengeni session route mounts the hook plus `HumanInputSurface` at the
 timeline tip, so the live question is part of the main conversation rather than
