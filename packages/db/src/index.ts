@@ -448,6 +448,7 @@ export {
   setSubscriptionCoreAllocator,
   setSubscriptionCorePrimary,
   setSubscriptionCoreRotation,
+  type SubscriptionCoreConnectionReach,
   type SubscriptionCoreConnectionRow,
   type SubscriptionCoreWake,
   type SubscriptionCoreWorkspaceView,
