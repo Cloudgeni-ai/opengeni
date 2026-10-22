@@ -1,5 +1,26 @@
 # @opengeni/core
 
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [6c7b552]
+- Updated dependencies [cfefee3]
+- Updated dependencies [65fc9ab]
+- Updated dependencies [d0bc2d6]
+  - @opengeni/runtime@4.5.0
+  - @opengeni/db@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/documents@4.5.0
+  - @opengeni/events@4.5.0
+  - @opengeni/capabilities@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/storage@4.5.0
+  - @opengeni/vaults@4.5.0
+  - @opengeni/network@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

@@ -1,5 +1,21 @@
 # @opengeni/db
 
+## 4.5.0
+
+### Patch Changes
+
+- cfefee3: Let organization administrators inspect usage on independent subscription connections concurrently. Keep the organization membership fence shared for these reads, while lifecycle writers and each connection's credential custody retain their exclusive locks. Demotion still waits for in-flight provider reads and prevents subsequent reads and quota recording.
+- Updated dependencies [6c7b552]
+- Updated dependencies [d0bc2d6]
+  - @opengeni/codemode@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/subscriptions@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes
