@@ -232,7 +232,10 @@ export function FormFrame({
     } catch (caught) {
       if (mountedRef.current) setThrown(errorMessage(caught));
     } finally {
+      // The owner's bookkeeping outlives the form: a dialog closed by its
+      // owner during the save refuses Escape until it hears the save ended.
       if (mountedRef.current) setPending(false);
+      else onPendingChange?.(false);
     }
     if (!mountedRef.current) return;
     if (succeeded) onSubmitted?.();
