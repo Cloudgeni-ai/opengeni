@@ -188,7 +188,7 @@ test("a portable checkpoint is named only by automaticCheckpoint, never the publ
   const portable = { ...selection, artifactId: null };
   expect(SandboxRecoverySelection.safeParse(portable).success).toBe(false);
   expect(SandboxCheckpointSelection.parse(portable)).toEqual(portable);
-  const projection = {
+  const projection: SandboxRecoveryProjection = {
     version: 1,
     status: "eligible",
     reason: null,
