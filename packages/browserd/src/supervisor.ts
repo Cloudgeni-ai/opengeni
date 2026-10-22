@@ -558,6 +558,10 @@ export class BrowserSupervisor {
     const released: string[] = [];
     for (const runtime of [...this.sessions.values()]) {
       if (!idleReleasable(runtime, idleBefore)) continue;
+      // A download still transferring is the browser at work with nobody
+      // calling it; stopping the browser would fail the download.
+      if (await downloadInProgress(runtime)) continue;
+      if (!idleReleasable(runtime, idleBefore)) continue;
       const browserSessionId = runtime.options.browserSessionId;
       if (this.sessions.get(browserSessionId) !== runtime || this.ending.has(browserSessionId))
         continue;
@@ -3322,6 +3326,18 @@ function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
     runtime.controller.isIdle() &&
     hasPreservableWorkingRuntime(runtime)
   );
+}
+
+/** Whether the browser is still receiving a download. A store that cannot be
+ * read counts as busy, so an idle sweep never fails a download it cannot see. */
+async function downloadInProgress(runtime: Runtime): Promise<boolean> {
+  if (!runtime.downloadStore) return false;
+  try {
+    const downloads = await runtime.downloadStore.list();
+    return downloads.some((download) => download.status === "in_progress");
+  } catch {
+    return true;
+  }
 }
 
 /** A restart now loses neither admitted work nor unrecoverable session state. */

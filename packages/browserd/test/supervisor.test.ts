@@ -3191,6 +3191,72 @@ describe("same-working-directory controller restart", () => {
       }
     });
   });
+
+  test("an idle browser still receiving a download keeps running until the download settles", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      let browserContext: BrowserSupervisorDriverContext | null = null;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 60_000,
+        now: () => clock,
+        inspectOwnedProcess: async () => processState,
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => {
+          browserContext = context;
+          return {
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              closes++;
+              processState = "exited";
+            },
+            detach: async () => undefined,
+          };
+        },
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const session = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        // The page starts a download; Chrome reports it without any request.
+        await browserContext!.downloadEvents!.begin({
+          guid: "idle-download-guid",
+          targetId: null,
+          suggestedFilename: "large.bin",
+        });
+        await browserContext!.downloadEvents!.progress({
+          guid: "idle-download-guid",
+          state: "inProgress",
+          receivedBytes: 1024,
+          totalBytes: null,
+        });
+        clock += 20 * 60_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        expect(closes).toBe(0);
+        expect((await supervisor.listDownloads(session)).map((d) => d.status)).toEqual([
+          "in_progress",
+        ]);
+        // Listing was a use; once the download settles and the idle time passes
+        // again, the browser is released as before.
+        await browserContext!.downloadEvents!.progress({
+          guid: "idle-download-guid",
+          state: "canceled",
+          receivedBytes: 1024,
+          totalBytes: null,
+        });
+        clock += 61_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+        expect(closes).toBe(1);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
 });
 
 function syntheticOwnedProcess(context: BrowserSupervisorDriverContext) {

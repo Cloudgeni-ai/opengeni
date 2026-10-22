@@ -399,6 +399,105 @@ recoveryE2e(
   90_000,
 );
 
+recoveryE2e(
+  "an idle browser still receiving a download keeps running and completes it",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-idle-download-e2e-");
+    const rootDirectory = join(directory, "state");
+    let finishDownload = () => {};
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/large.bin") {
+          // Keeps transferring until the test ends it.
+          let timer: ReturnType<typeof setInterval> | undefined;
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(64 * 1024));
+              timer = setInterval(() => controller.enqueue(new Uint8Array(1024)), 100);
+              finishDownload = () => {
+                clearInterval(timer);
+                controller.close();
+              };
+            },
+            cancel() {
+              clearInterval(timer);
+            },
+          });
+          return new Response(body, {
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-disposition": 'attachment; filename="large.bin"',
+            },
+          });
+        }
+        return new Response(
+          `<!doctype html><title>Download</title><script>setTimeout(()=>{location.href="/large.bin"},50)</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let browserPid: number | undefined;
+    try {
+      await supervisor.createSession(options);
+      browserPid = await chromiumProfilePid(profile);
+      await supervisor.openTarget(options, `http://127.0.0.1:${server.port}/download`);
+      let downloads = await supervisor.listDownloads(options);
+      for (let attempt = 0; attempt < 100 && downloads.length === 0; attempt++) {
+        await Bun.sleep(100);
+        downloads = await supervisor.listDownloads(options);
+      }
+      expect(downloads.map((download) => download.status)).toEqual(["in_progress"]);
+      // Nobody calls browserd for longer than the idle time while bytes arrive.
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      expect(() => process.kill(browserPid!, 0)).not.toThrow();
+      finishDownload();
+      for (let attempt = 0; attempt < 100; attempt++) {
+        downloads = await supervisor.listDownloads(options);
+        if (downloads[0]?.status !== "in_progress") break;
+        await Bun.sleep(100);
+      }
+      expect(downloads.map((download) => download.status)).toEqual(["completed"]);
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(browserPid);
+    } catch (error) {
+      if (browserPid) {
+        try {
+          process.kill(browserPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
   const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
