@@ -44,7 +44,9 @@ import {
 } from "lucide-react";
 import { toast } from "../../lib/toast";
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -245,6 +247,8 @@ import type { Channel, Session as SessionDetails } from "../../types";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
 import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { chordLabel, currentPlatform } from "../../lib/actions/chords";
+import { useHeldModifier } from "../../lib/actions/held-modifier";
 import { requestCommandMenu } from "../../lib/actions/events";
 import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
@@ -2364,9 +2368,14 @@ export function SessionList() {
       directorySubject,
       rail.workspaceId,
       flat.map((session) => session.id),
-      pinned.map((session) => session.id),
+      pinnedNodes.map((node) => node.session.id),
     );
-  }, [directorySubject, rail.workspaceId, flat, pinned]);
+  }, [directorySubject, rail.workspaceId, flat, pinnedNodes]);
+  // ⌘1 to ⌘9 open the pinned chats in the order shown; holding ⌘ shows which.
+  const pinnedJumpNumbers = useMemo(
+    () => new Map(pinnedNodes.slice(0, 9).map((node, index) => [node.session.id, index + 1])),
+    [pinnedNodes],
+  );
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
@@ -3592,26 +3601,28 @@ export function SessionList() {
           <>
             {pinnedNodes.length > 0 ? (
               <>
-                <SessionGroup
-                  label="Pinned"
-                  nodes={pinnedNodes}
-                  localDeliveryAttention={localDeliveryAttention}
-                  flat={flat}
-                  activeSessionId={activeSessionId}
-                  focusIndex={focusIndex}
-                  onFocusSession={setFocusedSessionId}
-                  expanded={expanded}
-                  onToggleExpand={toggleExpand}
-                  childPages={childPages}
-                  onLoadMoreChildren={loadChildPage}
-                  onRename={context.updateSessionTitle}
-                  onPin={onPin}
-                  channels={channels}
-                  onMoveToChannel={onMoveToChannel}
-                  onUpdateAttention={onUpdateAttention}
-                  onArchive={onArchive}
-                  onRequestDelete={setSessionPendingDelete}
-                />
+                <PinnedJumpNumbers.Provider value={pinnedJumpNumbers}>
+                  <SessionGroup
+                    label="Pinned"
+                    nodes={pinnedNodes}
+                    localDeliveryAttention={localDeliveryAttention}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
+                  />
+                </PinnedJumpNumbers.Provider>
                 {pinnedTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
                     Showing the 100 most recently pinned sessions. Older pins are omitted.
@@ -4566,6 +4577,23 @@ function TreeLoadRow({
   );
 }
 
+/** The ⌘1 to ⌘9 number of each top-level pinned row; absent outside the Pinned section. */
+const PinnedJumpNumbers = createContext<ReadonlyMap<string, number> | null>(null);
+
+/** "⌘3" while ⌘ is held on a pinned row that ⌘3 opens; otherwise nothing. */
+function usePinnedJumpKey(sessionId: string, depth: number, mobile: boolean): string | undefined {
+  const jumpNumber = useContext(PinnedJumpNumbers)?.get(sessionId);
+  // Only where ⌘1 to ⌘9 work: browsers keep those keys for their own tabs.
+  const pinnedKeys = useActionShortcut("go.pinnedChat");
+  const platform = currentPlatform();
+  const held = useHeldModifier(
+    platform,
+    Boolean(pinnedKeys && jumpNumber && depth === 0 && !mobile),
+  );
+  if (!held || !pinnedKeys || !jumpNumber) return undefined;
+  return chordLabel({ ...pinnedKeys.chord, code: `Digit${jumpNumber}` }, platform);
+}
+
 function SessionRow(props: {
   session: Session;
   index: number;
@@ -4603,6 +4631,7 @@ function SessionRow(props: {
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
+  const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
   // A key press puts the person's attention elsewhere (⌘K right after opening a
   // chat, with the pointer still on its row), so the hover card gives way, as
   // tooltips do.
@@ -4858,6 +4887,7 @@ function SessionRow(props: {
                   summary={props.aggregateStatus}
                   scheduled={sessionHasUpcomingSchedule(props.session)}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
+                  jumpKey={jumpKey}
                   creator={creator}
                 />
               </Link>
