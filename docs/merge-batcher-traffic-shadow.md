@@ -168,7 +168,17 @@ Fresh bounded run/job queries must show room for the full-main reserve plus curr
 other workflow demand and 18 conservative candidate slots. Demand is the count of
 `queued`, `in_progress` and `requested` jobs; approval-waiting, concurrency-pending
 and completed jobs and runs without jobs reserve nothing, and an unrecognized job
-status holds. Any active Batch CI or incomplete capacity scan blocks publication,
+status holds. The scan is shared with the batcher (see the headroom section of
+[merge-batcher.md](merge-batcher.md)): every active status is listed twice,
+runs listed as `completed` are skipped (a `completed` Batch CI listing no longer
+blocks publication), runs proven approval-only (`waiting` in every listing, at
+least one `waiting` job, all other jobs `pending` or `completed`) are excluded
+from the 32-run cap, which still applies to every other active run, and at most
+64 active runs are scanned per observation within a 120-second deadline; larger
+backlogs hold. One observation costs up to 74 uncached requests (10 run-list plus
+64 job pages) against the 200-per-cycle and 600-per-hour read budgets above;
+exhausting them backs off and holds. Any active Batch CI or incomplete capacity
+scan blocks publication,
 and unpublished or no-run traffic candidates keep their own occupancy hold. The
 budget is an operator allocation, not a discovered GitHub/custom quota; reserve for
 other organization consumers outside this repository separately. Actions

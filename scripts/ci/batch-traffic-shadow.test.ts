@@ -814,6 +814,219 @@ describe("traffic recovery and bounded reads", () => {
         readHeadroom(scan([{ id: 0, status: "queued", ...OTHER }], idle), 1000, 40),
       ).rejects.toThrow("Invalid traffic number");
     });
+    describe("proven approval-only runs are excluded from the 32-run cap", () => {
+      let nextId = 1;
+      const runSet = (count: number, status: string, base: object, statuses: unknown[]) => {
+        const runs: Array<Record<string, unknown>> = [];
+        const pages: Record<number, WirePage> = {};
+        for (let i = 0; i < count; i++) {
+          const id = nextId++;
+          runs.push({ id, status, ...base });
+          pages[id] = page(jobs(...statuses));
+        }
+        return { runs, pages };
+      };
+      const combine = (...parts: Array<ReturnType<typeof runSet>>) => {
+        const requests: string[] = [];
+        const runs = parts.flatMap((part) => part.runs);
+        const inner = scan(runs, Object.assign({}, ...parts.map((part) => part.pages)));
+        return {
+          requests,
+          runs,
+          fresh: async (path: string) => {
+            requests.push(path);
+            return inner.fresh(path);
+          },
+        };
+      };
+      const approvalMain = (count: number) =>
+        runSet(count, "waiting", MAIN, ["waiting", "completed", "completed"]);
+      const approvalOther = (count: number) =>
+        runSet(count, "waiting", OTHER, ["waiting", "pending"]);
+      const busyOther = (count: number) =>
+        runSet(count, "queued", OTHER, ["in_progress", "completed"]);
+      const idleOther = (count: number) => runSet(count, "queued", OTHER, ["pending", "completed"]);
+      test("12 waiting runs (10 old main reruns) plus active runs crossing 32 are admitted", async () => {
+        nextId = 1;
+        const reader = combine(approvalMain(10), approvalOther(2), busyOther(4), idleOther(21));
+        // Negative control: the previous reader held on more than 32 distinct active runs.
+        expect(reader.runs.length).toBe(37);
+        expect(await readHeadroom(reader, 52, 30)).toMatchObject({
+          allowed: true,
+          occupied: 4,
+          reservedMain: 30,
+          candidateSlots: 18,
+          budget: 52,
+          scannedRuns: 37,
+          approvalOnlyRuns: 12,
+        });
+        expect(reader.requests.length).toBe(10 + 37);
+        nextId = 1;
+        const tight = combine(approvalMain(10), approvalOther(2), busyOther(5), idleOther(20));
+        expect(await readHeadroom(tight, 52, 30)).toMatchObject({ allowed: false, occupied: 5 });
+        nextId = 1;
+        const crossing = combine(approvalMain(10), approvalOther(2), idleOther(33));
+        expect(await readHeadroom(crossing, 1000, 30)).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("Too many active workflows"),
+        });
+      });
+      test("approval-only accumulation is bounded by the absolute scan", async () => {
+        nextId = 1;
+        expect(await readHeadroom(combine(approvalMain(40)), 52, 30)).toMatchObject({
+          allowed: true,
+          occupied: 0,
+          approvalOnlyRuns: 40,
+        });
+        nextId = 1;
+        const over = combine(approvalMain(65));
+        expect(await readHeadroom(over, 52, 30)).toMatchObject({
+          allowed: false,
+          scannedRuns: 0,
+          reason: expect.stringContaining("bounded scan of 64"),
+        });
+        expect(over.requests.length).toBe(10);
+      });
+      const flipping = (
+        from: string,
+        to: string,
+        flipAfter: string,
+        base: object,
+        jobPage: WirePage,
+      ) => {
+        let flipped = false;
+        const requests: string[] = [];
+        return {
+          requests,
+          fresh: async (path: string): Promise<WirePage> => {
+            requests.push(path);
+            if (/^actions\/runs\/\d+\/jobs\?/.test(path)) return jobPage;
+            const status = new URLSearchParams(path.split("?")[1]).get("status");
+            const subject = { id: 9, status: flipped ? to : from, ...base };
+            const list = subject.status === status ? [subject] : [];
+            if (status === flipAfter) flipped = true;
+            return { total_count: list.length, workflow_runs: list };
+          },
+        };
+      };
+      test("runs flipping status during the listing are observed by the second pass", async () => {
+        const running = page(jobs(...Array(20).fill("in_progress"), "waiting"));
+        const backwards = flipping("in_progress", "waiting", "waiting", OTHER, running);
+        expect(await readHeadroom(backwards, 52, 30)).toMatchObject({
+          allowed: false,
+          occupied: 20,
+          scannedRuns: 1,
+          approvalOnlyRuns: 0,
+        });
+        expect(backwards.requests.length).toBe(10 + 1);
+        const mainRun = flipping(
+          "in_progress",
+          "waiting",
+          "waiting",
+          MAIN,
+          page(jobs(...Array(35).fill("in_progress"), "waiting")),
+        );
+        expect(await readHeadroom(mainRun, 52, 30)).toMatchObject({
+          allowed: false,
+          reservedMain: 35,
+        });
+        const approved = flipping(
+          "waiting",
+          "queued",
+          "waiting",
+          OTHER,
+          page(jobs(...Array(5).fill("queued"))),
+        );
+        expect(await readHeadroom(approved, 52, 30)).toMatchObject({
+          allowed: false,
+          occupied: 5,
+          approvalOnlyRuns: 0,
+        });
+      });
+      test("responses arriving after the scan deadline hold", async () => {
+        let clock = 0;
+        nextId = 1;
+        const one = combine(busyOther(1));
+        const slowJob = await readHeadroom(
+          {
+            fresh: async (path: string) => {
+              if (path.includes("/jobs?")) clock += 120_001;
+              return one.fresh(path);
+            },
+          },
+          1000,
+          30,
+          () => clock,
+        );
+        expect(slowJob).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("deadline"),
+        });
+        clock = 0;
+        let lists = 0;
+        const slowEmpty = await readHeadroom(
+          {
+            fresh: async () => {
+              if (++lists === 10) clock += 120_001;
+              return { total_count: 0, workflow_runs: [] };
+            },
+          },
+          1000,
+          30,
+          () => clock,
+        );
+        expect(slowEmpty).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("deadline"),
+        });
+      });
+      test("mixed waiting runs, transitions and unknown statuses are not approval-only", async () => {
+        for (const statuses of [["waiting", "queued"], ["waiting", "in_progress"], []]) {
+          nextId = 1;
+          const mixed = combine(runSet(1, "waiting", OTHER, statuses), idleOther(32));
+          expect([statuses, await readHeadroom(mixed, 1000, 30)]).toMatchObject([
+            statuses,
+            { allowed: false, reason: expect.stringContaining("Too many active workflows") },
+          ]);
+        }
+        nextId = 1;
+        const unknown = combine(approvalMain(40), runSet(1, "waiting", MAIN, ["waiting", "nope"]));
+        expect(await readHeadroom(unknown, 1000, 30)).toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining("Unrecognized"),
+        });
+        nextId = 1;
+        const failing = combine(approvalMain(3));
+        await expect(
+          readHeadroom(
+            {
+              fresh: async (path: string) => {
+                if (path.includes("/jobs?")) throw new Error("provider unavailable");
+                return failing.fresh(path);
+              },
+            },
+            52,
+            30,
+          ),
+        ).rejects.toThrow("provider unavailable");
+        let clock = 0;
+        nextId = 1;
+        const slow = combine(approvalMain(10));
+        expect(
+          await readHeadroom(
+            {
+              fresh: async (path: string) => {
+                clock += 30_000;
+                return slow.fresh(path);
+              },
+            },
+            52,
+            30,
+            () => clock,
+          ),
+        ).toMatchObject({ allowed: false, reason: expect.stringContaining("deadline") });
+      });
+    });
   });
   test("persistent rate backoff and hourly budget prevent restart storms", async () => {
     const f = await fixture();
