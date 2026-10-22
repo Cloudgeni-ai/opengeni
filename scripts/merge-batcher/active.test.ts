@@ -17,6 +17,7 @@ import {
   config,
   digest,
   emptyLedger,
+  runnerJobDemand,
   type Ledger,
   type Manifest,
   type Pull,
@@ -765,6 +766,142 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       })) as unknown as typeof fetch);
     expect(await batch.mainBusy()).toBe(true);
     expect(batch.lastHeadroom?.reason).toContain("single candidate");
+  });
+  describe("runner headroom counts runner-holding jobs, not run placeholders", () => {
+    type JobPage = Record<string, unknown> | unknown[];
+    const MAIN = { head_branch: "main", path: ".github/workflows/ci.yml", event: "push" };
+    const OTHER = { head_branch: "feature", path: ".github/workflows/other.yml", event: "push" };
+    const jobs = (...statuses: unknown[]) =>
+      statuses.map((status) => (status === undefined ? {} : { status }));
+    const page = (list: unknown[]): JobPage => ({ total_count: list.length, jobs: list });
+    const reader = (
+      runs: Array<Record<string, unknown>>,
+      jobPages: Record<number, JobPage>,
+      budget = "60",
+      runPage?: (status: string) => JobPage,
+    ) => {
+      const cfg = config({
+        BATCHER_MODE: "active",
+        BATCHER_RUNNER_BUDGET: budget,
+        BATCHER_MAIN_RESERVE: "40",
+      });
+      const transport = (async (url: string | URL | Request) => {
+        const text = String(url);
+        const jobsMatch = /\/runs\/(\d+)\/jobs\?/.exec(text);
+        if (jobsMatch) return Response.json(jobPages[Number(jobsMatch[1])]);
+        const status = new URL(text).searchParams.get("status")!;
+        if (runPage) return Response.json(runPage(status));
+        const listed = runs.filter((run) => run.status === status);
+        return Response.json({ total_count: listed.length, workflow_runs: listed });
+      }) as typeof fetch;
+      return new GitHubReader(cfg, new GitHubAuth({}), transport);
+    };
+    test("classifier counts queued, in-progress and requested jobs only", () => {
+      expect(runnerJobDemand([])).toBe(0);
+      expect(runnerJobDemand(jobs("waiting", "waiting", "pending", "completed"))).toBe(0);
+      expect(runnerJobDemand(jobs("queued", "in_progress", "requested", "completed"))).toBe(3);
+      for (const invalid of ["action_required", "", "QUEUED", 1, null, undefined])
+        expect(runnerJobDemand(jobs("in_progress", invalid))).toBeNull();
+      expect(runnerJobDemand([null])).toBeNull();
+      expect(runnerJobDemand(["queued"])).toBeNull();
+    });
+    test.each([
+      ["zero-job other run held by its concurrency group", [], 0, true],
+      ["approval-waiting other jobs", ["waiting", "waiting", "waiting", "waiting"], 0, true],
+      ["concurrency-pending other jobs", ["pending", "pending", "pending"], 0, true],
+      ["completed other jobs", ["completed", "completed", "completed"], 0, true],
+      ["two runner-holding other jobs", ["queued", "in_progress", "completed"], 2, true],
+      ["three runner-holding other jobs", ["queued", "in_progress", "requested"], 3, false],
+      [
+        "mixed matrix counts each runner-holding job",
+        ["in_progress", "in_progress", "queued", "waiting", "pending", "completed", "completed"],
+        3,
+        false,
+      ],
+    ] as const)("%s", async (_name, statuses, demand, allowed) => {
+      const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: page(jobs(...statuses)) });
+      expect(await r.mainBusy()).toBe(!allowed);
+      expect(r.lastHeadroom).toMatchObject({
+        allowed,
+        occupied: demand,
+        reservedMain: 40,
+        candidateSlots: 18,
+        budget: 60,
+      });
+    });
+    test("main and non-main allocations are independent", async () => {
+      const busy = (budget: string) =>
+        reader(
+          [
+            { id: 1, status: "in_progress", ...MAIN },
+            { id: 2, status: "waiting", ...MAIN },
+            { id: 3, status: "queued", ...MAIN, head_branch: "production" },
+            { id: 4, status: "queued", ...MAIN, event: "pull_request" },
+            { id: 5, status: "pending", ...OTHER },
+          ],
+          {
+            1: page(jobs(...Array(45).fill("in_progress"), "waiting", "completed")),
+            2: page([]),
+            3: page(jobs("queued", "waiting")),
+            4: page(jobs("pending", "completed")),
+            5: page(jobs("in_progress")),
+          },
+          budget,
+        );
+      // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
+      const fits = busy("65");
+      expect(await fits.mainBusy()).toBe(false);
+      expect(fits.lastHeadroom).toMatchObject({ occupied: 47, reservedMain: 45 });
+      const tight = busy("64");
+      expect(await tight.mainBusy()).toBe(true);
+      expect(tight.lastHeadroom).toMatchObject({ occupied: 47, reservedMain: 45 });
+      // An idle main run never shrinks the configured reserve.
+      const quiet = reader(
+        [
+          { id: 1, status: "queued", ...MAIN },
+          { id: 3, status: "queued", ...MAIN, head_branch: "production" },
+        ],
+        { 1: page(jobs("waiting", "waiting")), 3: page(jobs("queued", "in_progress")) },
+      );
+      expect(await quiet.mainBusy()).toBe(false);
+      expect(quiet.lastHeadroom).toMatchObject({ occupied: 2, reservedMain: 40 });
+    });
+    test.each([
+      ["unknown job status", page(jobs("in_progress", "action_required")), "Unrecognized"],
+      ["missing job status", page(jobs("queued", undefined)), "Unrecognized"],
+      ["oversized job page", { total_count: 101, jobs: [] }, "Incomplete"],
+      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "Incomplete"],
+      ["malformed job page", { total_count: 0 }, "Incomplete"],
+    ] as const)("%s holds", async (_name, jobPage, reason) => {
+      const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }, "1000");
+      expect(await r.mainBusy()).toBe(true);
+      expect(r.lastHeadroom?.reason).toContain(reason);
+      expect(r.lastHeadroom?.allowed).toBe(false);
+    });
+    test("run scan boundaries still hold with idle jobs", async () => {
+      const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
+      const many = Array.from({ length: 33 }, (_, i) => ({
+        id: i + 1,
+        status: "queued",
+        ...OTHER,
+      }));
+      const tooMany = reader(many, idle, "1000");
+      expect(await tooMany.mainBusy()).toBe(true);
+      expect(tooMany.lastHeadroom?.reason).toContain("32-run");
+      const invalid = reader([{ id: 0, status: "queued", ...OTHER }], idle, "1000");
+      expect(await invalid.mainBusy()).toBe(true);
+      expect(invalid.lastHeadroom?.reason).toContain("Invalid active run");
+      const truncated = reader([], idle, "1000", () => ({ total_count: 1, workflow_runs: [] }));
+      expect(await truncated.mainBusy()).toBe(true);
+      expect(truncated.lastHeadroom?.reason).toContain("Incomplete");
+      const batch = reader(
+        [{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }],
+        { 7: page([]) },
+        "1000",
+      );
+      expect(await batch.mainBusy()).toBe(true);
+      expect(batch.lastHeadroom?.reason).toContain("single candidate");
+    });
   });
   test("recovery CLI requires explicit active configuration and confirmation before auth", async () => {
     await expect(main(["recover-effect"], {})).rejects.toThrow("requires active mode");
