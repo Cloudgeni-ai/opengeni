@@ -2,6 +2,13 @@
   "version": 1,
   "entries": [
     {
+      "capabilityId": "api:excel-addin",
+      "file": "excel.svg",
+      "sourceUrl": "https://learn.microsoft.com/office/dev/add-ins/",
+      "sourceLicense": "Microsoft Excel name; nominative catalog use",
+      "modifications": "Drawn as a simple generic green spreadsheet tile with an X; not a copy of the Microsoft logo."
+    },
+    {
       "capabilityId": "api:fiken",
       "file": "fiken.svg",
       "sourceUrl": "https://fiken.no/android-chrome-192x192.png",

@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  EXCEL_ADDIN_CAPABILITY_ID,
+  excelAddinCatalogItem,
+  searchCapabilityCatalogItems,
+} from "@opengeni/core";
 import type { OpStreamConnection } from "@opengeni/events";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { chooseWorkbook, excelAddin } from "../src/mcp/excel-tools";
@@ -308,6 +313,28 @@ describe("chooseWorkbook", () => {
     expect(error).toContain("open the Acme add-in (Home > Add-ins > Acme)");
     expect(error).not.toContain("Opengeni");
     expect(error.endsWith(" https://acme.example/excel-help")).toBe(true);
+  });
+
+  test("the catalog tile names the product's add-in, links its install page and is found by spreadsheet searches", () => {
+    const item = excelAddinCatalogItem(
+      excelAddin({ officeAddinName: "Acme", officeAddinInstallUrl: "https://acme.example/excel" }),
+    );
+    expect(item).toMatchObject({
+      id: EXCEL_ADDIN_CAPABILITY_ID,
+      kind: "api",
+      surfaceType: "first_party_excel_addin",
+      enabled: false,
+      runtime: { available: true },
+      metadata: { addinName: "Acme", installUrl: "https://acme.example/excel" },
+    });
+    expect(item.description).toContain("Acme add-in");
+    expect(item.description).not.toContain("Opengeni");
+    for (const query of ["excel", "spreadsheet", "xlsx", "Excel add-in"]) {
+      expect(searchCapabilityCatalogItems([item], query, 5).map((each) => each.item.id)).toEqual([
+        EXCEL_ADDIN_CAPABILITY_ID,
+      ]);
+    }
+    expect(excelAddinCatalogItem(excelAddin({})).runtime.available).toBe(false);
   });
 
   test("uses the only open workbook when none is named", () => {
