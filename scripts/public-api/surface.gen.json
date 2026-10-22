@@ -23420,6 +23420,26 @@
         "$": "enum=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"compute\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]"
       }
     },
+    "SandboxCheckpointSelection": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveGeneration": "integer!",
+        "$.artifactId": "string! null",
+        "$.authorityEpoch": "integer!",
+        "$.capturedAt": "string!",
+        "$.leaseEpoch": "integer!",
+        "$.leaseId": "string!",
+        "$.revision": "string!",
+        "$.routeEpoch": "integer!",
+        "$.sandboxGroupId": "string!",
+        "$.sessionId": "string!",
+        "$.version": "const!=[\"1\"]",
+        "$.workspaceGeneration": "integer!"
+      }
+    },
     "SandboxFileArtifactReceipt": {
       "io": [
         "output"
@@ -23448,6 +23468,7 @@
       "shape": {
         "$": "object",
         "$.automaticAvailable": "boolean?",
+        "$.automaticCheckpoint": "ref(SandboxCheckpointSelection)?",
         "$.automaticLane": "enum?=[\"\\\"checkpoint\\\"\",\"\\\"fresh_workspace\\\"\"]",
         "$.availableAt": "string?",
         "$.checkpoint": "ref(SandboxRecoverySelection)! null",
@@ -32044,6 +32065,7 @@
       "SANDBOX_FILE_ARTIFACT_MAX_BYTES": "value",
       "SandboxBackend": "type",
       "SandboxCapabilityName": "type",
+      "SandboxCheckpointSelection": "type",
       "SandboxCommandOutputDeltaPayload": "type",
       "SandboxFileArtifactReceipt": "type",
       "SandboxOs": "type",

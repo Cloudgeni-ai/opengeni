@@ -32,6 +32,32 @@ let projection: SandboxRecoveryProjection = {
   freshWorkspaceAvailable: true,
   groupSessionCount: 3,
 };
+// ?portable: an automatic Retry that restores a portable (non-native) checkpoint.
+if (params.has("portable")) {
+  projection = {
+    version: 1,
+    status: "eligible",
+    reason: null,
+    checkpoint: null,
+    operationId: null,
+    automaticAvailable: true,
+    automaticLane: "checkpoint",
+    automaticCheckpoint: {
+      version: 1,
+      sessionId,
+      sandboxGroupId: crypto.randomUUID(),
+      leaseId: crypto.randomUUID(),
+      routeEpoch: 0,
+      authorityEpoch: 1,
+      leaseEpoch: 3,
+      workspaceGeneration: 7,
+      archiveGeneration: 5,
+      artifactId: null,
+      revision: "wa1:portable",
+      capturedAt: "2026-10-21T14:05:00.000Z",
+    },
+  };
+}
 const client: SandboxRecoveryClient = {
   getSandboxRecovery: async () => structuredClone(projection),
   recoverSandbox: async (_workspaceId, _sessionId, request) => {

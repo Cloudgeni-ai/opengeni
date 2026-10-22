@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { SandboxRecoveryProjection } from "@opengeni/contracts";
 import {
   acquireLease,
   authorizeAutomaticSandboxCheckpointRecovery,
@@ -203,17 +204,22 @@ describe("system continuity after a lost sandbox on every backend", () => {
       archiveGeneration: 10,
       resumeState: { sessionState: archive, opengeniRecovery: lostRecovery(true) },
     });
-    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+    const preview = await readPublicSandboxRecovery(client.db, f);
+    expect(preview).toMatchObject({
       status: "eligible",
       automaticAvailable: true,
       automaticLane: "checkpoint",
-      checkpoint: {
+      // The public consent selection names native checkpoints only, so older
+      // readers never see a null artifact; the portable one is additive.
+      checkpoint: null,
+      automaticCheckpoint: {
         archiveGeneration: 10,
         workspaceGeneration: 44,
         artifactId: null,
         revision: archive.workspaceArchiveMeta.revision,
       },
     });
+    expect(SandboxRecoveryProjection.safeParse(preview).success).toBe(true);
     const attempt = await claimedAttempt(f);
     expect(await authorizeAutomaticSandboxCheckpointRecovery(client.db, attempt)).toMatchObject({
       status: "authorized",
