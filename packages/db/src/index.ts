@@ -104,7 +104,10 @@ export type SessionEventMutation<Projection extends "full" | "event" = "full"> =
 export type SessionEventMutationInput =
   | SessionEventMutation
   | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
-export { sessionHasToolRouterHistory } from "./session-tool-router-history";
+export {
+  sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
+} from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
