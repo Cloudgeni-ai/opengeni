@@ -1,5 +1,25 @@
 # @opengeni/runtime
 
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/codemode@4.6.0
+  - @opengeni/agent-proto@4.6.0
+  - @opengeni/capabilities@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/decisions@4.6.0
+  - @opengeni/interaction@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/tool-gateway@4.6.0
+  - @opengeni/vaults@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
 ## 4.5.0
 
 ### Minor Changes

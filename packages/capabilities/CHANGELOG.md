@@ -1,5 +1,12 @@
 # @opengeni/capabilities
 
+## 4.6.1
+
+### Patch Changes
+
+- @opengeni/contracts@4.6.0
+- @opengeni/network@4.6.0
+
 ## 4.5.0
 
 ### Patch Changes

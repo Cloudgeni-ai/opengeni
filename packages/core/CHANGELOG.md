@@ -1,5 +1,23 @@
 # @opengeni/core
 
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [d0eb91c]
+  - @opengeni/db@4.6.0
+  - @opengeni/runtime@4.6.0
+  - @opengeni/documents@4.6.0
+  - @opengeni/events@4.6.0
+  - @opengeni/capabilities@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/storage@4.6.0
+  - @opengeni/vaults@4.6.0
+
 ## 4.5.0
 
 ### Minor Changes

@@ -1,5 +1,12 @@
 # @opengeni/browserd
 
+## 0.4.1
+
+### Patch Changes
+
+- @opengeni/contracts@4.6.0
+- @opengeni/interaction@4.6.0
+
 ## 0.4.0
 
 ### Minor Changes

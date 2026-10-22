@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 4.6.1
+
+### Patch Changes
+
+- @opengeni/codex@4.6.0
+- @opengeni/contracts@4.6.0
+- @opengeni/xai-subscription@4.6.0
+
 ## 4.5.0
 
 ### Minor Changes
