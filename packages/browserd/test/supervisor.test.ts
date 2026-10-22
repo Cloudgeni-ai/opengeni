@@ -3268,6 +3268,69 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("a browser still in use at shutdown gets its full idle time from the successor", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let detaches = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const stopped: string[] = [];
+      const open = () =>
+        BrowserSupervisor.open({
+          rootDirectory,
+          idleReleaseMs: 60_000,
+          now: () => clock,
+          inspectOwnedProcess: async () => processState,
+          assertProfileUnused: async () => undefined,
+          stopEndedProcess: async (profileDirectory) => {
+            stopped.push(profileDirectory);
+            processState = "exited";
+          },
+          createDriver: async (context) => ({
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              processState = "exited";
+            },
+            detach: async () => {
+              detaches++;
+            },
+            recordFrames: async () => async () => undefined,
+          }),
+        });
+      const first = await open();
+      const created = await first.createSession({
+        ...options,
+        recoverExistingWorkingDirectory: true,
+      });
+      // A recording runs for longer than the idle release time with no
+      // request; it keeps the browser in use (#5410) up to the shutdown.
+      await first.startRecording(options, created.observation.target.id);
+      clock += 5 * 60_000;
+      expect(await first.releaseIdleBrowsers()).toEqual([]);
+      await first.close();
+      expect({ detaches, stopped }).toEqual({ detaches: 1, stopped: [] });
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      const record = JSON.parse(
+        await readFile(join(sessionDirectory, "detached-browser.json"), "utf8"),
+      );
+      // Its idle time starts at the shutdown, not when the recording began.
+      expect(record.lastUsedAt).toBe(clock);
+
+      clock += 1_000;
+      const second = await open();
+      try {
+        expect(await second.releaseDetachedBrowsers()).toEqual([]);
+        expect(stopped).toEqual([]);
+        expect(second.isEmpty()).toBe(false);
+        clock += 60_000;
+        expect(await second.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+        expect(stopped).toEqual([join(sessionDirectory, "profile")]);
+      } finally {
+        await second.close();
+      }
+    });
+  });
+
   test("a handed-off browser its session uses again is adopted and not stopped", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
       let clock = 1_000_000;

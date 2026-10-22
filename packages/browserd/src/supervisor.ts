@@ -3136,7 +3136,9 @@ export class BrowserSupervisor {
         await writeDetachedBrowserRecord(runtime.sessionDirectory, {
           version: 1,
           browserSessionId: runtime.options.browserSessionId,
-          lastUsedAt: runtime.lastUsedAt,
+          // A live view, recording or request still open at shutdown is a use
+          // that has not ended yet, so the successor's idle time starts now.
+          lastUsedAt: runtime.presence.size > 0 ? this.now() : runtime.lastUsedAt,
           process: runtime.workingReceipt.process,
         });
       } catch (error) {
