@@ -2,7 +2,17 @@
 // the active sheet changes, and sent with their next message as context (a pill
 // above the composer they can leave out). A bounded sample of the selection
 // goes with it, so "explain this" or "fix these numbers" needs no extra read.
-import type { MessageContextItem } from "@opengeni/react/session-app";
+
+/**
+ * One piece of per-message context for the model, in the shape the session UI's
+ * `messageContext` takes: `text` goes to the model, `label` is the pill.
+ */
+export type OfficeContextItem = {
+  id: string;
+  text: string;
+  label?: string;
+  detail?: string;
+};
 
 export type SelectionSnapshot = {
   sheet: string;
@@ -56,7 +66,7 @@ function cell(value: string): string {
 export function selectionContextItem(
   selection: SelectionSnapshot,
   workbookName: string,
-): MessageContextItem {
+): OfficeContextItem {
   const where = selection.address
     ? `${selection.sheet}!${selection.address}`
     : `the sheet "${selection.sheet}"`;

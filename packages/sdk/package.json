@@ -42,6 +42,10 @@
       "types": "./src/desktop-bridge.ts",
       "default": "./src/desktop-bridge.ts"
     },
+    "./office": {
+      "types": "./src/office/index.ts",
+      "default": "./src/office/index.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

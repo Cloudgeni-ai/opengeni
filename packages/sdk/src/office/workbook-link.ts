@@ -1,13 +1,12 @@
-// Keeps this workbook connected to Opengeni so the person's agents can run
-// Office.js in it (the API's `excel_run`), from this pane or any other chat.
-import { serialQueue, type RunResult } from "./executor";
+// Keeps this workbook connected to Opengeni so the person's agents in one
+// workspace can run Office.js in it (the `excel_run` tool), from the pane's
+// chat or any other of their chats there.
+import { excel } from "./host";
+import { runOfficeCode, serialQueue, type RunResult } from "./executor";
+import type { OfficeWorkbookTicket } from "../types";
+import { describeWorkbook, type OfficeWorkbookInfo } from "./workbook";
 
-export type WorkbookInfo = {
-  name: string;
-  app: string;
-  version: string | null;
-  excelApi: string | null;
-};
+export type { OfficeWorkbookTicket };
 
 export type WorkbookLinkState =
   | { status: "connecting" }
@@ -16,20 +15,38 @@ export type WorkbookLinkState =
   | { status: "signed_out" };
 
 export type WorkbookLinkOptions = {
-  apiBaseUrl: string;
-  token: () => string | null;
-  describe: () => Promise<WorkbookInfo>;
-  run: (code: string) => Promise<RunResult>;
+  /**
+   * Mints a ticket for the workspace, normally
+   * `() => client.createOfficeWorkbookTicket(workspaceId)`. A rejection with
+   * `status: 401` means signed out; any other failure is retried.
+   */
+  ticket: () => Promise<OfficeWorkbookTicket>;
+  /**
+   * Where the socket connects: the Opengeni API's base URL as the pane reaches
+   * it (absolute, or a same-origin path such as "/api/opengeni" when the
+   * product's server passes the socket through); the ticket's path is
+   * appended. Omit it to use the ticket's `url` on the deployment's public API.
+   */
+  baseUrl?: string;
   onState: (state: WorkbookLinkState) => void;
   /** Agent code started (true) or finished (false) in this workbook. */
   onActivity?: (busy: boolean) => void;
+  /** Defaults to `describeWorkbook()`. */
+  describe?: () => Promise<OfficeWorkbookInfo>;
+  /** Defaults to running the code in this workbook with office.js. */
+  run?: (code: string) => Promise<RunResult>;
 };
 
 const PING_MS = 25_000;
 const MAX_BACKOFF_MS = 30_000;
 
-export function websocketUrl(apiBaseUrl: string, path: string): string {
-  const url = new URL(path, apiBaseUrl);
+/** The socket URL for `path` under `baseUrl`, resolved against `pageUrl` when relative. */
+export function websocketUrl(baseUrl: string, path: string, pageUrl?: string): string {
+  const base = new URL(
+    baseUrl.replace(/\/+$/u, "") + "/",
+    pageUrl ?? globalThis.location?.href ?? "http://localhost/",
+  );
+  const url = new URL(path.replace(/^\/+/u, ""), base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }
@@ -42,8 +59,14 @@ export class WorkbookLink {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly queue = serialQueue();
   private running = 0;
+  private readonly describe: () => Promise<OfficeWorkbookInfo>;
+  private readonly run: (code: string) => Promise<RunResult>;
 
-  constructor(private readonly options: WorkbookLinkOptions) {}
+  constructor(private readonly options: WorkbookLinkOptions) {
+    this.describe = options.describe ?? describeWorkbook;
+    this.run =
+      options.run ?? ((code) => runOfficeCode(code, (batch) => excel().run(batch), excel()));
+  }
 
   start(): void {
     this.stopped = false;
@@ -61,40 +84,36 @@ export class WorkbookLink {
   /** Tell agents the workbook's new name (after Save As or a rename). */
   async refresh(): Promise<void> {
     if (this.socket?.readyState !== WebSocket.OPEN) return;
-    this.socket.send(JSON.stringify({ type: "workbook", workbook: await this.options.describe() }));
+    this.socket.send(JSON.stringify({ type: "workbook", workbook: await this.describe() }));
   }
 
   private async connect(): Promise<void> {
     if (this.stopped) return;
-    const token = this.options.token();
-    if (!token) {
-      this.options.onState({ status: "signed_out" });
-      return;
-    }
     this.options.onState({ status: "connecting" });
-    let ticket: { ticket: string; path: string; protocol: string };
-    let workbook: WorkbookInfo;
+    let ticket: OfficeWorkbookTicket;
+    let workbook: OfficeWorkbookInfo;
     try {
-      const response = await fetch(`${this.options.apiBaseUrl}/v1/office/workbook-tickets`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-      });
-      if (response.status === 401) {
+      ticket = await this.options.ticket();
+      workbook = await this.describe();
+    } catch (error) {
+      if ((error as { status?: unknown } | null)?.status === 401) {
         this.options.onState({ status: "signed_out" });
         return;
       }
-      if (!response.ok) throw new Error(`ticket ${response.status}`);
-      ticket = (await response.json()) as typeof ticket;
-      workbook = await this.options.describe();
-    } catch {
       this.retry();
       return;
     }
     if (this.stopped) return;
-    const socket = new WebSocket(
-      websocketUrl(this.options.apiBaseUrl, ticket.path),
-      ticket.protocol,
-    );
+    const target = this.options.baseUrl
+      ? websocketUrl(this.options.baseUrl, ticket.path)
+      : ticket.url;
+    if (!target) {
+      // A setup error retrying cannot fix.
+      console.error("WorkbookLink needs baseUrl: this deployment's tickets carry no socket URL");
+      this.options.onState({ status: "offline", retryInMs: 0 });
+      return;
+    }
+    const socket = new WebSocket(target, ticket.protocol);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     socket.onopen = () =>
@@ -120,7 +139,7 @@ export class WorkbookLink {
         void this.queue(async () => {
           this.activity(1);
           try {
-            const result = await this.options.run(code);
+            const result = await this.run(code);
             if (socket.readyState === WebSocket.OPEN) {
               socket.send(JSON.stringify({ type: "result", id, ...result }));
             }
@@ -155,44 +174,4 @@ export class WorkbookLink {
     this.options.onState({ status: "offline", retryInMs: wait });
     this.retryTimer = setTimeout(() => void this.connect(), wait);
   }
-}
-
-/** What this Office host reports about the open workbook. */
-export async function describeWorkbook(): Promise<WorkbookInfo> {
-  let name: string | null = null;
-  try {
-    name = await Excel.run(async (context) => {
-      context.workbook.load("name");
-      await context.sync();
-      return context.workbook.name;
-    });
-  } catch {
-    name = null;
-  }
-  if (!name) {
-    const url = Office.context.document?.url ?? "";
-    name = decodeURIComponent(url.split(/[\\/]/u).pop()?.split("?")[0] ?? "") || null;
-  }
-  const diagnostics = Office.context.diagnostics;
-  const platform = diagnostics?.platform ?? Office.context.platform ?? "";
-  const app =
-    platform === "OfficeOnline"
-      ? "Excel on the web"
-      : platform === "Mac"
-        ? "Excel for Mac"
-        : platform === "PC"
-          ? "Excel for Windows"
-          : platform === "iOS"
-            ? "Excel for iPad"
-            : "Excel";
-  const versions = ["1.20", "1.19", "1.18", "1.17", "1.16", "1.15", "1.14", "1.13", "1.12"];
-  const excelApi =
-    versions.find((version) => Office.context.requirements.isSetSupported("ExcelApi", version)) ??
-    null;
-  return {
-    name: name ?? "Untitled workbook",
-    app,
-    version: diagnostics?.version ?? null,
-    excelApi,
-  };
 }

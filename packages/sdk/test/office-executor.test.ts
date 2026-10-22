@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { explainOfficeError, runOfficeCode, serialQueue } from "./executor";
+import { explainOfficeError, runOfficeCode, serialQueue } from "../src/office/executor";
 
 // A stand-in for an Office proxy: `format.fill` is a getter-only object.
 class Fill {

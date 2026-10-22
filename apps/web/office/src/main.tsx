@@ -16,20 +16,20 @@ import { enableWorkbench } from "@opengeni/react/workbench";
 import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
 import { lazy, StrictMode, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { runOfficeCode } from "./executor";
-import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
-import {
-  readSelection,
-  selectionContextItem,
-  type SelectionRequestContext,
-  type SelectionSnapshot,
-} from "./selection-context";
 import {
   describeWorkbook,
+  office,
+  officeTheme,
+  selectionContextItem,
+  watchOfficeTheme,
+  watchSelection,
   WorkbookLink,
-  type WorkbookInfo,
+  workbookContextItem,
+  type OfficeWorkbookInfo,
+  type SelectionSnapshot,
   type WorkbookLinkState,
-} from "./workbook-link";
+} from "@opengeni/sdk/office";
+import { forgetToken, prepareSignIn, signIn, storedToken, type SignInRequest } from "./office-auth";
 import "./pane.css";
 
 const apiBaseUrl =
@@ -123,7 +123,7 @@ function SignIn({ onSignedIn }: { onSignedIn: (token: string) => void }) {
   );
 }
 
-function statusText(state: WorkbookLinkState, busy: boolean, workbook: WorkbookInfo | null) {
+function statusText(state: WorkbookLinkState, busy: boolean, workbook: OfficeWorkbookInfo | null) {
   const name = workbook?.name ?? "this workbook";
   if (state.status === "connected") return busy ? `Working in ${name}` : `Connected to ${name}`;
   if (state.status === "offline") return "Reconnecting…";
@@ -131,101 +131,24 @@ function statusText(state: WorkbookLinkState, busy: boolean, workbook: WorkbookI
   return "Connecting…";
 }
 
-/** Light or dark from Excel's own theme (Office 2016+ reports its body color). */
-function officeTheme(): "light" | "dark" | undefined {
-  const color = Office.context.officeTheme?.bodyBackgroundColor;
-  const match = color ? /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/iu.exec(color) : null;
-  if (!match) return undefined;
-  const [r, g, b] = match.slice(1).map((part) => parseInt(part, 16) / 255) as [
-    number,
-    number,
-    number,
-  ];
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5 ? "dark" : "light";
-}
-
 /** Excel's theme, following it when it changes while the pane is open (Windows). */
 function useOfficeTheme(): "light" | "dark" | undefined {
   const [theme, setTheme] = useState(officeTheme);
-  useEffect(() => {
-    const handler = () => setTheme(officeTheme());
-    const event = Office.EventType.OfficeThemeChanged ?? "officeThemeChanged";
-    const document = Office.context.document;
-    try {
-      document?.addHandlerAsync?.(event, handler);
-    } catch {
-      // Hosts without the event keep the theme they opened with.
-    }
-    return () => {
-      try {
-        document?.removeHandlerAsync?.(event, { handler });
-      } catch {
-        // Nothing registered.
-      }
-    };
-  }, []);
+  useEffect(() => watchOfficeTheme(setTheme), []);
   return theme;
 }
 
 /** The workbook's current selection, re-read shortly after it or the sheet changes. */
 function useWorkbookSelection(active: boolean): SelectionSnapshot | null {
   const [selection, setSelection] = useState<SelectionSnapshot | null>(null);
-  useEffect(() => {
-    if (!active) return;
-    let live = true;
-    let reading = false;
-    let again = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const read = async () => {
-      if (reading) {
-        again = true;
-        return;
-      }
-      reading = true;
-      try {
-        const next = await Excel.run((context) =>
-          readSelection(context as unknown as SelectionRequestContext),
-        );
-        if (live) setSelection(next);
-      } catch {
-        // Keep the last selection; the next change reads again.
-      } finally {
-        reading = false;
-        if (again && live) {
-          again = false;
-          schedule();
-        }
-      }
-    };
-    const schedule = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => void read(), 150);
-    };
-    void read();
-    const event = Office.EventType.DocumentSelectionChanged ?? "documentSelectionChanged";
-    const document = Office.context.document;
-    try {
-      document?.addHandlerAsync?.(event, schedule);
-    } catch {
-      // Hosts without the event keep the selection read when the pane connected.
-    }
-    return () => {
-      live = false;
-      clearTimeout(timer);
-      try {
-        document?.removeHandlerAsync?.(event, { handler: schedule });
-      } catch {
-        // Nothing registered.
-      }
-    };
-  }, [active]);
+  useEffect(() => (active ? watchSelection(setSelection) : undefined), [active]);
   return selection;
 }
 
 function WorkbookStatus(props: {
   link: WorkbookLinkState;
   busy: boolean;
-  workbook: WorkbookInfo | null;
+  workbook: OfficeWorkbookInfo | null;
 }) {
   const dotState =
     props.link.status === "connected"
@@ -283,7 +206,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   const [loadError, setLoadError] = useState<string | null>(null);
   const [link, setLink] = useState<WorkbookLinkState>({ status: "connecting" });
   const [busy, setBusy] = useState(false);
-  const [workbook, setWorkbook] = useState<WorkbookInfo | null>(null);
+  const [workbook, setWorkbook] = useState<OfficeWorkbookInfo | null>(null);
   const theme = useOfficeTheme();
 
   useEffect(() => {
@@ -307,17 +230,18 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
     };
   }, [client, onSignedOut]);
 
+  // The workbook joins the chosen workspace: agents there can reach it.
   useEffect(() => {
+    if (!workspaceId) return;
     const describe = async () => {
       const info = await describeWorkbook();
       setWorkbook(info);
       return info;
     };
     const instance = new WorkbookLink({
-      apiBaseUrl,
-      token: () => token,
+      ticket: () => client.createOfficeWorkbookTicket(workspaceId),
+      baseUrl: apiBaseUrl,
       describe,
-      run: (code) => runOfficeCode(code, (batch) => Excel.run(batch), Excel),
       onState: (state) => {
         setLink(state);
         if (state.status === "signed_out") onSignedOut();
@@ -326,7 +250,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
     });
     instance.start();
     return () => instance.stop();
-  }, [token, onSignedOut]);
+  }, [client, workspaceId, onSignedOut]);
 
   const connectionId = link.status === "connected" ? link.connectionId : null;
   const selection = useWorkbookSelection(connectionId !== null);
@@ -337,10 +261,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
     () =>
       workbook && connectionId
         ? [
-            {
-              id: "excel-workbook",
-              text: `The person is writing from the Opengeni add-in in their open Excel workbook "${workbook.name}" (${workbook.app}). To read or change it, call excel_run with workbook "${connectionId}".`,
-            },
+            workbookContextItem({ workbook, connectionId, addinName: "Opengeni" }),
             ...(selection ? [selectionContextItem(selection, workbook.name)] : []),
           ]
         : undefined,
@@ -385,7 +306,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       openUrl={(url) => {
         // The task pane cannot navigate away; open the browser instead.
         try {
-          Office.context.ui.openBrowserWindow(url);
+          office().context.ui.openBrowserWindow(url);
         } catch {
           window.open(url, "_blank", "noopener");
         }
@@ -417,10 +338,12 @@ function App() {
   return token ? <Pane token={token} onSignedOut={signedOut} /> : <SignIn onSignedIn={setToken} />;
 }
 
-void Office.onReady().then(() => {
-  createRoot(document.getElementById("root")!).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
-});
+void office()
+  .onReady()
+  .then(() => {
+    createRoot(document.getElementById("root")!).render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+  });

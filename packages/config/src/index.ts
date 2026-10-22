@@ -439,6 +439,12 @@ const SettingsSchema = z.object({
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
+  // The Excel add-in people connect workbooks with, as agents name it to them
+  // ("open the <name> add-in"), and the page that shows how to add it. A
+  // product that ships its own branded add-in sets both; otherwise agents name
+  // Opengeni's and link this deployment's web app page.
+  officeAddinName: z.string().trim().min(1).max(80).default("Opengeni"),
+  officeAddinInstallUrl: z.string().url().optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
   // appends `/download/agent-v<ver>/<asset>`.
@@ -5017,6 +5023,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),
     apiTrustedProxyCidrs: optional("OPENGENI_API_TRUSTED_PROXY_CIDRS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
+    officeAddinName: optional("OPENGENI_OFFICE_ADDIN_NAME"),
+    officeAddinInstallUrl: optional("OPENGENI_OFFICE_ADDIN_INSTALL_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),

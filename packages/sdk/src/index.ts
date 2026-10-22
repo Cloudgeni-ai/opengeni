@@ -233,6 +233,7 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
+export type { OfficeWorkbook, OfficeWorkbookTicket } from "./types";
 export type {
   ModelConnectionAccessKind,
   ModelConnectionAccessPolicy,
