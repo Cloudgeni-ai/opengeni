@@ -475,7 +475,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(422, { message: "Invalid file cursor" });
       throw error;
     };
-    if (!deps.sessionAuthorization) {
+    if (!deps.sessionAuthorization && !grantHasAgentAttemptAuthority(grant)) {
       const page = await listPage(parsed.data.limit ?? 30, parsed.data.cursor).catch(
         onInvalidCursor,
       );

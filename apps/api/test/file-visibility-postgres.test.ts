@@ -16,6 +16,7 @@ import {
 } from "@opengeni/contracts";
 import {
   bindSlackInteractionSession,
+  claimSessionWorkForAttempt,
   createDb,
   createFileUpload,
   createOrganizationApiKey,
@@ -24,6 +25,7 @@ import {
   ensureExternalIdentity,
   getFilesForSubject,
   getOrCreateSlackInteraction,
+  initializeSessionStartAtomically,
   transitionSessionVisibility,
   updateFileVisibility,
   withSessionRlsActorContext,
@@ -292,6 +294,67 @@ test("an upload says who will be able to open it", async () => {
   expect(access.whoCanOpen).toContain("is told it is private");
 });
 
+test("a session-scoped agent cannot read another shared chat's File", async () => {
+  const f = await fixture();
+  const makeSession = () =>
+    withSessionRlsActorContext({ subjectId: f.owner.subjectId }, () =>
+      createSession(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        initialMessage: "Example request",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        agentAccess: "session",
+        createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+        createdByContext: {},
+      }),
+    );
+  const caller = await makeSession();
+  const other = await makeSession();
+  const fileId = await f.readyFile(null, f.owner.subjectId);
+  await shared.admin`update files set source_session_id = ${other.id},
+    source_session_shared_unrestricted = true where id = ${fileId}`;
+  const ownFileId = await f.readyFile(null, f.owner.subjectId);
+  await shared.admin`update files set source_session_id = ${caller.id},
+    source_session_shared_unrestricted = true where id = ${ownFileId}`;
+  await initializeSessionStartAtomically(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    sessionId: caller.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(db.db, f.workspace.id, {
+    sessionId: caller.id,
+    workflowId: `session-${caller.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("Could not claim agent attempt");
+  const grant: AccessGrant = {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker:test",
+    principalKind: "agent_attempt",
+    permissions: ["files:read"],
+    metadata: {
+      sessionId: caller.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    },
+  };
+  expect(await fileSourceVisibleToHost({ db: db.db }, grant, fileId)).toBe(false);
+  expect(await fileSourceVisibleToHost({ db: db.db }, grant, ownFileId)).toBe(true);
+});
+
 test("document authority reads an ordinary private original without opening a source chat", async () => {
   const f = await fixture(shared, db, true);
   const fileId = await f.readyFile(f.owner.subjectId);
@@ -490,6 +553,9 @@ test("a generated file follows its source chat when the chat becomes private", a
   const otherOwnedFileId = await f.readyFile(f.other.subjectId);
   await shared.admin`update files set source_session_id = ${sessionId},
     source_session_shared_unrestricted = true where id = ${otherOwnedFileId}`;
+  const otherOwnedSharedFileId = await f.readyFile(null, f.other.subjectId);
+  await shared.admin`update files set source_session_id = ${sessionId},
+    source_session_shared_unrestricted = true where id = ${otherOwnedSharedFileId}`;
   const uploadedFileId = crypto.randomUUID();
   await createFileUpload(db.db, {
     accountId: f.workspace.accountId,
@@ -565,6 +631,17 @@ test("a generated file follows its source chat when the chat becomes private", a
     expectedAuthorityEpoch: 1,
     operationKey: `file-visibility:${crypto.randomUUID()}`,
   });
+  const wrongOwnerShare = await f.call(
+    f.owner,
+    "PUT",
+    `/files/${otherOwnedSharedFileId}/visibility`,
+    { visibility: "workspace" },
+  );
+  expect(wrongOwnerShare.status).toBe(403);
+  const [wrongOwnerFlag] = await shared.admin`
+    select source_session_audience_explicit as explicit from files
+    where id = ${otherOwnedSharedFileId}`;
+  expect(wrongOwnerFlag?.explicit).toBe(false);
   const [sourceSnapshot] = await shared.admin`
     select source_session_owner_subject_id as owner from files where id = ${unsharedFileId}`;
   expect(sourceSnapshot?.owner).toBe(f.owner.subjectId);
@@ -1101,6 +1178,60 @@ test("migration requires decisions for ambiguous shared originals", async () => 
     });
     expect(sharedByOwner.status, await sharedByOwner.clone().text()).toBe(200);
     expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
+  } finally {
+    await legacyDb.close();
+    await legacy.release();
+  }
+}, 180_000);
+
+test("migration refuses a source whose historical Slack audience was erased", async () => {
+  const legacy = await acquireSharedTestDatabase("missing-slack-audience", {
+    withheldMigrations: ["0914_session_file_source_visibility.sql"],
+  });
+  if (!legacy) throw new Error("Slack audience preflight requires real PostgreSQL");
+  const legacyDb = createDb(legacy.appUrl);
+  try {
+    const f = await fixture(legacy, legacyDb);
+    const session = await createSession(legacyDb.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Synthetic Slack request",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(legacyDb.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      clientEventId: "slack:synthetic-event",
+    });
+    const fileId = await f.readyFile(null, f.owner.subjectId);
+    await legacy.admin`insert into generated_image_artifacts (
+      artifact_id, account_id, workspace_id, session_id, settlement_key,
+      tool_call_id, source_strategy, provider_id, provider_binding_hash,
+      status, media_type, size_bytes, sha256, width, height, sandbox_path, ready_at
+    ) values (${fileId}, ${f.workspace.accountId}, ${f.workspace.id}, ${session.id},
+      ${"d".repeat(64)}, 'fixture-call', 'provider_adapter', 'fixture', ${"e".repeat(64)},
+      'ready', 'image/png', 4, ${"a".repeat(64)}, 1, 1,
+      ${`/workspace/generated-images/generated-image-${fileId}.png`}, now())`;
+    const migration = await readFile(
+      new URL(
+        "../../../packages/db/drizzle/0914_session_file_source_visibility.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
+      "Missing historical Slack audience requires operator adjudication",
+    );
   } finally {
     await legacyDb.close();
     await legacy.release();

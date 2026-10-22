@@ -612,11 +612,20 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = await parseRequestJson(c, CreateKnowledgeDropRequest);
+    if (
+      payload.authorityKind &&
+      payload.visibility &&
+      (payload.authorityKind === "personal") !== (payload.visibility === "private")
+    ) {
+      throw new HTTPException(422, { message: "Document authority and visibility disagree" });
+    }
+    const requestedPersonal =
+      payload.authorityKind === "personal" ||
+      (payload.authorityKind === undefined && payload.visibility === "private");
     const fileActor = await fileOwnerContextForAccess(deps, access, "documents:manage");
     if (
       grantHasAgentAttemptAuthority(grant) &&
-      payload.authorityKind !== "personal" &&
-      payload.visibility !== "private" &&
+      !requestedPersonal &&
       (!fileActor.sessionAttachmentReadAccess?.sessionId ||
         (await sourceSessionRequiresHumanShare(
           db,
@@ -628,9 +637,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "Only the person can publish a private chat file to shared Knowledge",
       });
     }
-    const personalFileOwner =
-      payload.authorityKind === "personal" ? fileActor.privateFileOwnerSubjectId : null;
-    if (payload.authorityKind === "personal" && !personalFileOwner)
+    const personalFileOwner = requestedPersonal ? fileActor.privateFileOwnerSubjectId : null;
+    if (requestedPersonal && !personalFileOwner)
       throw new HTTPException(403, {
         message: "Personal source retention requires verified ownership",
       });
@@ -663,9 +671,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           fileId: newFileId,
           privateOwnerSubjectId: personalFileOwner ?? null,
-          sourceSessionId: grantHasAgentAttemptAuthority(grant)
-            ? (fileActor.sessionAttachmentReadAccess?.sessionId ?? null)
-            : null,
+          // This endpoint creates an independent Knowledge original after its
+          // scope has been authorized; it is not a copy of a chat File.
           filename,
           safeFilename,
           contentType: "text/plain; charset=utf-8",

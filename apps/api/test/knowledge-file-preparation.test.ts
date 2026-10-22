@@ -115,13 +115,18 @@ async function fixture(
   const authorization = async (
     tools: FirstPartyMcpToolName[] = ["knowledge_retain_file"],
     fileRead = true,
+    documentManage = false,
   ) =>
     `Bearer ${await signDelegatedAccessToken(SECRET, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: "worker:test",
       principalKind: "agent_attempt",
-      permissions: fileRead ? ["files:read", "documents:search"] : ["documents:search"],
+      permissions: [
+        ...(fileRead ? ["files:read"] : []),
+        "documents:search",
+        ...(documentManage ? ["documents:manage"] : []),
+      ],
       firstPartyMcpTools: tools,
       sessionId: session.id,
       turnId: claim.turn.id,
@@ -174,6 +179,10 @@ async function fixture(
         }
       : {}),
     objectStorage: {
+      bucket: "test",
+      putObject: async ({ key }: { key: string }) => {
+        calls.push(`put:${key}`);
+      },
       getObjectBytes: async (key: string) => {
         calls.push(`read:${key}`);
         return { bytes };
@@ -195,6 +204,7 @@ async function fixture(
         },
       },
     }),
+    documentIndexer: { indexDocument: async () => null },
   } as unknown as ApiRouteDeps;
   registerFileRoutes(app, deps);
   registerKnowledgeRoutes(app, deps);
@@ -287,6 +297,39 @@ describe("chat file to retained source through the public API", () => {
     } finally {
       await mcp.close();
       await server.close();
+    }
+  });
+  test("an agent text drop creates an independent Knowledge original in its chosen scope", async () => {
+    for (const personal of [false, true]) {
+      const f = await fixture("automatic", "application/pdf", false, personal);
+      const response = await f.app.request(
+        `http://test/v1/workspaces/${f.grant.workspaceId}/knowledge/drops`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await f.authorization(["knowledge_retain_file"], true, true),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            text: "Synthetic retained text",
+            ...(personal ? { visibility: "private" } : { authorityKind: "workspace" }),
+          }),
+        },
+      );
+      expect(response.status, await response.clone().text()).toBe(201);
+      const document = (await response.json()) as { fileId: string };
+      const [source] = await shared.admin<
+        {
+          source: string | null;
+          owner: string[] | null;
+        }[]
+      >`select source_session_id as source, private_owner_subject_ids as owner
+        from files where id = ${document.fileId}`;
+      expect(source).toMatchObject({
+        source: null,
+        owner: personal ? [f.subjectId] : null,
+      });
+      expect(f.calls.some((call) => call.startsWith("put:"))).toBe(true);
     }
   });
   test("Knowledge download denies a private source even when its entry remains shared", async () => {

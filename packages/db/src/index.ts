@@ -7957,7 +7957,8 @@ export async function updateFileVisibility(
               row.privateOwnerSubjectIds?.includes(input.actorSubjectId) ||
               (explicitShare &&
                 (row.ownerSubjectId === input.actorSubjectId ||
-                  row.sourceSessionOwnerSubjectId === input.actorSubjectId))
+                  (row.ownerSubjectId === null &&
+                    row.sourceSessionOwnerSubjectId === input.actorSubjectId)))
             )
           : row.ownerSubjectId !== input.actorSubjectId
       )
@@ -8213,13 +8214,18 @@ export async function listFilesForSubject(
 export async function getFileSourceSessionReference(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string; fileId: string },
-): Promise<{ sessionId: string | null; audienceExplicit: boolean } | null> {
+): Promise<{
+  sessionId: string | null;
+  audienceExplicit: boolean;
+  provenanceMissing: boolean;
+} | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, input.subjectId);
     const [row] = await scopedDb
       .select({
         sessionId: schema.files.sourceSessionId,
         audienceExplicit: schema.files.sourceSessionAudienceExplicit,
+        provenanceMissing: schema.files.sourceSessionProvenanceMissing,
       })
       .from(schema.files)
       .where(

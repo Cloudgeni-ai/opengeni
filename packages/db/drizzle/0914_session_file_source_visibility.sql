@@ -59,6 +59,7 @@ ALTER TABLE generated_video_artifacts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE retained_screenshot_artifacts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE opengeni_private.sandbox_file_publications NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_events NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE slack_interactions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE interaction_resource_operations NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE browser_session_retained_downloads NO FORCE ROW LEVEL SECURITY;
@@ -104,6 +105,29 @@ BEGIN
     RAISE EXCEPTION 'Conflicting file source sessions require review' USING ERRCODE='55000';
   END IF;
 END $conflicts$;
+-- An older hard-deleted Slack connection cascaded its interaction row. The
+-- surviving Slack message marker proves origin but not its private audience.
+DO $missing_slack_audience_preflight$
+BEGIN
+  IF EXISTS (SELECT 1 FROM session_file_sources_0913 source
+    JOIN sessions source_session ON source_session.account_id = source.account_id
+      AND source_session.workspace_id = source.workspace_id
+      AND source_session.id = source.session_id
+    JOIN files source_file ON source_file.account_id = source.account_id
+      AND source_file.workspace_id = source.workspace_id AND source_file.id = source.file_id
+    WHERE source_file.private_owner_subject_ids IS NULL
+      AND EXISTS (SELECT 1 FROM session_events event_row
+        WHERE event_row.account_id = source.account_id
+          AND event_row.workspace_id = source.workspace_id
+          AND event_row.session_id = source_session.root_session_id
+          AND event_row.client_event_id LIKE 'slack:%')
+      AND NOT EXISTS (SELECT 1 FROM slack_interactions interaction_row
+        WHERE interaction_row.account_id = source.account_id
+          AND interaction_row.workspace_id = source.workspace_id
+          AND interaction_row.session_reservation_id = source_session.root_session_id))
+  THEN RAISE EXCEPTION 'Missing historical Slack audience requires operator adjudication'
+    USING ERRCODE='55000'; END IF;
+END $missing_slack_audience_preflight$;
 UPDATE files f SET source_session_id = source.session_id,
   source_session_owner_subject_id = file_source_owner_snapshot_0913(
     CASE WHEN session_row.visibility = 'user_private' THEN coalesce(session_row.owner_subject_id,'') END,
@@ -319,6 +343,17 @@ BEGIN
   IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id OR NEW.account_id IS DISTINCT FROM OLD.account_id THEN
     RAISE EXCEPTION 'File ownership is immutable; share an explicitly authorized copy' USING ERRCODE='55000';
   END IF;
+  IF NEW.source_session_audience_explicit IS DISTINCT FROM OLD.source_session_audience_explicit
+    AND NOT (NOT OLD.source_session_audience_explicit
+      AND NEW.source_session_audience_explicit
+      AND OLD.status = 'ready' AND NEW.status = 'ready'
+      AND actor IS NOT NULL
+      AND (actor = ANY(OLD.private_owner_subject_ids)
+        OR OLD.owner_subject_id = actor
+        OR (OLD.owner_subject_id IS NULL AND OLD.source_session_owner_subject_id = actor))
+      AND OLD.object_key !~ '^workspaces/[^/]+/files/[^/]+/(retained|tool-results)/')
+  THEN RAISE EXCEPTION 'Only a File owner can independently share it'
+    USING ERRCODE='55000'; END IF;
   IF NEW.private_owner_subject_ids IS NOT DISTINCT FROM OLD.private_owner_subject_ids THEN
     IF NEW.owner_subject_id IS DISTINCT FROM OLD.owner_subject_id THEN
       IF OLD.owner_subject_id IS NULL AND actor IS NOT NULL
@@ -375,6 +410,7 @@ ALTER TABLE retained_screenshot_artifacts FORCE ROW LEVEL SECURITY;
 ALTER TABLE generated_video_artifacts FORCE ROW LEVEL SECURITY;
 ALTER TABLE generated_image_artifacts FORCE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE slack_interactions FORCE ROW LEVEL SECURITY;
 ALTER TABLE interaction_resource_operations FORCE ROW LEVEL SECURITY;
 ALTER TABLE browser_session_retained_downloads FORCE ROW LEVEL SECURITY;
@@ -391,13 +427,17 @@ CREATE FUNCTION freeze_file_source_provenance_0914() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
 BEGIN
   IF (OLD.source_session_id IS DISTINCT FROM NEW.source_session_id
-    OR OLD.source_session_provenance_missing IS DISTINCT FROM NEW.source_session_provenance_missing)
+    OR OLD.source_session_provenance_missing IS DISTINCT FROM NEW.source_session_provenance_missing
+    OR OLD.source_session_owner_subject_id IS DISTINCT FROM NEW.source_session_owner_subject_id
+    OR OLD.source_session_shared_unrestricted IS DISTINCT FROM NEW.source_session_shared_unrestricted)
+    AND pg_trigger_depth() <= 1
     AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper)
   THEN RAISE EXCEPTION 'File source provenance is immutable' USING ERRCODE='55000'; END IF;
   RETURN NEW;
 END $body$;
 CREATE TRIGGER freeze_file_source_provenance_0914
-  BEFORE UPDATE OF source_session_id, source_session_provenance_missing ON files
+  BEFORE UPDATE OF source_session_id, source_session_provenance_missing,
+    source_session_owner_subject_id, source_session_shared_unrestricted ON files
   FOR EACH ROW EXECUTE FUNCTION freeze_file_source_provenance_0914();
 
 CREATE FUNCTION sync_document_file_source_0914() RETURNS trigger

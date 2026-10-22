@@ -72,7 +72,8 @@ export async function fileSourceVisibleToHost(
   fileRlsSubjectId = grant.subjectId,
   authorizedFile?: FileAsset,
 ): Promise<boolean> {
-  if (!deps.sessionAuthorization && !requireFileRls) return true;
+  if (!deps.sessionAuthorization && !requireFileRls && !grantHasAgentAttemptAuthority(grant))
+    return true;
   const authorizedSource = authorizedFile ? authorizedFileSourceReference(authorizedFile) : null;
   const source = authorizedFile
     ? authorizedSource
@@ -94,10 +95,11 @@ export async function fileSourceVisibleToHost(
   // This exact File has already passed the requested session's accepted
   // attachment check; the grant cannot be reused for an ordinary File read.
   if (authorizedSource?.acceptedSessionAttachment) return true;
-  if (!deps.sessionAuthorization) return true;
-  if (!source.sessionId || source.audienceExplicit) return true;
+  if (!deps.sessionAuthorization && !grantHasAgentAttemptAuthority(grant)) return true;
+  if (source.audienceExplicit) return true;
+  if (!source.sessionId) return !grantHasAgentAttemptAuthority(grant) || !source.provenanceMissing;
   const live = await getSessionAuthorityProjection(deps.db, fileWorkspaceId, source.sessionId);
-  if (!live) return true; // The file policy already applied the deletion snapshot.
+  if (!live) return !grantHasAgentAttemptAuthority(grant); // Humans retain the deletion snapshot.
   try {
     await requireSessionAuthorization(
       deps,
