@@ -213,7 +213,6 @@ import {
   browserExtension,
   nativeConnectionCapabilityRecommendations,
   userSetupCardPayload,
-  OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
