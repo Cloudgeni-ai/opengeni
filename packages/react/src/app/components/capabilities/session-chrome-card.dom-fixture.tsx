@@ -322,6 +322,19 @@ describe("Chrome setup card", () => {
     await view.close();
   });
 
+  test("Chrome that links up a few seconds after the computer is noticed without a click", async () => {
+    const view = await render();
+    fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
+    await view.rerender();
+    expect(view.button("Add to Chrome")).not.toBeNull();
+    browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5_300)));
+    expect(opened).toEqual([]);
+    expect(view.text()).toContain("Chrome is connected (Work).");
+    expect(view.note()).toBe("");
+    await view.close();
+  }, 10_000);
+
   test("a card shown after Chrome already connected offers no Continue", async () => {
     fleet.machines = [sessionBox, machine("mac", "Ada's MacBook")];
     browsers = { devices: [chromeProfile("Work")], bridges: [], revision: 2 };

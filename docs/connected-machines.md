@@ -1477,7 +1477,7 @@ elsewhere (Slack, a worker or a scheduled chat), to open the link. It must not
 describe the card's steps, post another card, wait or retry: finishing the card
 sends the message that continues the chat. If the card can't be posted, an API
 refusal is returned unchanged, and a worker tool's error tells the agent to
-offer the fix itself in the same reply (`capability_authorization_request`, or
+offer the fix itself in the same reply (`capability_authorization_request`, and
 the exact next step). The agent instructions carry the same general rule: when
 something the user can fix blocks a tool, offer the fix in the same reply.
 
@@ -1498,9 +1498,9 @@ Two refusals are registered today:
   computer** when no online machine with a display exists, then **Add to
   Chrome** (the Opengeni Browser extension), then **Continue** once a Chrome
   profile `browser_open` can drive (connected, with debugger attachment)
-  links up, which sends `Chrome is connected. Continue.` The card checks Chrome
-  again when a computer comes online, and offers Continue only after it saw
-  Chrome missing, so an old or reloaded card sends nothing. The card reflects
+  links up, which sends `Chrome is connected. Continue.` When a computer comes
+  online, the card keeps checking Chrome for up to a minute. It offers Continue
+  only after it saw Chrome missing, so an old or reloaded card sends nothing. The card reflects
   the viewer's own machines and Chrome; in a shared workspace a teammate may see
   a different step than the person who started the turn. When Connected
   Machines are off on the deployment, nothing is posted and the agent is told

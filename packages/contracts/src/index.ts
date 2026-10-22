@@ -4185,8 +4185,8 @@ export function userSetupCardShownMessage(
 /** What the agent reads when the setup card could not be posted for it. */
 export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string {
   return (
-    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}), ` +
-    `or, if that tool isn't available, tell them the exact next step: ${blocker.nextStep}. ` +
+    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}) if that tool is available, ` +
+    `and tell them the exact next step: ${blocker.nextStep}. ` +
     "Do not only report that it is unavailable."
   );
 }

@@ -45,6 +45,11 @@ const WATCH_POLL_MS = 3_000;
 const CHROME_POLL_MS = 5_000;
 /** Stop checking for the extension after this long without a link. */
 const CHROME_POLL_LIMIT_MS = 10 * 60_000;
+/**
+ * After a computer comes online, keep checking quietly for a short while: its
+ * Chrome profile usually links up a few seconds after the machine does.
+ */
+const CHROME_REFRESH_POLL_LIMIT_MS = 60_000;
 
 export { machineUseMessage } from "../../lib/move-chat-to-machine";
 
@@ -599,6 +604,7 @@ export function useAttachedChrome(
   const [connected, setConnected] = useState<{ name: string } | null>(null);
   const [checked, setChecked] = useState(false);
   const [watchSince, setWatchSince] = useState<number | null>(null);
+  const [refreshSince, setRefreshSince] = useState<number | null>(null);
   const [expired, setExpired] = useState(false);
   const [denied, setDenied] = useState(false);
   const linked = connected !== null;
@@ -609,6 +615,10 @@ export function useAttachedChrome(
     setChecked(false);
     setDenied(false);
   }, [enrollmentId]);
+
+  useEffect(() => {
+    setRefreshSince(refreshKey === null ? null : Date.now());
+  }, [refreshKey]);
 
   useEffect(() => {
     if (!enrollmentId || denied) return;
@@ -638,11 +648,17 @@ export function useAttachedChrome(
       }
     };
     void read();
-    if (linked || watchSince === null) return () => void (cancelled = true);
+    if (linked || (watchSince === null && refreshSince === null)) {
+      return () => void (cancelled = true);
+    }
     const timer = window.setInterval(() => {
-      if (Date.now() - watchSince > CHROME_POLL_LIMIT_MS) {
+      const now = Date.now();
+      const watching = watchSince !== null && now - watchSince <= CHROME_POLL_LIMIT_MS;
+      const refreshing =
+        refreshSince !== null && now - refreshSince <= CHROME_REFRESH_POLL_LIMIT_MS;
+      if (!watching && !refreshing) {
         window.clearInterval(timer);
-        setExpired(true);
+        if (watchSince !== null) setExpired(true);
         return;
       }
       if (document.visibilityState !== "hidden") void read();
@@ -651,7 +667,7 @@ export function useAttachedChrome(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [denied, enrollmentId, linked, refreshKey, watchSince, workspaceId]);
+  }, [denied, enrollmentId, linked, refreshSince, watchSince, workspaceId]);
 
   const watch = useCallback(() => {
     setExpired(false);
