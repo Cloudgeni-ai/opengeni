@@ -103,6 +103,21 @@ export function markTransportFailure(error: unknown): void {
   if (error instanceof TypeError) transportFailures.add(error);
 }
 
+// 502s the client synthesizes for a response it could not accept (a non-JSON
+// or malformed success body). The server did answer; repeating the read gives
+// the same answer, so these are definitive rather than transient.
+const invalidResponses = new WeakSet<object>();
+
+/** A 502 for a response the client received but could not accept. */
+export function invalidApiResponseError(
+  body: string,
+  options?: ConstructorParameters<typeof OpenGeniApiError>[2],
+): OpenGeniApiError {
+  const error = new OpenGeniApiError(502, body, options);
+  invalidResponses.add(error);
+  return error;
+}
+
 // Transport failure messages across browsers, Node/undici and Bun, for
 // `TypeError`s that did not pass through this client.
 const NETWORK_FAILURE_MESSAGE =
@@ -112,12 +127,15 @@ const NETWORK_FAILURE_MESSAGE =
  * A failure a later identical safe read can plausibly succeed after: a
  * transport error (`fetch` or the response body rejected with a `TypeError`)
  * or a retryable 502, 503 or 504. Auth, permission, not-found, validation,
- * rate limits, aborts, other server errors and `TypeError`s from application
- * code are definitive and are not transient.
+ * rate limits, aborts, other server errors, a success response the client
+ * could not accept, and `TypeError`s from application code are definitive and
+ * are not transient.
  */
 export function isTransientRequestError(error: unknown): boolean {
   if (error instanceof OpenGeniApiError) {
-    return isTransientGatewayStatus(error.status) && error.retryable;
+    return (
+      !invalidResponses.has(error) && isTransientGatewayStatus(error.status) && error.retryable
+    );
   }
   if (!(error instanceof TypeError)) return false;
   return transportFailures.has(error) || NETWORK_FAILURE_MESSAGE.test(error.message);
@@ -144,8 +162,9 @@ export function parseRetryAfterMs(
 
 /**
  * The delay before retry number `retry` (1 for the first retry), or `null`
- * when no retry fits the policy. A server `Retry-After` is honored exactly;
- * otherwise the exponential backoff is jittered to between half and all of it.
+ * when no retry fits the policy. A server `Retry-After` is honored, plus up to
+ * 20% so clients told the same instant do not all return at once; otherwise
+ * the exponential backoff is jittered to between half and all of it.
  */
 export function readRetryDelayMs(
   policy: ReadRetryPolicy,
@@ -157,7 +176,7 @@ export function readRetryDelayMs(
   if (retry >= policy.maxAttempts) return null;
   let delay: number;
   if (retryAfterMs !== null) {
-    delay = retryAfterMs;
+    delay = retryAfterMs * (1 + 0.2 * Math.min(Math.max(random(), 0), 1));
   } else {
     const base = Math.min(policy.maxDelayMs, policy.initialDelayMs * 2 ** (retry - 1));
     delay = base / 2 + (base / 2) * Math.min(Math.max(random(), 0), 1);

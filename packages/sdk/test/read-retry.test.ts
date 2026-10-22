@@ -101,11 +101,15 @@ describe("safe-read retry policy", () => {
     expect(readRetryDelayMs(policy, 1, 950, null, () => 1)).toBeNull();
   });
 
-  test("Retry-After is honored exactly when it fits, and ends retrying when it does not", () => {
+  test("Retry-After is honored with up to 20% spread when it fits, and ends retrying when it does not", () => {
     const policy = { maxAttempts: 4, initialDelayMs: 100, maxDelayMs: 200, maxElapsedMs: 5_000 };
     expect(readRetryDelayMs(policy, 1, 0, 3_000, () => 0)).toBe(3_000);
+    expect(readRetryDelayMs(policy, 1, 0, 3_000, () => 0.5)).toBe(3_300);
+    expect(readRetryDelayMs(policy, 1, 0, 3_000, () => 1)).toBe(3_600);
     expect(readRetryDelayMs(policy, 1, 0, 0, () => 1)).toBe(0);
     expect(readRetryDelayMs(policy, 1, 2_500, 3_000, () => 0)).toBeNull();
+    // The spread counts against the budget too.
+    expect(readRetryDelayMs(policy, 1, 1_500, 3_000, () => 1)).toBeNull();
   });
 
   test("parses Retry-After seconds and HTTP dates", () => {
@@ -288,6 +292,22 @@ describe("OpenGeniClient safe-read retry", () => {
       .getSession("workspace-1", "session-1")
       .catch((cause: unknown) => cause);
     expect(error).toMatchObject({ status: 502, code: "upstream_unavailable" });
+    expect(calls).toHaveLength(1);
+    // Definitive for longer retry loops too (the React hooks surface it at once).
+    expect(isTransientRequestError(error)).toBe(false);
+  });
+
+  test("a success body that fails the client's shape check is not transient", async () => {
+    const { fetch, calls } = scriptedFetch([
+      json({ recordings: "not a list" }),
+      json({ recordings: [] }),
+    ]);
+    const error = await client(fetch)
+      .listTranscriptionRecordings("workspace-1")
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect(isTransientRequestError(error)).toBe(false);
     expect(calls).toHaveLength(1);
   });
 

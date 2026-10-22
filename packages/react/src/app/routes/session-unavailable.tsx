@@ -5,7 +5,11 @@ import { LoadingPanel, ProblemPanel } from "../components/common";
 import { Button } from "../../ui/button";
 import { CrossSlotDeepLinkRecovery } from "../components/cross-slot-deep-link-recovery";
 import { useAppContext } from "../app-context";
-import { DEFAULT_TRANSIENT_READ_RETRY, transientReadRetryStep } from "../../hooks/internal";
+import {
+  DEFAULT_TRANSIENT_READ_RETRY,
+  transientReadRetryStep,
+  usePageLiveActivity,
+} from "../../hooks/internal";
 import {
   authorizedSessionReadWorkspaceIds,
   canonicalSessionDeepLinkTarget,
@@ -28,6 +32,18 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
     attempts: number;
     surfaced: boolean;
   } | null>(null);
+  // A hidden page defers its next retry until it is visible again, and then
+  // looks with a fresh quiet window.
+  const pageLive = usePageLiveActivity();
+  const pageLiveRef = useRef(pageLive);
+  pageLiveRef.current = pageLive;
+  const deferredRetryRef = useRef(false);
+  useEffect(() => {
+    if (!pageLive || !deferredRetryRef.current) return;
+    deferredRetryRef.current = false;
+    transientStreakRef.current = null;
+    setAttempt((value) => value + 1);
+  }, [pageLive]);
   const sessionWorkspaceIds = useMemo(
     () => authorizedSessionReadWorkspaceIds(context.accessContext, context.workspaces),
     [context.accessContext, context.workspaces],
@@ -43,6 +59,7 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    deferredRetryRef.current = false;
     const key = `${props.workspaceId}\u0000${props.sessionId}`;
     if (transientStreakRef.current?.key !== key) transientStreakRef.current = null;
     // While a transient failure is already shown, background retries keep it.
@@ -83,7 +100,11 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
         });
         const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY);
         if (!step.quiet) setState("transient");
-        retryTimer = setTimeout(() => setAttempt((value) => value + 1), step.delayMs);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (pageLiveRef.current) setAttempt((value) => value + 1);
+          else deferredRetryRef.current = true;
+        }, step.delayMs);
         return;
       }
       transientStreakRef.current = null;

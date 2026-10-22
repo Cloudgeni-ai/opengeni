@@ -289,6 +289,64 @@ describe("useSessionEvents transient retry", () => {
     await hook.unmount();
   });
 
+  test("a stream suspended while hidden starts a fresh quiet window when the page returns", async () => {
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const setVisibility = async (next: DocumentVisibilityState) => {
+      visibility = next;
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+    };
+    let failing = true;
+    const client = fakeClient({
+      listEvents: async () => {
+        if (failing) throw unavailable();
+        return [event(1)];
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
+        (async function* () {
+          await new Promise<void>((resolve) =>
+            options.signal?.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          yield* [];
+        })(),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    try {
+      // A quiet streak is under way when the tab is hidden past its grace.
+      await flush(DEFAULT_TRANSIENT_READ_RETRY.quietWindowMs / 2);
+      expect(hook.result.current.error).toBeNull();
+      await setVisibility("hidden");
+      await flush(60_000);
+      expect(hook.result.current.connectionState).toBe("idle");
+
+      // Back after a minute: the next transient failure is quiet again
+      // instead of counting the hidden time against the quiet window.
+      await setVisibility("visible");
+      await flush(3_000);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.connectionState).toBe("connecting");
+
+      failing = false;
+      await flush(8_000);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.events.map((row) => row.sequence)).toEqual([1]);
+    } finally {
+      await hook.unmount();
+      if (originalVisibility) {
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      } else {
+        Reflect.deleteProperty(document, "visibilityState");
+      }
+    }
+  });
+
   test("a definitive tail failure still surfaces at once", async () => {
     let calls = 0;
     const client = fakeClient({

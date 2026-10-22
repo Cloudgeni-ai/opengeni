@@ -691,6 +691,9 @@ export function useSessionEvents(
     const generation = generationRef.current + 1;
     generationRef.current = generation;
     if (!sessionId || !streamEnabled) {
+      // A suspended stream starts a fresh transient streak when it resumes: a
+      // failure right after a wake must not count the hidden time.
+      streamTransientStreakRef.current = null;
       // A page that stayed hidden beyond the live-activity grace deliberately
       // closed its SSE connection. Replaying from the old cursor on return can
       // drip a large background backlog through React in many fast batches and
@@ -1227,6 +1230,8 @@ export function useSessionEvents(
             const initialOpen = openedStreamKeyRef.current !== streamKey;
             openedStreamKeyRef.current = streamKey;
             strictFailures = 0;
+            // The outage is over: drop an error a long transient streak surfaced.
+            if (streamTransientStreakRef.current?.surfaced) setError(null);
             streamTransientStreakRef.current = null;
             // Reconciliation repairs projections, but it must not block reading
             // the already-open SSE body. Otherwise live events accumulate in the

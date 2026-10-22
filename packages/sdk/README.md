@@ -1343,7 +1343,9 @@ backoff, or the server's `Retry-After` when it fits the budget, and stop as
 soon as the caller's signal aborts. Every attempt of one call carries the same
 correlation ID. Mutations are never retried; they keep the `outcomeUnknown`
 semantics above. Auth, permission, not-found, validation, rate-limit and other
-server errors surface immediately.
+server errors, and a success response the client cannot accept, surface
+immediately. A `Retry-After` gets up to 20% extra spread so clients told the
+same instant do not return together.
 
 ```ts
 const client = new OpenGeniClient({

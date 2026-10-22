@@ -296,4 +296,48 @@ describe("SessionUnavailableRoute", () => {
       await rendered.unmount();
     }
   });
+
+  test("a hidden page defers its retries and looks again when it returns", async () => {
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const setVisibility = async (next: DocumentVisibilityState) => {
+      visibility = next;
+      await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    };
+    let failing = true;
+    let reads = 0;
+    const route = renderRoute(async () => {
+      reads += 1;
+      if (failing) throw unavailable();
+      return session;
+    });
+    const rendered = await renderComponent(
+      route.tree(<SessionUnavailableRoute workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />),
+    );
+    try {
+      await flush(5_000);
+      await setVisibility("hidden");
+      await flush(10_000);
+      const hiddenReads = reads;
+      await flush(120_000);
+      expect(reads).toBe(hiddenReads);
+
+      failing = false;
+      await setVisibility("visible");
+      await flush(10);
+      expect(reads).toBe(hiddenReads + 1);
+      expect(route.assigned).toEqual([`/workspaces/${otherWorkspaceId}/sessions/${SESSION_ID}`]);
+    } finally {
+      await rendered.unmount();
+      if (originalVisibility) {
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      } else {
+        Reflect.deleteProperty(document, "visibilityState");
+      }
+    }
+  });
 });

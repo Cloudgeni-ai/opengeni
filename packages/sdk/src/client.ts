@@ -155,6 +155,7 @@ import {
   abortableReadRetryDelay,
   isSafeReadMethod,
   isTransientGatewayStatus,
+  invalidApiResponseError,
   isTransientRequestError,
   markTransportFailure,
   parseRetryAfterMs,
@@ -1365,7 +1366,7 @@ export class OpenGeniClient {
       options.signal ? { signal: options.signal } : {},
     );
     if (!isTranscriptionRecordingListResponse(body)) {
-      throw new OpenGeniApiError(502, "Invalid transcription recording list response.", {
+      throw invalidApiResponseError("Invalid transcription recording list response.", {
         code: "invalid_response",
       });
     }
@@ -4823,7 +4824,7 @@ export class OpenGeniClient {
       header.length > 64 * 1024
     ) {
       await cancelResponseBody(response, "browser frame metadata is invalid");
-      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+      throw invalidApiResponseError("browser frame metadata is invalid");
     }
     let metadata: BrowserFrameMetadata;
     try {
@@ -4832,7 +4833,7 @@ export class OpenGeniClient {
       );
     } catch {
       await cancelResponseBody(response, "browser frame metadata is invalid");
-      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+      throw invalidApiResponseError("browser frame metadata is invalid");
     }
     const data = await readBoundedResponseBytes(response, 24 * 1024 * 1024, null);
     if (
@@ -4840,7 +4841,7 @@ export class OpenGeniClient {
       metadata.targetId !== targetId ||
       metadata.mediaType !== mediaType
     ) {
-      throw new OpenGeniApiError(502, "browser frame evidence does not match its request");
+      throw invalidApiResponseError("browser frame evidence does not match its request");
     }
     return { ...metadata, data };
   }
@@ -4889,7 +4890,7 @@ export class OpenGeniClient {
       options,
     );
     if (state.browserSessionId !== browserSessionId || state.targetId !== targetId) {
-      throw new OpenGeniApiError(502, "browser target state belongs to another binding");
+      throw invalidApiResponseError("browser target state belongs to another binding");
     }
     return state;
   }
@@ -4916,7 +4917,7 @@ export class OpenGeniClient {
       result.documentGeneration !== request.expectedDocumentGeneration ||
       result.frameId !== request.expectedFrameId
     ) {
-      throw new OpenGeniApiError(502, "browser DOM read belongs to another binding");
+      throw invalidApiResponseError("browser DOM read belongs to another binding");
     }
     return result;
   }
@@ -5244,19 +5245,19 @@ export class OpenGeniClient {
     const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     if (mediaType !== "image/jpeg" && mediaType !== "image/png") {
       await cancelResponseBody(response, "computer frame media type is invalid");
-      throw new OpenGeniApiError(502, "computer frame media type is invalid");
+      throw invalidApiResponseError("computer frame media type is invalid");
     }
     const metadataHeader = response.headers.get("x-opengeni-computer-frame");
     if (!metadataHeader || metadataHeader.length > 32 * 1024) {
       await cancelResponseBody(response, "computer frame metadata is invalid");
-      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+      throw invalidApiResponseError("computer frame metadata is invalid");
     }
     let metadata: ReturnType<typeof decodeComputerFrameMetadataHeader>;
     try {
       metadata = decodeComputerFrameMetadataHeader(metadataHeader);
     } catch {
       await cancelResponseBody(response, "computer frame metadata is invalid");
-      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+      throw invalidApiResponseError("computer frame metadata is invalid");
     }
     const bytes = await readBoundedResponseBytes(response, 256 * 1024, null);
     const mismatchReason = computerFrameEvidenceMismatchReason(metadata, {
@@ -5266,7 +5267,7 @@ export class OpenGeniClient {
       sha256: await sha256Hex(bytes),
     });
     if (mismatchReason) {
-      throw new OpenGeniApiError(502, "computer frame evidence does not match its request");
+      throw invalidApiResponseError("computer frame evidence does not match its request");
     }
     return { ...metadata, data: bytes };
   }
@@ -7852,7 +7853,7 @@ export class OpenGeniClient {
       metadata.originalBytes <= 0 ||
       metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES
     ) {
-      throw new OpenGeniApiError(502, "retained screenshot metadata is invalid");
+      throw invalidApiResponseError("retained screenshot metadata is invalid");
     }
     const bytes = await this.downloadRetainedArtifactBytes(metadata, options);
     return { metadata, bytes };
@@ -7869,7 +7870,7 @@ export class OpenGeniClient {
     const bytes = new Uint8Array(artifact.originalBytes);
     const pageBytes = Math.min(artifact.retrieval.maxRangeBytes, RETAINED_OUTPUT_MAX_PAGE_BYTES);
     if (!Number.isSafeInteger(pageBytes) || pageBytes <= 0) {
-      throw new OpenGeniApiError(502, "retained artifact range metadata is invalid");
+      throw invalidApiResponseError("retained artifact range metadata is invalid");
     }
     for (let start = 0; start < bytes.byteLength; start += pageBytes) {
       options.signal?.throwIfAborted();
@@ -7892,7 +7893,7 @@ export class OpenGeniClient {
           }
         }
       }
-      if (!page) throw new OpenGeniApiError(502, "retained artifact range retry exhausted");
+      if (!page) throw invalidApiResponseError("retained artifact range retry exhausted");
       const expectedLength = end - start + 1;
       if (
         page.status !== 206 ||
@@ -7900,12 +7901,12 @@ export class OpenGeniClient {
         page.contentLength !== expectedLength ||
         page.contentRange !== `bytes ${start}-${end}/${artifact.originalBytes}`
       ) {
-        throw new OpenGeniApiError(502, "retained artifact range response is invalid");
+        throw invalidApiResponseError("retained artifact range response is invalid");
       }
       bytes.set(page.bytes, start);
     }
     if ((await sha256Hex(bytes)) !== artifact.sha256) {
-      throw new OpenGeniApiError(502, "retained artifact checksum mismatch");
+      throw invalidApiResponseError("retained artifact checksum mismatch");
     }
     return bytes;
   }
@@ -7945,7 +7946,7 @@ export class OpenGeniClient {
     }
     if (response.headers.get("accept-ranges") !== "bytes") {
       await cancelResponseBody(response, "retained artifact response omitted byte-range support");
-      throw new OpenGeniApiError(502, "retained artifact response omitted byte-range support");
+      throw invalidApiResponseError("retained artifact response omitted byte-range support");
     }
     let declaredLength: number | null;
     try {
@@ -11682,7 +11683,7 @@ function isTranscriptionRecordingResponse(value: unknown): value is Transcriptio
 
 function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
   if (isTranscriptionRecordingResponse(value)) return value;
-  throw new OpenGeniApiError(502, "Invalid transcription recording response.", {
+  throw invalidApiResponseError("Invalid transcription recording response.", {
     code: "invalid_response",
   });
 }
@@ -11822,7 +11823,7 @@ async function assertJsonResponse(
 ): Promise<void> {
   if (isJsonContentType(response.headers.get("content-type"))) return;
   await cancelResponseBody(response, "unexpected non-JSON API response");
-  throw new OpenGeniApiError(502, "", {
+  throw invalidApiResponseError("", {
     code: "upstream_unavailable",
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
@@ -11943,7 +11944,7 @@ function assertRetainedWorkspaceArtifactReceipt(
     !parseRetainedGeneratedImageReference(artifact, workspaceId) &&
     !parseRetainedWorkspaceFileReference(artifact, workspaceId)
   ) {
-    throw new OpenGeniApiError(502, "retained workspace artifact receipt is invalid");
+    throw invalidApiResponseError("retained workspace artifact receipt is invalid");
   }
 }
 
@@ -11954,16 +11955,16 @@ function assertSafeArtifactDownloadUrl(value: FileDownloadUrlResponse): void {
     typeof value.expiresAt !== "string" ||
     !Number.isFinite(Date.parse(value.expiresAt))
   ) {
-    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+    throw invalidApiResponseError("retained artifact download URL is invalid");
   }
   let parsed: URL;
   try {
     parsed = new URL(value.url);
   } catch {
-    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+    throw invalidApiResponseError("retained artifact download URL is invalid");
   }
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw new OpenGeniApiError(502, "retained artifact download URL is unsafe");
+    throw invalidApiResponseError("retained artifact download URL is unsafe");
   }
 }
 
@@ -11982,7 +11983,7 @@ function assertSafeVideoArtifactPlaybackSource(
     value.sizeBytes > GENERATED_VIDEO_MAX_BYTES ||
     !/^[0-9a-f]{64}$/.test(value.sha256)
   ) {
-    throw new OpenGeniApiError(502, "generated-video playback source is invalid");
+    throw invalidApiResponseError("generated-video playback source is invalid");
   }
   assertSafeArtifactDownloadUrl({ url: value.url, expiresAt: value.expiresAt });
 }
@@ -11990,11 +11991,11 @@ function assertSafeVideoArtifactPlaybackSource(
 function parseBoundedContentLength(value: string | null): number | null {
   if (value === null) return null;
   if (!/^\d+$/.test(value)) {
-    throw new OpenGeniApiError(502, "invalid retained artifact content-length");
+    throw invalidApiResponseError("invalid retained artifact content-length");
   }
   const length = Number(value);
   if (!Number.isSafeInteger(length) || length > RETAINED_OUTPUT_MAX_PAGE_BYTES) {
-    throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+    throw invalidApiResponseError("retained artifact response exceeds the SDK byte limit");
   }
   return length;
 }
@@ -12006,7 +12007,7 @@ async function readBoundedResponseBytes(
 ): Promise<Uint8Array> {
   if (!response.body) {
     if (expectedBytes !== null && expectedBytes !== 0) {
-      throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+      throw invalidApiResponseError("retained artifact response length mismatch");
     }
     return new Uint8Array();
   }
@@ -12022,7 +12023,7 @@ async function readBoundedResponseBytes(
         await reader
           .cancel("retained artifact response exceeded the SDK byte limit")
           .catch(() => undefined);
-        throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+        throw invalidApiResponseError("retained artifact response exceeds the SDK byte limit");
       }
       chunks.push(value);
     }
@@ -12030,7 +12031,7 @@ async function readBoundedResponseBytes(
     reader.releaseLock();
   }
   if (expectedBytes !== null && totalBytes !== expectedBytes) {
-    throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+    throw invalidApiResponseError("retained artifact response length mismatch");
   }
   const bytes = new Uint8Array(totalBytes);
   let offset = 0;
