@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`996d99a85841845d0b5032a1f7b1dddce676383c`: upstream `cua-driver-rs-v0.37.0`
+`0b24708f1e6fc2f728a65c3323c8b151bb1c476d`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -18,6 +18,8 @@ again, in the background. On macOS it also focuses an element on its own (a
 Its macOS waits wake on time (a kqueue timed wait instead of `nanosleep`, which
 woke a 25 ms poll up to 150 ms late on a busy Mac), and a batch of background
 presses on one window makes that window key once instead of before every press.
+A press that puts the caret in a text field reports a confirmed effect when the
+field then holds the keyboard focus, instead of an unconfirmed click.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
@@ -125,7 +127,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/996d99a85841845d0b5032a1f7b1dddce676383c/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/0b24708f1e6fc2f728a65c3323c8b151bb1c476d/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
