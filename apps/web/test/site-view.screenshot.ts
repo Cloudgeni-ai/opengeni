@@ -59,7 +59,7 @@ try {
     check(
       (await panelConversation(page, "Time filters across all graphs").getAttribute(
         "aria-current",
-      )) === "true",
+      )) === "page",
       "the newest conversation is not the one open",
     );
     check(
