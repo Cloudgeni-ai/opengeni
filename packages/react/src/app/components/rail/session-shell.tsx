@@ -275,7 +275,6 @@ export function SessionShell({
 function SessionShellFrame({ children }: { children: ReactNode }) {
   const rail = useRail();
   const chatList = useSessionUiFeature("chatList");
-  const brand = useSessionUiFeature("brand");
   const context = useAppContext();
   const { canvasBanners } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({
