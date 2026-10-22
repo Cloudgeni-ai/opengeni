@@ -1263,7 +1263,9 @@ describe("CUA desktop boundary", () => {
       await expect(open()).rejects.toMatchObject({
         code: "outcome_unknown",
         dispatched: true,
-        message: expect.stringContaining("macOS did not confirm opening the element"),
+        message: expect.stringContaining(
+          "macOS did not confirm the action, and the window reads the same as before",
+        ),
       });
       // A button still presses.
       await backend.dispatch(command(await backend.observe(target.id)));
@@ -1272,6 +1274,76 @@ describe("CUA desktop boundary", () => {
       );
     } finally {
       await backend.close();
+    }
+  });
+
+  test("a press macOS did not confirm, which closed its window, reads the window it opened", async () => {
+    // Excel's start gallery: pressing "Blank Workbook" closes the gallery and
+    // opens the workbook, and macOS answers the press with -25205.
+    class GalleryFixture extends Fixture {
+      pressed = false;
+      opens = true;
+      override async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "click" && args.element_token !== undefined) {
+          this.calls.push({ name, args });
+          this.pressed = true;
+          return result(
+            {
+              error: {
+                code: "ax_action_failed",
+                message: "AX action failed: AXUIElementPerformAction(AXPress) returned -25205",
+              },
+            },
+            true,
+          );
+        }
+        if (name === "list_windows" && this.pressed) {
+          this.calls.push({ name, args });
+          return result({
+            windows: this.opens
+              ? [
+                  {
+                    pid: 42,
+                    window_id: 5,
+                    title: "Book1",
+                    app_name: "Fixture",
+                    bounds: { x: 50, y: 50, width: 200, height: 100 },
+                  },
+                ]
+              : [],
+          });
+        }
+        if (name === "get_window_state" && this.pressed && args.window_id === 1) {
+          this.calls.push({ name, args });
+          return result({ error: { code: "window_not_found", message: "no such window" } }, true);
+        }
+        const response = await super.callTool(name, argumentsJson);
+        if (name === "get_window_state" && args.window_id === 5) {
+          const state = JSON.parse(response.structuredJson!);
+          response.structuredJson = JSON.stringify({ ...state, window_id: 5 });
+        }
+        return response;
+      }
+    }
+    for (const opens of [true, false]) {
+      const fixture = new GalleryFixture();
+      fixture.opens = opens;
+      const backend = await CuaComputerBackend.open(fixture, "macos");
+      try {
+        const target = (await backend.targets())[0]!;
+        const pressing = backend.dispatch(command(await backend.observe(target.id)));
+        if (opens) expect((await pressing)?.target.id).toBe("cua:window:42:5");
+        else
+          await expect(pressing).rejects.toMatchObject({
+            code: "outcome_unknown",
+            dispatched: true,
+            message:
+              "macOS did not confirm the action, but cua:window:42:1 has closed since, so it likely took effect; list the app's windows and observe the one to act on",
+          });
+      } finally {
+        await backend.close();
+      }
     }
   });
 
