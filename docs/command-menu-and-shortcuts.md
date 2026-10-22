@@ -72,6 +72,7 @@ character typed, so ⌘/ works on layouts where "/" needs Shift.
 | Archive or restore chat | ⌃⌘A | Ctrl+Alt+A | Apple Mail's Archive key; browsers on Windows and Linux use Ctrl+Shift+A for tab search |
 | Inbox | ⇧⌘I | Ctrl+Shift+I on desktop only | Browsers on Windows and Linux use Ctrl+Shift+I for developer tools |
 | Previous or next chat | ⌥↑ / ⌥↓ | Alt+↑ / Alt+↓ | Sidebar order, like Slack |
+| Previous or next workspace | ⌥⌘↑ / ⌥⌘↓ | Ctrl+Alt+↑ / Ctrl+Alt+↓, and Ctrl+Shift+PgUp / PgDn on desktop | The workspace picker's order, wrapping around. Arrows sit in the same place on every layout (⌘⇧[ and ⌘⇧] need ⌥ on Nordic keyboards and are taken by browsers); some Linux desktops keep Ctrl+Alt+arrows, hence the second key |
 | Pinned chat 1 to 9 | ⌘1 to ⌘9 on desktop | Ctrl+1 to 9 on desktop | Browsers use these for tabs |
 | Recent chat switcher | ⌃Tab on desktop | Ctrl+Tab on desktop | Browsers use these for tabs; see below |
 | Find in chat | ⌘F | Ctrl+F | Exists today |
@@ -92,18 +93,43 @@ the window cancels. The list only appears after a short delay, so a quick
 press never flashes it. Archived and subagent chats are left out. On Windows
 and Linux, Ctrl+Tab does the same.
 
+The recent chats span all of the person's workspaces, so Control+Tab also
+jumps back to a chat in another workspace; such chats carry a small tag with
+their workspace's name, and opening one switches to that workspace. Chats in a
+workspace no longer open to the person are left out. The list is kept per
+person in local storage (`opengeni.recentChats.<subject>`); older per-workspace
+lists merge into it on first read.
+
+## Workspaces
+
+The workspace picker at the top of the sidebar lists every workspace open to
+the person, grouped by organization: the default organization first, then by
+name, and each organization's workspaces by name. ⌥⌘↑ and ⌥⌘↓ walk that same
+list, wrapping around, and the picker shows the keys at its foot. ⌘K finds
+workspaces by name too, and "Switch workspace…" (also in the desktop Go menu)
+turns ⌘K into a workspace list: type to filter, Enter switches, Esc goes back.
+The sidebar, its pins and its order stay per workspace.
+
 ## The ⌘K menu
 
 Opening it is instant: no request is made before it appears.
 
 - **Empty query:** recent chats you opened (most recent first, topped up from
   the top of the sidebar), then actions for the chat you are in (copy link,
-  pin, rename, mark unread, archive) with their keys, then general actions
-  (new chat, find, inbox, search messages, sidebar, shortcuts).
+  pin, rename, fork, mark unread, archive) with their keys, then general
+  actions (new chat, find, inbox, search messages, switch workspace, sidebar,
+  shortcuts). Recent chats include other workspaces, tagged with their
+  workspace.
 - **Typing:** results update on every keystroke from chats already loaded in
   the sidebar and recent list, ranked by how well the title matches. The server
-  title search runs alongside and merges in chats the sidebar has not loaded.
-  Actions that match appear in their own group with their keys.
+  title search runs alongside and merges in chats the sidebar has not loaded,
+  in this workspace and in up to nine of the person's other workspaces (the
+  ones used most recently first), each joining as it answers. Chats from other
+  workspaces rank just below equal matches here and are tagged with their
+  workspace; opening one switches workspace. Actions that match appear in
+  their own group with their keys, and workspaces whose name matches in theirs.
+- **Fork chat:** forks the chat on screen from its latest message, the same as
+  the fork button under a message, and opens the same confirmation.
 - **Ranking:** whole-title prefix, then a word in the title starting with the
   query, then substring, then all query words found in any order, then letters
   in order, read as an abbreviation that starts words (so "kbsh" finds
@@ -117,7 +143,8 @@ Opening it is instant: no request is made before it appears.
   chat by name.
 - **Keys inside the menu:** ↑ ↓ move, Enter opens, ⌘Enter opens the chat in a
   new tab on web or window on desktop, Tab on a chat shows its actions (pin,
-  copy link, rename, archive), Esc closes.
+  copy link, rename, archive; for a chat in another workspace, open and copy
+  link), Esc closes.
 
 The server title search changes from one literal substring to matching each
 word: a chat matches when every word in the query appears in its title or first

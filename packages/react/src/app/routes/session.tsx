@@ -272,6 +272,7 @@ import type {
 } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
+import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
 
 const InlineChatArtifact = lazy(() =>
@@ -3206,6 +3207,26 @@ function SessionChatPane(props: {
     context.authSession !== null &&
     Boolean(props.session.tenancy) &&
     mayRate;
+  // "Fork chat" from the ⌘K menu or the desktop menu bar forks from the latest
+  // message, as the fork button under that message does.
+  const forkRequests = useUiEventTarget("document");
+  const eventsRef = useRef(props.events);
+  eventsRef.current = props.events;
+  useEffect(() => {
+    if (!mayForkMessage) return;
+    const fork = () => {
+      const events = eventsRef.current;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]!;
+        if (event.type === "agent.message.completed" || event.type === "user.message") {
+          setForkEventId(event.id);
+          return;
+        }
+      }
+    };
+    forkRequests.addEventListener(FORK_CURRENT_CHAT_EVENT, fork);
+    return () => forkRequests.removeEventListener(FORK_CURRENT_CHAT_EVENT, fork);
+  }, [forkRequests, mayForkMessage]);
   const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
     setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
   }, []);

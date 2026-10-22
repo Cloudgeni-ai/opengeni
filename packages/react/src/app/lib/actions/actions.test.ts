@@ -11,7 +11,7 @@ import {
 import type { ChatRecord } from "./chat-directory";
 import { isSwitcherKey, openChatSwitcher, stepChatSwitcher, SWITCHER_LIMIT } from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
-import { APP_ACTIONS } from "./registry";
+import { APP_ACTIONS, stepWorkspace } from "./registry";
 
 function key(
   code: string,
@@ -279,6 +279,22 @@ describe("chat switcher", () => {
     expect(openChatSwitcher(directory([]), null, false)).toBeNull();
   });
 
+  test("chats in other workspaces join the list, unless that workspace is gone", () => {
+    const rows = [
+      record("a"),
+      record("b", { workspaceId: "other" }),
+      record("c", { workspaceId: "gone" }),
+    ];
+    const state = openChatSwitcher(
+      directory(["a", "b", "c"], rows),
+      "a",
+      false,
+      (workspaceId) => workspaceId !== "gone",
+    )!;
+    expect(state.ids).toEqual(["a", "b"]);
+    expect(state.ids[state.index]).toBe("b");
+  });
+
   test("the list stops at ten chats", () => {
     const ids = Array.from({ length: 15 }, (_, index) => `c${index}`);
     expect(openChatSwitcher(directory(ids), "c0", false)!.ids).toHaveLength(SWITCHER_LIMIT);
@@ -291,5 +307,38 @@ describe("chat switcher", () => {
     expect(isSwitcherKey({ ...tab, altKey: true })).toBe(false);
     expect(isSwitcherKey({ ...tab, ctrlKey: false })).toBe(false);
     expect(isSwitcherKey({ ...tab, code: "KeyQ" })).toBe(false);
+  });
+});
+
+describe("workspace keys", () => {
+  const workspaces = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  test("previous and next walk the picker's order and wrap around", () => {
+    expect(stepWorkspace(workspaces, "a", 1)).toBe("b");
+    expect(stepWorkspace(workspaces, "c", 1)).toBe("a");
+    expect(stepWorkspace(workspaces, "a", -1)).toBe("c");
+    expect(stepWorkspace(workspaces, "b", -1)).toBe("a");
+  });
+
+  test("one workspace has nowhere to go, and an unknown one starts at an end", () => {
+    expect(stepWorkspace([{ id: "a" }], "a", 1)).toBeNull();
+    expect(stepWorkspace(workspaces, "x", 1)).toBe("a");
+    expect(stepWorkspace(workspaces, "x", -1)).toBe("c");
+  });
+
+  test("⌥⌘↑ and ⌥⌘↓ on Mac, Ctrl+Alt elsewhere, plus Ctrl+Shift+PgUp/PgDn in the desktop app", () => {
+    const next = APP_ACTIONS.find((action) => action.id === "go.nextWorkspace")!;
+    const mac = applicableChords(next.chords, "web", "mac");
+    expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌥⌘↓"]);
+    expect(matchesChord(key("ArrowDown", { meta: true, alt: true }), mac[0]!, "mac")).toBe(true);
+    // ⌥↓ alone is the next chat.
+    expect(matchesChord(key("ArrowDown", { alt: true }), mac[0]!, "mac")).toBe(false);
+    expect(
+      applicableChords(next.chords, "web", "other").map((chord) => chordLabel(chord, "other")),
+    ).toEqual(["Ctrl+Alt+↓"]);
+    expect(
+      applicableChords(next.chords, "desktop", "other").map((chord) => chordLabel(chord, "other")),
+    ).toEqual(["Ctrl+Alt+↓", "Ctrl+Shift+PgDn"]);
+    expect(chordAccelerator(mac[0]!)).toBe("CmdOrCtrl+Alt+Down");
   });
 });

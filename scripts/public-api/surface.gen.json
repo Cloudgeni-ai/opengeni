@@ -35442,7 +35442,9 @@
       "orgLabel": "value",
       "orgName": "value",
       "OrgOption": "type",
+      "OrgWorkspaces": "type",
       "shortAccountId": "value",
+      "workspacesByOrganization": "value",
       "workspacesInOrg": "value"
     },
     "@opengeni/react/queue-presentation-model": {

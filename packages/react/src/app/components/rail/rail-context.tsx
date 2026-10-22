@@ -84,8 +84,8 @@ export type RailContextValue = {
   openWorkspace: (workspaceId: string) => void;
   /** Switch organization: navigate to the first workspace in the target org. */
   openOrg: (accountId: string) => void;
-  /** Open a specific session in the current workspace. */
-  openSession: (sessionId: string) => void;
+  /** Open a session: in the current workspace, or in the one given. */
+  openSession: (sessionId: string, inWorkspaceId?: string) => void;
   /** Start a new session (the sessions index composer). */
   startNewSession: () => void;
 };
@@ -296,14 +296,17 @@ export function RailProvider({
   );
 
   const openSession = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, inWorkspaceId?: string) => {
+      const target = inWorkspaceId ?? workspaceId;
+      // Another workspace's chat leaves this workspace, as switching does.
+      if (target !== workspaceId) appContext.resetSessionView();
       setDrawerOpen(false);
       void navigate({
         to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId, sessionId },
+        params: { workspaceId: target, sessionId },
       });
     },
-    [navigate, workspaceId, setDrawerOpen],
+    [appContext, navigate, workspaceId, setDrawerOpen],
   );
 
   const startNewSession = useCallback(() => {

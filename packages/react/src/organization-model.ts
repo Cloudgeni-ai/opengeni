@@ -89,6 +89,24 @@ export function workspacesInOrg(workspaces: Workspace[], accountId: string): Wor
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+export type OrgWorkspaces = { org: OrgOption; workspaces: Workspace[] };
+
+/**
+ * Every workspace open to the person, grouped by organization in the
+ * switcher's order: organizations as `organizationsForSubject` orders them,
+ * each one's workspaces by name. The workspace picker lists them this way and
+ * the previous and next workspace keys walk them in the same order.
+ */
+export function workspacesByOrganization(
+  t: OpenGeniText,
+  context: AccessContext,
+  workspaces: Workspace[],
+): OrgWorkspaces[] {
+  return organizationsForSubject(t, context, workspaces)
+    .map((org) => ({ org, workspaces: workspacesInOrg(workspaces, org.accountId) }))
+    .filter((group) => group.workspaces.length > 0);
+}
+
 /** Organization settings remain anchored to an accessible workspace in that organization. */
 export function organizationSettingsWorkspaceId(
   workspaces: Workspace[],
