@@ -162,6 +162,7 @@ export async function buildCapabilityCatalog(input: {
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -1661,6 +1662,79 @@ function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCa
           ),
         ),
       ].filter(Boolean),
+    },
+  });
+}
+
+/** The catalog id of the Excel add-in tile and its in-chat install card. */
+export const EXCEL_ADDIN_CAPABILITY_ID = "api:excel-addin";
+
+/** How people and agents name the deployment's Excel add-in, and where it is installed. */
+export type ExcelAddin = { name: string; installUrl: string | null };
+
+/** The deployment's configured add-in, else this web app's own /excel install page. */
+export function excelAddin(settings: {
+  officeAddinName?: string | undefined;
+  officeAddinInstallUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
+  publicBaseUrl?: string | undefined;
+}): ExcelAddin {
+  const web = settings.webBaseUrl ?? settings.publicBaseUrl;
+  return {
+    name: settings.officeAddinName ?? "Opengeni",
+    installUrl:
+      settings.officeAddinInstallUrl ?? (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
+  };
+}
+
+/**
+ * The Excel add-in tile. The add-in is installed in each person's own Excel
+ * and connects whichever workbook they open its pane in, so there is nothing
+ * to enable for the workspace: the tile explains it and links to the install
+ * page, and `excel_run` reaches the person's connected workbooks.
+ */
+export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: EXCEL_ADDIN_CAPABILITY_ID,
+    kind: "api",
+    source: "built_in",
+    name: "Microsoft Excel",
+    description: `Add the ${addin.name} add-in to Excel (web, Windows or Mac) and open it in a workbook: you can chat there, and agents in any chat can read and change that workbook live.`,
+    category: "productivity",
+    tags: [
+      "excel",
+      "microsoft",
+      "office",
+      "microsoft-365",
+      "spreadsheet",
+      "spreadsheets",
+      "workbook",
+      "xlsx",
+      "add-in",
+      "finance",
+      "budget",
+      "model",
+    ],
+    homepageUrl: addin.installUrl,
+    providerDomain: "microsoft.com",
+    authModel: "office_addin",
+    authKind: "none",
+    surfaceType: "first_party_excel_addin",
+    tools: [],
+    runtime: {
+      available: addin.installUrl !== null,
+      notes:
+        addin.installUrl !== null
+          ? `Agents use excel_run in workbooks people have open with the ${addin.name} add-in.`
+          : "This deployment has no Excel add-in install page configured.",
+    },
+    enabled: false,
+    enabledReason: null,
+    metadata: {
+      connectorMode: "first_party_excel_addin",
+      addinName: addin.name,
+      installUrl: addin.installUrl,
+      firstPartyMcpTools: ["excel_run"],
     },
   });
 }

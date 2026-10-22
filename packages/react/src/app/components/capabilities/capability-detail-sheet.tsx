@@ -26,6 +26,7 @@ import {
 import { CapabilityLogo } from "./capability-logo";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
 import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
+import { ExcelAddinSetupSteps } from "./excel-addin-catalog-link";
 import { CapabilityDialogContent } from "./detail-dialog";
 import {
   capabilityPresentation,
@@ -456,6 +457,8 @@ export function DetailBody({
                   : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
               </p>
             </div>
+          ) : item.surfaceType === "first_party_excel_addin" ? (
+            <ExcelAddinSetupSteps item={item} preserveChat={setupOnly} />
           ) : item.surfaceType === "first_party_onepassword" && workspaceId ? (
             <div className="space-y-3">
               <p className="text-sm text-fg-muted">

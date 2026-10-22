@@ -16,7 +16,7 @@ import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
 import { registerNotificationTools } from "./notification-tools";
-import { registerExcelTools } from "./excel-tools";
+import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   sessionChatUrl,
@@ -212,6 +212,7 @@ import {
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
   CONNECTED_MACHINE_CAPABILITY_ID,
+  EXCEL_ADDIN_CAPABILITY_ID,
   nativeConnectionCapabilityRecommendations,
   OPENGENI_BROWSER_EXTENSION_URL,
   requireLiveAgentAttemptAuthorization,
@@ -6693,16 +6694,18 @@ function registerCapabilityDiscoveryTools(
     }
     return await Promise.all(
       items.map((item) =>
-        capabilitySetupProjection(
-          deps,
-          grant.workspaceId,
-          item,
-          availableServerIds,
-          acceptedServerIds,
-          accountSelectionKnown,
-          availableFirstPartyTools,
-          new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-        ),
+        item.id === EXCEL_ADDIN_CAPABILITY_ID
+          ? excelAddinSetup(deps, grant, sessionId)
+          : capabilitySetupProjection(
+              deps,
+              grant.workspaceId,
+              item,
+              availableServerIds,
+              acceptedServerIds,
+              accountSelectionKnown,
+              availableFirstPartyTools,
+              new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+            ),
       ),
     );
   };
@@ -6855,7 +6858,9 @@ function registerCapabilityDiscoveryTools(
         message:
           item.id === CONNECTED_MACHINE_CAPABILITY_ID
             ? "The Connected Machine card was posted. It shows the person what to do, so do not describe its buttons or steps; nothing is connected yet. Do not paste an enroll token into the chat."
-            : "The recommendation was posted for human confirmation. No access has been granted yet.",
+            : item.id === EXCEL_ADDIN_CAPABILITY_ID
+              ? "The Excel add-in card was posted with its install link and steps, so do not repeat them; no workbook is connected yet. excel_run works once the person opens the add-in in their workbook."
+              : "The recommendation was posted for human confirmation. No access has been granted yet.",
       });
     },
   );

@@ -10,6 +10,8 @@ import { capabilityLogoFallback } from "../../../connect";
  * committed files.
  */
 export const FIRST_PARTY_CAPABILITY_LOGOS: Readonly<Record<string, string>> = {
+  "api:excel-addin":
+    "data:image/svg+xml,%3Csvg%20role%3D%22img%22%20viewBox%3D%220%200%2024%2024%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%0A%20%20%3Ctitle%3EMicrosoft%20Excel%3C%2Ftitle%3E%0A%20%20%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%225%22%20fill%3D%22%23107c41%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M7%206.5h2.4l2.6%203.9%202.6-3.9H17l-3.8%205.5L17%2017.5h-2.4L12%2013.6l-2.6%203.9H7l3.8-5.5z%22%20fill%3D%22%23fff%22%2F%3E%0A%3C%2Fsvg%3E%0A",
   "api:fiken":
     "data:image/svg+xml,%3Csvg%20role%3D%22img%22%20viewBox%3D%220%200%20192%20192%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%0A%20%20%3Ctitle%3EFiken%3C%2Ftitle%3E%0A%20%20%3Crect%20width%3D%22192%22%20height%3D%22192%22%20rx%3D%2236%22%20fill%3D%22%23fff%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M88%20157V83c0-27%2018-47%2042-47%208%200%2015%202%2022%206%22%20fill%3D%22none%22%20stroke%3D%22%2375a7f5%22%20stroke-linecap%3D%22round%22%20stroke-width%3D%2225%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M46%20114h84M88%2082v75%22%20fill%3D%22none%22%20stroke%3D%22%235838c6%22%20stroke-linecap%3D%22round%22%20stroke-width%3D%2225%22%2F%3E%0A%3C%2Fsvg%3E%0A",
   "api:github-app":

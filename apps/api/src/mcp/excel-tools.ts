@@ -2,7 +2,13 @@
 // Excel add-in (office-workbooks.ts). The agent acts as the person its turn
 // works for and reaches only that person's workbooks in the session's workspace.
 import type { AccessGrant } from "@opengeni/contracts";
-import { requireLiveAgentAttemptAuthorization, type ApiRouteDeps } from "@opengeni/core";
+import {
+  EXCEL_ADDIN_CAPABILITY_ID,
+  excelAddin,
+  requireLiveAgentAttemptAuthorization,
+  type ApiRouteDeps,
+  type ExcelAddin,
+} from "@opengeni/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { OFFICE_RUN_DEFAULT_TIMEOUT_MS, type OfficeWorkbook } from "../office-workbooks";
@@ -11,6 +17,8 @@ import { officeWorkbookRelayFor } from "../routes/office-workbooks";
 export const EXCEL_RUN_MAX_CODE_CHARS = 200_000;
 const MAX_RESULT_CHARS = 40_000;
 
+export { excelAddin, type ExcelAddin };
+
 const DESCRIPTION = [
   "Run Office.js code live in an Excel workbook the person has open with the Excel add-in (Excel on the web, Windows or Mac).",
   "`code` is the body of an async function called inside Excel.run with `context` and `Excel`: queue operations on `context.workbook`, `load` every property you will read and `await context.sync()` before reading it, then `return` a small JSON-serializable result with only what you need. console.log output is returned too.",
@@ -18,6 +26,7 @@ const DESCRIPTION = [
   "Changes appear in the person's workbook at once and may not be undoable, so look before you change anything and change only what was asked.",
   "A failure returns Office's error code, message and failing statement; operations synced before the failure stay applied.",
   "Omit `workbook` when one workbook is open; otherwise the error lists the open workbooks to choose from.",
+  `When someone works on a spreadsheet and no workbook is connected, offer the Excel add-in: capability_authorization_request with ${EXCEL_ADDIN_CAPABILITY_ID} shows its install card.`,
 ].join(" ");
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -29,24 +38,6 @@ function textResult(value: unknown, isError = false): ToolResult {
 
 function listed(workbooks: OfficeWorkbook[]): string {
   return workbooks.map((each) => `"${each.name}" (id ${each.id}, ${each.app})`).join("; ");
-}
-
-/** How agents name the add-in to people, and where they can add it. */
-export type ExcelAddin = { name: string; installUrl: string | null };
-
-/** The deployment's configured add-in, else Opengeni's own on this web app's /excel page. */
-export function excelAddin(settings: {
-  officeAddinName?: string | undefined;
-  officeAddinInstallUrl?: string | undefined;
-  webBaseUrl?: string | undefined;
-  publicBaseUrl?: string | undefined;
-}): ExcelAddin {
-  const web = settings.webBaseUrl ?? settings.publicBaseUrl;
-  return {
-    name: settings.officeAddinName ?? "Opengeni",
-    installUrl:
-      settings.officeAddinInstallUrl ?? (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
-  };
 }
 
 /** The workbook `wanted` names (id, or a unique name), or why there is none. */
@@ -103,6 +94,50 @@ function boundedJson(value: unknown): { json: string; truncated: boolean } {
     : { json, truncated: false };
 }
 
+/** The person whose workbooks this session's agent reaches: the human its turn works for. */
+async function workbookOwner(deps: ApiRouteDeps, grant: AccessGrant, sessionId: string) {
+  const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+  return {
+    subjectId: attempt.initiatingHumanSubjectId ?? grant.subjectId,
+    workspaceId: grant.workspaceId,
+  };
+}
+
+/** Setup status of the Excel add-in tile for this session's person. */
+export async function excelAddinSetup(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<
+  | { status: "ready"; action: null; detail: string }
+  | { status: "authorization_required"; action: "connect"; detail: string }
+  | { status: "unavailable"; action: null; detail: string }
+> {
+  const addin = excelAddin(deps.settings);
+  if (!addin.installUrl) {
+    return {
+      status: "unavailable",
+      action: null,
+      detail: "This deployment has no Excel add-in install page configured.",
+    };
+  }
+  const workbooks = await officeWorkbookRelayFor(deps).list(
+    await workbookOwner(deps, grant, sessionId),
+  );
+  if (workbooks.length > 0) {
+    return {
+      status: "ready",
+      action: null,
+      detail: `Connected workbooks: ${listed(workbooks)}. Use excel_run.`,
+    };
+  }
+  return {
+    status: "authorization_required",
+    action: "connect",
+    detail: `No workbook is connected. The card links to ${addin.installUrl}, which shows how to add ${addin.name} to Excel; then the person opens it in their workbook (Home > Add-ins > ${addin.name}).`,
+  };
+}
+
 export function registerExcelTools(input: {
   server: McpServer;
   deps: ApiRouteDeps;
@@ -131,11 +166,7 @@ export function registerExcelTools(input: {
     },
     async ({ code, workbook: wanted }) => {
       await authorize();
-      const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-      const owner = {
-        subjectId: attempt.initiatingHumanSubjectId ?? grant.subjectId,
-        workspaceId: grant.workspaceId,
-      };
+      const owner = await workbookOwner(deps, grant, sessionId);
       const relay = officeWorkbookRelayFor(deps);
       const addin = excelAddin(deps.settings);
       const chosen = chooseWorkbook(await relay.list(owner), wanted, addin);
