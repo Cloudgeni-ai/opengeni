@@ -474,9 +474,16 @@ export function ArtifactRow({
  * blocks every network request, so a card never runs Site code or phones
  * home. The first element of the document is the policy, so it always lands
  * in <head> whatever the Site's own markup.
+ *
+ * The frame also requires the same policy from outside (the `csp` attribute,
+ * CSP Embedded Enforcement), so browsers that support it enforce the policy
+ * on the srcdoc document before any of its markup is parsed or speculatively
+ * preloaded. The in-document policy keeps other browsers covered.
  */
 const SITE_STILL_POLICY =
   "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'";
+// `csp` is a standard iframe attribute React passes through but doesn't type.
+const SITE_STILL_FRAME_POLICY = { csp: SITE_STILL_POLICY };
 export function siteStillDocument(html: string) {
   return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${SITE_STILL_POLICY}"><meta name="color-scheme" content="light">${html}`;
 }
@@ -538,6 +545,7 @@ function SiteStill({
       <iframe
         title={`Preview of ${item.title}`}
         sandbox=""
+        {...SITE_STILL_FRAME_POLICY}
         srcDoc={siteStillDocument(html)}
         loading="lazy"
         tabIndex={-1}
