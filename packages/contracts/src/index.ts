@@ -17177,6 +17177,12 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       /** An agent suggestion, not a catalog entry or authority to contact this URL. */
       setupRequest: CustomMcpSetupRequest.optional(),
+      /**
+       * The Connected Machine the agent asked for, when a Connected Machine card
+       * answers a refused switch or one-off command. Names the request; it grants
+       * nothing.
+       */
+      requestedSandboxId: z.string().uuid().optional(),
     })
     .superRefine((payload, context) => {
       if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {
