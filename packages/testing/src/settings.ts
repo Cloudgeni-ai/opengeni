@@ -39,6 +39,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     turnWorkerEmergencyMemoryUsage: 0.9,
     turnWorkerMemoryGuardIntervalMs: 5_000,
     turnWorkerMemoryGuardSustainMs: 30_000,
+    turnWorkerShutdownGraceMs: 90_000,
+    turnWorkerShutdownForceMs: 105_000,
     observabilityStructuredLogs: false,
     observabilityMetricsEnabled: true,
     observabilityOtlpEndpoint: undefined,

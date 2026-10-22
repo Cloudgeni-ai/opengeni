@@ -4,6 +4,8 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -12,6 +14,8 @@ export {
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
+  DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -378,6 +382,25 @@ const SettingsSchema = z.object({
   turnWorkerEmergencyMemoryUsage: z.coerce.number().min(0.85).max(0.95).default(0.9),
   turnWorkerMemoryGuardIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
   turnWorkerMemoryGuardSustainMs: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
+  // Graceful turn-worker shutdown (rolling deploy, scale-down, memory guard).
+  // After the worker stops polling, in-flight turns may finish naturally for
+  // the grace; the rest are cancelled with WORKER_SHUTDOWN (recoverable
+  // checkpoint) and the SDK force-stops at the force time. Keep the force time
+  // inside the pod's termination grace; the standalone process exits at most
+  // ten seconds after it. The worker keeps at least a ten-second checkpoint
+  // window between grace and force, shortening the grace when needed.
+  turnWorkerShutdownGraceMs: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(3_600_000)
+    .default(DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS),
+  turnWorkerShutdownForceMs: z.coerce
+    .number()
+    .int()
+    .min(10_000)
+    .max(3_600_000)
+    .default(DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS),
   observabilityStructuredLogs: EnvBoolean.default(false),
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
@@ -5006,6 +5029,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     turnWorkerEmergencyMemoryUsage: optional("OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE"),
     turnWorkerMemoryGuardIntervalMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS"),
     turnWorkerMemoryGuardSustainMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS"),
+    turnWorkerShutdownGraceMs: optional("OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS"),
+    turnWorkerShutdownForceMs: optional("OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
