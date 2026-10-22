@@ -355,6 +355,7 @@ import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
+import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
   composeModularAgentInstructions,
@@ -3350,6 +3351,7 @@ export function buildOpenGeniAgent(
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
+    baseInstructions: sandboxBaseInstructions(),
     defaultManifest: buildManifest(
       settings,
       resources,
