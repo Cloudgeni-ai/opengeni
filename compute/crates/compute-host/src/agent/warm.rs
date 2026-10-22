@@ -44,6 +44,7 @@ impl Warm {
         rootfs: &Arc<Cache>,
         images: &Images,
     ) -> Started {
+        let began = Instant::now();
         let (config, root) = (host.pool.clone(), host.root.as_path());
         let (depends_on, ready_port) = config.as_ref().map_or((Vec::new(), 0), |config| {
             (config.depends_on.clone(), config.ready_port)
@@ -91,6 +92,11 @@ impl Warm {
         for shape in &unused {
             pool.retire(*shape);
         }
+        tracing::info!(
+            templates = found.len(),
+            ms = began.elapsed().as_millis(),
+            "templates found"
+        );
         Started {
             warm: Some(Self {
                 pool,

@@ -16,7 +16,7 @@ use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::cpu_share::ProcessorShare;
-use compute_host::fleet::{FleetConfig, Leased, Prepared};
+use compute_host::fleet::{FleetConfig, Joined, Leased, Prepared};
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::observe::StoreAlarms;
 use compute_host::observe::canary::{self, CanaryConfig};
@@ -875,10 +875,19 @@ async fn run_agent<S: Store>(
 ) -> anyhow::Result<()> {
     let observer = config.observer.clone();
     let links = config.agent_link.clone();
-    let (handle, agent) = HostAgent::start(config, engine, store).await?;
+    let in_fleet = fleet.is_some();
+    // On a host in a fleet the lease a previous run left is renewed while
+    // this one takes its sandboxes back.
+    let ((handle, agent), joined) = if let Some((fleet, prepared)) = fleet {
+        // Boxed: it holds the agent's start, and this future lives long.
+        Box::pin(fleet.start(prepared, HostAgent::start(config, engine, store))).await?
+    } else {
+        let alone: Joined = Box::pin(std::future::pending());
+        (HostAgent::start(config, engine, store).await?, alone)
+    };
     // On a host in a fleet only the service creates, adopts and hands off
     // sandboxes; the socket serves the host's own tools the rest.
-    let local = if fleet.is_some() {
+    let local = if in_fleet {
         handle.local_to_fleet()
     } else {
         handle.clone()
@@ -886,12 +895,6 @@ async fn run_agent<S: Store>(
     if let Some(canary) = canary {
         tokio::spawn(canary::run(handle.clone(), canary));
     }
-    let joined = async {
-        match fleet {
-            Some((fleet, prepared)) => fleet.run(prepared, handle).await,
-            None => std::future::pending().await,
-        }
-    };
     let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
     let result = tokio::select! {
         result = serve(local, &socket) => result.context("serving"),

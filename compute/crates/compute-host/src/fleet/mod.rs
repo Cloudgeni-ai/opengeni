@@ -8,6 +8,11 @@
 //! - The renewer ([`lease`]) registers, carries out the service's rulings
 //!   on what the host still holds, and renews, writing the lease file
 //!   before anything goes out under it.
+//! - The renewer and the listener start before the agent takes back what
+//!   an earlier run left ([`FleetConfig::start`]), which can take longer
+//!   than the lease's term: until it has, the lease held is renewed
+//!   without a capacity, no registration is sent, and every request is
+//!   refused as `unavailable`.
 //! - The guard ([`run_guard`]), a process of its own, freezes the VMs a
 //!   second before the deadline in that file and kills them if they are
 //!   not frozen by then, and holds the kernel watchdog, so the VMs stop
@@ -24,12 +29,14 @@ mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use compute_fleet::{HostLease, LeaseTerms};
 use compute_protocol::fleet::{Answered, HostInfo};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 pub use gate::Admission;
@@ -41,7 +48,7 @@ pub use link::MetricsRoute;
 pub use record::LeaseFile;
 pub use tls::{Tls, TlsFiles};
 
-use crate::agent::Handle;
+use crate::agent::{Handle, HostError};
 
 /// How a host joins a fleet.
 #[derive(Clone, Debug)]
@@ -75,6 +82,22 @@ pub struct Prepared {
     pub gate: LeaseGate,
     file: LeaseFile,
 }
+
+/// The agent as the fleet sees it: none while it takes back what an
+/// earlier run left, then its handle.
+#[derive(Clone, Debug)]
+pub(crate) struct Agent(watch::Receiver<Option<Handle>>);
+
+impl Agent {
+    /// The agent's handle, once it has started.
+    fn handle(&self) -> Option<Handle> {
+        self.0.borrow().clone()
+    }
+}
+
+/// The fleet's part of a started agent: it renews and serves until the
+/// agent stops, and ends only with an error.
+pub type Joined = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 
 /// Checks the service's URL is HTTPS: its lease answers and rulings must
 /// come over mutual TLS.
@@ -120,8 +143,36 @@ impl FleetConfig {
         })
     }
 
-    /// Registers, renews and serves the service until the agent stops.
-    pub async fn run(self, prepared: Prepared, handle: Handle) -> anyhow::Result<()> {
+    /// Joins the fleet, then starts the agent with `start`. The lease a
+    /// previous run of the agent left is renewed meanwhile: taking back
+    /// the sandboxes it ran can take longer than the lease's term, and
+    /// once that ran out the guard would freeze their VMs, and the service
+    /// give the host up, before this run answered anything. Returns what
+    /// `start` did and the fleet's part, which goes on until the agent
+    /// stops.
+    pub async fn start<T>(
+        self,
+        prepared: Prepared,
+        start: impl Future<Output = Result<(Handle, T), HostError>>,
+    ) -> anyhow::Result<((Handle, T), Joined)> {
+        let (starting, agent) = watch::channel(None);
+        let mut joined: Joined = Box::pin(self.run(prepared, Agent(agent)));
+        let started = tokio::select! {
+            started = start => started?,
+            result = &mut joined => {
+                return Err(result
+                    .err()
+                    .unwrap_or_else(|| anyhow::anyhow!("left the fleet"))
+                    .context("in the fleet, while the agent started"));
+            }
+        };
+        starting.send_replace(Some(started.0.clone()));
+        Ok((started, joined))
+    }
+
+    /// Registers, renews and serves the service until the agent stops,
+    /// from before `agent` has started.
+    async fn run(self, prepared: Prepared, agent: Agent) -> anyhow::Result<()> {
         let Prepared { gate, file } = prepared;
         let tls = Tls::load(&self.tls)?;
         let listener = TcpListener::bind(self.listen)
@@ -131,7 +182,7 @@ impl FleetConfig {
         let listening = listen::Listening {
             acceptor: TlsAcceptor::from(Arc::clone(&tls.server)),
             service: tls::service_name(&self.control)?,
-            handle: handle.clone(),
+            agent: agent.clone(),
             gate: gate.clone(),
         };
         // Lease answers and rulings come only over mutual TLS, from the
@@ -151,7 +202,7 @@ impl FleetConfig {
             host: file.host,
             file: self.lease_file,
             gate,
-            handle,
+            agent,
             info: self.info,
             image: self.image,
         };

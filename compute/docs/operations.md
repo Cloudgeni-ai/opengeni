@@ -763,16 +763,27 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   a setting it silently ignores. The service ignores what it does not
   know in a host's description and capacity, so newer hosts work with
   the older service meanwhile.
+  A release that lets hosts leave out something they used to send, which
+  an older service would refuse, says so, and then the service goes
+  first.
 - **The agent** can be replaced at any time; running VMs keep running
-  ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
-  `install.sh` (without `--config`, the installed configuration stays):
+  ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
+  keeps its lease however many sandboxes it has: the new agent renews
+  the lease from the moment it starts, while it takes its sandboxes
+  back, and until it has, it refuses requests as unavailable, so the
+  service places elsewhere meanwhile
+  ([ADR 18](adr/0018-the-control-service-leases-and-fences.md)). Its log
+  lines `templates found`, `recovered` and `started` tell how long that
+  took and where. Run the new bundle's `install.sh` (without `--config`,
+  the installed configuration stays):
   it installs the release beside the old ones, points
   `/opt/compute/current` at it and restarts the agent alone; the guard is
   never restarted. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
-  bundle in Terraform and replace hosts one at a time, each drained first,
-  or run `install.sh` from the new bundle on each host in place.
+  bundle in Terraform, so hosts created from then on install it, and run
+  `install.sh` from the new bundle on each host in place, or replace
+  hosts one at a time, each drained first.
 - **The control service** is a Deployment: upgrade the chart with the new
   image. Replicas share the store; one leads at a time, and a new leader
   waits a whole lease term before giving up on any host, so a rollout

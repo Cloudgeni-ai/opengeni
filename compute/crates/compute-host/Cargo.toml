@@ -56,7 +56,7 @@ async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "http1"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rcgen = "0.13"
 tempfile = "3"

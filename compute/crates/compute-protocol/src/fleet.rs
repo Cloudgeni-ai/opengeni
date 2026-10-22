@@ -226,7 +226,12 @@ pub struct Renew {
     /// Its number under the registration, from 1. The service stamps its
     /// requests to the host with the highest it accepted.
     pub seq: u64,
-    pub capacity: Capacity,
+    /// What the host can take on; `None` while its agent is still taking
+    /// back the sandboxes an earlier run left, when the service keeps what
+    /// it last heard. A restarted agent renews the lease it holds from the
+    /// moment it starts, since taking them back can outlast the term.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Capacity>,
 }
 
 /// The answer to a [`Renew`].
@@ -452,9 +457,14 @@ mod tests {
         .unwrap();
         assert_eq!(envelope.sent.owner_epoch, Some(2));
         assert!(matches!(envelope.request, Request::Status));
-        assert!(
-            serde_json::from_str::<Renew>(r#"{"host":1,"epoch":1,"seq":1}"#).is_err(),
-            "a renewal says what the host can take on"
+        let starting: Renew = serde_json::from_str(r#"{"host":1,"epoch":1,"seq":1}"#).unwrap();
+        assert_eq!(
+            starting.capacity, None,
+            "a starting agent renews before it can say what it can take on"
+        );
+        assert_eq!(
+            serde_json::to_string(&starting).unwrap(),
+            r#"{"host":1,"epoch":1,"seq":1}"#
         );
         let register: Register = serde_json::from_str(
             r#"{"attempt":7,"info":{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"t","memory_mib":1,"disk_mib":1,"cpu_millis":1000},"capacity":{"memory_free_mib":1,"disk_free_mib":1,"cpu_millis":1000,"cpu_free_millis":1000,"awake":0,"sandboxes":0},"held":[]}"#,
