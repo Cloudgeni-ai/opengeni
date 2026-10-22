@@ -125,6 +125,38 @@ async fn concurrent_creates_of_one_image_share_its_fetch() {
     assert_eq!(names.len(), 1, "{names:?}");
 }
 
+/// Creates of one image copy it at the same time: none waits for another
+/// to finish its copy, an agent's first check of a kept image included.
+#[tokio::test]
+async fn copies_of_one_image_share_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let first = cache.get(image, &store).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), cache.get(image, &store))
+        .await
+        .expect("a second create waits for none")
+        .unwrap();
+    let third = tokio::time::timeout(Duration::from_secs(5), cache.hold(image))
+        .await
+        .expect("a third create waits for none")
+        .unwrap();
+    assert!(
+        cache
+            .retire(&HashSet::new(), SystemTime::now() + WEEK * 2)
+            .await
+            .is_empty(),
+        "never removed while copied"
+    );
+    drop((first, second, third));
+
+    let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let (one, other) = tokio::join!(reopened.hold(image), reopened.hold(image));
+    let (one, other) = (one.unwrap(), other.unwrap());
+    assert_eq!(fs::read(&one.path).unwrap(), b"an image");
+    assert_eq!(one.path, other.path);
+}
+
 #[tokio::test]
 async fn an_image_nowhere_or_damaged_is_refused_and_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();

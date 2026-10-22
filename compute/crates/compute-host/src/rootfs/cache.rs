@@ -13,6 +13,11 @@
 //! that one. New disks are copies of the image (a shared-extent clone where
 //! the file system has them), as from the host's base image.
 //!
+//! The cache alone vouches for what an image's file holds: nothing copies
+//! one it has not checked, and nothing writes to one, so whoever needs to
+//! know its content (a template's inputs) takes the id for it instead of
+//! reading the file.
+//!
 //! The cache keeps a share of the state root's ownership, and so does every
 //! piece of its work in flight, blocking work included: a fetch or removal
 //! an agent started ends before a successor takes the root. A successor
@@ -22,10 +27,11 @@
 //!
 //! A file's modified time is when a create last used it. An image no
 //! create used for as long as a template may go unused, that no template
-//! is being built or kept from, is removed. A create holds the image's lock
-//! from the check until its copy is made, and a removal takes the same lock
-//! and looks at the time again, so an image is never removed under a
-//! create that is copying it.
+//! is being built or kept from, is removed. Every create or template build
+//! shares the image's lock from the check until its copy is made, so any
+//! number copy one image at once; its fetch, its first check and its
+//! removal take the lock alone, and a removal looks at the time again, so
+//! an image is never removed under a copy of it.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -35,7 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 use crate::layout::{remove_if_present, sync_parent};
 use crate::protocol::ImageId;
@@ -57,9 +63,10 @@ pub(crate) enum Missing {
 }
 
 /// An image a create may copy: it stays on the host while this is held.
+/// Others may hold it too.
 pub(crate) struct Held {
     pub path: PathBuf,
-    _lock: OwnedMutexGuard<()>,
+    _lock: OwnedRwLockReadGuard<()>,
 }
 
 /// The host's images.
@@ -70,8 +77,9 @@ pub(crate) struct Cache {
     present: Mutex<HashSet<ImageId>>,
     /// Images an earlier agent left, not checked against their ids yet.
     recovered: Mutex<HashSet<ImageId>>,
-    /// One lock per image, taken by its fetch, its copies and its removal.
-    locks: Mutex<HashMap<ImageId, Arc<AsyncMutex<()>>>>,
+    /// One lock per image: shared by its copies, taken alone by its fetch,
+    /// its first check and its removal.
+    locks: Mutex<HashMap<ImageId, Arc<RwLock<()>>>>,
     /// How long an image may go unused before it is removed.
     unused_after: Duration,
     /// Kept by every piece of work in flight.
@@ -141,7 +149,7 @@ impl Cache {
 
     /// Checks an image an earlier agent left against its id, once: it
     /// becomes present if it matches and is removed if not. Call under
-    /// the image's lock.
+    /// the image's lock, taken alone.
     async fn check_recovered(&self, image: ImageId) {
         if !self
             .recovered
@@ -192,7 +200,7 @@ impl Cache {
             .contains(&image)
     }
 
-    fn lock(&self, image: ImageId) -> Arc<AsyncMutex<()>> {
+    fn lock(&self, image: ImageId) -> Arc<RwLock<()>> {
         Arc::clone(
             self.locks
                 .lock()
@@ -202,12 +210,37 @@ impl Cache {
         )
     }
 
+    /// The image's lock, shared, once the image is checked if an earlier
+    /// agent left it: that first check takes the lock alone.
+    async fn shared(&self, image: ImageId) -> OwnedRwLockReadGuard<()> {
+        let lock = self.lock(image);
+        // Only opening the cache adds to these, so one not among them now
+        // never needs the check.
+        let unchecked = self
+            .recovered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&image);
+        if unchecked {
+            let alone = lock.write_owned().await;
+            self.check_recovered(image).await;
+            return alone.downgrade();
+        }
+        lock.read_owned().await
+    }
+
     /// The image `image`, fetched from `store` first if the host does not
     /// have it, and marked used now.
     pub async fn get<S: Store>(&self, image: ImageId, store: &S) -> Result<Held, Missing> {
-        let lock = self.lock(image).lock_owned().await;
-        self.check_recovered(image).await;
+        let shared = self.shared(image).await;
         let path = self.path(image);
+        if self.has(image) {
+            return Ok(self.used(image, path, shared).await);
+        }
+        drop(shared);
+        // One fetch runs per image: other creates of it wait here, then
+        // find it present.
+        let lock = self.lock(image).write_owned().await;
         let failed = |error: String| Missing::Failed { image, error };
         if !self.has(image) {
             let staging = self.staging(image);
@@ -241,14 +274,13 @@ impl Cache {
                 .insert(image);
             tracing::info!(%image, "image fetched from the store");
         }
-        Ok(self.used(image, path, lock).await)
+        Ok(self.used(image, path, lock.downgrade()).await)
     }
 
     /// The image `image` if the host has it, marked used now; never
     /// fetches.
     pub async fn hold(&self, image: ImageId) -> Option<Held> {
-        let lock = self.lock(image).lock_owned().await;
-        self.check_recovered(image).await;
+        let lock = self.shared(image).await;
         if !self.has(image) {
             return None;
         }
@@ -256,7 +288,7 @@ impl Cache {
     }
 
     /// Marks the image at `path` used now and holds it with `lock`.
-    async fn used(&self, image: ImageId, path: PathBuf, lock: OwnedMutexGuard<()>) -> Held {
+    async fn used(&self, image: ImageId, path: PathBuf, lock: OwnedRwLockReadGuard<()>) -> Held {
         // Only the retirement clock depends on it.
         let marked = self
             .blocking({
@@ -292,8 +324,8 @@ impl Cache {
         };
         let mut removed = Vec::new();
         for image in present {
-            // A create holding it is using it.
-            let Ok(_lock) = self.lock(image).try_lock_owned() else {
+            // A copy holding it is using it.
+            let Ok(_lock) = self.lock(image).try_write_owned() else {
                 continue;
             };
             let path = self.path(image);
