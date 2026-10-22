@@ -8,7 +8,8 @@
  * frontend release. The web keeps its generic fallback for any definition or
  * field missing here. Gmail's reviewed presentation lives on its catalog row
  * instead (`data/catalog/curated.json`): Gmail is a Connector, not one of
- * these API integration definitions.
+ * these API integration definitions. Google Drive is likewise one Drive MCP
+ * Connector on its curated catalog row, not a core API integration definition.
  *
  * MCP connectors carry the same shape on their curated catalog row
  * (`presentation` in `data/catalog/curated.json` -> importer ->
@@ -31,33 +32,6 @@ export type IntegrationPresentationCopy = {
 export const INTEGRATION_DEFINITION_PRESENTATIONS: Readonly<
   Record<string, IntegrationPresentationCopy>
 > = {
-  "google-drive": {
-    providerName: "Google",
-    icon: "files",
-    introduction: "Let agents work with files in the Google Drive account you choose.",
-    capabilities: [
-      {
-        title: "Find files and folders",
-        description: "Browse and search content in My Drive and shared drives.",
-      },
-      {
-        title: "Create and update content",
-        description: "Work with files and folders through the reviewed Drive tools.",
-      },
-      {
-        title: "Manage sharing",
-        description: "Review and update links, permissions, and shared-drive content.",
-      },
-    ],
-    permissionSummary:
-      "Google asks for access to the Drive account you approve, including files shared with that account.",
-    scopeLabels: {
-      "https://www.googleapis.com/auth/drive": {
-        label: "Work with Google Drive files",
-        description: "See, create, edit, organize, and share files available to this account.",
-      },
-    },
-  },
   "microsoft-outlook-mail": {
     providerName: "Microsoft",
     icon: "mail",

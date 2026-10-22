@@ -3550,9 +3550,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).text();
     expect(toolsSource).toContain("namedSubjectHasLiveWorkspaceAuthority");
     expect(toolsSource).not.toContain("getWorkspaceGrant");
-    expect(toolsSource).toMatch(
-      /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
-    );
+    // The retired native Drive publication target no longer resolves a
+    // personal connection here; the frozen-delegation resolver is the only path.
+    expect(toolsSource).not.toContain("resolveGoogleDrivePublicationTarget");
+    expect(toolsSource).toContain("ownerHasWorkspaceMembership: delegatedOwnerHasMembership");
   });
 
   test("resuming journaled work starts deferred preparation before joining it", async () => {

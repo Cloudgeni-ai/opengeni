@@ -20,6 +20,7 @@ export default defineConfig({
     "src/host-mcp-bindings.ts",
     "src/atlassian.ts",
     "src/atlassian-native-retirement.ts",
+    "src/google-drive-native-retirement.ts",
     "src/canonical-human-identities.ts",
     "src/client-error-report.ts",
     "src/analytics-consent-report.ts",

@@ -12,6 +12,7 @@ import {
   GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveConnectionMetadata,
 } from "@opengeni/contracts/google-drive";
+import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import {
   ApiIntegrationPreview,
   InstalledApiIntegration,
@@ -511,15 +512,18 @@ describe("API Integration routes", () => {
     // Gmail is not one of these API integration definitions: it is a
     // Connector, consolidated onto its catalog row and the REST bridge
     // (packages/runtime/src/gmail-rest-mcp.ts). It must never reappear here.
-    expect(payload.definitions).toHaveLength(5);
+    // Google Drive is likewise one Drive MCP Connector since its native API
+    // integration was retired; no new native Drive definition may be offered.
+    expect(payload.definitions).toHaveLength(4);
     expect(payload.definitions.some((definition) => definition.id === "google-gmail")).toBe(false);
+    expect(payload.definitions.some((definition) => definition.id === "google-drive")).toBe(false);
     expect(payload.definitions).toContainEqual(
       expect.objectContaining({
-        id: "google-drive",
-        name: "Google Drive",
+        id: "microsoft-onedrive",
+        name: "OneDrive",
         provider: {
-          id: "google",
-          domain: "www.googleapis.com",
+          id: "microsoft",
+          domain: "graph.microsoft.com",
         },
         authentication: expect.objectContaining({ kind: "oauth2" }),
       }),
@@ -531,8 +535,10 @@ describe("API Integration routes", () => {
     // grants nothing). Every core definition carries it, and the whole payload
     // must satisfy the published contract, bounds included.
     const parsed = ListIntegrationDefinitionsResponse.parse(payload);
-    const drive = parsed.definitions.find((definition) => definition.id === "google-drive");
-    expect(drive?.presentation).toMatchObject({ providerName: "Google", icon: "files" });
+    const oneDrive = parsed.definitions.find(
+      (definition) => definition.id === "microsoft-onedrive",
+    );
+    expect(oneDrive?.presentation).toMatchObject({ providerName: "Microsoft", icon: "cloud" });
     for (const definition of parsed.definitions) {
       expect(definition.presentation).toBeDefined();
     }
@@ -1627,7 +1633,7 @@ describe("API Integration routes", () => {
     expect(conflictAfterInstanceDrift.status).toBe(409);
   }, 60_000);
 
-  test("replays completed Google Drive facet saves before provider and Connection validation", async () => {
+  test("refuses retired native Google Drive facet saves before provider, Connection or operation effects", async () => {
     if (!available || !client) return;
     googleDriveFolderName = "Product";
     googleDriveProviderRequests.length = 0;
@@ -1710,17 +1716,14 @@ describe("API Integration routes", () => {
       },
     });
     const endpoint = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${installed.instanceKey}/facets/drive-content/source`;
-    const aliasCollisionKey = crypto.randomUUID();
-    const aliasCollision = await request(endpoint, {
+    // Native Drive source setup is retired: a save is refused before provider,
+    // Connection, or operation effects. Drive work now uses the Drive MCP
+    // connection and ordinary agent schedules.
+    const idempotencyKey = crypto.randomUUID();
+    const retired = await request(endpoint, {
       method: "PUT",
       body: JSON.stringify({
         sources: [
-          {
-            id: "folder-1",
-            name: "Product",
-            mimeType: "application/vnd.google-apps.folder",
-            driveId: null,
-          },
           {
             id: "https://drive.google.com/drive/folders/folder-1",
             name: "Product",
@@ -1732,98 +1735,19 @@ describe("API Integration routes", () => {
         syncCadence: "hourly",
         syncEnabled: true,
         readPolicy: "allow",
-        idempotencyKey: aliasCollisionKey,
+        idempotencyKey,
       }),
     });
-    expect(aliasCollision.status).toBe(400);
-    expect(await aliasCollision.text()).toBe("Google Drive sources must be unique");
+    expect(retired.status).toBe(410);
+    expect(await retired.text()).toBe(GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE);
     expect(googleDriveProviderRequests).toHaveLength(0);
     expect(
       await shared!.admin<Array<{ count: number }>>`
         select count(*)::int as count
         from capability_operations
         where workspace_id = ${workspaceId}::uuid
-          and idempotency_key = ${aliasCollisionKey}
+          and idempotency_key = ${idempotencyKey}
       `,
     ).toEqual([{ count: 0 }]);
-
-    const idempotencyKey = crypto.randomUUID();
-    const payload = {
-      sources: [
-        {
-          id: "https://drive.google.com/drive/folders/folder-1",
-          name: "Product",
-          mimeType: "application/vnd.google-apps.folder",
-          driveId: null,
-        },
-      ],
-      destination: { authorityKind: "workspace", collectionId: null },
-      syncCadence: "hourly",
-      syncEnabled: true,
-      readPolicy: "allow",
-      idempotencyKey,
-    };
-    const configuredResponse = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-    expect(configuredResponse.status).toBe(200);
-    const configured = await configuredResponse.json();
-    expect(configured).toMatchObject({
-      status: "configured",
-      binding: {
-        connectionId: connection.id,
-        status: "active",
-        version: 1,
-        config: { sources: [{ id: "folder-1" }] },
-      },
-    });
-    expect(googleDriveProviderRequests).toHaveLength(1);
-
-    const legacyConfigured = {
-      ...configured,
-      binding: { ...configured.binding },
-    };
-    delete legacyConfigured.binding.directlyOwned;
-    delete legacyConfigured.binding.owners;
-    await shared!.admin`
-      update capability_operations
-      set result = ${shared!.admin.json(legacyConfigured)}
-      where workspace_id = ${workspaceId}::uuid
-        and idempotency_key = ${idempotencyKey}
-    `;
-
-    googleDriveFolderName = "Renamed Product";
-    await shared!.admin`
-      update connections
-      set status = 'revoked', version = version + 1, updated_at = now()
-      where id = ${connection.id}
-    `;
-    const providerRequestCount = googleDriveProviderRequests.length;
-    const replay = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toEqual(configured);
-    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
-
-    const conflict = await request(endpoint, {
-      method: "PUT",
-      body: JSON.stringify({
-        ...payload,
-        sources: [{ ...payload.sources[0], name: "Renamed Product" }],
-      }),
-    });
-    expect(conflict.status).toBe(409);
-    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
-
-    const crossSubjectReplay = await request(
-      endpoint,
-      { method: "PUT", body: JSON.stringify(payload) },
-      "user:api-integration-route-other-admin",
-    );
-    expect(crossSubjectReplay.status).toBe(409);
-    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
   }, 60_000);
 });

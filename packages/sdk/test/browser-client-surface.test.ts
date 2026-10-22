@@ -23,7 +23,8 @@ const legacyBrowserUnusedMethods = [
   "codexAccountUsage",
   "codexDisconnect",
   "codexStatus",
-  "codexUsage",
+  // The SDK codexUsage method is still browser-unused, but #5607 added a React
+  // helper with the same identifier, which this identifier-count guard counts.
   "createDocumentBase",
   "createWorkspaceInstructionPolicyOnboardingProposal",
   "createOrganization",
@@ -174,6 +175,14 @@ const retiredSettingsMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// #5616 retired the web console's native Google Drive connection controls in
+// favour of one Drive MCP connection, not their public SDK contracts. Historical
+// native connections keep their API removal and pause routes for SDK consumers.
+const retiredGoogleDriveNativeMethods = [
+  "disconnectGoogleDriveConnection",
+  "transitionGoogleDriveLifecycle",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
@@ -240,6 +249,7 @@ describe("browser client runtime surface", () => {
         ...nativeAppMethods,
         ...retiredSettingsMethods,
         ...pendingModelAccountMethods,
+        ...retiredGoogleDriveNativeMethods,
       ].sort(),
     );
   });

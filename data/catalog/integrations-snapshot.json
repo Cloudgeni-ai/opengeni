@@ -3,8 +3,8 @@
   "source": "integrations.sh",
   "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
-    "inputRows": 1334,
-    "outputRows": 643,
+    "inputRows": 1335,
+    "outputRows": 644,
     "skippedRows": 687,
     "quarantinedRows": 4,
     "duplicateDomainNameRows": 109,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 643,
+    "kept": 644,
     "dropped": 143,
-    "real": 643,
+    "real": 644,
     "unverified": 111,
     "googleapisDropped": 2
   },

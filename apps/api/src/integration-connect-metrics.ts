@@ -30,6 +30,7 @@ const FIXED_CONNECT_PROVIDERS = [
   "github-personal",
   "github-app",
   "github-lens",
+  "google-drive",
   "google-drive-knowledge",
   "google-drive-publish",
   "fiken-token",
