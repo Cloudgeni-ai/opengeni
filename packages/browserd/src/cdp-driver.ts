@@ -186,6 +186,8 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 /** How long the controller's own close request may take to be acknowledged. */
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
+/** How long an action's locator waits for its element to appear or enable. */
+const LOCATOR_WAIT_MS = 10_000;
 /** Response types that stay open for the life of the page by design. */
 const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
@@ -3979,7 +3981,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "hover": {
-        const node = await this.resolveActionLocator(state, action.locator);
+        const node = await this.resolveActionLocator(state, action.locator, { input: false });
         const point = await this.actionPoint(
           state,
           node.backendDOMNodeId,
@@ -4110,7 +4112,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         const effectsBeforeScroll = state.actionEffectCount;
         let moved: unknown;
         if (action.locator) {
-          const node = await this.resolveActionLocator(state, action.locator);
+          const node = await this.resolveActionLocator(state, action.locator, { input: false });
           moved = await this.callOnNode(
             state,
             node.backendDOMNodeId,
@@ -4136,9 +4138,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "drag": {
-        const from = await this.resolveActionLocator(state, action.from);
+        const from = await this.resolveActionLocator(state, action.from, { input: false });
         const fromRoute = state.nodeRoute;
-        const to = await this.resolveActionLocator(state, action.to);
+        const to = await this.resolveActionLocator(state, action.to, { input: false });
         if (fromRoute !== state.nodeRoute) {
           throw new InteractionDefiniteDriverError(
             "invalid_action",
@@ -4619,7 +4621,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<string> {
     let value: unknown;
     if (locator) {
-      const node = await this.resolveActionLocator(state, locator);
+      const node = await this.resolveActionLocator(state, locator, { input: false });
       value = await this.callOnNode(state, node.backendDOMNodeId, COPY_BROWSER_TEXT_FUNCTION, [
         { value: content },
       ]);
@@ -4688,16 +4690,70 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Resolve a locator an action is about to act on and, when the command is
    * traced, record which element it resolved to before any input is sent. */
+  /**
+   * The element an action acts on, once it can take the action. A role, label,
+   * text, placeholder, test id or CSS locator waits for its element to appear,
+   * as after a click that loads the next page or a form that renders late; an
+   * input action also waits while the element is disabled, as in a form whose
+   * fields stay greyed out until it loads. So a batch of steps across page
+   * changes runs without an observation between them. A ref names a node the
+   * caller already saw, so it does not wait to appear. The wait ends at
+   * LOCATOR_WAIT_MS; the action then fails as it would have without waiting.
+   */
   private async resolveActionLocator(
     state: TargetState,
     locator: BrowserLocator,
+    options: { input?: boolean } = {},
   ): Promise<CdpAccessibilityEntry> {
-    const entry = await this.resolveLocator(state, locator);
+    const input = options.input ?? true;
+    const deadline = Date.now() + LOCATOR_WAIT_MS;
+    let pause = 25;
+    let entry: CdpAccessibilityEntry;
+    for (;;) {
+      let found: CdpAccessibilityEntry | null = null;
+      try {
+        found = await this.resolveLocator(state, locator);
+      } catch (error) {
+        if (
+          locator.kind === "ref" ||
+          !(
+            error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found"
+          ) ||
+          Date.now() >= deadline
+        ) {
+          throw error;
+        }
+      }
+      if (found) {
+        if (!input || Date.now() >= deadline || !(await this.nodeDisabled(state, found))) {
+          entry = found;
+          break;
+        }
+      }
+      await delay(pause);
+      pause = Math.min(pause * 2, 200);
+    }
     const current = state.actionTrace;
     if (current) {
       current.trace.record(await this.describeResolvedTarget(state, entry, current.actionIndex));
     }
     return entry;
+  }
+
+  /** Whether a resolved element is disabled, natively or with aria-disabled. */
+  private async nodeDisabled(state: TargetState, entry: CdpAccessibilityEntry): Promise<boolean> {
+    if (entry.nodeId !== "" && entry.states.includes("disabled")) return true;
+    try {
+      return (
+        (await this.callOnNode(state, entry.backendDOMNodeId, NODE_DISABLED_FUNCTION, [])) === true
+      );
+    } catch (error) {
+      // A node that went away is re-resolved on the next try.
+      if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
+        return true;
+      }
+      throw error;
+    }
   }
 
   private async describeResolvedTarget(
@@ -7124,6 +7180,13 @@ const VISIBLE_FUNCTION = `function() {
 
 const CHECKED_FUNCTION = `function() {
   return typeof this.checked === "boolean" ? this.checked : null;
+}`;
+
+/** Disabled natively (including inside a disabled fieldset) or with aria-disabled. */
+const NODE_DISABLED_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element)) return false;
+  return element.matches(":disabled") || element.closest('[aria-disabled="true"]') !== null;
 }`;
 
 const SELECT_OPTIONS_FUNCTION = `function(values) {
