@@ -3183,6 +3183,22 @@ export async function verifyApprovedMerge(options = {}) {
     head,
     pullIdentity,
   );
+  // When GitHub's merge-time `pull.base.sha` has advanced past the reviewed
+  // patch base, no exact-head Version CI ran against the landed integration
+  // base. Admit that shape only for one generated Version commit on its patch
+  // base, and only with the landed commit's own fully green push run (below).
+  const advancedProviderBase =
+    sourceComposition.type === "exact-reviewed-delta-on-moving-main" &&
+    sourceComposition.patchBaseSha !== pullIdentity.baseSha;
+  if (advancedProviderBase) {
+    assertVersionProvenancePull(pull);
+    invariant(
+      pullIdentity.commitCount === 1 &&
+        head.parents.length === 1 &&
+        head.parents[0] === sourceComposition.patchBaseSha,
+      "advanced-provider-base release head is not one generated commit on its patch base",
+    );
+  }
   const review = mergedSourceReview(pullNumber, context.sourceSha, pullIdentity);
 
   const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
@@ -3211,9 +3227,34 @@ export async function verifyApprovedMerge(options = {}) {
   const requiredSourceChecks = await verifySuccessfulSourceChecks(
     api,
     sourceChecks,
-    RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    advancedProviderBase
+      ? [
+          ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+          ...RELEASE_AUTOMATION_CONTRACT.checks.fullGreenJobs,
+        ]
+      : RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
     context.sourceSha,
   );
+  let fullGreen;
+  if (advancedProviderBase) {
+    const { workflowRunId, workflowRunAttempt } = requiredSourceChecks[0];
+    fullGreen = {
+      workflowRunId,
+      workflowRunAttempt,
+      status: await verifyFullGreenStatus(
+        api,
+        context.sourceSha,
+        workflowRunId,
+        workflowRunAttempt,
+      ),
+      artifacts: await verifyFullGreenArtifacts(
+        api,
+        context.sourceSha,
+        workflowRunId,
+        workflowRunAttempt,
+      ),
+    };
+  }
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
   const terminalMainSha = await assertReleaseMainRef(
     api,
@@ -3260,6 +3301,7 @@ export async function verifyApprovedMerge(options = {}) {
     review,
     sourceAdmission,
     requiredSourceChecks,
+    ...(fullGreen ? { fullGreen } : {}),
   };
   logger.log(
     `Verified PR #${pullNumber} ${mergeMethod} provenance and exact checks for ${context.sourceSha}.`,
