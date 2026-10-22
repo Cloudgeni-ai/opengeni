@@ -301,6 +301,8 @@ export interface WelcomeUnreachable {
 export interface WelcomeState {
   productName: string;
   defaultServerUrl: string;
+  /** The page offers "Use another server"; an app made for one server doesn't. */
+  otherServers?: boolean;
   /** The server a browser sign-in is waiting on. */
   pendingServer: string | null;
   error: string | null;

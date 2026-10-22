@@ -32769,12 +32769,16 @@
       "appHandoffUrl": "value",
       "AppLink": "type",
       "AppLinkAccount": "type",
+      "AppLinkOptions": "type",
+      "AppWebPaths": "type",
       "ComputerConnectLink": "type",
       "computerConnectUrl": "value",
       "normalizeServerUrl": "value",
+      "OPENGENI_WEB_PATHS": "value",
       "parseAppLink": "value",
       "parseComputerConnectLink": "value",
-      "serverLabel": "value"
+      "serverLabel": "value",
+      "sessionMoment": "value"
     },
     "@opengeni/sdk/artifacts": {
       "CreateEditableArtifactMaterializationRequest": "type",

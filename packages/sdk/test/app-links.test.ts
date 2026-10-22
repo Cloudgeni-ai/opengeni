@@ -8,6 +8,9 @@ import {
   serverLabel,
   computerConnectUrl,
   parseComputerConnectLink,
+  OPENGENI_WEB_PATHS,
+  sessionMoment,
+  type AppWebPaths,
 } from "../src/app-links";
 
 describe("app links", () => {
@@ -35,6 +38,56 @@ describe("app links", () => {
   test("unwraps the web's open-in-app handoff", () => {
     const web = "https://app.example.com/workspaces/w1/sessions/s1";
     expect(parseAppLink(appHandoffUrl(web))?.sessionId).toBe("s1");
+    expect(parseAppLink(appHandoffUrl(web, "acme"), { scheme: "acme" })?.sessionId).toBe("s1");
+    expect(parseAppLink(appHandoffUrl(web, "acme"))).toBeNull();
+    expect(() => appHandoffUrl(web, "not a scheme")).toThrow();
+  });
+
+  test("reads a product's own web routes", () => {
+    const paths: AppWebPaths = {
+      home: (workspaceId) => `/app/${workspaceId}`,
+      session: (workspaceId, sessionId, at) =>
+        `/app/${workspaceId}/chat/${sessionId}${at ? `?at=${at}` : ""}`,
+      inbox: (workspaceId) => `/app/${workspaceId}/inbox`,
+      match(path, query) {
+        const chat = /^\/app\/([\w-]+)\/chat\/([\w-]+)$/u.exec(path);
+        if (chat) return { workspaceId: chat[1]!, sessionId: chat[2]!, at: sessionMoment(query) };
+        const home = /^\/app\/([\w-]+)$/u.exec(path);
+        return home ? { workspaceId: home[1]!, sessionId: null } : null;
+      },
+    };
+    const web = `https://app.example.com${paths.session("w1", "s1", 7)}`;
+    expect(parseAppLink(web, { paths })).toMatchObject({
+      workspaceId: "w1",
+      sessionId: "s1",
+      at: 7,
+    });
+    expect(parseAppLink("https://app.example.com/app/w1", { paths })).toMatchObject({
+      workspaceId: "w1",
+      sessionId: null,
+      at: null,
+    });
+    expect(parseAppLink("https://app.example.com/workspaces/w1/sessions/s1", { paths })).toBeNull();
+    expect(parseAppLink(web)).toBeNull();
+    const connect = computerConnectUrl({
+      webUrl: "https://app.example.com/app/w1/chat/s1",
+      subjectId: "user:one",
+      scheme: "acme",
+      paths,
+    });
+    expect(parseComputerConnectLink(connect, "acme", paths)).toMatchObject({
+      workspaceId: "w1",
+      sessionId: "s1",
+    });
+    expect(parseComputerConnectLink(connect, "acme")).toBeNull();
+  });
+
+  test("builds Opengeni's own web routes", () => {
+    expect(OPENGENI_WEB_PATHS.session("w1", "s1", 42)).toBe("/workspaces/w1/sessions/s1?at=42");
+    expect(OPENGENI_WEB_PATHS.session("w1", "s1")).toBe("/workspaces/w1/sessions/s1");
+    expect(OPENGENI_WEB_PATHS.home("w1")).toBe("/workspaces/w1/sessions");
+    expect(OPENGENI_WEB_PATHS.inbox("w1")).toBe("/workspaces/w1/inbox");
+    expect(OPENGENI_WEB_PATHS.settings?.("w1")).toBe("/workspaces/w1/settings");
   });
 
   test("picks the account by server, then workspace, then the active one", () => {

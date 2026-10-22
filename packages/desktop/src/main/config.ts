@@ -1,3 +1,5 @@
+import type { AppWebPaths } from "@opengeni/sdk/app-links";
+
 /** How a product configures the desktop kit. Everything product-specific lives here. */
 export interface DesktopAppConfig {
   /** The product's name in menus, notifications and the first-run page. */
@@ -14,6 +16,19 @@ export interface DesktopAppConfig {
    * An app installed by a server's install script suggests that server instead.
    */
   defaultServerUrl: string;
+  /**
+   * Whether the first-run page offers "Use another server". Default true.
+   * An app made for one server sets false: it then signs in to
+   * `defaultServerUrl` (or the server whose install script installed it) only.
+   */
+  allowOtherServers?: boolean;
+  /**
+   * Where the product's web app shows workspaces, sessions and the inbox:
+   * the app reads links with it, reopens the last page and opens
+   * notifications and menu commands there. Default: Opengeni's own web app
+   * (`OPENGENI_WEB_PATHS` from `@opengeni/sdk/app-links`).
+   */
+  webPaths?: AppWebPaths;
   /** Absolute paths to the bundled preload scripts and the first-run page. */
   preloadPath: string;
   welcomePreloadPath: string;
@@ -32,6 +47,20 @@ export interface DesktopAppConfig {
   background: { light: string; dark: string };
   /** Let people connect this computer, running the connected-machine agent. */
   thisComputer: boolean;
+  /**
+   * Where the app keeps the agent it runs. By default the place Opengeni's
+   * command-line installer uses, so there is one agent per person. An app
+   * that keeps its own agent apart passes its own path (and usually its own
+   * `agentConfigDir`).
+   */
+  agentPath?: string;
+  /** The agent's own config folder (its machine identity and connections). */
+  agentConfigDir?: string;
+  /**
+   * Reuse a separately installed agent through its existing service.
+   * Default: true unless `agentPath` or `agentConfigDir` is set.
+   */
+  adoptStandaloneAgent?: boolean;
   /**
    * IDs of the product's own Chrome extensions (its branded build of the
    * Opengeni Browser extension) that may reach this computer's agent, so
