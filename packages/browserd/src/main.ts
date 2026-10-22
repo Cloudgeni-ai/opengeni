@@ -62,7 +62,10 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
         ...(computerNativeBinaryPath ? { nativeBinaryPath: computerNativeBinaryPath } : {}),
         ...(config.computerBackend === "cua" ? { createDriver: createCuaComputerDriver } : {}),
         maxSessions: config.maxComputerSessions,
-        displaceExistingSessions: config.computerEnvironmentMode === "existing",
+        // CUA sessions on the physical desktop share one worker instead
+        // (see cua/factory.ts), so several agents can use one Mac at once.
+        displaceExistingSessions:
+          config.computerEnvironmentMode === "existing" && config.computerBackend !== "cua",
         environmentAllocator:
           config.computerEnvironmentMode === "isolated_linux"
             ? new LinuxVirtualComputerEnvironmentAllocator({
