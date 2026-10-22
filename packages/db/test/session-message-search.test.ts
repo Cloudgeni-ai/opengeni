@@ -17,7 +17,10 @@ import {
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "../src/schema";
-import { toPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "../src/lossless-json";
+import {
+  toPostgresLosslessJson,
+  LOSSLESS_JSON_STRING_PREFIX,
+} from "../src/lossless-json";
 import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
@@ -63,7 +66,12 @@ async function insert(
   sequence: number,
   type: string,
   payload: unknown,
-  extra: { turnId?: string; codec?: number | null; duplicate?: string; association?: string } = {},
+  extra: {
+    turnId?: string;
+    codec?: number | null;
+    duplicate?: string;
+    association?: string;
+  } = {},
 ) {
   const [event] =
     await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, payload_codec_version, turn_id, duplicate_of_event_id, turn_association, duplicate_reason)
@@ -72,7 +80,9 @@ async function insert(
 }
 async function collect(
   request: SessionMessageSearchRequest,
-  authority: Parameters<typeof searchSessionMessagesForSubject>[3] = { subjectId },
+  authority: Parameters<typeof searchSessionMessagesForSubject>[3] = {
+    subjectId,
+  },
 ) {
   const matches: SessionMessageSearchResponse["matches"] = [];
   let page: SessionMessageSearchResponse;
@@ -93,7 +103,9 @@ async function collect(
   } while (cursor);
   expect(page.countIsExact).toBe(true);
   expect(page.matchedOccurrenceCount).toBe(matches.length);
-  expect(page.matchedMessageCount).toBe(new Set(matches.map((m) => m.eventId)).size);
+  expect(page.matchedMessageCount).toBe(
+    new Set(matches.map((m) => m.eventId)).size,
+  );
   return { matches, pages, page };
 }
 
@@ -103,40 +115,63 @@ test("old messages paginate without a recent-history cap, tools/reasoning/contex
     text: "old needle",
     modelContext: "hidden-context",
   });
-  for (let n = 2; n <= 70; n++) await insert(session.id, n, "user.message", { text: "unmatched" });
-  await insert(session.id, 71, "agent.message.completed", { text: "new NEEDLE" });
+  for (let n = 2; n <= 70; n++)
+    await insert(session.id, n, "user.message", { text: "unmatched" });
+  await insert(session.id, 71, "agent.message.completed", {
+    text: "new NEEDLE",
+  });
   await insert(session.id, 72, "agent.message.delta", { delta: "needle" });
   await insert(session.id, 73, "agent.reasoning.delta", { text: "needle" });
   await insert(session.id, 74, "agent.toolCall.output", { text: "needle" });
-  const result = await collect({ query: "needle", sessionId: session.id, limit: 1 });
+  const result = await collect({
+    query: "needle",
+    sessionId: session.id,
+    limit: 1,
+  });
   expect(result.matches.map((m) => m.sequence)).toEqual([1, 71]);
   expect(result.matches[0]!.eventId).toBe(first);
-  expect(result.pages).toBeGreaterThan(2);
-  expect((await collect({ query: "hidden-context", sessionId: session.id })).matches).toHaveLength(
-    0,
-  );
+  // The 69 unmatched messages between the hits cost no extra page.
+  expect(result.pages).toBe(2);
+  expect(
+    (await collect({ query: "hidden-context", sessionId: session.id })).matches,
+  ).toHaveLength(0);
 }, 180_000);
 
 test("literal wildcards and Unicode offsets survive SQL, codec text and multi-page scalar scans", async () => {
   const session = await makeSession();
   const needle = "%_\\🙂İ";
   const text = "a\u0000\ud800" + "x".repeat(1_100_000) + needle;
-  await insert(session.id, 1, "agent.message.completed", toPostgresLosslessJson({ text }), {
-    codec: 1,
-  });
+  await insert(
+    session.id,
+    1,
+    "agent.message.completed",
+    toPostgresLosslessJson({ text }),
+    {
+      codec: 1,
+    },
+  );
   const result = await collect({ query: needle, sessionId: session.id });
   expect(result.pages).toBeGreaterThan(1);
   expect(result.matches).toHaveLength(1);
   const match = result.matches[0]!;
   expect(match.messageMatchOffset).toBe(text.indexOf(needle));
-  expect(match.snippet.text.slice(match.snippet.matchStart, match.snippet.matchEnd)).toBe(needle);
-  expect((await collect({ query: "wildcard", sessionId: session.id })).matches).toHaveLength(0);
-  // An unversioned codec-looking legacy value is literal, never decoded.
-  await insert(session.id, 2, "user.message", { text: LOSSLESS_JSON_STRING_PREFIX + "YQA=" });
   expect(
-    (await collect({ query: LOSSLESS_JSON_STRING_PREFIX, sessionId: session.id })).matches.map(
-      (m) => m.sequence,
-    ),
+    match.snippet.text.slice(match.snippet.matchStart, match.snippet.matchEnd),
+  ).toBe(needle);
+  expect(
+    (await collect({ query: "wildcard", sessionId: session.id })).matches,
+  ).toHaveLength(0);
+  // An unversioned codec-looking legacy value is literal, never decoded.
+  await insert(session.id, 2, "user.message", {
+    text: LOSSLESS_JSON_STRING_PREFIX + "YQA=",
+  });
+  expect(
+    (
+      await collect({
+        query: LOSSLESS_JSON_STRING_PREFIX,
+        sessionId: session.id,
+      })
+    ).matches.map((m) => m.sequence),
   ).toEqual([2]);
 }, 180_000);
 
@@ -151,11 +186,20 @@ test("matches crossing plain Unicode and encoded scalar boundaries are not lost"
     "\u0000" + "x".repeat(32766),
   ].entries()) {
     const text = prefix + needle;
-    await insert(session.id, index + 1, "user.message", toPostgresLosslessJson({ text }), {
-      codec: 1,
-    });
+    await insert(
+      session.id,
+      index + 1,
+      "user.message",
+      toPostgresLosslessJson({ text }),
+      {
+        codec: 1,
+      },
+    );
   }
-  const result = await collect({ query: needle.toLowerCase(), sessionId: session.id });
+  const result = await collect({
+    query: needle.toLowerCase(),
+    sessionId: session.id,
+  });
   expect(result.matches.map((m) => m.messageMatchOffset)).toEqual([
     16380, 8190, 65532, 32766, 32767,
   ]);
@@ -163,7 +207,11 @@ test("matches crossing plain Unicode and encoded scalar boundaries are not lost"
 
 test("long reads retain the 32-window budget and stop on between-read cancellation", async () => {
   const session = await makeSession();
-  await insert(session.id, 1, "user.message", { text: "x".repeat(400_000) });
+  // Only the very end matches, so the whole message is a candidate whose text
+  // must still be read in bounded windows.
+  await insert(session.id, 1, "user.message", {
+    text: "x".repeat(400_000) + "tail-token",
+  });
   let scalarReads = 0;
   let cancelOnRead = false;
   const controller = new AbortController();
@@ -181,14 +229,16 @@ test("long reads retain the 32-window budget and stop on between-read cancellati
     const page = await searchSessionMessagesForSubject(
       observed,
       workspaceId,
-      { query: "not-present", sessionId: session.id },
+      { query: "tail-token", sessionId: session.id },
       { subjectId },
     );
     expect(page.matches).toHaveLength(0);
     expect(page.hasMore).toBe(true);
     expect(scalarReads).toBeGreaterThan(0);
     expect(scalarReads).toBeLessThanOrEqual(8);
-    const cursor = JSON.parse(Buffer.from(page.nextCursor!, "base64url").toString("utf8"));
+    const cursor = JSON.parse(
+      Buffer.from(page.nextCursor!, "base64url").toString("utf8"),
+    );
     expect(cursor.position.offset).toBeGreaterThan(0);
     expect(cursor.position.offset).toBeLessThanOrEqual(32 * 8192);
     scalarReads = 0;
@@ -197,7 +247,7 @@ test("long reads retain the 32-window budget and stop on between-read cancellati
       searchSessionMessagesForSubject(
         observed,
         workspaceId,
-        { query: "not-present", sessionId: session.id },
+        { query: "tail-token", sessionId: session.id },
         { subjectId },
         { signal: controller.signal },
       ),
@@ -215,16 +265,26 @@ test("list scope, member removal, workspace and personally archived boundaries a
   await insert(denied.id, 1, "user.message", { text: "isolated-token" });
   const authority = {
     subjectId,
-    authorizationScope: { kind: "scoped" as const, sessionIds: [allowed.id], rootSessionIds: [] },
+    authorizationScope: {
+      kind: "scoped" as const,
+      sessionIds: [allowed.id],
+      rootSessionIds: [],
+    },
   };
   const scoped = await collect({ query: "isolated-token" }, authority);
   expect(scoped.matches.map((m) => m.sessionId)).toEqual([allowed.id]);
   expect(scoped.page.matchedMessageCount).toBe(1);
   expect(
-    (await collect({ query: "isolated-token", sessionId: denied.id }, authority)).matches,
+    (
+      await collect(
+        { query: "isolated-token", sessionId: denied.id },
+        authority,
+      )
+    ).matches,
   ).toHaveLength(0);
   expect(
-    (await collect({ query: "isolated-token", sessionId: crypto.randomUUID() })).matches,
+    (await collect({ query: "isolated-token", sessionId: crypto.randomUUID() }))
+      .matches,
   ).toHaveLength(0);
   await expect(
     searchSessionMessagesForSubject(
@@ -240,12 +300,17 @@ test("list scope, member removal, workspace and personally archived boundaries a
     subjectId,
     archived: true,
   });
-  expect((await collect({ query: "isolated-token", sessionId: allowed.id })).matches).toHaveLength(
-    0,
-  );
   expect(
-    (await collect({ query: "isolated-token", sessionId: allowed.id, archiveStatus: "archived" }))
-      .matches,
+    (await collect({ query: "isolated-token", sessionId: allowed.id })).matches,
+  ).toHaveLength(0);
+  expect(
+    (
+      await collect({
+        query: "isolated-token",
+        sessionId: allowed.id,
+        archiveStatus: "archived",
+      })
+    ).matches,
   ).toHaveLength(1);
 }, 180_000);
 
@@ -269,7 +334,12 @@ test("cursors bind subject, query and filters and cannot broaden authorization",
       searchSessionMessagesForSubject(
         client.db,
         workspaceId,
-        { query: "cursor", sessionId: session.id, cursor: page.nextCursor!, ...change },
+        {
+          query: "cursor",
+          sessionId: session.id,
+          cursor: page.nextCursor!,
+          ...change,
+        },
         { subjectId },
       ),
     ).rejects.toThrow("cursor");
@@ -296,16 +366,22 @@ test("every non-overlapping occurrence survives pagination within one message", 
   const text = "🙂 aa aaa AA aa aa";
   await insert(session.id, 1, "user.message", { text });
   await insert(session.id, 2, "agent.message.completed", { text: "aa aa" });
-  const result = await collect({ query: "aa", sessionId: session.id, limit: 1 });
-  expect(result.matches.map((m) => [m.sequence, m.messageMatchOffset])).toEqual([
-    [1, 3],
-    [1, 6],
-    [1, 10],
-    [1, 13],
-    [1, 16],
-    [2, 0],
-    [2, 3],
-  ]);
+  const result = await collect({
+    query: "aa",
+    sessionId: session.id,
+    limit: 1,
+  });
+  expect(result.matches.map((m) => [m.sequence, m.messageMatchOffset])).toEqual(
+    [
+      [1, 3],
+      [1, 6],
+      [1, 10],
+      [1, 13],
+      [1, 16],
+      [2, 0],
+      [2, 3],
+    ],
+  );
   expect(result.page.matchedMessageCount).toBe(2);
   expect(result.page.matchedOccurrenceCount).toBe(7);
   expect(result.page.scannedMessages).toBe(2);
@@ -314,10 +390,20 @@ test("every non-overlapping occurrence survives pagination within one message", 
 test("all occurrences cross scalar windows without repeat or loss", async () => {
   const session = await makeSession();
   const text = "\u0000🙂" + ("x".repeat(249) + "abAB").repeat(160);
-  await insert(session.id, 1, "agent.message.completed", toPostgresLosslessJson({ text }), {
-    codec: 1,
+  await insert(
+    session.id,
+    1,
+    "agent.message.completed",
+    toPostgresLosslessJson({ text }),
+    {
+      codec: 1,
+    },
+  );
+  const result = await collect({
+    query: "ab",
+    sessionId: session.id,
+    limit: 7,
   });
-  const result = await collect({ query: "ab", sessionId: session.id, limit: 7 });
   expect(result.matches.map((m) => m.messageMatchOffset)).toEqual(
     [...text.matchAll(/ab/giu)].map((m) => m.index),
   );
@@ -327,7 +413,9 @@ test("all occurrences cross scalar windows without repeat or loss", async () => 
 
 test("canonical completion copies, explicit duplicates, stale events and unclaimed prompts are excluded", async () => {
   const session = await makeSession();
-  const triggerId = await insert(session.id, 1, "user.message", { text: "unclaimed keyword" });
+  const triggerId = await insert(session.id, 1, "user.message", {
+    text: "unclaimed keyword",
+  });
   const [turn] = await shared.admin`insert into session_turns (
     account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
     status, source, position, prompt, model, reasoning_effort, sandbox_backend
@@ -348,7 +436,13 @@ test("canonical completion copies, explicit duplicates, stale events and unclaim
     { text: "keyword full-tail", messageId: "provider-1" },
     { turnId, codec: 1 },
   );
-  await insert(session.id, 4, "agent.message.completed", { text: "keyword full-tail" }, { turnId });
+  await insert(
+    session.id,
+    4,
+    "agent.message.completed",
+    { text: "keyword full-tail" },
+    { turnId },
+  );
   await insert(
     session.id,
     5,
@@ -356,7 +450,13 @@ test("canonical completion copies, explicit duplicates, stale events and unclaim
     { text: "keyword", messageId: "provider-2" },
     { turnId },
   );
-  await insert(session.id, 6, "agent.model.usage", { text: "keyword" }, { duplicate: canonical });
+  await insert(
+    session.id,
+    6,
+    "agent.model.usage",
+    { text: "keyword" },
+    { duplicate: canonical },
+  );
   await insert(
     session.id,
     7,
@@ -364,11 +464,19 @@ test("canonical completion copies, explicit duplicates, stale events and unclaim
     { text: "keyword" },
     { association: "late_rejected" },
   );
-  await insert(session.id, 8, "turn.completed", { output: "keyword" }, { turnId });
+  await insert(
+    session.id,
+    8,
+    "turn.completed",
+    { output: "keyword" },
+    { turnId },
+  );
   const result = await collect({ query: "keyword", sessionId: session.id });
   expect(result.matches.map((m) => m.sequence)).toEqual([3, 5]);
   expect(
-    (await collect({ query: "full-tail", sessionId: session.id })).matches.map((m) => m.sequence),
+    (await collect({ query: "full-tail", sessionId: session.id })).matches.map(
+      (m) => m.sequence,
+    ),
   ).toEqual([3]);
 }, 180_000);
 
@@ -491,12 +599,18 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
             { query: "never-present-token", ...(cursor ? { cursor } : {}) },
             {
               subjectId: benchmarkSubjectId,
-              authorizationScope: { kind: "scoped", sessionIds: scenario.ids, rootSessionIds: [] },
+              authorizationScope: {
+                kind: "scoped",
+                sessionIds: scenario.ids,
+                rootSessionIds: [],
+              },
             },
           );
           expect(page.matches).toHaveLength(0);
           expect(page.hasMore).toBe(page.nextCursor !== null);
-          expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(128 * 1024);
+          expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(
+            128 * 1024,
+          );
           cursor = page.nextCursor ?? undefined;
           expect(++pages).toBeLessThan(1000);
         } while (cursor);
@@ -516,7 +630,9 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
           ms: Math.round(performance.now() - started),
         });
       }
-      console.info(`[session-search efficiency] ${scenario.name}: ${JSON.stringify(samples)}`);
+      console.info(
+        `[session-search efficiency] ${scenario.name}: ${JSON.stringify(samples)}`,
+      );
     }
   } finally {
     await wire.end();
@@ -586,16 +702,22 @@ test("private sessions stay owner-only under the real production RLS role", asyn
     { query: "private-search-token" },
     { query: "private-search-token", sessionId: session.id },
   ]) {
-    const denied = await searchSessionMessagesForSubject(client.db, grant.workspaceId, request, {
-      subjectId: other,
-    });
+    const denied = await searchSessionMessagesForSubject(
+      client.db,
+      grant.workspaceId,
+      request,
+      {
+        subjectId: other,
+      },
+    );
     expect(denied.matches).toHaveLength(0);
     expect(denied.matchedMessageCount).toBe(0);
     expect(denied.scannedMessages).toBe(0);
   }
   // A foreign workspace cannot disclose even an exact known session UUID.
   expect(
-    (await collect({ query: "private-search-token", sessionId: session.id })).matches,
+    (await collect({ query: "private-search-token", sessionId: session.id }))
+      .matches,
   ).toHaveLength(0);
 }, 180_000);
 
@@ -658,11 +780,24 @@ test("workspace grouping skips prolific sessions in both buffered results and co
       rootSessionIds: [],
     },
   };
-  await insert(first!.id, 1, "user.message", { text: "group-token ".repeat(1000) });
-  await insert(second!.id, 1, "agent.message.completed", { text: "group-token group-token" });
+  await insert(first!.id, 1, "user.message", {
+    text: "group-token ".repeat(1000),
+  });
+  await insert(second!.id, 1, "agent.message.completed", {
+    text: "group-token group-token",
+  });
   // Both identities fit one batch: only the first occurrence of each is returned.
-  const together = await collect({ query: "group-token", groupBy: "session" }, authority);
-  expect(together.matches.map((m) => [m.sessionId, m.sequence, m.messageMatchOffset])).toEqual([
+  const together = await collect(
+    { query: "group-token", groupBy: "session" },
+    authority,
+  );
+  expect(
+    together.matches.map((m) => [
+      m.sessionId,
+      m.sequence,
+      m.messageMatchOffset,
+    ]),
+  ).toEqual([
     [first!.id, 1, 0],
     [second!.id, 1, 0],
   ]);
@@ -673,8 +808,17 @@ test("workspace grouping skips prolific sessions in both buffered results and co
   // session-id > boundary, not scan its 80 remaining messages or 999 occurrences.
   for (let sequence = 2; sequence <= 81; sequence++)
     await insert(first!.id, sequence, "user.message", { text: "group-token" });
-  const request = { query: "group-token", groupBy: "session" as const, limit: 1 };
-  const page = await searchSessionMessagesForSubject(client.db, workspaceId, request, authority);
+  const request = {
+    query: "group-token",
+    groupBy: "session" as const,
+    limit: 1,
+  };
+  const page = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    request,
+    authority,
+  );
   expect(page.matches.map((m) => m.sessionId)).toEqual([first!.id]);
   expect(page.hasMore).toBe(true);
   const next = await searchSessionMessagesForSubject(
@@ -688,37 +832,28 @@ test("workspace grouping skips prolific sessions in both buffered results and co
   expect(next.matchedMessageCount).toBe(2);
   expect(next.scannedMessages).toBe(2);
   expect(next.countIsExact).toBe(true);
-  // A larger/default result limit must also preserve the continuation when
-  // grouping drains all 33 buffered identities of the first session. There
-  // may still be another session beyond this full batch; no buffered identity
-  // is not evidence that the entire search is exhausted.
+  // With a larger/default result limit, the 81 matching messages of the first
+  // session do not crowd the second session out of the same request: grouping
+  // takes only each session's first hit from the database.
   for (const limit of [undefined, 50]) {
-    const groupedRequest = {
-      query: "group-token",
-      groupBy: "session" as const,
-      ...(limit === undefined ? {} : { limit }),
-    };
-    const drained = await searchSessionMessagesForSubject(
+    const grouped = await searchSessionMessagesForSubject(
       client.db,
       workspaceId,
-      groupedRequest,
+      {
+        query: "group-token",
+        groupBy: "session",
+        ...(limit === undefined ? {} : { limit }),
+      },
       authority,
     );
-    expect(drained.matches.map((m) => m.sessionId)).toEqual([first!.id]);
-    expect(drained.hasMore).toBe(true);
-    expect(drained.countIsExact).toBe(false);
-    expect(drained.nextCursor).not.toBeNull();
-    const resumed = await searchSessionMessagesForSubject(
-      client.db,
-      workspaceId,
-      { ...groupedRequest, cursor: drained.nextCursor! },
-      authority,
-    );
-    expect(resumed.matches.map((m) => m.sessionId)).toEqual([second!.id]);
-    expect(resumed.scannedMessages).toBe(2);
-    expect(resumed.matchedOccurrenceCount).toBe(2);
-    expect(resumed.countIsExact).toBe(true);
-    expect(resumed.hasMore).toBe(false);
+    expect(grouped.matches.map((m) => m.sessionId)).toEqual([
+      first!.id,
+      second!.id,
+    ]);
+    expect(grouped.matchedOccurrenceCount).toBe(2);
+    expect(grouped.scannedMessages).toBe(82);
+    expect(grouped.countIsExact).toBe(true);
+    expect(grouped.hasMore).toBe(false);
   }
   // Grouping participates in cursor identity in both directions.
   await expect(
@@ -750,14 +885,18 @@ test("workspace grouping skips prolific sessions in both buffered results and co
     { subjectId },
   );
   expect(unchangedFind.matches).toHaveLength(50);
-  expect(unchangedFind.matches[49]!.messageMatchOffset).toBe(49 * "group-token ".length);
+  expect(unchangedFind.matches[49]!.messageMatchOffset).toBe(
+    49 * "group-token ".length,
+  );
 }, 180_000);
 
-test("grouped exact multiples of the identity batch terminate on one empty continuation", async () => {
+test("grouping a prolific session finishes in one request at any message count", async () => {
   for (const messageCount of [33, 66]) {
     const session = await makeSession();
     for (let sequence = 1; sequence <= messageCount; sequence++)
-      await insert(session.id, sequence, "user.message", { text: "exact-batch-token" });
+      await insert(session.id, sequence, "user.message", {
+        text: "exact-batch-token",
+      });
     const authority = {
       subjectId,
       authorizationScope: {
@@ -766,38 +905,104 @@ test("grouped exact multiples of the identity batch terminate on one empty conti
         rootSessionIds: [],
       },
     };
-    const request = { query: "exact-batch-token", groupBy: "session" as const, limit: 50 };
-    const first = await searchSessionMessagesForSubject(client.db, workspaceId, request, authority);
-    expect(first.matches.map((match) => match.sessionId)).toEqual([session.id]);
-    expect(first.hasMore).toBe(true);
-    expect(first.countIsExact).toBe(false);
-    expect(first.nextCursor).not.toBeNull();
-    const terminal = await searchSessionMessagesForSubject(
+    const request = {
+      query: "exact-batch-token",
+      groupBy: "session" as const,
+      limit: 50,
+    };
+    const first = await searchSessionMessagesForSubject(
       client.db,
       workspaceId,
-      { ...request, cursor: first.nextCursor! },
+      request,
       authority,
     );
-    expect(terminal.matches).toHaveLength(0);
-    expect(terminal.hasMore).toBe(false);
-    expect(terminal.nextCursor).toBeNull();
-    expect(terminal.countIsExact).toBe(true);
-    expect(terminal.scannedMessages).toBe(1);
-    expect(terminal.matchedMessageCount).toBe(1);
-    expect(terminal.matchedOccurrenceCount).toBe(1);
+    expect(first.matches.map((match) => match.sessionId)).toEqual([session.id]);
+    expect(first.hasMore).toBe(false);
+    expect(first.nextCursor).toBeNull();
+    expect(first.countIsExact).toBe(true);
+    expect(first.scannedMessages).toBe(messageCount);
+    expect(first.matchedMessageCount).toBe(1);
+    expect(first.matchedOccurrenceCount).toBe(1);
   }
+}, 180_000);
+
+test("grouping returns a full batch of sessions per request, and encoded text never hides a later hit", async () => {
+  const sessions = await Promise.all(
+    Array.from({ length: 40 }, () => makeSession()),
+  );
+  sessions.sort((a, b) => (a.id < b.id ? -1 : 1));
+  for (const [index, session] of sessions.entries()) {
+    // Encoded text that does not contain the literal precedes the real hit.
+    await insert(
+      session.id,
+      1,
+      "user.message",
+      index === 0
+        ? toPostgresLosslessJson({ text: "\u0000none" })
+        : { text: "filler" },
+      { codec: index === 0 ? 1 : null },
+    );
+    for (let sequence = 2; sequence <= 4; sequence++)
+      await insert(session.id, sequence, "agent.message.completed", {
+        text: `many-session-token ${sequence}`,
+        messageId: `m-${sequence}`,
+      });
+  }
+  const authority = {
+    subjectId,
+    authorizationScope: {
+      kind: "scoped" as const,
+      sessionIds: sessions.map((s) => s.id),
+      rootSessionIds: [],
+    },
+  };
+  const request = {
+    query: "MANY-session-token",
+    groupBy: "session" as const,
+    limit: 50,
+  };
+  const first = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    request,
+    authority,
+  );
+  // One request carries a full window budget of sessions (the encoded
+  // message takes one window), not one session per request.
+  expect(first.matches.length).toBeGreaterThanOrEqual(31);
+  expect(first.matches.every((m) => m.sequence === 2)).toBe(true);
+  expect(first.hasMore).toBe(true);
+  const rest = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { ...request, cursor: first.nextCursor! },
+    authority,
+  );
+  expect([...first.matches, ...rest.matches].map((m) => m.sessionId)).toEqual(
+    sessions.map((s) => s.id),
+  );
+  expect(rest.hasMore).toBe(false);
+  expect(rest.matchedMessageCount).toBe(40);
+  // The first request's last matched session skips its two later messages.
+  expect(rest.scannedMessages).toBe(158);
 }, 180_000);
 
 test("grouped workspace counts still exclude sessions outside authorization scope", async () => {
   const permitted = await makeSession();
   const hidden = await makeSession();
   await insert(permitted.id, 1, "user.message", { text: "group-isolation" });
-  await insert(hidden.id, 1, "user.message", { text: "group-isolation ".repeat(1000) });
+  await insert(hidden.id, 1, "user.message", {
+    text: "group-isolation ".repeat(1000),
+  });
   const page = await collect(
     { query: "group-isolation", groupBy: "session" },
     {
       subjectId,
-      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [permitted.id] },
+      authorizationScope: {
+        kind: "scoped",
+        rootSessionIds: [],
+        sessionIds: [permitted.id],
+      },
     },
   );
   expect(page.matches.map((m) => m.sessionId)).toEqual([permitted.id]);
@@ -807,7 +1012,9 @@ test("grouped workspace counts still exclude sessions outside authorization scop
 
 test("a later text-less completion copy never hides earlier retained text", async () => {
   const session = await makeSession();
-  const triggerId = await insert(session.id, 1, "user.message", { text: "start" });
+  const triggerId = await insert(session.id, 1, "user.message", {
+    text: "start",
+  });
   const [turn] = await shared.admin`insert into session_turns (
     account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
     status, source, position, prompt, model, reasoning_effort, sandbox_backend
@@ -854,7 +1061,11 @@ test("cursor binding canonicalizes authorization scope id order", async () => {
   await insert(first.id, 1, "user.message", { text: "order-canonical-token" });
   await insert(second.id, 1, "user.message", { text: "order-canonical-token" });
   const ids = [first.id, second.id].sort();
-  const ascending = { kind: "scoped" as const, sessionIds: ids, rootSessionIds: ids };
+  const ascending = {
+    kind: "scoped" as const,
+    sessionIds: ids,
+    rootSessionIds: ids,
+  };
   const descending = {
     kind: "scoped" as const,
     sessionIds: [...ids].reverse().concat(ids[0]!),
@@ -886,7 +1097,11 @@ test("cursor binding canonicalizes authorization scope id order", async () => {
       { query: "order-canonical-token", limit: 1, cursor: page.nextCursor! },
       {
         subjectId,
-        authorizationScope: { kind: "scoped", sessionIds: [first.id], rootSessionIds: [] },
+        authorizationScope: {
+          kind: "scoped",
+          sessionIds: [first.id],
+          rootSessionIds: [],
+        },
       },
     ),
   ).rejects.toThrow("cursor");
@@ -903,7 +1118,9 @@ test("Slack-private sessions stay owner-only in message search", async () => {
       permissions: ["sessions:read"],
     });
   const session = await makeSession();
-  await insert(session.id, 1, "user.message", { text: "slack-private-search-token" });
+  await insert(session.id, 1, "user.message", {
+    text: "slack-private-search-token",
+  });
   const [connection] = await shared.admin`insert into connections (
     account_id, workspace_id, origin_workspace_id, provider_domain, kind,
     credential_encrypted, status
@@ -969,7 +1186,9 @@ test("cross-account workspaces are fenced before any message is scanned", async 
     values (${foreignGrant.accountId}, ${foreignGrant.workspaceId}, ${foreignSession.id}, 1, 'user.message', '{"text":"cross-tenant-search-token"}'::jsonb)`;
   // The same token exists in our workspace: a correct search returns only ours.
   const ownSession = await makeSession();
-  await insert(ownSession.id, 1, "user.message", { text: "cross-tenant-search-token" });
+  await insert(ownSession.id, 1, "user.message", {
+    text: "cross-tenant-search-token",
+  });
   const ours = await collect({ query: "cross-tenant-search-token" });
   expect(ours.matches.map((m) => m.sessionId)).toEqual([ownSession.id]);
   // Our member has no authority in the foreign workspace at all.
