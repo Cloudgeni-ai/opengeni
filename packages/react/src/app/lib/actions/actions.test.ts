@@ -11,7 +11,7 @@ import {
 import type { ChatRecord } from "./chat-directory";
 import { isSwitcherKey, openChatSwitcher, stepChatSwitcher, SWITCHER_LIMIT } from "./chat-switcher";
 import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
-import { APP_ACTIONS, stepWorkspace } from "./registry";
+import { appActions, stepWorkspace } from "./registry";
 
 function key(
   code: string,
@@ -92,7 +92,7 @@ describe("chords", () => {
       getModifierState: (modifier: string) => modifier === "AltGraph",
     });
     const chordFor = (id: string) =>
-      applicableChords(APP_ACTIONS.find((action) => action.id === id)!.chords, "web", "other")[0]!;
+      applicableChords(appActions().find((action) => action.id === id)!.chords, "web", "other")[0]!;
     // "ą" on Polish keyboards and "{" on Czech and Hungarian ones; Pin uses the same shape.
     expect(matchesChord(altGr("KeyA", "ą"), chordFor("chat.archive"), "other")).toBe(false);
     expect(matchesChord(altGr("KeyB", "{"), chordFor("view.workspacePanel"), "other")).toBe(false);
@@ -129,7 +129,7 @@ describe("chords", () => {
   });
 
   test("browser-reserved keys stay on desktop", () => {
-    const action = APP_ACTIONS.find((candidate) => candidate.id === "chat.new")!;
+    const action = appActions().find((candidate) => candidate.id === "chat.new")!;
     expect(applicableChords(action.chords, "web", "mac").map((chord) => chord.code)).toEqual([
       "KeyO",
     ]);
@@ -137,7 +137,7 @@ describe("chords", () => {
       "KeyN",
       "KeyO",
     ]);
-    const inbox = APP_ACTIONS.find((candidate) => candidate.id === "go.inbox")!;
+    const inbox = appActions().find((candidate) => candidate.id === "go.inbox")!;
     // Ctrl+Shift+I opens developer tools in browsers on Windows and Linux.
     expect(applicableChords(inbox.chords, "web", "other")).toEqual([]);
     expect(applicableChords(inbox.chords, "desktop", "other")).toHaveLength(1);
@@ -147,7 +147,7 @@ describe("chords", () => {
     for (const surface of ["web", "desktop"] as const) {
       for (const platform of ["mac", "other"] as const) {
         const seen = new Map<string, string>();
-        for (const action of APP_ACTIONS) {
+        for (const action of appActions()) {
           for (const chord of applicableChords(action.chords, surface, platform)) {
             const label = chordLabel(chord, platform);
             expect(seen.get(label) ?? action.id).toBe(action.id);
@@ -159,7 +159,7 @@ describe("chords", () => {
   });
 
   test("⌘B toggles the sidebar, as a formatting key with a standard key beside it", () => {
-    const sidebar = APP_ACTIONS.find((candidate) => candidate.id === "view.sidebar")!;
+    const sidebar = appActions().find((candidate) => candidate.id === "view.sidebar")!;
     for (const platform of ["mac", "other"] as const) {
       const chords = applicableChords(sidebar.chords, "desktop", platform);
       expect(chordLabel(chords[0]!, platform)).toBe(platform === "mac" ? "⌘B" : "Ctrl+B");
@@ -327,7 +327,7 @@ describe("workspace keys", () => {
   });
 
   test("⌥⌘↑ and ⌥⌘↓ on Mac, Ctrl+Alt elsewhere, plus Ctrl+Shift+PgUp/PgDn in the desktop app", () => {
-    const next = APP_ACTIONS.find((action) => action.id === "go.nextWorkspace")!;
+    const next = appActions().find((action) => action.id === "go.nextWorkspace")!;
     const mac = applicableChords(next.chords, "web", "mac");
     expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌥⌘↓"]);
     expect(matchesChord(key("ArrowDown", { meta: true, alt: true }), mac[0]!, "mac")).toBe(true);

@@ -50,7 +50,7 @@ import {
   rankWithKeywords,
 } from "../../lib/actions/rank";
 import {
-  APP_ACTIONS,
+  appActions,
   actionIcon,
   actionTitle,
   type ActionEnv,
@@ -496,7 +496,7 @@ function CommandMenuDialog(props: {
           });
         }
       }
-      for (const action of APP_ACTIONS) {
+      for (const action of appActions()) {
         if (!action.forChat || action.inCommandMenu === false) continue;
         // Copy link needs only the id; the rest need the chat's row.
         const target = row ?? (action.id === "chat.copyLink" ? pseudoRow(focusChat) : null);
@@ -531,7 +531,7 @@ function CommandMenuDialog(props: {
         });
       }
       if (current) {
-        const chatActions = APP_ACTIONS.filter(
+        const chatActions = appActions().filter(
           (action) =>
             action.forChat &&
             action.inCommandMenu !== false &&
@@ -546,7 +546,7 @@ function CommandMenuDialog(props: {
           });
         }
       }
-      const general = APP_ACTIONS.filter(
+      const general = appActions().filter(
         (action) =>
           !action.forChat &&
           action.inCommandMenu !== false &&
@@ -583,7 +583,7 @@ function CommandMenuDialog(props: {
     }
 
     const actionScores: Array<{ item: Item; rank: number; loose: boolean }> = [];
-    for (const action of APP_ACTIONS) {
+    for (const action of appActions()) {
       if (action.inCommandMenu === false) continue;
       const target = action.forChat ? current : null;
       if (action.forChat && !target) continue;
@@ -782,7 +782,7 @@ function CommandMenuDialog(props: {
       const chatRecord = focusChat ?? activeItem?.chat;
       if (!chatRecord) return;
       const sameWorkspace = chatRecord.workspaceId === workspaceId;
-      for (const action of APP_ACTIONS) {
+      for (const action of appActions()) {
         if (!action.forChat) continue;
         const chord = chordsFor(action).find((candidate) =>
           matchesChord(event.nativeEvent, candidate, platform),

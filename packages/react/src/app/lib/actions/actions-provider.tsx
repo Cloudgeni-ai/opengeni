@@ -55,7 +55,7 @@ import {
   RENAME_CURRENT_CHAT_EVENT,
 } from "./events";
 import {
-  APP_ACTIONS,
+  appActions,
   actionTitle,
   findAction,
   type ActionEnv,
@@ -346,16 +346,18 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const menuSignature = useMemo(() => {
     if (!menuBridge) return "";
     return JSON.stringify(
-      APP_ACTIONS.filter((action) => action.desktopMenu).map((action) => {
-        const chat = action.forChat ? env.currentChat : null;
-        return {
-          id: action.id,
-          label: actionTitle(action, env, chat),
-          section: action.desktopMenu!,
-          accelerator: menuChord(action, platform),
-          enabled: action.available(env, chat),
-        };
-      }),
+      appActions()
+        .filter((action) => action.desktopMenu)
+        .map((action) => {
+          const chat = action.forChat ? env.currentChat : null;
+          return {
+            id: action.id,
+            label: actionTitle(action, env, chat),
+            section: action.desktopMenu!,
+            accelerator: menuChord(action, platform),
+            enabled: action.available(env, chat),
+          };
+        }),
     );
   }, [menuBridge, env, platform]);
   useEffect(() => {
@@ -383,7 +385,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
     function onKeyDown(event: KeyboardEvent) {
       if (event.defaultPrevented) return;
       const current = envRef.current;
-      for (const action of APP_ACTIONS) {
+      for (const action of appActions()) {
         // ⌘F belongs to the conversation's own find bar.
         if (action.id === "chat.find") continue;
         // The chat switcher handles Control+Tab itself: it needs Control's release.

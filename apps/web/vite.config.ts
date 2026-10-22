@@ -379,8 +379,11 @@ export default defineConfig({
               // The dollar-input parser is shared by the chat's usage-limit
               // editor and the lazy budget pages; keep it here so the session
               // graph never loads the usage-allowances chunk.
+              // The chat page sends the keyboard actions' events and focuses the
+              // new-chat composer; both leaves are shared with the lazy command
+              // menu, so keep them here instead of beside the action registry.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.tsx?|packages[\\/]sdk[\\/]src[\\/]transcription\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]lib[\\/](?:dollars|format|machine-selectability|create-composer-focus|actions[\\/]events)\.tsx?|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.tsx?|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
