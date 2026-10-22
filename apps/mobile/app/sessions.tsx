@@ -20,7 +20,8 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
-import { rankChatSearch, useServerChatSearch, workspacesToSearch } from "@/chat-search";
+import { rankChatSearch, workspacesToSearch } from "@/chat-search";
+import { useServerChatSearch } from "@/use-server-chat-search";
 import { cachedLists, rememberLists } from "@/session-list-cache";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { AppThemeProvider } from "@/theme";
