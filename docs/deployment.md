@@ -3055,7 +3055,12 @@ editable-artifact service pools alike:
   query or transaction first.
 - `0` turns either timer off.
 - If backends still do not fit, add memory, reduce pool sizes or replicas, or
-  set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false`.
+  set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false`. Most of the growth after
+  the first pass is generic plans, which the server's default
+  `plan_cache_mode=auto` caches once a statement has run five times. A role
+  setting of `force_custom_plan` held the replay above at 126 MB, but its warm
+  passes ran 25-40% slower, and it also re-plans every statement inside PL/pgSQL
+  routines and triggers, so Opengeni keeps `auto`.
 
 Scoped transactions retry transient connection acquisition up to eight times
 with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
