@@ -38,7 +38,7 @@ does not list that format, the file itself is the deliverable:
 
 1. Make or edit it in the sandbox with ordinary tools (`python-pptx`;
    LibreOffice (`soffice --headless --convert-to pdf`) for a PDF copy). Managed
-   sandboxes already include them, so do not check first; run
+   sandboxes already include python-pptx, so do not check for it first; run
    `pip install <package>` only if an import fails.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
