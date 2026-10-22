@@ -672,12 +672,9 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
       layoutRef.current = undefined;
     };
   }, []);
-  // ReactMarkdown recreates table children even when only later prose changes.
-  // Remeasure genuine content changes without collapsing the expanded wrapper
-  // between cleanup and the asynchronous observer-module import on each update.
-  useEffect(() => {
-    layoutRef.current?.measure();
-  }, [children]);
+  // The layout observer remeasures when the table's cells change. ReactMarkdown
+  // recreates table children on every render, so a render alone (a keystroke
+  // in the composer, a later paragraph streaming in) must not measure again.
   return (
     // Touch shows the copy action permanently at full touch size, so it sits
     // under the table there instead of covering the right-aligned header.
