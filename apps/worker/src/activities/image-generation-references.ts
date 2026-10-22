@@ -55,6 +55,8 @@ export type ResolveImageGenerationReferencesInput = Readonly<{
   workspaceId: string;
   subjectId: string | null;
   references: readonly ImageGenerationReference[];
+  /** Recheck the live source chat before reading stored File bytes. */
+  authorizeFile: (file: FileAsset) => Promise<boolean>;
   readSandboxFile?: SandboxImageReferenceReader;
 }>;
 
@@ -186,6 +188,12 @@ async function referenceBytes(
     }
   } else {
     file = await artifactFile(input.db, input.workspaceId, reference.artifactId);
+  }
+  if (!(await input.authorizeFile(file))) {
+    throw new ImageGenerationReferenceError(
+      "reference_unavailable",
+      "The image reference is unavailable.",
+    );
   }
   if (file.status !== "ready" || !file.sha256) {
     throw new ImageGenerationReferenceError(

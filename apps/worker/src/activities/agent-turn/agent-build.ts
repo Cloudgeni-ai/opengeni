@@ -66,7 +66,11 @@ import {
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
-import type { runtimeResourcesForTurn } from "./file-resources";
+import {
+  workerFileAuthorization,
+  workerMayReadFileSource,
+  type runtimeResourcesForTurn,
+} from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
 import type { sandboxEnvironmentForRun } from "../environment";
 import type {
@@ -96,6 +100,7 @@ export type BuildTurnAgentDeps = {
   db: ActivityServices["db"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
+  sessionAuthorization: ActivityServices["sessionAuthorization"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
   runtimeCancellationSignal: AbortSignal | undefined;
@@ -165,6 +170,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     db,
     runtime,
     objectStorage,
+    sessionAuthorization,
     observability,
     cancellationSignal,
     runtimeCancellationSignal,
@@ -249,6 +255,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     runSettings,
     deps.workspaceCreditModelsAllowed,
   ).hostedWebSearch;
+  const fileAuthorization = workerFileAuthorization(input, turn, sessionAuthorization);
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>
@@ -259,6 +266,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       workspaceId: input.workspaceId,
       subjectId: fileAuthoritySubjectId,
       references,
+      authorizeFile: (file) =>
+        workerMayReadFileSource(db, fileAuthoritySubjectId, file, fileAuthorization),
       readSandboxFile: async (path, maxBytes) => {
         const imageReferenceSandbox = await resolveTurnSandboxAccess(
           sandboxState,

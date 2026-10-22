@@ -50,6 +50,7 @@ describe("image generation references", () => {
       accountId: "00000000-0000-4000-8000-000000000000",
       workspaceId: "11111111-1111-4111-8111-111111111111",
       subjectId: "user:image-reference-authority",
+      authorizeFile: async () => true,
       references: [
         { kind: "sandbox_path", path: "/workspace/first.png" },
         { kind: "sandbox_path", path: "/workspace/second.png" },
@@ -74,6 +75,7 @@ describe("image generation references", () => {
         accountId: "00000000-0000-4000-8000-000000000000",
         workspaceId: "11111111-1111-4111-8111-111111111111",
         subjectId: "user:image-reference-authority",
+        authorizeFile: async () => true,
         references: [{ kind: "sandbox_path", path: "/workspace/logo.svg" }],
         readSandboxFile: async () =>
           new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
@@ -93,6 +95,7 @@ describe("image generation references", () => {
       accountId: "00000000-0000-4000-8000-000000000000",
       workspaceId: "11111111-1111-4111-8111-111111111111",
       subjectId: "user:image-reference-authority",
+      authorizeFile: async () => true,
       references: [{ kind: "sandbox_path", path: "/workspace/missing.png" }],
       readSandboxFile: async () => {
         throw new Error("Sandbox image reference is unavailable");

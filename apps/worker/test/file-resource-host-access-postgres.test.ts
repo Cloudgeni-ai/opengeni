@@ -1,8 +1,20 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import type { AccessGrant } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, createFileUpload, createSession } from "@opengeni/db";
+import { createHash } from "node:crypto";
+import { MODEL_ATTACHMENT_REFS_FIELD, type AccessGrant } from "@opengeni/contracts";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createFileUpload,
+  createSession,
+  getFilesForSubject,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
-import { assertFileResourcesRemainAuthorized } from "../src/activities/agent-turn/file-resources";
+import {
+  assertFileResourcesRemainAuthorized,
+  workerMayReadFileSource,
+} from "../src/activities/agent-turn/file-resources";
+import { resolveImageGenerationReferencesForTool } from "../src/activities/image-generation-references";
+import { createModelHistoryAttachmentProjector } from "../src/activities/run-input";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -45,20 +57,25 @@ test("a host revocation blocks an already selected File before worker materializ
     sandboxBackend: "none",
   });
   const fileId = crypto.randomUUID();
+  const imageBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const digest = createHash("sha256").update(imageBytes).digest("hex");
   await createFileUpload(client.db, {
     accountId,
     workspaceId,
     fileId,
     sourceSessionId: source.id,
-    filename: "example.txt",
-    safeFilename: "example.txt",
-    contentType: "text/plain",
-    sizeBytes: 4,
+    filename: "example.png",
+    safeFilename: "example.png",
+    contentType: "image/png",
+    sizeBytes: imageBytes.length,
     bucket: "fixture",
-    objectKey: `workspaces/${workspaceId}/files/${fileId}/original/example.txt`,
+    objectKey: `workspaces/${workspaceId}/files/${fileId}/original/example.png`,
     expiresAt: new Date(Date.now() + 60_000),
   });
-  await shared.admin`update files set status = 'ready' where id = ${fileId}`;
+  await shared.admin`update files set status = 'ready', sha256 = ${digest} where id = ${fileId}`;
   const grant: AccessGrant = {
     accountId,
     workspaceId,
@@ -89,4 +106,57 @@ test("a host revocation blocks an already selected File before worker materializ
   mcpAllowed = true;
   allowed = false;
   await expect(check()).rejects.toThrow("no longer authorized");
+  const workerAuthorization = { grant, port, requireMcpSurface: false };
+  const loadVisible = async (fileIds: readonly string[]) => {
+    const files = await getFilesForSubject(client.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      fileIds,
+    });
+    const visible = await Promise.all(
+      files.map((file) => workerMayReadFileSource(client.db, subjectId, file, workerAuthorization)),
+    );
+    return files.filter((_, index) => visible[index]);
+  };
+  let historyReads = 0;
+  const project = createModelHistoryAttachmentProjector(
+    { supportsImageInput: true, inputFileMediaTypes: [] },
+    async () => {
+      historyReads++;
+      return imageBytes;
+    },
+    loadVisible,
+  );
+  const history = [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Example" }],
+      [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId }],
+    },
+  ];
+  expect(JSON.stringify(await project(history))).not.toContain("data:image/");
+  expect(historyReads).toBe(0);
+  let imageReferenceReads = 0;
+  const imageReference = await resolveImageGenerationReferencesForTool({
+    db: client.db,
+    objectStorage: {
+      getFileBytes: async () => {
+        imageReferenceReads++;
+        return imageBytes;
+      },
+    } as never,
+    accountId,
+    workspaceId,
+    subjectId,
+    references: [{ kind: "file", fileId }],
+    authorizeFile: (file) =>
+      workerMayReadFileSource(client.db, subjectId, file, workerAuthorization),
+  });
+  expect(imageReference).toMatchObject({
+    status: "rejected",
+    result: { code: "reference_unavailable" },
+  });
+  expect(imageReferenceReads).toBe(0);
 }, 180_000);

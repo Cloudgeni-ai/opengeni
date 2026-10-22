@@ -32,6 +32,7 @@ import { projectReasoningConfigurations, supportsReasoningConfiguration } from "
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
+import { workerFileAuthorization, workerMayReadFileSource } from "./file-resources";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -75,6 +76,7 @@ export type GovernanceModelDeps = {
   observability: ActivityServices["observability"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
+  sessionAuthorization: ActivityServices["sessionAuthorization"];
   eventing: EventingState;
   workspaceRefs: WorkspaceRefState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
@@ -180,6 +182,7 @@ export async function prepareGovernanceAndModel(
     observability,
     runtime,
     objectStorage,
+    sessionAuthorization,
     eventing,
     workspaceRefs,
     media,
@@ -398,13 +401,21 @@ export async function prepareGovernanceAndModel(
           return object.bytes;
         }
       : undefined,
-    (fileIds) =>
-      getFilesForSubject(db, {
+    async (fileIds) => {
+      const files = await getFilesForSubject(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         subjectId: fileAuthoritySubjectId,
         fileIds,
-      }),
+      });
+      const authorization = workerFileAuthorization(input, turn, sessionAuthorization);
+      const visible = await Promise.all(
+        files.map((file) =>
+          workerMayReadFileSource(db, fileAuthoritySubjectId, file, authorization),
+        ),
+      );
+      return files.filter((_, index) => visible[index]);
+    },
   );
   const useReasoningUpdates =
     runSettings.reasoningConfigurationUpdatesEnabled &&

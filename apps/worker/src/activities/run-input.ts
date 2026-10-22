@@ -477,7 +477,8 @@ async function boundedAttachmentImage(
 /**
  * Build one turn-scoped durable-attachment projector. Resolve active refs under
  * current file authority and memoize metadata/bytes for retries and compaction.
- * A turn boundary never changes an authorized attachment's representation.
+ * Authorized bytes stay stable across retries; revoked Files are removed on
+ * the next projection, including within the same turn.
  * Images of a message stamped with an image bound are shown downscaled to fit
  * it; unstamped (older) messages keep their full-resolution projection.
  */
@@ -513,11 +514,26 @@ export function createModelHistoryAttachmentProjector(
       }
     }
     if (refsByIndex.size === 0) return items;
-    const unresolved = orderedFileIds.filter((id) => !resolvedFileIds.has(id));
-    if (loadAuthorizedFiles && unresolved.length > 0) {
-      const files = await loadAuthorizedFiles(unresolved);
-      for (const file of files) fileById.set(file.id, file);
-      for (const id of unresolved) resolvedFileIds.add(id);
+    if (loadAuthorizedFiles && orderedFileIds.length > 0) {
+      // A projector survives retries and compaction within one turn. Recheck
+      // every referenced File so a host revocation cannot reuse cached pixels.
+      const files = await loadAuthorizedFiles(orderedFileIds);
+      const authorized = new Map(files.map((file) => [file.id, file]));
+      for (const id of orderedFileIds) {
+        const file = authorized.get(id);
+        if (file) {
+          fileById.set(id, file);
+        } else {
+          fileById.delete(id);
+          contentById.delete(id);
+          attemptedContentIds.delete(id);
+          retainedByteSizes.delete(id);
+          for (const key of boundedById.keys()) {
+            if (key.endsWith(`:${id}`)) boundedById.delete(key);
+          }
+        }
+        resolvedFileIds.add(id);
+      }
     }
 
     if (readFileBytes) {

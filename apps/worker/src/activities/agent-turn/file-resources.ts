@@ -58,7 +58,7 @@ export function workerFileAuthorization(
 
 type WorkerFileAuthorization = ReturnType<typeof workerFileAuthorization>;
 
-async function workerMayReadFileSource(
+export async function workerMayReadFileSource(
   db: ActivityServices["db"],
   subjectId: string | null,
   file: FileAsset,

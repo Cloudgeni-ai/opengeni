@@ -879,7 +879,7 @@ describe("retained upload replay", () => {
     );
     expect(await replay(history)).toEqual(first);
     expect(await replay(history)).toEqual(first);
-    expect(lookups).toBe(1);
+    expect(lookups).toBe(2);
     expect(reads).toBe(1);
     expect(JSON.stringify(history)).toBe(original);
   });
@@ -1063,6 +1063,33 @@ test("a new turn cannot reuse image bytes when its file authority no longer gran
   expect(reads).toBe(0);
 });
 
+test("same-turn reprojection drops cached pixels after File authority is revoked", async () => {
+  const bytes = new TextEncoder().encode("image");
+  const asset = {
+    ...file("00000000-0000-4000-8000-000000000098", "image/png", bytes.length, "a.png"),
+    sha256: sha256(bytes),
+  };
+  const history = [
+    { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+  ];
+  let allowed = true;
+  let reads = 0;
+  const projector = createModelHistoryAttachmentProjector(
+    { supportsImageInput: true, inputFileMediaTypes: [] },
+    async () => {
+      reads++;
+      return bytes;
+    },
+    async () => (allowed ? [asset] : []),
+  );
+  expect(JSON.stringify(await projector(history))).toContain("data:image/");
+  allowed = false;
+  const revoked = JSON.stringify(await projector(history));
+  expect(revoked).not.toContain("data:image/");
+  expect(revoked).toContain("not available to the current requester");
+  expect(reads).toBe(1);
+});
+
 test("retained image transport admission failures do not retry the same oversized context", () => {
   expect(agentRunFailurePayload(new RetainedAttachmentTransportLimitError())).toMatchObject({
     code: "retained_attachment_transport_limit",
@@ -1170,20 +1197,23 @@ describe("attachments outside the current requester's file access", () => {
     // The requester's own file keeps the ordinary receipt.
     expect(ownReceipt).toContain("files__files_get_download_url");
     expect(ownReceipt).toContain(`fileId=${own.id}`);
-    // Stable across same-turn reprojection without another lookup.
+    // Stable output, with a fresh authority lookup on reprojection.
     expect(await projector(history)).toEqual(projected);
-    expect(lookups).toEqual([[shared.id, own.id]]);
+    expect(lookups).toEqual([
+      [shared.id, own.id],
+      [shared.id, own.id],
+    ]);
   });
 
-  test("inline files of the current turn are never treated as excluded", async () => {
+  test("inline files of the current turn still require live authority", async () => {
     const projected = await createModelHistoryAttachmentProjector(
       { supportsImageInput: true, inputFileMediaTypes: [] },
       async () => bytes,
       async () => [],
     )(history, { inlineFiles: [shared, own] });
     for (const receipt of texts(projected).slice(1)) {
-      expect(receipt).toContain("files__files_get_download_url");
-      expect(receipt).not.toContain("not available to the current requester");
+      expect(receipt).not.toContain("files__files_get_download_url");
+      expect(receipt).toContain("not available to the current requester");
     }
   });
 
