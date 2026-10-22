@@ -40,6 +40,17 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain(">12 Aug</span>");
   });
 
+  test("a held ⌘ shows the row's jump key in place of its time", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata summary={active} relativeTime="12 Aug" jumpKey="⌘3" />,
+    );
+
+    expect(markup).toContain("data-session-row-jump-key");
+    expect(markup).toContain(">⌘3</kbd>");
+    expect(markup).not.toContain("12 Aug");
+    expect(markup).toContain("Running");
+  });
+
   test("runs the working spinner at 75% of its prior speed", () => {
     const markup = renderToStaticMarkup(<RailTrailingMetadata summary={active} />);
 
