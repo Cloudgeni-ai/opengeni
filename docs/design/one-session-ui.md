@@ -1,7 +1,8 @@
 # One session UI
 
 Status: built, October 21, 2026, as one PR: the move (part 1) and the embeds
-(part 2). The session-proxy embed is an open decision (see "Session proxy").
+(part 2). The session-proxy embed was decided on October 22, 2026: option 1,
+the proxy's opt-in `sessionApp` mode (see "Session proxy").
 
 ## Problem
 
@@ -159,9 +160,18 @@ Two end states are possible:
    customer pages use `SessionApp` directly and the proxy stays for chat-only
    embeds.
 
-Until that is decided, the proxy path keeps the conversation components, and
-`SessionApp` covers every embed that holds a credential (the Excel add-in,
-the desktop app, in-process hosts with delegated tokens).
+Decision (October 22, 2026): option 1. `createSessionProxyHandler` takes
+`sessionApp: true`. The app's bootstrap (`access/me`, `workspaces`) answers
+with the resolved workspace only; other reads in that workspace and in chats
+`authorizeSession` admits pass through as the resolved user; a short list of
+the app's own writes (pin, move to a project, projects, the new-chat draft, a
+chat's tool approval settings) passes; every other write is refused, and
+rosters, keys, budgets and administration stay closed even for reads. The
+proxy keeps every existing route's rules, so the host's `createSession` and
+message hooks still decide what a new chat is. Option 2 was rejected because
+a browser credential bypasses those hooks. A product page can now render
+`SessionApp` with `apiBaseUrl` set to its proxy; `OpenGeniChat` keeps the
+conversation components until it switches to `SessionApp`.
 
 ## Plan
 

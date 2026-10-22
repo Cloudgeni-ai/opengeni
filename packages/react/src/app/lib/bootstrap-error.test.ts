@@ -12,7 +12,7 @@ describe("bootstrap error presentation", () => {
     );
 
     expect(presentation).toEqual({
-      title: "Opengeni is under maintenance",
+      title: "Under maintenance",
       description: "We'll be back shortly. Try again in a moment.",
     });
   });
@@ -23,7 +23,7 @@ describe("bootstrap error presentation", () => {
       "workspace_access",
     );
 
-    expect(presentation.title).toBe("Opengeni is under maintenance");
+    expect(presentation.title).toBe("Under maintenance");
   });
 
   test("does not expose proxy HTML or API framing", () => {
@@ -33,7 +33,7 @@ describe("bootstrap error presentation", () => {
     );
 
     expect(presentation).toEqual({
-      title: "Opengeni is temporarily unavailable",
+      title: "Temporarily unavailable",
       description: "The service could not finish loading. Try again shortly.",
     });
     expect(JSON.stringify(presentation)).not.toContain("<div>");
@@ -47,7 +47,7 @@ describe("bootstrap error presentation", () => {
     );
 
     expect(presentation).toEqual({
-      title: "Opengeni couldn't start",
+      title: "Couldn't start",
       description:
         "The API returned an invalid configuration response. Check the deployment or proxy configuration, then try again.",
     });
@@ -58,8 +58,8 @@ describe("bootstrap error presentation", () => {
     expect(
       bootstrapErrorPresentation(new TypeError("Failed to fetch"), "client_configuration"),
     ).toEqual({
-      title: "Opengeni is unreachable",
-      description: "The app could not reach the Opengeni API. Check your connection and try again.",
+      title: "Can't connect",
+      description: "The app could not reach its server. Check your connection and try again.",
     });
 
     expect(
@@ -68,7 +68,7 @@ describe("bootstrap error presentation", () => {
         "client_configuration",
       ),
     ).toEqual({
-      title: "Opengeni couldn't start",
+      title: "Couldn't start",
       description:
         "The client configuration could not be loaded. Check the deployment settings and server logs, then try again.",
     });
@@ -82,7 +82,7 @@ describe("bootstrap error presentation", () => {
 
     expect(presentation).toEqual({
       title: "Workspace access unavailable",
-      description: "Opengeni couldn't load your workspace access. Try again.",
+      description: "Your workspace access couldn't be loaded. Try again.",
     });
     expect(JSON.stringify(presentation)).not.toContain("forbidden by proxy");
   });

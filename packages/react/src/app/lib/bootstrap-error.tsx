@@ -12,35 +12,35 @@ type ErrorMetadata = {
 };
 
 const maintenancePresentation: BootstrapErrorPresentation = {
-  title: "Opengeni is under maintenance",
+  title: "Under maintenance",
   description: "We'll be back shortly. Try again in a moment.",
 };
 
 const temporaryUnavailablePresentation: BootstrapErrorPresentation = {
-  title: "Opengeni is temporarily unavailable",
+  title: "Temporarily unavailable",
   description: "The service could not finish loading. Try again shortly.",
 };
 
 const networkUnavailablePresentation: BootstrapErrorPresentation = {
-  title: "Opengeni is unreachable",
-  description: "The app could not reach the Opengeni API. Check your connection and try again.",
+  title: "Can't connect",
+  description: "The app could not reach its server. Check your connection and try again.",
 };
 
 const invalidConfigurationResponsePresentation: BootstrapErrorPresentation = {
-  title: "Opengeni couldn't start",
+  title: "Couldn't start",
   description:
     "The API returned an invalid configuration response. Check the deployment or proxy configuration, then try again.",
 };
 
 const clientConfigurationPresentation: BootstrapErrorPresentation = {
-  title: "Opengeni couldn't start",
+  title: "Couldn't start",
   description:
     "The client configuration could not be loaded. Check the deployment settings and server logs, then try again.",
 };
 
 const workspaceAccessPresentation: BootstrapErrorPresentation = {
   title: "Workspace access unavailable",
-  description: "Opengeni couldn't load your workspace access. Try again.",
+  description: "Your workspace access couldn't be loaded. Try again.",
 };
 
 function normalizedErrorCode(value: unknown): string | null {
