@@ -36914,7 +36914,10 @@ type LineageIdRow = {
  * before RLS is considered. Up to 63 ancestors are returned root-first; an
  * invalid, cyclic, foreign, or deeper chain fails closed instead of presenting
  * a partial path as if it were rooted. Descendants are capped at depth 5 and
- * 200 total rows, returned as a nested tree.
+ * 200 total rows, returned as a nested tree with each level newest first (as
+ * the sidebar lists chats). The cap keeps shallower agents before deeper ones
+ * and newer before older, so a long fleet loses its oldest grandchildren
+ * first, never a direct child picked at random.
  */
 export async function getSessionLineage(
   db: Database,
@@ -36971,13 +36974,13 @@ export async function getSessionLineage(
     const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
     const childRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive descendants(id, parent_session_id, depth, path) as (
-        select child.id, child.parent_session_id, 1, array[${sessionId}, child.id]
+      with recursive descendants(id, parent_session_id, created_at, depth, path) as (
+        select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
         from ${schema.sessions} child
         where child.workspace_id = ${workspaceId}
           and child.parent_session_id = ${sessionId}
         union all
-        select child.id, child.parent_session_id, descendants.depth + 1, descendants.path || child.id
+        select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
         from ${schema.sessions} child
         join descendants on child.parent_session_id = descendants.id
         where child.workspace_id = ${workspaceId}
@@ -36986,7 +36989,7 @@ export async function getSessionLineage(
       )
       select id, parent_session_id as "parentSessionId", depth, path, false as cycle
       from descendants
-      order by path
+      order by depth, created_at desc, id desc
       limit ${descendantLimit + 1}
     `)) as LineageIdRow[];
     const truncated = childRows.length > descendantLimit;

@@ -1,6 +1,10 @@
 import type { ClientModel, LineageNode, SessionBackgroundCommand } from "@opengeni/sdk";
 import type { UseGoalResult } from "@opengeni/react/session";
-import { sessionAgentsSignal, sessionGoalStateLabel } from "@opengeni/react/session-agents-model";
+import {
+  sessionAgentAttention,
+  sessionAgentsSignal,
+  sessionGoalStateLabel,
+} from "@opengeni/react/session-agents-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
@@ -94,29 +98,17 @@ export function SessionSignals(props: {
       <BottomSheet open={open === "agents"} onClose={close} accessibilityLabel={m.agents}>
         <SheetTitle>{m.agents}</SheetTitle>
         <ScrollView style={{ paddingHorizontal: 12 }}>
+          {/* Newest first, as the server lists them and the sidebar orders chats. */}
           {props.agents.map((node) => (
-            <View key={node.session.id}>
-              <SessionRow
-                session={node.session}
-                models={props.models ?? []}
-                onPress={() => {
-                  close();
-                  props.onOpenSession?.(node.session.id);
-                }}
-              />
-              {node.children.map((child) => (
-                <View key={child.session.id} style={{ paddingLeft: 18 }}>
-                  <SessionRow
-                    session={child.session}
-                    models={props.models ?? []}
-                    onPress={() => {
-                      close();
-                      props.onOpenSession?.(child.session.id);
-                    }}
-                  />
-                </View>
-              ))}
-            </View>
+            <AgentNode
+              key={node.session.id}
+              node={node}
+              models={props.models ?? []}
+              onOpen={(sessionId) => {
+                close();
+                props.onOpenSession?.(sessionId);
+              }}
+            />
           ))}
         </ScrollView>
       </BottomSheet>
@@ -168,6 +160,80 @@ function Chip(props: {
       )}
       <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor }} />
     </Pressable>
+  );
+}
+
+/**
+ * One sub-agent, as the web agents panel lists it: its status, title, model and
+ * last update, or the word to act on (Needs you · 10h, Failed, Stuck, Paused).
+ * Its own agents fold under it behind a count, one level deep like the web.
+ */
+function AgentNode(props: {
+  node: LineageNode;
+  models: readonly ClientModel[];
+  onOpen: (sessionId: string) => void;
+  nested?: boolean | undefined;
+}) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const [expanded, setExpanded] = useState(false);
+  const { session, children } = props.node;
+  const paused = session.status !== "cancelled" && session.effectiveControl.state !== "active";
+  const attention = sessionAgentAttention(t, session, paused);
+  const count = children.length;
+  return (
+    <View style={props.nested ? { paddingLeft: 18 } : undefined}>
+      <SessionRow
+        session={session}
+        models={props.models}
+        attention={attention}
+        onPress={() => props.onOpen(session.id)}
+      />
+      {count > 0 && !props.nested ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded }}
+            accessibilityLabel={t("counts.agents", { count })}
+            onPress={() => setExpanded((value) => !value)}
+            hitSlop={{ top: 6, bottom: 6 }}
+            style={({ pressed }) => ({
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+              alignSelf: "flex-start",
+              marginLeft: 24,
+              marginBottom: 6,
+              paddingHorizontal: 8,
+              paddingVertical: 4,
+              borderRadius: theme.radius.md,
+              backgroundColor: pressed ? c.hover : "transparent",
+            })}
+          >
+            <Icon
+              name={expanded ? "chevron-down" : "chevron-right"}
+              size={12}
+              color={c["fg-subtle"]}
+            />
+            <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: c["fg-muted"] }}>
+              {t("counts.agents", { count })}
+            </Text>
+          </Pressable>
+          {expanded
+            ? children.map((child) => (
+                <AgentNode
+                  key={child.session.id}
+                  node={child}
+                  models={props.models}
+                  onOpen={props.onOpen}
+                  nested
+                />
+              ))
+            : null}
+        </>
+      ) : null}
+    </View>
   );
 }
 

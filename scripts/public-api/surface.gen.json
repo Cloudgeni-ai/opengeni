@@ -35876,6 +35876,9 @@
       "WorkerItem": "type"
     },
     "@opengeni/react/session-agents-model": {
+      "formatWaitingSince": "value",
+      "sessionAgentAttention": "value",
+      "SessionAgentAttention": "type",
       "sessionAgentsSignal": "value",
       "SessionAgentsSignal": "type",
       "sessionGoalStateLabel": "value"
