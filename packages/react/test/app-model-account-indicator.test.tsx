@@ -13,8 +13,8 @@ import { fakeClient, WORKSPACE_ID } from "./fake-client";
   ).IS_REACT_ACT_ENVIRONMENT = true;
 }
 const { OpenGeniProvider } = await import("../src");
-const { ModelAccountIndicator } =
-  await import("../src/app/components/session/model-account-indicator");
+const { SubscriptionAccountIndicator } =
+  await import("../src/app/components/session/subscription-account-indicator");
 afterAll(() => GlobalRegistrator.unregister());
 
 const ORG = "00000000-0000-4000-8000-0000000000aa";
@@ -67,7 +67,7 @@ async function render(
   await act(async () =>
     root.render(
       <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
-        <ModelAccountIndicator
+        <SubscriptionAccountIndicator
           workspaceId={WORKSPACE_ID}
           sessionId="session-1"
           organizationId={ORG}
@@ -166,7 +166,7 @@ test("offers only the session provider's accounts, with the caller's own account
   const view = await render(client);
   try {
     expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
-      "Model account · Automatic",
+      "Claude account · Automatic",
     );
     await view.open();
     const items = menuItems();
@@ -178,14 +178,19 @@ test("offers only the session provider's accounts, with the caller's own account
   }
 });
 
-test("renders nothing when the provider has no accounts on the shared core", async () => {
+test("says so when the provider has no accounts this person can use", async () => {
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
       choiceResponse({ accounts: [option("x", "Team Codex", { provider: "codex" })] }),
   });
   const view = await render(client);
   try {
-    expect(view.container.querySelector("button")).toBeNull();
+    expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
+      "Claude account · Automatic",
+    );
+    await view.open();
+    expect(menuItems()).toEqual(["Automatic"]);
+    expect(document.body.textContent).toContain("No accounts available.");
   } finally {
     await view.cleanup();
   }
@@ -241,44 +246,41 @@ test("choosing sends the account and shows where it applies; a refused account i
     expect(calls).toEqual(["shared-1"]);
     expect(document.body.textContent).toContain("Selection saved for the next turn.");
     expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
-      "Model account · Team Claude",
+      "Claude account · Team Claude",
     );
   } finally {
     await view.cleanup();
   }
 });
 
-test.each(["claude", "xai", "codex"])(
-  "uses the subscription provider mark for %s",
-  async (provider) => {
-    const client = Object.assign(fakeClient({}), {
-      getSessionModelAccount: async () =>
-        choiceResponse({
-          accounts: [option("team", "Team account", { provider })],
-        }),
-    });
-    const view = await render(client, provider);
-    try {
-      expect(
-        view.container.querySelector(
+test.each(["claude", "xai"])("uses the subscription provider mark for %s", async (provider) => {
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () =>
+      choiceResponse({
+        accounts: [option("team", "Team account", { provider })],
+      }),
+  });
+  const view = await render(client, provider);
+  try {
+    expect(
+      view.container.querySelector(
+        `[data-testid="billing-class-icon-${provider === "xai" ? "supergrok" : provider}_subscription"]`,
+      ),
+    ).not.toBeNull();
+    await view.open();
+    expect(
+      document
+        .querySelector('[role="menu"]')
+        ?.querySelector(
           `[data-testid="billing-class-icon-${provider === "xai" ? "supergrok" : provider}_subscription"]`,
         ),
-      ).not.toBeNull();
-      await view.open();
-      expect(
-        document
-          .querySelector('[role="menu"]')
-          ?.querySelector(
-            `[data-testid="billing-class-icon-${provider === "xai" ? "supergrok" : provider}_subscription"]`,
-          ),
-      ).not.toBeNull();
-      expect(document.body.textContent).toContain("Choose an account to view usage");
-      expect(document.querySelector('[role="progressbar"]')).toBeNull();
-    } finally {
-      await view.cleanup();
-    }
-  },
-);
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain("Choose an account to see usage");
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
+  } finally {
+    await view.cleanup();
+  }
+});
 
 test("renders the API's cached windows without an aggregate remaining estimate or refresh", async () => {
   let refreshes = 0;
@@ -322,8 +324,8 @@ test("renders the API's cached windows without an aggregate remaining estimate o
       document.querySelector('[aria-label="Overage used"]')?.getAttribute("aria-valuetext"),
     ).toBe("125% used");
     expect(document.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
-    expect(document.body.textContent).toContain("Cached observation");
-    expect(document.body.textContent).toContain("Reset time passed; current usage unknown");
+    expect(document.body.textContent).toContain("Updated ");
+    expect(document.body.textContent).toContain("Reset passed; usage may be outdated");
     expect(document.body.textContent).toContain("Unknown");
     expect(document.body.textContent).not.toContain("% remaining");
     expect(refreshes).toBe(0);
@@ -333,28 +335,25 @@ test("renders the API's cached windows without an aggregate remaining estimate o
 });
 
 test.each([
-  { usage: null, expected: "No stored usage" },
-  { usage: undefined, expected: "Usage not reported" },
-])(
-  "distinguishes absent snapshots from omitted projection: $expected",
-  async ({ usage, expected }) => {
-    const client = Object.assign(fakeClient({}), {
-      getSessionModelAccount: async () =>
-        choiceResponse({
-          binding: { provider: "claude", connectionId: "team", choice: "explicit" },
-          accounts: [option("team", "Team Claude", { usage })],
-        }),
-    });
-    const view = await render(client);
-    try {
-      await view.open();
-      expect(document.body.textContent).toContain(expected);
-      expect(document.querySelector('[role="progressbar"]')).toBeNull();
-    } finally {
-      await view.cleanup();
-    }
-  },
-);
+  { usage: null, expected: "No usage reading yet", kind: "absent" },
+  { usage: undefined, expected: "No usage reading yet", kind: "omitted" },
+])("an $kind snapshot shows no made-up usage", async ({ usage, expected }) => {
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () =>
+      choiceResponse({
+        binding: { provider: "claude", connectionId: "team", choice: "explicit" },
+        accounts: [option("team", "Team Claude", { usage })],
+      }),
+  });
+  const view = await render(client);
+  try {
+    await view.open();
+    expect(document.body.textContent).toContain(expected);
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
+  } finally {
+    await view.cleanup();
+  }
+});
 
 test("a redacted binding does not borrow another visible account's usage", async () => {
   const client = Object.assign(fakeClient({}), {
@@ -438,7 +437,9 @@ test("shows a server selection error without claiming that the account was saved
       (row) => row.textContent === "My Claude",
     )!;
     await act(async () => mine.click());
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe("Account access changed");
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+      "Couldn't switch: Account access changed",
+    );
     expect(document.body.textContent).not.toContain("Selection saved");
   } finally {
     await view.cleanup();
@@ -489,7 +490,7 @@ test.each([false, true])(
       )!;
       await act(async () => mine.click());
       expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Model account · My Claude",
+        "Claude account · My Claude",
       );
       const automatic = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
         (row) => row.textContent === "Automatic",
@@ -497,7 +498,7 @@ test.each([false, true])(
       await act(async () => automatic.click());
       expect(calls).toEqual(["mine-1", null]);
       expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Model account · Automatic",
+        "Claude account · Automatic",
       );
       expect(menuItems()).toEqual(["Automatic", "Team Claude", "My Claude"]);
       expect(preferenceCalls).toBe(0);
@@ -535,7 +536,7 @@ test("uses the displayed provider's binding and scopes Automatic to it", async (
   const view = await render(client);
   try {
     expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
-      "Model account · Team Claude",
+      "Claude account · Team Claude",
     );
     await view.open();
     const automatic = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(

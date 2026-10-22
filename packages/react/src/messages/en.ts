@@ -1817,7 +1817,7 @@ export const englishMessages = {
   "modelPolicy.billedToTheWorkspaceProvider": "Billed to the workspace provider account",
   "modelPolicy.billedToTheWorkspaceVercel": "Billed to the workspace Vercel account",
   "modelPolicy.blockedByWorkspacePolicy": "Blocked by workspace policy",
-  "modelPolicy.claudeSubscription": "Claude subscription",
+  "modelPolicy.claudeSubscription": "Claude",
   "modelPolicy.claudeSubscriptionExternalBilling": "Claude subscription · external billing",
   "modelPolicy.codex": "Codex",
   "modelPolicy.codexSubscriptionExternalBilling": "Codex subscription · external billing",

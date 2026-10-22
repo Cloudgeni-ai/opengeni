@@ -4036,6 +4036,9 @@ function SessionChatPane(props: {
                       sessionKey={props.session.id}
                       menuSide="top"
                       connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                      claudeSubscriptionAvailable={
+                        context.clientConfig.claudeSubscriptionEnabled === true
+                      }
                       codexOnly={props.session.codexCompactionMode === "remote_v2"}
                       onModelChange={composer.setModel}
                       onEffortChange={composer.setReasoningEffort}

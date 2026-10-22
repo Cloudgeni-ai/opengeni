@@ -51,8 +51,7 @@ import {
   SessionComputeIndicator,
   sessionSupportsFleetSwitching,
 } from "../session/sandbox-switcher";
-import { CodexAccountIndicator } from "../session/codex-account-indicator";
-import { ModelAccountIndicator } from "../session/model-account-indicator";
+import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
 import { Button } from "../../../ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/sheet";
@@ -551,6 +550,8 @@ function SessionRouteHeader({
   const credentialSource = selectedRow?.catalog.credentialSource;
   const subscriptionProvider =
     credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+  // Codex product models are Codex subscriptions even before the catalog lists them.
+  const accountProvider = isCodexProductModel(displayModelId) ? "codex" : subscriptionProvider;
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
@@ -660,24 +661,16 @@ function SessionRouteHeader({
           <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
         ) : null
       }
-      codexSlot={
-        policyReady && isCodexProductModel(displayModelId) ? (
-          <CodexAccountIndicator
-            workspaceId={session.workspaceId}
-            sessionId={session.id}
-            model={displayModelId}
-            modelReady={policyReady}
-            events={events}
-          />
-        ) : policyReady && subscriptionProvider ? (
-          <ModelAccountIndicator
+      accountSlot={
+        policyReady && accountProvider ? (
+          <SubscriptionAccountIndicator
             workspaceId={session.workspaceId}
             sessionId={session.id}
             organizationId={
               context.workspaces.find((candidate) => candidate.id === session.workspaceId)
                 ?.accountId ?? null
             }
-            provider={subscriptionProvider}
+            provider={accountProvider}
             servingTurnId={lastStarted.policy?.turnId}
             events={events}
           />

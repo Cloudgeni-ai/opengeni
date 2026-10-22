@@ -181,7 +181,11 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
             ) : null}
           </>
         ) : props.connectModelsHref || rows.length > 0 ? (
-          <ConnectModelsPanel href={props.connectModelsHref} messages={messages} />
+          <ConnectModelsPanel
+            href={props.connectModelsHref}
+            claude={props.claudeSubscriptionAvailable === true}
+            messages={messages}
+          />
         ) : (
           <p className={MENU_NOTE_CLASS}>{messages.noModels}</p>
         )}
@@ -204,8 +208,14 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
 
 const CONNECT_MODEL_OPTIONS = (
   t: OpenGeniText,
+  claude: boolean,
 ): Array<{
-  billingClass: "codex_subscription" | "supergrok_subscription" | "byok" | "external";
+  billingClass:
+    | "codex_subscription"
+    | "claude_subscription"
+    | "supergrok_subscription"
+    | "byok"
+    | "external";
   title: string;
   detail: string;
 }> => [
@@ -214,6 +224,15 @@ const CONNECT_MODEL_OPTIONS = (
     title: t("modelPolicyPickerMenu.codex"),
     detail: "ChatGPT",
   },
+  ...(claude
+    ? [
+        {
+          billingClass: "claude_subscription" as const,
+          title: t("modelPolicyPicker.claude"),
+          detail: "Anthropic",
+        },
+      ]
+    : []),
   { billingClass: "supergrok_subscription", title: "SuperGrok", detail: "xAI" },
   {
     billingClass: "byok",
@@ -225,6 +244,7 @@ const CONNECT_MODEL_OPTIONS = (
 
 function ConnectModelsPanel(props: {
   href: string | undefined;
+  claude: boolean;
   messages: ReturnType<typeof defaultModelPolicyPickerMessages>;
 }) {
   const t = useOpenGeniText();
@@ -239,7 +259,7 @@ function ConnectModelsPanel(props: {
         </p>
       </div>
       <div className="grid grid-cols-2 gap-1">
-        {CONNECT_MODEL_OPTIONS(t).map((option) => {
+        {CONNECT_MODEL_OPTIONS(t, props.claude).map((option) => {
           const content = (
             <>
               <span className="flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-surface-2 text-og-fg">
