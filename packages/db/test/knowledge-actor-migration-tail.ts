@@ -7,4 +7,5 @@ export const knowledgeActorMigrationTail = [
   "0868_humanless_personal_workspace_learning.sql",
   "0878_keyed_knowledge_visibility.sql",
   "0881_knowledge_scope_expression.sql",
+  "0902_batched_knowledge_visibility.sql",
 ] as const;
