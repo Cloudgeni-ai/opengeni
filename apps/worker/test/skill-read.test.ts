@@ -304,11 +304,17 @@ describe("skill_read gateway definition", () => {
     });
     for (const paths of [[], ["SKILL.md"]]) {
       await expect(read({ listFiles: true, paths })).rejects.toThrow();
+      // The gateway's exact "true" is `true`, so it is still not combinable with paths.
+      await expect(read({ listFiles: "true", paths })).rejects.toThrow();
     }
-    for (const listFiles of ["true", 1, null]) {
+    // Only the exact literals are booleans (tool gateway); any other flag stays invalid.
+    for (const listFiles of ["True", "TRUE", " true", "1", "yes", "", 1, 0, null]) {
       await expect(read({ listFiles })).rejects.toThrow();
     }
     expect(loads).toBe(0);
+    expect((await read({ listFiles: "true" })).structuredContent).toEqual({
+      paths: files.map(({ path }) => path).sort(),
+    });
   });
 
   test("inventory permits 1024 files and rejects overflow, unsafe and duplicate paths", async () => {
