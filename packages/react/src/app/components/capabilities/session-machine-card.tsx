@@ -29,6 +29,7 @@ import { LogoTile } from "../../../ui/logo-tile";
 import { Notice } from "../../../ui/notice";
 import { RowButton } from "../../../ui/page-actions";
 import { useAppContext } from "../../app-context";
+import { useClientConfigFlags } from "../../../hooks/use-client-config-flags";
 import { userErrorText } from "../../../ui/api-error";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { useDesktopThisComputer } from "../desktop/this-computer";
@@ -929,6 +930,12 @@ function ScreenControlStep({
 }
 
 function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName: string }) {
+  const { client } = useAppContext();
+  // The deployment's own extension when it ships one, else Opengeni Browser.
+  const extension = useClientConfigFlags(client).browserExtension ?? {
+    name: "Opengeni Browser",
+    installUrl: OPENGENI_BROWSER_EXTENSION_URL,
+  };
   return (
     <div data-slot="chrome-extension">
       <RowList label="Chrome" flush>
@@ -938,7 +945,7 @@ function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName:
           description={
             chrome.connected
               ? `${chrome.connected.name} on ${machineName}`
-              : `Add Opengeni Browser on ${machineName}`
+              : `Add ${extension.name} on ${machineName}`
           }
           control={
             chrome.connected ? (
@@ -949,7 +956,7 @@ function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName:
             ) : (
               <Button asChild size="sm" variant="outline" className="rounded-[10px]">
                 <a
-                  href={OPENGENI_BROWSER_EXTENSION_URL}
+                  href={extension.installUrl}
                   target="_blank"
                   rel="noreferrer"
                   onClick={chrome.watch}

@@ -5325,6 +5325,11 @@ export type ClientConfig = {
   claudeSubscriptionEnabled?: boolean | undefined;
   /** Whether people can connect their own computers; absent on older servers. */
   connectedMachines?: boolean | undefined;
+  /**
+   * The Chrome extension people add to connect their own Chrome, and its
+   * Chrome Web Store page; absent on older servers (Opengeni Browser).
+   */
+  browserExtension?: { name: string; installUrl: string } | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];

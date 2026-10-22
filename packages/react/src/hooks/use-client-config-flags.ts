@@ -14,6 +14,7 @@ export type ClientConfigFlagsSource = {
     archive?: boolean | undefined;
     voiceInput?: ClientVoiceInputConfig | undefined;
     realtimeVoice?: boolean | undefined;
+    browserExtension?: { name: string; installUrl: string } | undefined;
   }>;
 };
 
@@ -46,6 +47,11 @@ export type ClientConfigFlags = {
    * then or when their `realtimeVoice` prop is `true`.
    */
   realtimeVoiceOffered: boolean;
+  /**
+   * The Chrome extension the deployment offers for people's own Chrome, or
+   * null until the config loads or when the server doesn't say (Opengeni Browser).
+   */
+  browserExtension: { name: string; installUrl: string } | null;
 };
 
 const INITIAL_FLAGS: ClientConfigFlags = {
@@ -60,6 +66,7 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   voiceInput: null,
   realtimeVoice: false,
   realtimeVoiceOffered: false,
+  browserExtension: null,
 };
 
 /** Deployment and session-proxy capabilities from the client config. */
@@ -89,6 +96,7 @@ export function useClientConfigFlags(
             voiceInput: config.voiceInput?.available === true ? config.voiceInput : null,
             realtimeVoice: config.realtimeVoice !== false,
             realtimeVoiceOffered: config.realtimeVoice === true,
+            browserExtension: config.browserExtension ?? null,
           });
         }
       },

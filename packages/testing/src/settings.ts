@@ -11,6 +11,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackAccessMode: "limited",
     serviceName: "opengeni",
     officeAddinName: "Opengeni",
+    browserExtensionName: "Opengeni Browser",
     environment: "test",
     deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
