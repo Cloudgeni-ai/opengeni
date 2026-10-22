@@ -5913,6 +5913,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       await delay(50);
     }
+    // Some live pages never go quiet: a long poll or a request the page keeps
+    // open is indistinguishable from a slow fetch until it ends. Network idle
+    // waits for the page to settle, so a document that finished loading has
+    // settled as far as anything will within the wait; failing here would
+    // make a completed navigation look uncertain.
+    if (action.condition === "network_idle" && (await this.documentReady(state))) return;
     throw new InteractionDefiniteDriverError("timeout", "browser wait condition timed out", true);
   }
 
