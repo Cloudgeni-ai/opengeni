@@ -28,7 +28,7 @@ import type {
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
-import type { UpdateBlocker } from "./update-admission";
+import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserDownloadExportRequest,
@@ -1236,6 +1236,21 @@ export class BrowserSupervisor {
     if (this.stateTransferTails.size)
       blockers.push({ kind: "browser_state_transfer", count: this.stateTransferTails.size });
     for (const runtime of this.sessions.values()) {
+      // A restart in the middle of a task fails the agent's next calls while
+      // it lasts, even for a session that survives it. A session used within
+      // the hold is mid-task, so the update waits for a pause.
+      if (
+        runtime.lifecycle === "active" &&
+        runtime.controller.isIdle() &&
+        this.now() - runtime.lastUsedAt < RECENT_USE_UPDATE_HOLD_MS
+      ) {
+        blockers.push({
+          kind: "browser_recent_use",
+          resourceId: runtime.options.browserSessionId,
+          count: 1,
+        });
+        continue;
+      }
       if (restartPreservesRuntime(runtime)) continue;
       const kind =
         runtime.recovery !== null
