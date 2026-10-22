@@ -910,8 +910,8 @@ export function OrganizationModelsList({
         <Section title="Codex">
           <SettingRowGroup>
             <SettingRow
-              label="Sharing work between accounts"
-              description={`Spread work shares new chats evenly across accounts that can serve them, in every workspace that uses ${possessive(organizationName)} Codex accounts. Primary first starts new chats on the primary account and uses another account when it can't serve them.`}
+              label="Spreading work across accounts"
+              description={`Spread work starts new chats evenly across accounts that can serve them, in every workspace that uses ${possessive(organizationName)} Codex accounts. Primary first starts new chats on the primary account and uses another account when it can't serve them.`}
               controlWidth="auto"
               control={
                 <SegmentedControl<"spread" | "primary">
@@ -937,7 +937,7 @@ export function OrganizationModelsList({
       ) : null}
       {!accountRules && administrator && superGrokSectionVisible(orgGrok) ? (
         <Section title="SuperGrok">
-          <SuperGrokSettingRows grok={orgGrok} label="Sharing work between accounts" />
+          <SuperGrokSettingRows grok={orgGrok} label="Spreading work across accounts" />
         </Section>
       ) : null}
     </SectionStack>
@@ -1255,7 +1255,7 @@ function WorkspaceRow({
 
 /**
  * "Default: GPT-6 Astra · Codex", "3 models allowed", what it changed in its
- * sharing rules ("Claude sharing: Off"), or "Uses the defaults".
+ * subscription rules ("Spread Claude work: Off"), or "Uses the defaults".
  */
 function workspaceDifferences(snapshot: WorkspaceModelsSnapshot) {
   const facts = [
@@ -1265,6 +1265,6 @@ function workspaceDifferences(snapshot: WorkspaceModelsSnapshot) {
   ].filter((fact): fact is string => fact !== null);
   const rules = snapshot.own.accountRules;
   // Two changes read at a glance; more would crowd the row, so they're counted.
-  facts.push(...(rules.length > 2 ? [`${rules.length} sharing rules changed`] : rules));
+  facts.push(...(rules.length > 2 ? [`${rules.length} rules changed`] : rules));
   return facts.length > 0 ? facts : ["Uses the defaults"];
 }

@@ -1588,7 +1588,7 @@ function ModelsList({
   workspaceId: string;
   /** "Design", or "your Personal workspace". */
   workspaceName: string;
-  /** The default sharing rules, when this person can read them. */
+  /** The default subscription rules, when this person can read them. */
   defaultRules?: ModelAccountSettingValues | undefined;
   accountRules: WorkspaceModelAccountSettingsState;
   organizationId: string | undefined;

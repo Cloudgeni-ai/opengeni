@@ -1171,13 +1171,13 @@ describe("Codex pool controls", () => {
     });
     const view = await render();
     try {
-      // One Codex sharing switch in Sharing subscriptions, and no legacy pool control.
+      // One Codex sharing switch in Using subscriptions, and no legacy pool control.
       const switches = [...view.container.querySelectorAll("[role='switch']")].filter((control) =>
         (control.getAttribute("aria-labelledby") ?? "")
           .split(" ")
           .some(
             (id) =>
-              document.getElementById(id)?.textContent === "Share work between Codex subscriptions",
+              document.getElementById(id)?.textContent === "Spread work across Codex accounts",
           ),
       );
       expect(switches).toHaveLength(1);

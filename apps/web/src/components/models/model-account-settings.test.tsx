@@ -10,7 +10,7 @@ import {
 } from "@opengeni/react/app/lib/shared-query";
 
 /* ----------------------------------------------------------------------------
-   Sharing subscriptions, against a mocked client: the organization's rules,
+   Using subscriptions, against a mocked client: the organization's rules,
    which of them workspaces can change, and a workspace's one-step return to
    the organization.
    -------------------------------------------------------------------------- */
@@ -439,7 +439,7 @@ test("a late personal preference save cannot overwrite the newly selected organi
 test("rotation saves the selected provider without guessing another provider's policy", async () => {
   const view = await render(<Organization />);
   try {
-    const sharing = rowSwitch(view.container, "Share work between Claude subscriptions");
+    const sharing = rowSwitch(view.container, "Spread work across Claude accounts");
     expect(sharing?.getAttribute("aria-checked")).toBe("true");
     await act(async () => sharing!.click());
     expect(client.updateOrganizationModelAccountSettings).toHaveBeenCalledWith("acme", {
@@ -517,7 +517,7 @@ test("a workspace's changes read as words, and locked rules are never its change
       },
     }),
   ).toEqual([
-    "Claude sharing: Off",
+    "Spread Claude work: Off",
     "Personal subscriptions: On",
     "Switch models: Off",
     "Own fallback order",
@@ -611,7 +611,7 @@ test("the organization keeps a rule the same everywhere with the version it read
     await act(async () => checkbox(view.container, "Personal subscriptions").click());
     expect(view.container.textContent).toContain("Design will go back to the default.");
     await act(async () => checkbox(view.container, "Personal subscriptions").click());
-    await act(async () => checkbox(view.container, "Share work between subscriptions").click());
+    await act(async () => checkbox(view.container, "Spread work across accounts").click());
     const form = view.container.querySelector("form")!;
     await act(async () =>
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
