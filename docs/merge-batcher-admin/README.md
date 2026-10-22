@@ -21,10 +21,12 @@ controller activation are part of this change.
 | --- | --- | --- | --- |
 | Existing `Protection`, updated in place | Existing default-branch condition (`main` required) | Dedicated App, `Integration`, `always` | Existing PR admission parameters, including squash-only manual merges, unchanged |
 | `Opengeni batcher immutable refs` | `main`, `queue/live/**`, `batcher-state` | **None**, including administrators and the App | Non-fast-forward and deletion prohibited |
-| `Opengeni batcher dedicated writer` | `queue/live/**`, `batcher-state` only | Dedicated App, `Integration`, `always` | Creation/update restricted to the App |
+| `Opengeni batcher dedicated writer` | `main`, `queue/live/**`, `batcher-state` | Dedicated App, `Integration`, `always` | Creation/update restricted to the App, including normal PR merges to main |
 
-On **main**, the App bypasses PR admission only. Namespace creation/update bypass
-authorizes its candidate/state writes; it does not bypass the separate immutable
+On **main**, the App bypasses PR admission and the dedicated-writer restriction,
+never the separate immutable guard. The writer restriction is the exclusive
+normal-path gate; PR admission alone would still permit manual merges. Namespace
+creation/update bypass authorizes candidate/state writes; it does not bypass the separate immutable
 guard. Lease commits descend from the previous state commit, so their CAS pushes
 remain fast-forward despite the state-specific `--force-with-lease` wire option.
 Main receives no force authorization. Candidate refs remain create-only in the
@@ -32,10 +34,14 @@ controller; the ruleset itself permits App FF updates and is not a substitute
 for that implementation invariant.
 
 The previous combined ruleset's broad administrator bypass is removed from main
-admission, not copied into the guard. Ordinary collaborators retain the existing
-normal squash PR merge path; this bundle does not require `Batch ready` on that
-manual path or add linear-history enforcement (candidate commits have two
-parents). It does not enable auto-merge. Production/tag rules, full-main CI and
+admission, not copied into either guard or writer restriction. While applied,
+ordinary collaborators **and administrators** cannot normally merge directly to
+main. No standing admin writer bypass is installed. An authorized organization/
+repository administrator can run the emergency OFF policy restoration; policy
+administration cannot itself be prevented by a repository ruleset and is not
+permission for routine bypass. The original normal squash path returns only after
+OFF restores it. No linear-history enforcement is added (candidate commits have two
+parents). This does not enable auto-merge. Production/tag rules, full-main CI and
 release proof are unchanged. Diagnostic `queue/shadow-traffic/**` and shadow state
 refs are deliberately outside these live namespaces. A credential with repository
 contents write is not intrinsically branch-scoped: unchanged production/tag
@@ -160,6 +166,13 @@ identity is accepted by GitHub. Future policy drift needs a new reviewed plan,
 not a relaxed assertion. No production/tag change is proposed.
 
 `plan.json` retains the complete before snapshot, App/installation IDs and payloads.
+This exclusive-main revision uses **schemaVersion 2**. Version 1 intentionally
+allowed manual merges and is not silently upgraded or accepted for activation.
+Generate a fresh, independently reviewed version 2 plan from untouched live
+originals. Retain older evidence rather than overwriting it. Every verification
+reconstructs the proposed payloads from the original snapshot and assigned IDs;
+edited parallel files or edited plan payloads cannot remove exclusivity or add
+an admin bypass.
 `restore.json` retains the original writable fields, including original bypass
 actors and every PR parameter. API-generated timestamps/links are retained in
 the raw snapshot but are not valid PUT fields. `guard.json`, `namespace.json`,
@@ -171,7 +184,8 @@ preserved in admission and restore payloads, not dropped to satisfy a narrower
 OpenAPI schema. No no-op PUT is executed by this task. If forward or restore PUT
 returns **422**, leave all writers stopped, retain the exact payload/response and
 read back the current stage. In particular, a rejected restore may leave
-`applied` in place: its no-bypass guard and ordinary manual squash path remain.
+`applied` in place: its no-bypass guard and exclusive writer restriction remain;
+manual merges stay **held**, not falsely advertised as available.
 Do not remove protective rules, omit the field or weaken policy to make recovery
 pass. Provider/admin resolution and a newly reviewed round-trip plan are required;
 exact-prior restoration is prepared but not proven accepted by GitHub. If a
@@ -181,7 +195,12 @@ the undocumented field; changing policy still requires separate review.
 
 ## Prepared API changes — administrator runs only after explicit go
 
-Coordinate an exclusive admin change window and stop all live controllers first.
+Coordinate an exclusive admin change window, obtain the current Version-window
+clearance, and stop all live controllers first. Before activating a writer, perform
+the authorized **live apply → OFF → exact restoration drill** using the real App
+and this exact plan. Static tests do not establish provider round-trip acceptance.
+The rollout owner must retain both drill receipts and reauthorize a fresh reviewed
+apply plan; never erase old write intents to reuse it.
 No transaction spans these REST calls; full inventory assertions detect drift but
 cannot eliminate a last-moment concurrent administrator edit. Abort/reconcile if
 that happens. Reconfirm identity/install permission receipts and the original
@@ -214,6 +233,13 @@ merge settings and classic protections. Read the effective rules with
 `queue%2Flive%2F<existing-candidate-id>` / `batcher-state` branch endpoints when
 those refs exist. Absence of refs is not proof the patterns fail or succeed.
 
+Land the conditional AGENTS instructions before this transition. Full-inventory
+checks print `manual` for original/restored, `hold` for partial guard/namespace
+stages, and `queue-only` for applied. The rollout owner publishes that current
+receipt to agents as part of the same activation/OFF action. Instructions become
+queue-only when applied, and do not revert merely because the runtime stops.
+Until a fresh exact receipt is available, agents hold rather than guess a mode.
+
 For a timeout or failed post-write readback, use these **read-only remote** stages:
 
 ```sh
@@ -244,7 +270,7 @@ forward intent remains unresolved. Resolve its provider outcome with the admin/
 rollout owner; do not erase the intent or mark it verified manually. This is an
 explicit safe hold, not a claim that REST readbacks provide a transaction fence.
 
-## Controller enable and one-step stop
+## Controller enable and one-command OFF
 
 Only after ruleset readbacks, App permissions, the qualified continuous runtime,
 capacity observation and the separate release/activation go are satisfied, the
@@ -270,17 +296,64 @@ Do not copy the shell example into the old guarded read-only image. The chosen
 service manager must have a tested stop operation and must not restart an active
 process after rollback.
 
-**One-step operational rollback: stop/disable the active controller service** using
-the deployment owner's tested service-manager stop command. This bundle cannot
-name that cloud/service resource in advance. A portable foreground process can be
-stopped with `kill -TERM "$BATCHER_PID"` only when that is its recorded owned PID
-and no supervisor restarts it. SIGTERM stops new polls; an already executing
-transaction can finish. Wait for every writer to exit and reconcile the state/main
-tips before claiming rollback complete. Restart only with `BATCHER_MODE=shadow`
-and the shadow-only entrypoint/configuration. Do not cancel running CI, delete
-candidate/state refs, reset main, rotate credentials or close PRs. Normal manual
-squash merges remain available under normal tests/review while the batcher is
-stopped. Stopping the controller is distinct from restoring rulesets.
+**STOP alone is not OFF:** exclusive main remains unavailable to normal manual
+merges until exact policy restoration succeeds. The checked-in [off.ts](off.ts)
+combines the deployment owner's reviewed STOP with the reverse ruleset stages.
+First bind the exact reviewed control directory and its real deployed receipt,
+offline, with no cloud writes:
+
+```sh
+bun docs/merge-batcher-admin/off.ts bind-stop "$ADMIN_DIR" "$REVIEWED_CONTROL_DIRECTORY"
+```
+
+That directory must contain the deployment owner's reviewed `control.ts`,
+`cloud-auth.ts`, `service-config.ts`, `service-limits.ts` and
+`deployment-receipt.json`. The binding records all four source hashes and the exact
+service UID/image/URI in `stop-contract.json`. It never guesses a service identity.
+Review the source/dependency closure and binding together; if the runtime owner
+adds imports or changes the STOP interface, qualify a new adapter rather than
+assuming this contract remains valid. Binding is not review or deployment proof.
+
+After the separate emergency/turn-off authorization, the **single OFF command** is:
+
+```sh
+bun docs/merge-batcher-admin/off.ts run "$ADMIN_DIR" --apply-after-go
+```
+
+It executes only the pinned `control.ts stop`, which persists STOP, drains/disables
+the writer and emits a JSON receipt. GitHub reads happen **after STOP** so a GitHub
+outage cannot prevent stopping the already-bound runtime. Restoration requires a
+confirmed drained or previously proven disabled outcome, persistent STOP,
+manual-zero, no tagged revision uncertainty, no forced outcome, stable state SHA
+and a matching deployment stop proof. Unknown/forced/reconciliation-required
+results retain STOP and protections; they do not claim the manual path works.
+The real active STOP contract, including uninitialized state behavior, must be
+qualified by the runtime owner before the live drill. If local source/identity
+binding drift prevents the wrapper from starting, use that owner's emergency STOP
+directly and reconcile; do not edit hashes to bypass review.
+
+Then OFF detects the exact live stage, reconciles an observed-but-unrecorded
+admission success, restores original admission, removes only the two exact
+receipt-owned added rulesets, and verifies the complete restored inventory twice.
+Only then it emits `off-verified.json` with `mergeMode: manual`. Publish that
+receipt so the conditional AGENTS instructions immediately resume the normal
+reviewed squash path. It never edits AGENTS via an emergency main push.
+
+Every invocation retains separate STOP/stage output. Re-entry uses the **same
+command and ADMIN_DIR**: already-completed stages are skipped; a failed reverse
+PUT/DELETE uses the existing explicit reverse-only reissue with two delayed
+pre-state readbacks and archived identical requests. No forward POST/admit is
+replayed. An unresolved forward request or provider 422 can still block recovery;
+the one-command interface cannot make REST atomic or hide that failure. Keep the
+writer stopped and resolve it with the administrator before allowing manual
+merges. An exclusive admin window remains required throughout. A crash-held
+`plan/off-lock` needs owner inspection before removal, not a concurrent writer.
+
+OFF does not cancel running CI, delete candidate/state refs, reset main, rotate
+credentials, close PRs or restart shadow. Existing CI continues. Runtime image/
+credential rollback and an optional shadow restart remain separately owned by the
+deployment operator, after the old active writer is proven stopped. Production/
+tags and full-main/release proof remain unchanged.
 
 The accepted landing contract remains an exact **tested snapshot**, not an atomic
 lock on PR metadata. A later head can race the final reread. Exact landed SHA
@@ -292,7 +365,7 @@ head/follow-up needs fresh full VM tests, independent review and readiness. Vers
 intake is a singleton with the same evidence, never an automated exemption. Full
 main CI and Version/image provenance still gate production release.
 
-## Exact-prior ruleset restoration (separate admin action)
+## Exact-prior ruleset restoration (OFF's underlying reverse stages)
 
 Stop writers first. Verify `applied` against a **fresh** snapshot. Restore original
 admission before removing either protective ruleset; verify after every call:

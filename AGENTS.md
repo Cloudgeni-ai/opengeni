@@ -811,11 +811,24 @@ Candidate-only CI shadow permission is not permission to control main or change
 rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
 does not activate anything; keep main control inactive until the release hold is
 cleared and the rollout owner gives a separate explicit go.
-Before activation, use the repository's normal squash merge after the same
-local-test and independent-review evidence. Once active, submit the documented
-ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and observe the **Batch ready**
-result and exact landed SHA. Never use `--admin`, a direct merge API or a direct
-main push. Do not rebase merely because main advanced: the batcher tests the
+Merge mode follows the rollout owner's **current verified ruleset receipt**, not
+whether a controller happens to be running. Before activation or after a complete
+verified OFF restoration, use the repository's normal squash merge after the same
+local-test and independent-review evidence. A partial transition or unknown mode
+is **hold**: do not merge. Once the exclusive-main rules are applied, the batcher
+is the **only normal path to main**; this queue-only instruction takes effect with
+that activation without waiting for another source edit. Submit the documented
+ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and
+observe the **Batch ready** result and exact landed SHA. Do not directly squash or
+merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
+create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
+Stopping the controller alone does **not** restore the manual merge path. The
+authorized operator's one-command OFF must prove writer stop and restore the exact
+prior rules, then publish its verified manual-mode receipt. This section switches
+back to the normal reviewed squash path only on that receipt. Organization-admin
+policy changes are emergency/turn-off operations, never routine queue bypass;
+there is no standing admin writer bypass on active main. Do not rebase merely
+because main advanced: the batcher tests the
 combined tree. Any head change invalidates earlier evidence and requires a new
 candidate. Version PRs always occupy their own batch.
 

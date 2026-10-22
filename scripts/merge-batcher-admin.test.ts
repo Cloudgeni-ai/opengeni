@@ -8,6 +8,8 @@ import {
   prepare,
   verify,
   writable,
+  validatePlan,
+  mergeMode,
   type Plan,
   type RuleSet,
   type Snapshot,
@@ -131,16 +133,56 @@ describe("offline batcher administration contract", () => {
       },
     });
   });
-  test("namespace creation/update is dedicated; no production/tag/shadow overlap", () => {
+  test("main and live namespace creation/update are App-only; no production/tag/shadow overlap", () => {
     const plan = prepare(fixture(), 501, 999);
     expect(plan.namespace.conditions).toEqual({
-      ref_name: { include: ["refs/heads/queue/live/**", "refs/heads/batcher-state"], exclude: [] },
+      ref_name: {
+        include: ["refs/heads/main", "refs/heads/queue/live/**", "refs/heads/batcher-state"],
+        exclude: [],
+      },
     });
     expect(plan.namespace.rules).toEqual([
       { type: "creation" },
       { type: "update", parameters: { update_allows_fetch_and_merge: false } },
     ]);
     expect(plan.namespace.bypass_actors).toEqual(plan.admission.bypass_actors);
+  });
+
+  test("old/manual-path or tampered plans are never silently activated", () => {
+    const plan = prepare(fixture(), 501, 999);
+    expect(plan.schemaVersion).toBe(2);
+    expect(() => validatePlan({ ...plan, schemaVersion: 1 } as unknown as Plan)).toThrow(
+      "version 2",
+    );
+    const weakened = structuredClone(plan);
+    weakened.namespace.conditions = {
+      ref_name: { include: ["refs/heads/queue/live/**", "refs/heads/batcher-state"], exclude: [] },
+    };
+    expect(() => validatePlan(weakened)).toThrow("drift");
+    const adminBypass = structuredClone(plan);
+    (adminBypass.namespace.bypass_actors as unknown[]).push({
+      actor_type: "RepositoryRole",
+      actor_id: 5,
+      bypass_mode: "always",
+    });
+    expect(() => validatePlan(adminBypass)).toThrow("drift");
+  });
+
+  test("agent merge mode follows whole verified policy, not merely controller STOP", () => {
+    expect(mergeMode("original")).toBe("manual");
+    expect(mergeMode("guard")).toBe("hold");
+    expect(mergeMode("namespace")).toBe("hold");
+    expect(mergeMode("applied")).toBe("queue-only");
+    expect(mergeMode("restored")).toBe("manual");
+  });
+
+  test("agent instructions pair queue-only activation with verified OFF manual restoration", async () => {
+    const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
+    expect(agents).toContain("only normal path to main");
+    expect(agents).toContain("manually rerun/cancel Batch CI");
+    expect(agents).toContain("create/update/delete queue or batcher-state refs");
+    expect(agents).toContain("Stopping the controller alone does **not** restore");
+    expect(agents).toContain("complete\nverified OFF restoration");
   });
   test("restore preserves exact original writable fields, not API metadata", () => {
     const before = fixture();
