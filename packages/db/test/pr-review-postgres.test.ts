@@ -199,6 +199,9 @@ describe("PR Review persistence", () => {
         ...bindingInput(createProductModelId, "301"),
         beforeCreateCommit: customModelGuard(createProductModelId),
       });
+      // The guarded create rejects as soon as this barrier commits, which can be
+      // before `begin` returns here. Handle it now; the rejection is asserted below.
+      void createPromise.catch(() => undefined);
       await waitForBlockedBackend(backend.pid, "PR Review binding custom-model create");
       await barrier`
         update workspace_gateway_custom_models
@@ -248,6 +251,7 @@ describe("PR Review persistence", () => {
           if (context.nextModel) await customModelGuard(context.nextModel)(tx);
         },
       });
+      void updatePromise.catch(() => undefined);
       await waitForBlockedBackend(backend.pid, "PR Review binding custom-model update");
       await barrier`
         update workspace_gateway_custom_models
