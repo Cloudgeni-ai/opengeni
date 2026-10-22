@@ -2,7 +2,16 @@
 // app flow, then runs the app's own server locally with that person's token
 // and shows it in a window. The token is kept with Electron safeStorage (the
 // macOS keychain) and handed to the server on stdin only.
-const { app, BrowserWindow, Menu, dialog, net, safeStorage, shell } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  dialog,
+  nativeTheme,
+  net,
+  safeStorage,
+  shell,
+} = require("electron");
 const { spawn } = require("node:child_process");
 const { createHash, randomBytes } = require("node:crypto");
 const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
@@ -55,8 +64,8 @@ function tokenPathFor(url) {
   return join(userData, "tokens", `${new URL(url).host}.bin`);
 }
 
-function readToken() {
-  const tokenPath = tokenPathFor(serverUrl);
+function readToken(url) {
+  const tokenPath = tokenPathFor(url);
   if (!existsSync(tokenPath) || !safeStorage.isEncryptionAvailable()) return null;
   try {
     return safeStorage.decryptString(readFileSync(tokenPath));
@@ -65,14 +74,14 @@ function readToken() {
   }
 }
 
-function writeToken(token) {
-  const tokenPath = tokenPathFor(serverUrl);
+function writeToken(url, token) {
+  const tokenPath = tokenPathFor(url);
   mkdirSync(dirname(tokenPath), { recursive: true });
   writeFileSync(tokenPath, safeStorage.encryptString(token), { mode: 0o600 });
 }
 
-async function api(path, init = {}, token) {
-  const response = await net.fetch(`${serverUrl}${path}`, {
+async function api(base, path, init = {}, token) {
+  return net.fetch(`${base}${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
@@ -80,16 +89,14 @@ async function api(path, init = {}, token) {
       ...init.headers,
     },
   });
-  return response;
 }
 
-async function tokenStillValid(token) {
+async function tokenStillValid(base, token) {
   try {
-    const response = await api("/v1/access/me", {}, token);
-    if (response.status === 401 || response.status === 403) return false;
-    return true; // offline or a server error: keep the token and let the app report it
+    const response = await api(base, "/v1/access/me", {}, token);
+    return response.status !== 401 && response.status !== 403;
   } catch {
-    return true;
+    return true; // offline or a server error: keep the token and let the app report it
   }
 }
 
@@ -98,11 +105,10 @@ function base64Url(bytes) {
 }
 
 // The callback arrives through macOS as an opengeni:// link.
-let pendingCallback = null;
 app.on("open-url", (event, url) => {
   if (!url.startsWith("opengeni:")) return;
   event.preventDefault();
-  pendingCallback?.(url);
+  void finishSignIn(url);
 });
 
 // Opengeni.app usually owns opengeni://, so take it only while a sign-in is
@@ -123,17 +129,101 @@ function releaseCallbackScheme() {
 
 function note(line) {
   try {
+    mkdirSync(userData, { recursive: true });
     writeFileSync(join(userData, "app.log"), `${new Date().toISOString()} ${line}\n`, {
       flag: "a",
     });
   } catch {}
 }
 
-function signIn() {
+// The sign-in window: pick a server, continue in the browser, wait for the callback.
+let welcome = null;
+let pending = null;
+
+function render(state) {
+  if (!welcome) return;
+  welcome.state = { ...welcome.state, ...state };
+  if (welcome.loaded)
+    void welcome.window.webContents.executeJavaScript(`render(${JSON.stringify(welcome.state)})`);
+}
+
+function showWelcome({ canGoBack = false, error = null } = {}) {
+  if (welcome) {
+    render({ view: "start", server: serverUrl ?? SERVERS[0].url, canGoBack, error });
+    welcome.window.show();
+    return;
+  }
+  const dark = nativeTheme.shouldUseDarkColors;
+  const window = new BrowserWindow({
+    width: 440,
+    height: 500,
+    resizable: false,
+    fullscreenable: false,
+    show: false,
+    title: "Sign in",
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 14, y: 14 },
+    backgroundColor: dark ? "#121113" : "#fbfaf8",
+    webPreferences: { contextIsolation: true, sandbox: true },
+  });
+  welcome = {
+    window,
+    loaded: false,
+    closing: false,
+    state: { view: "start", server: serverUrl ?? SERVERS[0].url, canGoBack, error },
+  };
+  const current = welcome;
+  window.once("ready-to-show", () => window.show());
+  window.webContents.on("did-finish-load", () => {
+    current.loaded = true;
+    render({});
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event, target) => {
+    event.preventDefault();
+    const match = /^https:\/\/simple\.invalid\/([a-z]+)\?u=(.*)$/u.exec(target);
+    if (match) void onWelcomeAction(match[1], decodeURIComponent(match[2]));
+  });
+  window.on("closed", () => {
+    if (welcome === current) welcome = null;
+    if (current.closing) return;
+    cancelSignIn();
+    if (!mainWindow) app.quit();
+  });
+  void window.loadFile(join(__dirname, "welcome.html"));
+}
+
+function closeWelcome() {
+  if (!welcome) return;
+  welcome.closing = true;
+  welcome.window.destroy();
+  welcome = null;
+}
+
+async function onWelcomeAction(action, value) {
+  if (action === "back") return closeWelcome();
+  if (action === "restart") {
+    cancelSignIn();
+    return render({ view: "start", error: null });
+  }
+  if (action === "again") {
+    if (pending) void shell.openExternal(pending.url);
+    return;
+  }
+  if (action !== "continue") return;
+  const url = normalizeServerUrl(value);
+  if (!url) return render({ error: "Enter an https address, like staging.app.opengeni.ai." });
+  const token = readToken(url);
+  if (token && (await tokenStillValid(url, token))) return openWorkspace(url, token);
+  await beginSignIn(url);
+}
+
+async function beginSignIn(base) {
+  cancelSignIn();
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash("sha256").update(verifier).digest());
   const state = base64Url(randomBytes(16));
-  const url = new URL("/native-sign-in", serverUrl);
+  const url = new URL("/native-sign-in", base);
   url.searchParams.set("redirect_uri", REDIRECT_URI);
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("state", state);
@@ -142,126 +232,53 @@ function signIn() {
     "device_name",
     `Opengeni Simple on ${hostname().replace(/\.local$/u, "")}`.slice(0, 80),
   );
-
-  return new Promise((resolve, reject) => {
-    const window = new BrowserWindow({
-      width: 380,
-      height: 200,
-      resizable: false,
-      title: "Opengeni Simple",
-      webPreferences: { contextIsolation: true, sandbox: true },
-    });
-    let settled = false;
-    const done = () => {
-      settled = true;
-      pendingCallback = null;
-      releaseCallbackScheme();
-      if (!window.isDestroyed()) window.destroy();
-    };
-    pendingCallback = async (raw) => {
-      if (settled) return;
-      done();
-      app.focus({ steal: true });
-      try {
-        const callback = new URL(raw);
-        if (callback.searchParams.get("state") !== state)
-          throw new Error("That sign-in didn't match this request.");
-        const error = callback.searchParams.get("error");
-        if (error)
-          throw new Error(
-            error === "access_denied" ? "Sign-in was cancelled." : `Sign-in failed (${error}).`,
-          );
-        const response = await api("/v1/native-app/token", {
-          method: "POST",
-          body: JSON.stringify({
-            code: callback.searchParams.get("code"),
-            codeVerifier: verifier,
-            redirectUri: REDIRECT_URI,
-          }),
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok || !body.accessToken)
-          throw new Error(`Sign-in failed (${body.error || response.status}).`);
-        resolve(body.accessToken);
-      } catch (error) {
-        reject(error);
-      }
-    };
-    window.webContents.on("will-navigate", (event, target) => {
-      event.preventDefault();
-      if (target.startsWith("https://simple.invalid/retry"))
-        void shell.openExternal(url.toString());
-    });
-    window.on("closed", () => {
-      if (settled) return;
-      done();
-      reject(new Error("Sign-in was cancelled."));
-    });
-    void window.loadURL(waitingPage());
-    void claimCallbackScheme().then(() => shell.openExternal(url.toString()));
-  });
+  pending = { base, verifier, state, url: url.toString() };
+  render({ view: "waiting", server: base, error: null });
+  await claimCallbackScheme();
+  if (pending?.state === state) void shell.openExternal(pending.url);
 }
 
-function page(title, body) {
-  return `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><meta charset="utf-8"><title>${title}</title>
-<style>body{font:14px -apple-system,system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-content:center;text-align:center;gap:12px;padding:0 24px;background:#fff;color:#242424}
-@media(prefers-color-scheme:dark){body{background:#202020;color:#eee}input{color:#eee}}
-button,input{font:inherit;padding:7px 14px;border-radius:8px;border:1px solid #c4c4c4;background:transparent;color:inherit}
-button.primary{background:#242424;color:#fff;border-color:#242424}@media(prefers-color-scheme:dark){button.primary{background:#eee;color:#242424}}
-.row{display:flex;gap:8px;justify-content:center}input{width:260px}.muted{color:#7a7a7a;font-size:12px}</style>${body}`)}`;
+function cancelSignIn() {
+  if (!pending) return;
+  pending = null;
+  releaseCallbackScheme();
 }
 
-function waitingPage() {
-  return page(
-    "Sign in",
-    `<b>Finish signing in in your browser</b><span class="muted">${new URL(serverUrl).host}</span><div class="row"><button onclick="location.href='https://simple.invalid/retry'">Open again</button><button onclick="window.close()">Cancel</button></div>`,
-  );
-}
-
-function serverPage(current) {
-  const presets = SERVERS.map(
-    ({ label, url }) =>
-      `<button class="${url === current ? "primary" : ""}" onclick="location.href='https://simple.invalid/server?u='+encodeURIComponent('${url}')">${label}</button>`,
-  ).join("");
-  return page(
-    "Choose a server",
-    `<b>Which Opengeni do you want to use?</b><div class="row">${presets}</div>
-<form class="row" onsubmit="event.preventDefault();location.href='https://simple.invalid/server?u='+encodeURIComponent(this.u.value)"><input name="u" placeholder="Or another address" value="${current && !SERVERS.some((entry) => entry.url === current) ? current : ""}"><button>Use</button></form>
-<span class="muted">You can change this later from the app menu.</span>`,
-  );
-}
-
-/** Asks which server to use; resolves with its origin, or null when the window is closed. */
-function chooseServer(current) {
-  return new Promise((resolve) => {
-    const window = new BrowserWindow({
-      width: 460,
-      height: 260,
-      resizable: false,
-      title: "Opengeni Simple",
-      webPreferences: { contextIsolation: true, sandbox: true },
+async function finishSignIn(raw) {
+  const request = pending;
+  if (!request) return;
+  cancelSignIn();
+  app.focus({ steal: true });
+  welcome?.window.show();
+  try {
+    const callback = new URL(raw);
+    if (callback.searchParams.get("state") !== request.state)
+      throw new Error("That sign-in didn't match this request. Try again.");
+    const error = callback.searchParams.get("error");
+    if (error)
+      throw new Error(
+        error === "access_denied" ? "Sign-in was cancelled." : `Sign-in failed (${error}).`,
+      );
+    const response = await api(request.base, "/v1/native-app/token", {
+      method: "POST",
+      body: JSON.stringify({
+        code: callback.searchParams.get("code"),
+        codeVerifier: request.verifier,
+        redirectUri: REDIRECT_URI,
+      }),
     });
-    let settled = false;
-    window.webContents.on("will-navigate", (event, target) => {
-      event.preventDefault();
-      const match = /^https:\/\/simple\.invalid\/server\?u=(.*)$/u.exec(target);
-      const url = match ? normalizeServerUrl(decodeURIComponent(match[1])) : null;
-      if (!url) {
-        void dialog.showMessageBox(window, {
-          type: "warning",
-          message: "Enter an https address, like staging.app.opengeni.ai.",
-        });
-        return;
-      }
-      settled = true;
-      window.destroy();
-      resolve(url);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.accessToken)
+      throw new Error(`Sign-in failed (${body.error || response.status}).`);
+    writeToken(request.base, body.accessToken);
+    await openWorkspace(request.base, body.accessToken);
+  } catch (error) {
+    render({
+      view: "start",
+      server: request.base,
+      error: error instanceof Error ? error.message : String(error),
     });
-    window.on("closed", () => {
-      if (!settled) resolve(null);
-    });
-    void window.loadURL(serverPage(current));
-  });
+  }
 }
 
 function freePort() {
@@ -363,71 +380,52 @@ function showApp(origin) {
   mainWindow.show();
 }
 
+/** Signed in: run the local server against this Opengeni and show the app. */
+async function openWorkspace(url, token) {
+  render({ view: "starting", server: url, error: null });
+  serverUrl = url;
+  saveServerUrl(url);
+  buildMenu();
+  stopServer();
+  mainWindow?.destroy();
+  mainWindow = null;
+  showApp(await startServer(token));
+  closeWelcome();
+}
+
 async function launch() {
-  serverUrl ??= normalizeServerUrl(
+  serverUrl = normalizeServerUrl(
     process.env.OPENGENI_SIMPLE_SERVER_URL || readConfig().serverUrl || "",
   );
-  if (!serverUrl) {
-    serverUrl = await chooseServer(SERVERS[0].url);
-    if (!serverUrl) return app.quit();
-    saveServerUrl(serverUrl);
-  }
   buildMenu();
-  let token = readToken();
-  if (token && !(await tokenStillValid(token))) token = null;
-  while (!token) {
-    try {
-      token = await signIn();
-      writeToken(token);
-    } catch (error) {
-      const { response } = await dialog.showMessageBox({
-        type: "warning",
-        message: `Not signed in to ${new URL(serverUrl).host}`,
-        detail: error instanceof Error ? error.message : String(error),
-        buttons: ["Try again", "Choose another server", "Quit"],
-        defaultId: 0,
-        cancelId: 2,
-      });
-      if (response === 2) {
-        app.quit();
-        return;
-      }
-      if (response === 1) {
-        const next = await chooseServer(serverUrl);
-        if (next) {
-          serverUrl = next;
-          saveServerUrl(next);
-          buildMenu();
-          token = readToken();
-          if (token && !(await tokenStillValid(token))) token = null;
-        }
-      }
-    }
-  }
-  stopServer();
-  showApp(await startServer(token));
+  const token = serverUrl ? readToken(serverUrl) : null;
+  if (token && (await tokenStillValid(serverUrl, token))) return openWorkspace(serverUrl, token);
+  showWelcome();
+}
+
+/** Clicking the Dock icon always brings a window forward, whatever state the app is in. */
+function reveal() {
+  if (mainWindow) return mainWindow.show();
+  if (welcome) return welcome.window.show();
+  if (server) return showApp(server.origin);
+  showWelcome();
 }
 
 async function signOut() {
-  const token = readToken();
+  const token = serverUrl ? readToken(serverUrl) : null;
   if (token)
-    await api("/v1/native-app/sign-out", { method: "POST", body: "{}" }, token).catch(() => {});
-  rmSync(tokenPathFor(serverUrl), { force: true });
+    await api(serverUrl, "/v1/native-app/sign-out", { method: "POST", body: "{}" }, token).catch(
+      () => {},
+    );
+  if (serverUrl) rmSync(tokenPathFor(serverUrl), { force: true });
+  showWelcome();
   stopServer();
   mainWindow?.destroy();
   mainWindow = null;
-  await launch();
 }
 
-async function switchServer() {
-  const next = await chooseServer(serverUrl);
-  if (!next || next === serverUrl) return;
-  serverUrl = next;
-  saveServerUrl(next);
-  stopServer();
-  mainWindow?.destroy();
-  mainWindow = null;
-  await launch();
+function switchServer() {
+  showWelcome({ canGoBack: Boolean(mainWindow) });
 }
 
 function buildMenu() {
@@ -439,7 +437,7 @@ function buildMenu() {
           { role: "about" },
           { type: "separator" },
           { label: serverUrl ? `Server: ${new URL(serverUrl).host}` : "No server", enabled: false },
-          { label: "Change Server…", click: () => void switchServer() },
+          { label: "Change Server…", click: () => switchServer() },
           { label: "Sign Out", enabled: Boolean(serverUrl), click: () => void signOut() },
           { type: "separator" },
           { role: "hide" },
@@ -470,20 +468,17 @@ function buildMenu() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => mainWindow?.show());
+  app.on("second-instance", () => reveal());
   app.whenReady().then(() => {
     void launch();
   });
-  app.on("activate", () => {
-    if (mainWindow) mainWindow.show();
-    else if (server) showApp(server.origin);
-  });
+  app.on("activate", () => reveal());
   app.on("window-all-closed", () => {
     // Stay running in the dock like a normal Mac app; the server keeps avatars painting.
   });
   app.on("before-quit", () => {
     quitting = true;
-    if (pendingCallback) releaseCallbackScheme();
+    cancelSignIn();
     stopServer();
   });
 }

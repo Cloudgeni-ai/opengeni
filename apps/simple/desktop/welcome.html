@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+    />
+    <title>Sign in</title>
+    <style>
+      /* The simple app's own tokens (apps/simple/src/styles.css). */
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfaf8;
+        --well: #f3f1ed;
+        --card: #ffffff;
+        --fg: #1c1a17;
+        --muted: #77716a;
+        --border: rgba(20, 16, 10, 0.1);
+        --primary: #1c1a17;
+        --primary-fg: #ffffff;
+        --ring: #79d9c1;
+        --danger: #c2412d;
+        font-family:
+          "Inter",
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          sans-serif;
+        font-size: 14px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121113;
+          --well: #19181b;
+          --card: #2a292e;
+          --fg: #ecebee;
+          --muted: #908c96;
+          --border: rgba(255, 255, 255, 0.1);
+          --primary: #ecebee;
+          --primary-fg: #121113;
+          --danger: #f08a78;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+        cursor: default;
+      }
+      .drag {
+        position: fixed;
+        inset: 0 0 auto;
+        height: 40px;
+        -webkit-app-region: drag;
+      }
+      main {
+        display: flex;
+        min-height: 100%;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 48px 32px 36px;
+        text-align: center;
+      }
+      section {
+        display: flex;
+        width: min(320px, 100%);
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .mark {
+        width: 40px;
+        height: 40px;
+        margin: 0 auto 20px;
+        color: var(--fg);
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 21px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+      }
+      .lead {
+        margin: 0 0 24px;
+        color: var(--muted);
+        line-height: 1.45;
+        text-wrap: pretty;
+      }
+      .lead strong {
+        color: var(--fg);
+        font-weight: 550;
+        overflow-wrap: anywhere;
+      }
+      button,
+      input {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        height: 36px;
+        border-radius: 9px;
+        border: 1px solid transparent;
+        padding: 0 16px;
+        font-weight: 550;
+        cursor: default;
+        background: none;
+      }
+      button:focus-visible,
+      input:focus-visible {
+        outline: 2px solid var(--ring);
+        outline-offset: 2px;
+      }
+      .primary {
+        background: var(--primary);
+        color: var(--primary-fg);
+      }
+      .primary:active {
+        opacity: 0.85;
+      }
+      .secondary {
+        border-color: var(--border);
+      }
+      .link {
+        height: auto;
+        padding: 4px 6px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .link:hover {
+        color: var(--fg);
+      }
+      form,
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .servers {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 2px;
+        padding: 3px;
+        border-radius: 10px;
+        background: var(--well);
+        border: 1px solid var(--border);
+      }
+      .servers button {
+        height: 28px;
+        padding: 0 8px;
+        border-radius: 7px;
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 13px;
+      }
+      .servers button[aria-pressed="true"] {
+        background: var(--card);
+        color: var(--fg);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+      }
+      input {
+        width: 100%;
+        height: 36px;
+        border-radius: 9px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        padding: 0 11px;
+        user-select: text;
+      }
+      .host {
+        margin: -2px 0 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .error {
+        max-width: 320px;
+        margin: 16px 0 0;
+        color: var(--danger);
+        line-height: 1.4;
+      }
+      .back {
+        position: fixed;
+        top: 46px;
+        left: 14px;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        section:not([hidden]) {
+          animation: enter 180ms ease-out;
+        }
+      }
+      @keyframes enter {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="drag" aria-hidden="true"></div>
+    <main>
+      <svg class="mark" viewBox="71 17 184 184" aria-hidden="true">
+        <path
+          fill="currentColor"
+          d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"
+        />
+      </svg>
+      <section id="start">
+        <h1 id="title">Sign in to Opengeni</h1>
+        <p class="lead">Your browser opens to finish signing in.</p>
+        <form id="form" novalidate>
+          <div class="servers" role="group" aria-label="Server">
+            <button type="button" data-server="https://staging.app.opengeni.ai">Staging</button>
+            <button type="button" data-server="https://app.opengeni.ai">Production</button>
+            <button type="button" data-server="">Other</button>
+          </div>
+          <input
+            id="other"
+            type="text"
+            inputmode="url"
+            placeholder="opengeni.example.com"
+            autocapitalize="off"
+            spellcheck="false"
+            hidden
+          />
+          <p id="host" class="host"></p>
+          <button type="submit" class="primary">Continue in browser</button>
+        </form>
+      </section>
+      <section id="waiting" hidden>
+        <h1>Finish in your browser</h1>
+        <p class="lead">
+          Sign in to <strong id="pending"></strong> and allow this app. This window updates by
+          itself.
+        </p>
+        <div class="stack">
+          <button id="again" type="button" class="secondary">Open the browser again</button>
+          <button id="restart" type="button" class="link">Start over</button>
+        </div>
+      </section>
+      <section id="starting" hidden>
+        <h1>Opening</h1>
+        <p class="lead">Signed in to <strong id="ready"></strong>.</p>
+      </section>
+      <p id="error" class="error" role="alert" hidden></p>
+      <button id="back" type="button" class="link back" hidden>Back</button>
+    </main>
+    <script>
+      // Talks to the main process by navigating to simple.invalid, which it intercepts.
+      const send = (action, value = "") =>
+        (location.href = `https://simple.invalid/${action}?u=${encodeURIComponent(value)}`);
+      const byId = (id) => document.getElementById(id);
+      const other = byId("other");
+      let selected = "";
+      let applied;
+
+      const host = (url) => url.replace(/^https?:\/\//u, "");
+      function select(url, custom) {
+        selected = url;
+        for (const button of document.querySelectorAll(".servers button")) {
+          button.setAttribute(
+            "aria-pressed",
+            String(button.dataset.server === (custom ? "" : url)),
+          );
+        }
+        other.hidden = !custom;
+        byId("host").textContent = custom ? "" : host(url);
+        byId("host").hidden = custom;
+        if (custom) other.focus();
+      }
+
+      window.render = (state) => {
+        byId("start").hidden = state.view !== "start";
+        byId("waiting").hidden = state.view !== "waiting";
+        byId("starting").hidden = state.view !== "starting";
+        byId("pending").textContent = host(state.server || "");
+        byId("ready").textContent = host(state.server || "");
+        byId("title").textContent = state.canGoBack ? "Change server" : "Sign in to Opengeni";
+        byId("back").hidden = !state.canGoBack || state.view === "starting";
+        byId("error").hidden = !state.error;
+        byId("error").textContent = state.error || "";
+        if (state.view === "start" && state.server !== undefined && state.server !== applied) {
+          applied = state.server;
+          const preset = [...document.querySelectorAll(".servers button")].some(
+            (button) => button.dataset.server && button.dataset.server === state.server,
+          );
+          if (!preset && state.server) other.value = host(state.server);
+          select(
+            preset || !state.server ? state.server || "https://staging.app.opengeni.ai" : "",
+            !preset && Boolean(state.server),
+          );
+        }
+      };
+
+      for (const button of document.querySelectorAll(".servers button")) {
+        button.addEventListener("click", () =>
+          select(button.dataset.server, !button.dataset.server),
+        );
+      }
+      byId("form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        send("continue", other.hidden ? selected : other.value.trim());
+      });
+      byId("again").addEventListener("click", () => send("again"));
+      byId("restart").addEventListener("click", () => send("restart"));
+      byId("back").addEventListener("click", () => send("back"));
+      window.render({ view: "start", server: "https://staging.app.opengeni.ai" });
+    </script>
+  </body>
+</html>
