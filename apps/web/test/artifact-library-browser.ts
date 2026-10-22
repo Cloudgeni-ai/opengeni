@@ -112,6 +112,11 @@ try {
     await still.contentFrame().getByText("Weekly active teams by plan.", { exact: true }).waitFor();
     assert.equal((await activity()).siteHtml.length, 1, "the visible Site fetches its HTML once");
     assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
+    assert.match(
+      (await still.getAttribute("csp")) ?? "",
+      /^default-src 'none';/,
+      "the frame requires the no-network policy before the Site markup is parsed",
+    );
     assert.equal(
       await page.locator("iframe:not([sandbox=''])").count(),
       0,
