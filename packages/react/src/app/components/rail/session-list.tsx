@@ -149,6 +149,7 @@ import {
   defaultExpandedAncestors,
   sessionAncestorPath,
   sessionStateLabel,
+  sessionHasUpcomingSchedule,
   sessionInputWait,
   visualTreeDepth,
 } from "../../lib/session-rail";
@@ -4562,7 +4563,7 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={props.session.hasSchedules === true}
+          scheduled={sessionHasUpcomingSchedule(props.session)}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -4691,7 +4692,7 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={props.session.hasSchedules === true}
+                  scheduled={sessionHasUpcomingSchedule(props.session)}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   creator={creator}
                 />

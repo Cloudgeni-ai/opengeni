@@ -15869,6 +15869,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
     /** Current non-deleted schedules targeting this session, including paused schedules. */
     hasSchedules: z.boolean().optional(),
+    /**
+     * An active schedule targeting this session can still start a run: not
+     * paused, and not a one-time schedule whose time has passed.
+     */
+    hasUpcomingSchedules: z.boolean().optional(),
     initialMessage: z.string(),
     title: z.string().nullable(),
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16169,6 +16174,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     status: true,
     backgroundCommandActivity: true,
     hasSchedules: true,
+    hasUpcomingSchedules: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16275,6 +16281,8 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
   z.object({
     /** Current schedule relationship for the requested session. */
     sessionHasSchedules: z.boolean().optional(),
+    /** An active schedule targeting the requested session can still start a run. */
+    sessionHasUpcomingSchedules: z.boolean().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: z.boolean().default(false),

@@ -466,6 +466,8 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         session={{
           ...context.session,
           hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+          hasUpcomingSchedules:
+            lineage.lineage?.sessionHasUpcomingSchedules ?? context.session.hasUpcomingSchedules,
         }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}

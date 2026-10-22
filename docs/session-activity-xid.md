@@ -3,7 +3,10 @@
 Session writers stamp `sessions.activity_xid` with `pg_current_xact_id()` in a
 BEFORE trigger, in the original INSERT or semantic UPDATE. `updated_at` writes
 and project detachment (`channel_id`, including FK actions) count as activity;
-raw event/cursor writes do not. The ID is the top-level xid, including inside
+raw event/cursor writes do not, and neither do statements made only of raw
+deltas and infrastructure diagnostics (migration 0904): the event cursor
+trigger then updates `last_sequence` without listing `updated_at`, so this
+trigger does not fire. The ID is the top-level xid, including inside
 savepoints. Rollbacks roll back the stamp. New application transactions never
 open the activity gate, flush/re-defer every constraint, advance a workspace
 counter, or write the session again to finalize activity. Tenant/actor RLS,

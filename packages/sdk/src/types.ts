@@ -1795,6 +1795,8 @@ export type Session = {
   status: SessionStatus;
   backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
   hasSchedules?: boolean | undefined;
+  /** An active schedule targeting this session can still start a run. */
+  hasUpcomingSchedules?: boolean | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1979,6 +1981,7 @@ export type SessionListEntry = Pick<
   | "status"
   | "backgroundCommandActivity"
   | "hasSchedules"
+  | "hasUpcomingSchedules"
   | "title"
   | "titleSource"
   | "createdBy"
@@ -2216,6 +2219,7 @@ export type LineageNode = {
 
 export type SessionLineageResponse = {
   sessionHasSchedules?: boolean | undefined;
+  sessionHasUpcomingSchedules?: boolean | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;

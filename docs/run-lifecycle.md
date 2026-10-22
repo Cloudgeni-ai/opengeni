@@ -4788,7 +4788,13 @@ response to 64 KiB; the REST session detail contract remains unchanged.
 stream volume advances neither. A batch containing only raw message, reasoning,
 sandbox-command-output, or PTY
 deltas advances `last_sequence` but does not advance `updated_at` or
-`activity_xid`. A semantic event or explicit session mutation advances
+`activity_xid`. The same holds for infrastructure diagnostics
+(`SESSION_ACTIVITY_NEUTRAL_EVENT_TYPES`, migration 0904): sandbox box
+created/terminated/snapshot, env drift, route reconciliation, workspace
+capture announcements, and machine recovery/restore/restart notices. The idle
+reaper's `sandbox.box.terminated` fan-out therefore no longer makes every chat
+sharing a drained box look recently active. Attention events such as
+`sandbox.box.lost` remain activity. A semantic event or explicit session mutation advances
 the timestamp and stamps the same top-level xid on every session changed by
 that transaction. This keeps
 updated-order discovery useful even while a productive session emits a large

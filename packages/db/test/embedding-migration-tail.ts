@@ -290,6 +290,8 @@ export const embeddingMigrationTail = [
   "0775_session_usage_limit_attention_cursor.sql",
   // Patches the semantic projection in the cursor trigger restored by 0775.
   "0877_single_semantic_event_projection.sql",
+  // Splits the semantic projection 0877 installed, by exact text; replay after it.
+  "0904_infrastructure_events_keep_session_activity.sql",
   // Reads subscription_connections and the owner-capability routine from
   // withheld 0645/0707 and later subscription-core migrations.
   "0777_workspace_admin_subscription_connections.sql",

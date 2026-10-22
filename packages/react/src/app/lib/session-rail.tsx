@@ -27,9 +27,9 @@ export function sessionStatusLabel(status: SessionDisplayStatus): string {
   }
 }
 
-import { sessionInputWait } from "../../session-list-model";
+import { sessionHasUpcomingSchedule, sessionInputWait } from "../../session-list-model";
 
-export { sessionInputWait };
+export { sessionHasUpcomingSchedule, sessionInputWait };
 
 export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact = false): string {
   const deadline = new Date(deadlineAt);

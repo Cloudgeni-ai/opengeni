@@ -1045,6 +1045,7 @@ describe("embedding host session authorization routes", () => {
       children: [],
       truncated: false,
       sessionHasSchedules: false,
+      sessionHasUpcomingSchedules: false,
     });
 
     await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
@@ -2048,12 +2049,18 @@ test("session schedule projections follow current targets and schedule permissio
     expect(response.status).toBe(200);
     return await response.json();
   };
-  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({ hasSchedules: true });
+  // A paused schedule is still a schedule relationship, but never upcoming.
+  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({
+    hasSchedules: true,
+    hasUpcomingSchedules: false,
+  });
   expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
     sessionHasSchedules: true,
+    sessionHasUpcomingSchedules: false,
   });
   expect(await read(`/sessions/${value.child.id}`, value.authorization)).toMatchObject({
     hasSchedules: false,
+    hasUpcomingSchedules: false,
   });
   expect(await read(`/scheduled-tasks?sessionId=${value.child.id}`)).toMatchObject([
     { id: task.id },
@@ -2062,7 +2069,34 @@ test("session schedule projections follow current targets and schedule permissio
   const page = await read("/sessions?view=page");
   expect(
     page.sessions.find((session: { id: string }) => session.id === value.child.id),
-  ).toMatchObject({ hasSchedules: true });
+  ).toMatchObject({ hasSchedules: true, hasUpcomingSchedules: false });
+  const upcoming = await createScheduledTask(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: "Daily review",
+    status: "active",
+    schedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "existing_session",
+    overlapPolicy: "skip",
+    targetSessionId: value.child.id,
+    agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {} },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    metadata: {},
+  });
+  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({
+    hasSchedules: true,
+    hasUpcomingSchedules: true,
+  });
+  expect(
+    (await read("/sessions?view=page")).sessions.find(
+      (session: { id: string }) => session.id === value.child.id,
+    ),
+  ).toMatchObject({ hasSchedules: true, hasUpcomingSchedules: true });
+  expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
+    sessionHasUpcomingSchedules: true,
+  });
+  await deleteScheduledTask(client.db, value.grant.workspaceId, upcoming.id);
   const denied = await app.request(`${base}/scheduled-tasks?sessionId=${value.child.id}`, {
     headers: { authorization: value.authorization },
   });

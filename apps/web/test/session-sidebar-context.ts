@@ -259,12 +259,31 @@ if (previewParameters.get("scenario") === "hover") {
       status: "idle",
       unread: true,
       hasSchedules: true,
+      hasUpcomingSchedules: true,
       model: "codex/gpt-6-astra",
       reasoningEffort: "medium",
     },
     jamie,
   );
-  rows.splice(0, rows.length, working, needsYou, waiting, parent, pausedChild, finished);
+  // Targeted only by a paused or already-past one-time schedule: no clock icon.
+  const lapsedSchedule = hoverRow(3007, "Release stabilization checkpoint", 300, {
+    status: "idle",
+    hasSchedules: true,
+    hasUpcomingSchedules: false,
+    model: "codex/gpt-6-astra",
+    reasoningEffort: "high",
+  });
+  rows.splice(
+    0,
+    rows.length,
+    working,
+    needsYou,
+    waiting,
+    parent,
+    pausedChild,
+    finished,
+    lapsedSchedule,
+  );
 }
 
 type RecordedOptions = Omit<SessionListPageOptions, "signal">;
