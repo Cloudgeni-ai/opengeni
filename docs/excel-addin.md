@@ -100,7 +100,9 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   `office().context.ui.messageParent`.
 - **Server passthrough.** With the packaged session proxy, set
   `office: true` in `createSessionProxyHandler`: it mints workbook tickets as
-  the signed-in user (`asUser`), so each person's workbooks stay theirs. Pass
+  the signed-in user (`asUser`), so each person's workbooks stay theirs. To
+  render `SessionApp` in the pane with `apiBaseUrl` set to the proxy, also set
+  `sessionApp: true`; without it the app cannot load its workspace. Pass
   the WebSocket upgrade for `<proxy base>/v1/office/workbooks/live` through to
   the Opengeni API's `/v1/office/workbooks/live`. The ticket, not a cookie or
   header, authenticates the socket.
