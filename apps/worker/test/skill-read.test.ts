@@ -305,10 +305,14 @@ describe("skill_read gateway definition", () => {
     for (const paths of [[], ["SKILL.md"]]) {
       await expect(read({ listFiles: true, paths })).rejects.toThrow();
     }
-    for (const listFiles of ["true", 1, null]) {
+    // The gateway repairs only the exact literals "true"/"false" at a boolean
+    // location; every other non-boolean flag is refused before loading.
+    for (const listFiles of ["yes", "True", 1, null]) {
       await expect(read({ listFiles })).rejects.toThrow();
     }
     expect(loads).toBe(0);
+    await expect(read({ listFiles: "true" })).resolves.toBeDefined();
+    expect(loads).toBe(1);
   });
 
   test("inventory permits 1024 files and rejects overflow, unsafe and duplicate paths", async () => {
