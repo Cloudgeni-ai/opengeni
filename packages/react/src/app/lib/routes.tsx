@@ -141,9 +141,10 @@ export function railRouteSelection(location: {
   const session = /\/sessions\/([^/]+)/u.exec(location.pathname);
   if (session) return { sessionId: session[1] ?? null, siteId: null };
   const site = /^\/workspaces\/[^/]+\/sites\/([^/]+)\/?$/u.exec(location.pathname);
-  if (!site) return { sessionId: null, siteId: null };
+  // Site ids are UUIDs; anything else (including a malformed escape) is no Site.
+  if (!site || !UUID.test(site[1] ?? "")) return { sessionId: null, siteId: null };
   return {
     sessionId: siteViewSearch(location.search).conversation ?? null,
-    siteId: decodeURIComponent(site[1] ?? "") || null,
+    siteId: site[1]!.toLowerCase(),
   };
 }

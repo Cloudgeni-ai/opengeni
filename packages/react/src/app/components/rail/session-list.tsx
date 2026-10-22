@@ -2271,9 +2271,10 @@ export function SessionList() {
     },
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
-  // Opening one of a Site's conversations opens its Site row once, as a
-  // person's own expansion would: it stays open when another session is
-  // selected, and closing it again is respected.
+  // Opening one of a Site's conversations opens its Site row once per visit
+  // to that Site, as a person's own expansion would: it stays open when
+  // another session is selected, and closing it again is respected while
+  // switching between the Site's conversations.
   const openSiteId =
     activeSiteId ??
     (activeSessionId &&
@@ -2283,15 +2284,15 @@ export function SessionList() {
       : null);
   const siteRouteExpansion = useRef<string | null>(null);
   useEffect(() => {
-    if (!hierarchyMode || !openSiteId || !activeSessionId) {
+    if (!hierarchyMode || !openSiteId) {
       siteRouteExpansion.current = null;
       return;
     }
-    const routeKey = `${openSiteId}:${activeSessionId}`;
-    if (siteRouteExpansion.current === routeKey) return;
+    // The Site itself is marked without opening its row.
+    if (!activeSessionId || siteRouteExpansion.current === openSiteId) return;
     const rows = [...nodesById.values()].filter((node) => node.siteGroup?.siteId === openSiteId);
     if (rows.length === 0) return;
-    siteRouteExpansion.current = routeKey;
+    siteRouteExpansion.current = openSiteId;
     for (const row of rows) if (!expanded.has(row.session.id)) toggleExpand(row.session.id);
   }, [activeSessionId, expanded, hierarchyMode, nodesById, openSiteId, toggleExpand]);
   const visibleRows = useMemo(() => {

@@ -137,6 +137,8 @@ const newSession = createRoute({
 const site = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/sites/$siteId",
+  // As the console registers it.
+  validateSearch: siteViewSearch,
 });
 const router = createRouter({
   routeTree: root.addChildren([preview, session, newSession, site]),

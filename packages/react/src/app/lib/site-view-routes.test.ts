@@ -33,6 +33,9 @@ test("other pages mark nothing", () => {
     `/workspaces/${workspaceId}/artifacts/${siteId}`,
     `/workspaces/${workspaceId}/sites`,
     `/workspaces/${workspaceId}/sites/${siteId}/extra`,
+    // Not a Site id, including a malformed escape that can't be decoded.
+    `/workspaces/${workspaceId}/sites/%E0`,
+    `/workspaces/${workspaceId}/sites/not-a-site`,
   ])
     expect(railRouteSelection({ pathname, search: { conversation: sessionId } })).toEqual({
       sessionId: null,
