@@ -24,16 +24,28 @@ import {
 } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 
-/** Creation only: save the normal eager selection; never rewrite an existing session. */
+/**
+ * Creation only: save the normal eager selection; never rewrite an existing session.
+ * The deployment's server entry is a ceiling: a server (for example an
+ * operator-configured `docs` server) whose allowed tools exclude
+ * `knowledge_search` never gets it as an eager tool, which would otherwise
+ * move that server's connection before the first model request.
+ */
 export function newSessionKnowledgeSearchTools(
   tools: ToolRef[],
   config: ResolvedAgentConfig | null,
   firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+  mcpServers: readonly { id: string; allowedTools?: readonly string[] | undefined }[],
 ): ToolRef[] {
   if (!config?.capabilities.knowledge) return tools;
+  const serverAllowsSearch = (id: string) => {
+    const allowed = mcpServers.find((candidate) => candidate.id === id)?.allowedTools;
+    return allowed === undefined || allowed.includes("knowledge_search");
+  };
   const canSearch = (tool: ToolRef) =>
     tool.kind === "mcp" &&
-    (tool.allowedTools === undefined || tool.allowedTools.includes("knowledge_search"));
+    (tool.allowedTools === undefined || tool.allowedTools.includes("knowledge_search")) &&
+    serverAllowsSearch(tool.id);
   const serverId =
     firstPartyMcpTools.includes("knowledge_search") &&
     tools.some((tool) => tool.id === "opengeni" && canSearch(tool))

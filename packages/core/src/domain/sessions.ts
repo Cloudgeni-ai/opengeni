@@ -3596,7 +3596,12 @@ async function createSessionForRequestInFileScope(
     toolPolicy,
     productServerIds: [],
   }).firstPartyMcpTools;
-  tools = newSessionKnowledgeSearchTools(tools, agentConfig, firstPartyMcpTools);
+  tools = newSessionKnowledgeSearchTools(
+    tools,
+    agentConfig,
+    firstPartyMcpTools,
+    runtimeSettings.mcpServers,
+  );
   const googleDrivePublicationEnabled =
     firstPartyMcpTools.includes("editable_artifact_export") &&
     firstPartyMcpTools.includes("editable_artifact_export_status") &&

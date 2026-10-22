@@ -3923,7 +3923,8 @@ describe("worker activities integration", () => {
       title: "scheduled-new-session",
       titleSource: "agent",
     });
-    expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    // The fresh occurrence saves the attached Docs search as eager (#5232).
+    expect(session?.tools).toEqual([{ kind: "mcp", id: "docs", eager: ["knowledge_search"] }]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     // session.created carries the public "queued" status directly, so no
     // separate session.status.changed event is emitted before the wake. The

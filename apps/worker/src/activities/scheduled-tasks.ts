@@ -654,6 +654,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             written.tools,
             resolvedAgentConfig,
             firstPartyMcpTools,
+            settings.mcpServers,
           );
         } catch (error) {
           const status =
