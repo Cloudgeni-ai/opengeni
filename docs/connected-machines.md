@@ -1265,6 +1265,17 @@ continues to use the directory it was launched from, and an explicit session
 Reinstalling or restarting the LaunchAgent preserves its existing environment
 (including PATH and locale), rather than replacing it with the invoking shell's
 environment. Fresh installs still inherit the installer's PATH.
+When the agent runs from its app bundle (the `install.sh` layout), the
+LaunchAgent also sets `AssociatedBundleIdentifiers` to `ai.opengeni.agent`.
+Without it, macOS cannot tell which app owns the job. The "Background Items
+Added" notification and System Settings → General → Login Items then fall back
+to the developer name in the signing certificate. With it, they name the app
+(**Opengeni Agent**) instead. Background Task Management keeps the attribution
+it recorded when it first saw the job, so a machine that registered the
+LaunchAgent before this change keeps the developer name. Rewriting, reloading or
+recreating the plist does not change that. The name changes only after the user
+resets Background Task Management (`sfltool resetbtm`, then restart), which also
+resets every other app's login and background items.
 
 On Windows, the background agent is a per-user Task Scheduler task named
 **Opengeni Agent**, not a Windows Service. A service runs in session 0, where

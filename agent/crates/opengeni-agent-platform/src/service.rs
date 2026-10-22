@@ -15,6 +15,9 @@
 //!     ai.opengeni.agent.plist`, `RunAtLoad`+`KeepAlive`). LaunchAgent NOT
 //!     LaunchDaemon deliberately: desktop/computer-use needs the user's GUI Aqua
 //!     session + TCC. Structured + compiling; the plist generation is pure + tested.
+//!     When the agent runs from its app bundle, the plist names that bundle in
+//!     `AssociatedBundleIdentifiers` so Login Items and the "Background Items
+//!     Added" notification show the app instead of the signing developer's name.
 //!   * **Windows** — a per-user Task Scheduler task (`Opengeni Agent`) that starts
 //!     at logon in the user's own desktop session, NOT a Windows Service:
 //!     services run in session 0, where screenshots, input and the user's browser
@@ -113,6 +116,9 @@ pub mod ids {
     pub const SYSTEMD_UNIT: &str = "opengeni-agent.service";
     /// The launchd label (macOS) + the plist file stem.
     pub const LAUNCHD_LABEL: &str = "ai.opengeni.agent";
+    /// The macOS app bundle the installer and release place the agent in
+    /// (`CFBundleIdentifier` of `OpenGeni Agent.app`).
+    pub const MACOS_APP_BUNDLE_ID: &str = "ai.opengeni.agent";
     /// The per-user Task Scheduler task (Windows).
     pub const WINDOWS_TASK: &str = "Opengeni Agent";
     /// The Windows Service earlier releases registered. It could never start (the
@@ -332,10 +338,32 @@ pub fn launchd_stderr_log_path(user_home: &Path) -> PathBuf {
         .join("agent.stderr.log")
 }
 
+/// Whether `binary` is the executable of an app bundle
+/// (`<name>.app/Contents/MacOS/<executable>`). Evaluated as a POSIX path on every
+/// build host, like the rest of the LaunchAgent rendering.
+fn is_macos_app_bundle_executable(binary: &Path) -> bool {
+    let path = binary.to_string_lossy();
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    matches!(
+        parts.as_slice(),
+        [.., bundle, "Contents", "MacOS", executable]
+            if !executable.is_empty()
+                && Path::new(bundle)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    )
+}
+
 /// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
 /// The user home is explicit: launchd otherwise starts in `/`, which is read-only
 /// on macOS and cannot hold session attachments. Never inherit the installer's
 /// cwd (it can itself be an older launchd process during an update).
+///
+/// Background Task Management lists a legacy LaunchAgent under its responsible
+/// app only when the plist names that app's bundle; otherwise it falls back to
+/// the developer name in the signing certificate. When the agent runs from its
+/// app bundle, `AssociatedBundleIdentifiers` names that bundle (see
+/// `man launchd.plist`).
 ///
 /// # Errors
 ///
@@ -405,6 +433,14 @@ pub fn render_launchd_plist_with_environment(
         "{}/.config/opengeni/agent/logs/agent.stderr.log",
         user_home.trim_end_matches('/')
     ));
+    let associated_bundles = if is_macos_app_bundle_executable(&spec.binary_path) {
+        format!(
+            "  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>{}</string>\n  </array>\n",
+            ids::MACOS_APP_BUNDLE_ID
+        )
+    } else {
+        String::new()
+    };
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -412,6 +448,7 @@ pub fn render_launchd_plist_with_environment(
          <dict>\n\
          \x20 <key>Label</key>\n\
          \x20 <string>{label}</string>\n\
+         {associated_bundles}\
          \x20 <key>ProgramArguments</key>\n\
          \x20 <array>\n\
          {program_args}\n\
@@ -872,6 +909,47 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<string>/home/u/.local/bin/opengeni-agent</string>"));
         assert!(plist.contains("<string>run</string>"));
+    }
+
+    #[test]
+    fn launchd_plist_associates_the_agent_with_its_app_bundle() {
+        // Without the association, Login Items and the "Background Items Added"
+        // notification name the signing certificate's developer instead of the app.
+        let bundled = ServiceSpec {
+            binary_path: PathBuf::from(
+                "/Users/runner/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+            ),
+            ..spec()
+        };
+        let plist = render_launchd_plist(&bundled, Path::new("/Users/runner")).unwrap();
+        assert!(plist.contains(
+            "  <key>Label</key>\n  <string>ai.opengeni.agent</string>\n  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>ai.opengeni.agent</string>\n  </array>\n  <key>ProgramArguments</key>\n"
+        ));
+    }
+
+    #[test]
+    fn launchd_plist_names_no_bundle_for_a_bare_binary() {
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/runner")).unwrap();
+        assert!(!plist.contains("AssociatedBundleIdentifiers"));
+    }
+
+    #[test]
+    fn app_bundle_executable_detection_requires_the_bundle_layout() {
+        for path in [
+            "/Users/u/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+            "/Applications/X.app/Contents/MacOS/opengeni-agent",
+        ] {
+            assert!(is_macos_app_bundle_executable(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/Users/u/.local/bin/opengeni-agent",
+            "/Users/u/Applications/OpenGeni Agent.app/Contents/Helpers/opengeni-browserd",
+            "/Users/u/Applications/OpenGeni Agent.app/Contents/MacOS/sub/opengeni-agent",
+            "/Users/u/.app/Contents/MacOS/opengeni-agent",
+            "/Users/u/build/Contents/MacOS/opengeni-agent",
+        ] {
+            assert!(!is_macos_app_bundle_executable(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
