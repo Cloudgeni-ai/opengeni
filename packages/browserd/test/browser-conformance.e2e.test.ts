@@ -329,12 +329,8 @@ e2e(
       page = await act(driver, page, clickRole("button", "Request fixture failure"));
       page = await act(driver, page, clickRole("button", "Throw page error"));
       await Bun.sleep(100);
-      page = await driver.observe(page.target.id);
-      expect(page.diagnostics).toMatchObject({
-        consoleErrorCount: 1,
-        failedRequestCount: 1,
-        pageErrorCount: lightpandaBinary ? 0 : 1,
-      });
+      // Console messages and page errors are read on request (Runtime stays
+      // disabled so pages cannot detect it); observations count them afterwards.
       const diagnostics = await driver.debug(page.target.id);
       expect(diagnostics.entries.map((entry) => entry.kind)).toEqual(
         expect.arrayContaining(
@@ -343,6 +339,12 @@ e2e(
             : ["console", "failed_request", "page_error"],
         ),
       );
+      page = await driver.observe(page.target.id);
+      expect(page.diagnostics).toMatchObject({
+        consoleErrorCount: 1,
+        failedRequestCount: 1,
+        pageErrorCount: lightpandaBinary ? 0 : 1,
+      });
 
       if (!lightpandaBinary) {
         page = await act(driver, page, {
