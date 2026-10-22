@@ -1,0 +1,35 @@
+{
+  "name": "@opengeni/simple",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "dev:web": "vite --host 0.0.0.0 --port 5190",
+    "dev:server": "bun --watch server/index.ts",
+    "build": "vite build",
+    "start": "bun server/index.ts --serve-dist",
+    "typecheck": "tsrs --noEmit",
+    "test": "bun test ./test",
+    "mock-model": "bun scripts/mock-model.ts"
+  },
+  "dependencies": {
+    "@opengeni/connect": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "@tailwindcss/vite": "^4.2.4",
+    "@vitejs/plugin-react": "^6.0.1",
+    "lucide-react": "^1.8.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "tailwindcss": "^4.2.4",
+    "vite": "^8.0.9"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,87 @@
+@import "tailwindcss";
+@import "@opengeni/react/styles.css";
+@import "@opengeni/react/connect.css";
+@source "../../../packages/react/src";
+@source "./";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --app-bg: #fbfaf8;
+  --app-sidebar: #f3f1ed;
+  --app-card: #ffffff;
+  --app-border: rgba(20, 16, 10, 0.08);
+  --app-fg: #1c1a17;
+  --app-muted: #77716a;
+  --app-accent: #7c3aed;
+  --app-accent-soft: rgba(124, 58, 237, 0.1);
+  --app-hover: rgba(20, 16, 10, 0.05);
+  color-scheme: light;
+}
+
+.dark {
+  --app-bg: #121113;
+  --app-sidebar: #19181b;
+  --app-card: #1f1e22;
+  --app-border: rgba(255, 255, 255, 0.08);
+  --app-fg: #ecebee;
+  --app-muted: #908c96;
+  --app-accent: #a78bfa;
+  --app-accent-soft: rgba(167, 139, 250, 0.14);
+  --app-hover: rgba(255, 255, 255, 0.06);
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--app-bg);
+  color: var(--app-fg);
+  font-family:
+    "Inter",
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@keyframes avatar-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+.avatar-pending {
+  background-size: 200% 200% !important;
+  animation: avatar-shimmer 2.4s linear infinite;
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.card-in {
+  animation: card-in 180ms ease-out;
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-border) transparent;
+}

@@ -145,6 +145,29 @@
         "electron-updater": "6.8.9",
       },
     },
+    "apps/simple": {
+      "name": "@opengeni/simple",
+      "version": "0.0.1",
+      "dependencies": {
+        "@opengeni/connect": "workspace:*",
+        "@opengeni/contracts": "workspace:*",
+        "@opengeni/react": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
+        "@tailwindcss/vite": "^4.2.4",
+        "@vitejs/plugin-react": "^6.0.1",
+        "lucide-react": "^1.8.0",
+        "react": "^19.2.5",
+        "react-dom": "^19.2.5",
+        "tailwindcss": "^4.2.4",
+        "vite": "^8.0.9",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.3",
+        "@types/react": "^19.2.14",
+        "@types/react-dom": "^19.2.3",
+        "typescript": "7.0.2",
+      },
+    },
     "apps/site-gateway": {
       "name": "@opengeni/site-gateway",
       "version": "0.1.10",
@@ -1926,6 +1949,8 @@
     "@opengeni/runtime": ["@opengeni/runtime@workspace:packages/runtime"],
 
     "@opengeni/sdk": ["@opengeni/sdk@workspace:packages/sdk"],
+
+    "@opengeni/simple": ["@opengeni/simple@workspace:apps/simple"],
 
     "@opengeni/site-gateway": ["@opengeni/site-gateway@workspace:apps/site-gateway"],
 

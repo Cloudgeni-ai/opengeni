@@ -1857,6 +1857,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
 | `apps/site-gateway` | `@opengeni/site-gateway` | Cloudflare Worker serving published Sites on `<label>.<sites domain>`: host lookup, viewer sign-in cookies, signed forwarding to `/v1/site-runtime`, short generation-keyed HTML caching and edge headers; no authorization of its own ([README](../apps/site-gateway/README.md)) |
 | `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
+| `apps/simple` | `@opengeni/simple` | Experimental chat-first client (internal): one continuous chat per agent, a main agent "Geni", no model picker. A leaf client over the public SDK/React packages plus a small Bun companion server for app-only state (profiles, avatars, sidebar usage); no session authority of its own ([README](../apps/simple/README.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
 boundary before configuration or dependency startup. Startup failures,
