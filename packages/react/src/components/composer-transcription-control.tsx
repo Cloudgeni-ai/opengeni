@@ -24,6 +24,7 @@ import { useVoiceInput } from "../hooks/use-voice-input";
 import type { VoiceRecordingStore } from "../voice-recording-store";
 import { useChatComposer } from "./composer";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
+import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 function Tip({ tip, children }: { tip: string; children: ReactElement }) {
@@ -406,9 +407,9 @@ export function ComposerTranscriptionControl({
                       </Tip>
                     </>
                   ) : status === "transcribing" || status === "saving" ? (
-                    <span className="og-shimmer-text px-1.5 text-og-xs font-medium whitespace-nowrap">
+                    <ShimmerText className="px-1.5 text-og-xs font-medium whitespace-nowrap">
                       {status === "saving" ? messages.saving : messages.transcribing}
-                    </span>
+                    </ShimmerText>
                   ) : (
                     <span className="px-1.5 text-og-xs text-og-fg-muted whitespace-nowrap">
                       {messages.requestingPermission}

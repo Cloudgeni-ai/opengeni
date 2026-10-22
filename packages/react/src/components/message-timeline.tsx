@@ -202,6 +202,7 @@ import type { AllowanceLabels } from "../usage/allowance-copy";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
+import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
@@ -2742,11 +2743,11 @@ export function MessageTimeline({
                                   >
                                     {loadingOlder || loadingOldest ? (
                                       <span className={LOADING_CHIP_CLASS}>
-                                        <span className="og-shimmer-text">
+                                        <ShimmerText>
                                           {loadingOldest
                                             ? t("messageTimeline.jumpingToStart")
                                             : t("messageTimeline.loadingEarlierActivity")}
-                                        </span>
+                                        </ShimmerText>
                                       </span>
                                     ) : null}
                                     {hasOlder &&
@@ -2961,9 +2962,9 @@ export function MessageTimeline({
                                 className="flex max-w-full justify-center"
                               >
                                 <span className={LOADING_CHIP_CLASS}>
-                                  <span className="og-shimmer-text">
+                                  <ShimmerText>
                                     {t("messageTimeline.loadingLaterActivity")}
-                                  </span>
+                                  </ShimmerText>
                                 </span>
                               </motion.div>
                             ) : null}
