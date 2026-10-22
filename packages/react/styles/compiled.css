@@ -6589,6 +6589,13 @@
       padding-bottom: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).odd\:last\:col-span-2,:where(.og-root) .odd\:last\:col-span-2 {
+    &:nth-child(odd) {
+      &:last-child {
+        grid-column: span 2 / span 2;
+      }
+    }
+  }
 :where(.og-root).open\:basis-full,:where(.og-root) .open\:basis-full {
     &:is([open], :popover-open, :open) {
       flex-basis: 100%;

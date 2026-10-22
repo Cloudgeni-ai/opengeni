@@ -280,7 +280,8 @@ function ConnectModelsPanel(props: {
             </>
           );
           const className =
-            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40";
+            // An odd last tile spans both columns instead of sitting alone.
+            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors odd:last:col-span-2 hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40";
           return props.href ? (
             <a key={option.title} href={props.href} className={className}>
               {content}

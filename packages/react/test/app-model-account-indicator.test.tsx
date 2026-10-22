@@ -178,19 +178,18 @@ test("offers only the session provider's accounts, with the caller's own account
   }
 });
 
-test("says so when the provider has no accounts this person can use", async () => {
+test("shows only the provider mark when the provider offers this person no accounts", async () => {
   const client = Object.assign(fakeClient({}), {
     getSessionModelAccount: async () =>
       choiceResponse({ accounts: [option("x", "Team Codex", { provider: "codex" })] }),
   });
   const view = await render(client);
   try {
-    expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
-      "Claude account · Automatic",
-    );
-    await view.open();
-    expect(menuItems()).toEqual(["Automatic"]);
-    expect(document.body.textContent).toContain("No accounts available.");
+    // Nothing chosen, serving or choosable: no empty menu, just the mark.
+    expect(view.container.querySelector("button")).toBeNull();
+    expect(
+      view.container.querySelector("[data-testid='billing-class-icon-claude_subscription']"),
+    ).not.toBeNull();
   } finally {
     await view.cleanup();
   }
@@ -418,6 +417,24 @@ test("retains account identity, plan, source, and the reason an inactive account
     expect(document.body.textContent).toContain(
       "Applies next turn. The current turn keeps its account.",
     );
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("a failed read says the accounts are unavailable instead of claiming Automatic", async () => {
+  const client = Object.assign(fakeClient({}), {
+    getSessionModelAccount: async () => {
+      throw new Error("down");
+    },
+  });
+  const view = await render(client);
+  try {
+    expect(view.container.querySelector("button")?.getAttribute("aria-label")).toBe(
+      "Claude account · Accounts unavailable",
+    );
+    await view.open();
+    expect(document.body.textContent).toContain("Accounts unavailable.");
   } finally {
     await view.cleanup();
   }

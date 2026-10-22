@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  showsSubscriptionAccountMenu,
   subscriptionAccountMenuContent,
+  subscriptionAccountProvider,
   subscriptionAccountUsage,
   type SubscriptionAccount,
   type SubscriptionAccountState,
@@ -52,6 +54,7 @@ function state(extra: Partial<SubscriptionAccountState> = {}): SubscriptionAccou
     accounts,
     current: accounts[0]!,
     currentHidden: false,
+    serving: false,
     automatic: true,
     chosenId: null,
     waiting: false,
@@ -150,9 +153,65 @@ describe("one menu for every subscription provider", () => {
       state({ accounts: [], current: null, unavailable: true }),
     );
     expect(failed.emptyMessage).toBe("Accounts unavailable.");
+    // A failed read does not know the selection, so nothing claims Automatic.
+    expect(failed.displayName).toBe("Accounts unavailable");
+    expect(failed.selectionLabel).toBe("Account selection");
+    expect(failed.automaticSelected).toBe(false);
+    expect(failed.selectedId).toBeNull();
+    expect(failed.ariaLabel).toBe("Claude account · Accounts unavailable");
     expect(subscriptionAccountMenuContent(state({ mutationError: "busy" })).error).toBe(
       "Couldn't switch: busy",
     );
+  });
+
+  test("a failed check on the current account keeps the other accounts' readings", () => {
+    const failed = subscriptionAccountMenuContent(state({ usageCheck: "failed" }));
+    expect(failed.accounts.map((row) => row.usageSummary)).toEqual([
+      undefined,
+      "5h 36% · Week 62% used",
+      undefined,
+    ]);
+  });
+
+  test("the serving account is the current account, even when another one is chosen", () => {
+    const hidden = subscriptionAccountMenuContent(
+      state({ current: null, currentHidden: true, serving: true, automatic: false, chosenId: "b" }),
+    );
+    expect(hidden.selectionLabel).toBe("Current account");
+    expect(hidden.displayName).toBe("Account unavailable");
+    expect(hidden.selectedId).toBe("b");
+    const visible = subscriptionAccountMenuContent(
+      state({ serving: true, automatic: false, chosenId: "a" }),
+    );
+    expect(visible.selectionLabel).toBe("Current account");
+  });
+
+  test("a chip near its limit says so to assistive technology", () => {
+    const near = subscriptionAccountMenuContent(
+      state({
+        current: account("a", {
+          usage: snapshot([
+            { id: "five_hour", usedPercent: 95, resetsAt: null, status: "warning" },
+          ]),
+        }),
+      }),
+    );
+    expect(near.ariaLabel).toBe("Claude account · Acme a · Near its limit");
+  });
+
+  test("with nothing to choose or show, only the provider mark remains", () => {
+    expect(showsSubscriptionAccountMenu(state({ accounts: [], current: null }))).toBe(false);
+    expect(showsSubscriptionAccountMenu(state())).toBe(true);
+    for (const extra of [
+      { unavailable: true },
+      { currentHidden: true },
+      { waiting: true },
+      { automatic: false },
+    ]) {
+      expect(showsSubscriptionAccountMenu(state({ accounts: [], current: null, ...extra }))).toBe(
+        true,
+      );
+    }
   });
 
   test("a live check hides readings until it answers", () => {
@@ -218,5 +277,24 @@ describe("usage readings", () => {
     expect(after.windows?.[0]?.detail).toContain("Reset passed; usage may be outdated");
     expect(after.windows?.[0]?.detail).toContain("Limit reached");
     expect(after.windows?.[0]?.usedPercent).toBe(100);
+  });
+});
+
+describe("which subscription a chat offers accounts for", () => {
+  test("Codex product models, then the catalog's connected subscription", () => {
+    expect(subscriptionAccountProvider("codex/gpt-6-astra", undefined)).toBe("codex");
+    expect(
+      subscriptionAccountProvider("organization-claude-subscription/claude-opus-5-5", {
+        kind: "connected_subscription",
+        provider: "claude",
+      }),
+    ).toBe("claude");
+    expect(
+      subscriptionAccountProvider("supergrok/grok-4.6", {
+        kind: "connected_subscription",
+        provider: "xai",
+      }),
+    ).toBe("xai");
+    expect(subscriptionAccountProvider("gpt-5.6-sol", undefined)).toBeNull();
   });
 });

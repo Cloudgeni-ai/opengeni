@@ -52,6 +52,7 @@ import {
   sessionSupportsFleetSwitching,
 } from "../session/sandbox-switcher";
 import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
+import { subscriptionAccountProvider } from "../session/subscription-account";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
 import { Button } from "../../../ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/sheet";
@@ -60,7 +61,6 @@ import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
-import { isCodexProductModel } from "../../lib/session-model";
 import { isIntelligenceEffort } from "../../lib/session-tools";
 import { useSessionRepliesMute } from "../../lib/inbox";
 import { useSessionAdminAccess } from "../session/session-admin-access";
@@ -547,11 +547,10 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const credentialSource = selectedRow?.catalog.credentialSource;
-  const subscriptionProvider =
-    credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
-  // Codex product models are Codex subscriptions even before the catalog lists them.
-  const accountProvider = isCodexProductModel(displayModelId) ? "codex" : subscriptionProvider;
+  const accountProvider = subscriptionAccountProvider(
+    displayModelId,
+    selectedRow?.catalog.credentialSource,
+  );
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;

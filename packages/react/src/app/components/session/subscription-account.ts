@@ -3,7 +3,8 @@
 // into `SubscriptionAccountState`; everything a person sees is decided here,
 // so every provider shows the same structure and copy. Only names, marks and
 // plan labels differ.
-import type { ModelAccountChoiceRefusal } from "@opengeni/sdk";
+import type { ClientModel, ModelAccountChoiceRefusal } from "@opengeni/sdk";
+import { isCodexProductModel } from "../../lib/session-model";
 import type { BillingClass } from "../billing-class-mark";
 import type {
   SubscriptionAccountMenuRow,
@@ -53,6 +54,8 @@ export type SubscriptionAccountState = {
   current: SubscriptionAccount | null;
   /** The chat runs on a chosen or serving account this person cannot see. */
   currentHidden: boolean;
+  /** `current`/`currentHidden` is the account serving the chat's latest turn. */
+  serving: boolean;
   /** Automatic selection, not a person's explicit choice. */
   automatic: boolean;
   /** The explicitly chosen account, when this person can see it. */
@@ -217,32 +220,72 @@ function nearLimit(usage: SubscriptionAccountUsage | null | undefined): boolean 
   );
 }
 
+/**
+ * Whether there is anything to show or choose. A chat whose provider offers
+ * no accounts to this person, with nothing chosen, serving or waiting, shows
+ * the provider's mark alone instead of an empty menu.
+ */
+export function showsSubscriptionAccountMenu(state: SubscriptionAccountState): boolean {
+  return (
+    state.unavailable ||
+    state.accounts.length > 0 ||
+    state.current !== null ||
+    state.currentHidden ||
+    state.waiting ||
+    !state.automatic
+  );
+}
+
+/**
+ * The subscription whose accounts a chat's header offers, or null for a chat
+ * that does not run on a subscription. Codex product models are Codex
+ * subscriptions even before the catalog lists them.
+ */
+export function subscriptionAccountProvider(
+  modelId: string,
+  credentialSource: ClientModel["credentialSource"],
+): string | null {
+  if (isCodexProductModel(modelId)) return "codex";
+  return credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+}
+
 /** Everything the account menu shows, from the neutral state. */
 export function subscriptionAccountMenuContent(state: SubscriptionAccountState) {
   const { name } = subscriptionProviderPresentation(state.provider);
   const current = state.current;
+  // A failed read does not know the selection; never claim Automatic for it.
+  const unknown = state.unavailable && !current && !state.currentHidden;
   const displayName = current
     ? accountLabel(current)
     : state.currentHidden
       ? "Account unavailable"
-      : "Automatic";
+      : unknown
+        ? "Accounts unavailable"
+        : "Automatic";
   const status = current ? accountStatus(current) : null;
   const selectionLabel = state.waiting
     ? "Limit reached"
-    : !state.automatic && (!current || current.id === state.chosenId)
-      ? "Chosen account"
-      : current
-        ? "Current account"
-        : "Account selection";
+    : state.serving && (current || state.currentHidden)
+      ? "Current account"
+      : !state.automatic && !unknown && (!current || current.id === state.chosenId)
+        ? "Chosen account"
+        : current
+          ? "Current account"
+          : "Account selection";
+  const usageNearLimit = nearLimit(current?.usage);
   const tone: "ok" | "warn" | "bad" =
     current?.status === "needs_relogin" || current?.status === "error"
       ? "bad"
-      : status || state.waiting || nearLimit(current?.usage)
+      : status || state.waiting || usageNearLimit
         ? "warn"
         : "ok";
   const usage: SubscriptionAccountMenuUsage = !current
     ? {
-        message: state.currentHidden ? "Account usage hidden" : "Choose an account to see usage",
+        message: state.currentHidden
+          ? "Account usage hidden"
+          : unknown
+            ? "Usage unavailable"
+            : "Choose an account to see usage",
       }
     : state.usageCheck === "checking"
       ? { checking: true }
@@ -267,12 +310,16 @@ export function subscriptionAccountMenuContent(state: SubscriptionAccountState) 
     disabled: !account.choosable,
     // The current account's usage is already shown above the list.
     usageSummary:
-      account.id === current?.id || state.usageCheck !== "idle"
+      account.id === current?.id || state.usageCheck === "checking"
         ? undefined
         : subscriptionAccountUsage(account.usage).summary,
   }));
   return {
-    ariaLabel: [`${name} account`, displayName, state.waiting ? "Limit reached" : status]
+    ariaLabel: [
+      `${name} account`,
+      displayName,
+      state.waiting ? "Limit reached" : (status ?? (usageNearLimit ? "Near its limit" : null)),
+    ]
       .filter(Boolean)
       .join(" · "),
     selectionLabel,
@@ -285,8 +332,8 @@ export function subscriptionAccountMenuContent(state: SubscriptionAccountState) 
     tone,
     usage,
     accounts,
-    selectedId: state.automatic ? null : state.chosenId,
-    automaticSelected: state.automatic,
+    selectedId: state.automatic || unknown ? null : state.chosenId,
+    automaticSelected: state.automatic && !unknown,
     actionLabel: state.waiting ? "Retry with" : "Use for next turn",
     automaticLabel: "Automatic",
     emptyMessage: state.unavailable ? "Accounts unavailable." : "No accounts available.",

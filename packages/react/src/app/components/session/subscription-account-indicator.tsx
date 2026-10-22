@@ -10,13 +10,18 @@ import type {
   CodexUsageMap,
   ModelAccountChoiceOption,
   SessionEvent,
+  SessionModelAccountChoiceResponse,
 } from "@opengeni/sdk";
 
-import { useCodexAccounts } from "../../../hooks/use-codex-accounts";
-import { useSessionModelAccount } from "../../../hooks/use-session-model-account";
+import { useCodexAccounts, type UseCodexAccountsResult } from "../../../hooks/use-codex-accounts";
+import {
+  useSessionModelAccount,
+  type UseSessionModelAccountResult,
+} from "../../../hooks/use-session-model-account";
 import { Skeleton } from "../../../ui/skeleton";
 import { BillingClassMark } from "../billing-class-mark";
 import {
+  showsSubscriptionAccountMenu,
   subscriptionAccountMenuContent,
   subscriptionProviderPresentation,
   type SubscriptionAccount,
@@ -58,7 +63,22 @@ export function SubscriptionAccountControl({
   const { name, billingClass } = subscriptionProviderPresentation(state.provider);
   if (state.loading) {
     return (
-      <Skeleton className="h-6 w-11 shrink-0 rounded-full" aria-label={`Loading ${name} account`} />
+      <Skeleton
+        role="status"
+        className="h-6 w-11 shrink-0 rounded-full"
+        aria-label={`Loading ${name} account`}
+      />
+    );
+  }
+  // Nothing to choose or show (the provider's accounts are not offered for
+  // this chat): the provider's mark alone, as on any other subscription chat.
+  if (!showsSubscriptionAccountMenu(state)) {
+    return (
+      <BillingClassMark
+        billingClass={billingClass}
+        className="size-3.5 shrink-0 text-fg-muted"
+        aria-label=""
+      />
     );
   }
   return (
@@ -82,7 +102,7 @@ export function SubscriptionAccountControl({
 
 // ── Shared subscription core (Claude, SuperGrok, …) ─────────────────────────
 
-function sharedAccount(option: ModelAccountChoiceOption): SubscriptionAccount {
+export function sharedAccount(option: ModelAccountChoiceOption): SubscriptionAccount {
   return {
     id: option.connectionId,
     label: option.label,
@@ -96,16 +116,15 @@ function sharedAccount(option: ModelAccountChoiceOption): SubscriptionAccount {
   };
 }
 
-function SharedAccountSource(props: IndicatorProps) {
-  const { provider } = props;
-  const account = useSessionModelAccount({
-    workspaceId: props.workspaceId,
-    sessionId: props.sessionId,
-    provider,
-    organizationId: props.organizationId,
-    pollIntervalMs: 60_000,
-    ...(props.events !== undefined ? { events: props.events } : {}),
-  });
+/** The shared subscription core's session choice as the neutral state. */
+export function sharedAccountState(
+  provider: string,
+  account: Pick<
+    UseSessionModelAccountResult,
+    "loading" | "choosing" | "choosingTarget" | "appliedTo" | "mutationError"
+  > & { choice: SessionModelAccountChoiceResponse | null },
+  servingTurnId: string | undefined,
+): SubscriptionAccountState {
   const choice = account.choice;
   const options = (choice?.accounts ?? []).filter((each) => each.provider === provider);
   const binding =
@@ -114,7 +133,7 @@ function SharedAccountSource(props: IndicatorProps) {
   const explicit = binding?.choice === "explicit";
   const serving =
     choice?.serving &&
-    choice.serving.turnId === props.servingTurnId &&
+    choice.serving.turnId === servingTurnId &&
     choice.serving.provider === provider
       ? choice.serving
       : null;
@@ -122,13 +141,14 @@ function SharedAccountSource(props: IndicatorProps) {
   const current = currentId
     ? (options.find((each) => each.connectionId === currentId) ?? null)
     : null;
-  const state: SubscriptionAccountState = {
+  return {
     provider,
     loading: account.loading && !choice,
     unavailable: !choice,
     accounts: options.map(sharedAccount),
     current: current ? sharedAccount(current) : null,
     currentHidden: !current && (explicit || serving !== null),
+    serving: serving !== null,
     automatic: !explicit,
     chosenId: explicit ? (binding?.connectionId ?? null) : null,
     waiting: false,
@@ -139,11 +159,24 @@ function SharedAccountSource(props: IndicatorProps) {
     appliedTo: account.appliedTo,
     mutationError: account.mutationError?.message ?? null,
   };
+}
+
+function SharedAccountSource(props: IndicatorProps) {
+  const { provider } = props;
+  const account = useSessionModelAccount({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    provider,
+    organizationId: props.organizationId,
+    pollIntervalMs: 60_000,
+    ...(props.events !== undefined ? { events: props.events } : {}),
+  });
+  const state = sharedAccountState(provider, account, props.servingTurnId);
   return (
     <SubscriptionAccountControl
       state={state}
       onChoose={(id) => {
-        if (id === null ? !explicit : explicit && binding?.connectionId === id) return;
+        if (id === null ? state.automatic : !state.automatic && state.chosenId === id) return;
         void account.choose(id);
       }}
     />
@@ -157,7 +190,7 @@ const AUTO = "auto";
 // provider again; older ones stay on screen while the menu re-checks.
 const LIVE_USAGE_REUSE_MS = 30_000;
 
-function codexUsage(
+export function codexUsage(
   account: CodexAccount,
   live: CodexUsageMap[string] | undefined,
 ): SubscriptionAccountUsage | null {
@@ -177,7 +210,14 @@ function codexUsage(
         id,
         usedPercent,
         resetsAt: reading.resetAt ?? null,
-        status: usedPercent === null ? "unknown" : usedPercent >= 100 ? "exhausted" : "ok",
+        status:
+          usedPercent === null
+            ? "unknown"
+            : usedPercent >= 100
+              ? "exhausted"
+              : usedPercent >= 90
+                ? "warning"
+                : "ok",
       },
     ];
   };
@@ -185,12 +225,82 @@ function codexUsage(
     ...window("five_hour", account.fiveHour),
     ...window("seven_day", account.weekly),
   ];
-  if (windows.length === 0) return null;
+  const exhaustedUntil = account.exhaustedUntil ?? null;
+  if (windows.length === 0 && !exhaustedUntil) return null;
   return {
     observedAt: live?.usage?.fetchedAt ?? account.usageCheckedAt ?? null,
     windows,
-    exhaustedUntil: null,
-    exhaustedKind: null,
+    exhaustedUntil,
+    exhaustedKind: exhaustedUntil ? "quota" : null,
+  };
+}
+
+/** The Codex session endpoint as the neutral state. */
+export function codexAccountState(
+  codex: Pick<
+    UseCodexAccountsResult,
+    | "accounts"
+    | "pinnedAccountId"
+    | "currentSelection"
+    | "currentAccount"
+    | "switchAppliedTo"
+    | "loading"
+    | "error"
+    | "liveUsage"
+    | "liveUsageUpdatedAt"
+    | "pinning"
+    | "pinningTarget"
+    | "mutationError"
+  >,
+  check: { checking: boolean; checked: boolean; failed: boolean },
+): SubscriptionAccountState {
+  // Live readings from an earlier check (this menu, another session's, or
+  // Settings) stay visible while a new check runs instead of flashing away.
+  const awaitingFirstUsage = check.checking && codex.liveUsageUpdatedAt === null;
+  const selection = codex.currentSelection;
+  const effective =
+    (selection ? codex.currentAccount : null) ??
+    codex.accounts.find(
+      (account) => account.id === (selection ? selection.credentialId : codex.pinnedAccountId),
+    ) ??
+    null;
+  // A live check that returned nothing for an account hides its older reading.
+  const liveMissing = (id: string) => {
+    const status = codex.liveUsage[id]?.status;
+    return check.failed || (check.checked && !status) || status === "error" || status === "no-data";
+  };
+  const account = (each: CodexAccount): SubscriptionAccount => ({
+    id: each.id,
+    // The ChatGPT account id names an account only when nothing else does.
+    label: each.label ?? (each.email || each.plan ? null : (each.chatgptAccountId ?? null)),
+    email: each.email ?? null,
+    plan: each.plan ?? null,
+    source: each.source ?? null,
+    status: each.status,
+    refusal: null,
+    choosable: true,
+    usage: liveMissing(each.id) ? null : codexUsage(each, codex.liveUsage[each.id]),
+  });
+  return {
+    provider: "codex",
+    loading: codex.loading && !effective,
+    unavailable: Boolean(codex.error),
+    accounts: codex.accounts.map(account),
+    current: effective ? account(effective) : null,
+    currentHidden: !effective && Boolean(selection?.credentialId ?? codex.pinnedAccountId),
+    serving: selection !== null,
+    automatic: codex.pinnedAccountId === null,
+    chosenId: codex.pinnedAccountId,
+    waiting: selection?.waiting === true,
+    usageCheck: awaitingFirstUsage
+      ? "checking"
+      : effective && liveMissing(effective.id)
+        ? "failed"
+        : "idle",
+    choosing: codex.pinning,
+    choosingTarget: codex.pinningTarget === AUTO ? null : (codex.pinningTarget ?? undefined),
+    appliedTo: codex.switchAppliedTo,
+    mutationError: codex.mutationError?.message ?? null,
   };
 }
 
@@ -203,55 +313,12 @@ function CodexAccountSource(props: IndicatorProps) {
   const [checkingUsage, setCheckingUsage] = useState(false);
   const [usageChecked, setUsageChecked] = useState(false);
   const [usageCheckFailed, setUsageCheckFailed] = useState(false);
-  // Live readings from an earlier check (this menu, another session's, or
-  // Settings) stay visible while a new check runs instead of flashing away.
-  const awaitingFirstUsage = checkingUsage && codex.liveUsageUpdatedAt === null;
-  const selection = codex.currentSelection;
-  const effective =
-    (selection ? codex.currentAccount : null) ??
-    codex.accounts.find(
-      (account) => account.id === (selection ? selection.credentialId : codex.pinnedAccountId),
-    ) ??
-    null;
-  // A live check that returned nothing for an account hides its older reading.
-  const liveMissing = (id: string) => {
-    const status = codex.liveUsage[id]?.status;
-    return (
-      usageCheckFailed || (usageChecked && !status) || status === "error" || status === "no-data"
-    );
-  };
-  const account = (each: CodexAccount): SubscriptionAccount => ({
-    id: each.id,
-    label: each.label ?? null,
-    email: each.email ?? null,
-    plan: each.plan ?? null,
-    source: each.source ?? null,
-    status: each.status,
-    refusal: null,
-    choosable: true,
-    usage: liveMissing(each.id) ? null : codexUsage(each, codex.liveUsage[each.id]),
+  const state = codexAccountState(codex, {
+    checking: checkingUsage,
+    checked: usageChecked,
+    failed: usageCheckFailed,
   });
-  const waiting = selection?.waiting === true;
-  const state: SubscriptionAccountState = {
-    provider: "codex",
-    loading: codex.loading && !effective,
-    unavailable: Boolean(codex.error),
-    accounts: codex.accounts.map(account),
-    current: effective ? account(effective) : null,
-    currentHidden: !effective && Boolean(selection?.credentialId ?? codex.pinnedAccountId),
-    automatic: codex.pinnedAccountId === null,
-    chosenId: codex.pinnedAccountId,
-    waiting,
-    usageCheck: awaitingFirstUsage
-      ? "checking"
-      : effective && liveMissing(effective.id)
-        ? "failed"
-        : "idle",
-    choosing: codex.pinning,
-    choosingTarget: codex.pinningTarget === AUTO ? null : (codex.pinningTarget ?? undefined),
-    appliedTo: codex.switchAppliedTo,
-    mutationError: codex.mutationError?.message ?? null,
-  };
+  const waiting = state.waiting;
   return (
     <SubscriptionAccountControl
       state={state}
