@@ -11,6 +11,7 @@ import {
   config,
   digest,
   emptyLedger,
+  runnerJobDemand,
   type Config,
   type Ledger,
   type Manifest,
@@ -919,7 +920,9 @@ export async function readHeadroom(
       page.jobs.length !== page.total_count
     )
       return { ...result, reason: "Active job scan incomplete; no publication" };
-    const demand = Math.max(1, page.jobs.filter((job) => job.status !== "completed").length);
+    const demand = runnerJobDemand(page.jobs);
+    if (demand === null)
+      return { ...result, reason: "Unrecognized job status in active job scan; no publication" };
     if (
       run.path === ".github/workflows/ci.yml" &&
       run.head_branch === "main" &&

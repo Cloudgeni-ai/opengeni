@@ -183,6 +183,26 @@ export interface Headroom {
   reservedMain: number;
   candidateSlots: 18;
 }
+// GitHub job statuses. Only jobs that hold or are about to request a hosted
+// runner are demand: queued and in_progress jobs, plus requested jobs (created
+// but not yet queued), which are counted conservatively. Jobs waiting for environment
+// approval (waiting) or a job concurrency group (pending) and completed jobs
+// hold no runner, and a run without materialized jobs (for example a run held
+// by its concurrency group) is only a placeholder. Any other or missing status
+// returns null so callers hold instead of treating unknown demand as free.
+const RUNNER_DEMAND_JOB_STATUSES = new Set(["queued", "in_progress", "requested"]);
+const IDLE_JOB_STATUSES = new Set(["waiting", "pending", "completed"]);
+export function runnerJobDemand(jobs: readonly unknown[]): number | null {
+  let demand = 0;
+  for (const job of jobs) {
+    const status =
+      job !== null && typeof job === "object" ? (job as { status?: unknown }).status : undefined;
+    if (typeof status !== "string") return null;
+    if (RUNNER_DEMAND_JOB_STATUSES.has(status)) demand++;
+    else if (!IDLE_JOB_STATUSES.has(status)) return null;
+  }
+  return demand;
+}
 export const emptyLedger = (): Ledger => ({
   schemaVersion: 1,
   epoch: 0,

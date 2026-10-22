@@ -15,7 +15,7 @@ import { verifyResult, type VerifiedResult } from "./result";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
 import { DiskCache } from "./cache";
-import { digest } from "./model";
+import { digest, runnerJobDemand } from "./model";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
 export function isControlPlanePath(path: unknown): boolean {
@@ -290,12 +290,9 @@ export class GitHubReader {
         run.path === ".github/workflows/ci.yml" &&
         run.head_branch === this.config.baseBranch &&
         run.event === "push";
-      if (!page.jobs.length && !isMain)
-        return { ...result, reason: "Other workflow job demand is not yet observable" };
-      const demand = Math.max(
-        1,
-        page.jobs.filter((job: Json) => job.status !== "completed").length,
-      );
+      const demand = runnerJobDemand(page.jobs);
+      if (demand === null)
+        return { ...result, reason: "Unrecognized job status in current job observation" };
       if (isMain) mainDemand += demand;
       else otherDemand += demand;
     }

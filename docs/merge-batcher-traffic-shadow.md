@@ -165,11 +165,16 @@ updates also persist terminal observations and scan progress.
 
 Publication is disabled unless both runner-budget variables are positive integers.
 Fresh bounded run/job queries must show room for the full-main reserve plus current
-other workflow demand and 18 conservative candidate slots. Any active Batch CI or
-incomplete capacity scan blocks publication. The budget is an operator allocation,
-not a discovered GitHub/custom quota; reserve for other organization consumers
-outside this repository separately. Actions scheduling is not transactionally
-fenced by the Git CAS, so this observation is not a provider capacity reservation.
+other workflow demand and 18 conservative candidate slots. Demand is the count of
+`queued`, `in_progress` and `requested` jobs; approval-waiting, concurrency-pending
+and completed jobs and runs without jobs reserve nothing, and an unrecognized job
+status holds. Any active Batch CI or incomplete capacity scan blocks publication,
+and unpublished or no-run traffic candidates keep their own occupancy hold. The
+budget is an operator allocation, not a discovered GitHub/custom quota; reserve for
+other organization consumers outside this repository separately. Actions
+scheduling is not transactionally fenced by the Git CAS, so this observation is
+not a provider capacity reservation. Waiting, pending and job-less runs can start
+requesting runners after observation; that race is bounded by the same caveat.
 
 The candidate's **pre-cohort base must already contain the Batch CI adapter**.
 Pin the entire `scripts` tree (all merge-batcher core, impact, profile, shard and

@@ -670,6 +670,151 @@ describe("traffic recovery and bounded reads", () => {
       ).allowed,
     ).toBe(false);
   });
+  describe("traffic headroom counts runner-holding jobs, not run placeholders", () => {
+    // Provider wire JSON, deliberately including malformed pages.
+    type WirePage = Record<string, any> | unknown[];
+    const MAIN = { path: ".github/workflows/ci.yml", event: "push", head_branch: "main" };
+    const OTHER = { path: ".github/workflows/other.yml", event: "push", head_branch: "feature" };
+    const jobs = (...statuses: unknown[]) =>
+      statuses.map((status) => (status === undefined ? {} : { status }));
+    const page = (list: unknown[]) => ({ total_count: list.length, jobs: list });
+    const scan = (
+      runs: Array<Record<string, unknown>>,
+      jobPages: Record<number, WirePage>,
+      runPage?: () => WirePage,
+    ) => ({
+      fresh: async (path: string): Promise<WirePage> => {
+        const match = /^actions\/runs\/(\d+)\/jobs\?/.exec(path);
+        if (match) return jobPages[Number(match[1])] ?? {};
+        if (runPage) return runPage();
+        const status = new URLSearchParams(path.split("?")[1]).get("status");
+        const listed = runs.filter((entry) => entry.status === status);
+        return { total_count: listed.length, workflow_runs: listed };
+      },
+    });
+    test.each([
+      ["zero-job run held by its concurrency group", [], 0, true],
+      ["approval-waiting jobs", ["waiting", "waiting", "waiting", "waiting"], 0, true],
+      ["concurrency-pending jobs", ["pending", "pending", "pending"], 0, true],
+      ["completed jobs", ["completed", "completed"], 0, true],
+      ["two runner-holding jobs", ["queued", "in_progress", "completed"], 2, true],
+      ["three runner-holding jobs", ["queued", "in_progress", "requested"], 3, false],
+      [
+        "mixed matrix counts each runner-holding job",
+        ["in_progress", "in_progress", "queued", "waiting", "pending", "completed"],
+        3,
+        false,
+      ],
+    ] as const)("%s", async (_name, statuses, demand, allowed) => {
+      const reader = scan([{ id: 2, status: "queued", ...OTHER }], {
+        2: page(jobs(...statuses)),
+      });
+      expect(await readHeadroom(reader, 60, 40)).toMatchObject({
+        allowed,
+        occupied: demand,
+        reservedMain: 40,
+        candidateSlots: 18,
+        budget: 60,
+      });
+    });
+    test("main and non-main allocations are independent", async () => {
+      const reader = scan(
+        [
+          { id: 1, status: "in_progress", ...MAIN },
+          { id: 2, status: "waiting", ...MAIN },
+          { id: 3, status: "queued", ...MAIN, head_branch: "production" },
+          { id: 4, status: "queued", ...MAIN, event: "pull_request" },
+          { id: 5, status: "pending", ...OTHER },
+        ],
+        {
+          1: page(jobs(...Array(45).fill("in_progress"), "waiting", "completed")),
+          2: page([]),
+          3: page(jobs("queued", "waiting")),
+          4: page(jobs("queued", "pending", "completed")),
+          5: page(jobs("in_progress")),
+        },
+      );
+      // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
+      expect(await readHeadroom(reader, 66, 40)).toMatchObject({
+        allowed: true,
+        occupied: 48,
+        reservedMain: 45,
+      });
+      expect((await readHeadroom(reader, 65, 40)).allowed).toBe(false);
+      const quiet = scan([{ id: 1, status: "queued", ...MAIN }], {
+        1: page(jobs("waiting", "waiting")),
+      });
+      expect(await readHeadroom(quiet, 58, 40)).toMatchObject({
+        allowed: true,
+        occupied: 0,
+        reservedMain: 40,
+      });
+      expect((await readHeadroom(quiet, 57, 40)).allowed).toBe(false);
+    });
+    test.each([
+      ["unknown job status", page(jobs("in_progress", "action_required")), "Unrecognized"],
+      ["missing job status", page(jobs("queued", undefined)), "Unrecognized"],
+      [
+        "complete job page above the 100-row bound",
+        { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
+        "incomplete",
+      ],
+      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "incomplete"],
+      ["malformed job page", { total_count: 0 }, "incomplete"],
+      ["array job page", [], "incomplete"],
+    ] as const)("%s holds", async (_name, jobPage, reason) => {
+      const result = await readHeadroom(
+        scan([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }),
+        1000,
+        40,
+      );
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain(reason);
+    });
+    test("run scan boundaries still hold with idle jobs", async () => {
+      const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
+      const many = Array.from({ length: 33 }, (_, i) => ({
+        id: i + 1,
+        status: "queued",
+        ...OTHER,
+      }));
+      const tooMany = await readHeadroom(scan(many, idle), 1000, 40);
+      expect(tooMany.allowed).toBe(false);
+      expect(tooMany.reason).toContain("Too many");
+      const truncated = await readHeadroom(
+        scan([], idle, () => ({ total_count: 1, workflow_runs: [] })),
+        1000,
+        40,
+      );
+      expect(truncated).toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining("incomplete"),
+      });
+      const oversized = await readHeadroom(
+        scan([], idle, () => ({
+          total_count: 101,
+          workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
+        })),
+        1000,
+        40,
+      );
+      expect(oversized).toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining("exceeds bounded scan"),
+      });
+      const batch = await readHeadroom(
+        scan([{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }], {
+          7: page([]),
+        }),
+        1000,
+        40,
+      );
+      expect(batch).toMatchObject({ allowed: false, reason: expect.stringContaining("Batch CI") });
+      await expect(
+        readHeadroom(scan([{ id: 0, status: "queued", ...OTHER }], idle), 1000, 40),
+      ).rejects.toThrow("Invalid traffic number");
+    });
+  });
   test("persistent rate backoff and hourly budget prevent restart storms", async () => {
     const f = await fixture();
     let now = 100000,

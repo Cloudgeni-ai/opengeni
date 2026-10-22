@@ -274,11 +274,18 @@ even if a higher legacy max-inflight planner setting is present.
 Full-main CI retains explicit reserved capacity, but its mere presence does not
 block progress. Before publication/retry/landing, the reader scans current
 repository runs and their latest jobs (at most 32 runs, 100 entries per response;
-incomplete observations hold). Required capacity is other nonterminal job demand
-plus the larger of configured main reserve and observed main demand, plus **18
-candidate slots**. It proceeds only when that fits BATCHER_RUNNER_BUDGET and no
-other Batch CI run occupies the single candidate slot. Missing budget/reserve or
-unobservable other-workflow job demand holds rather than inventing capacity.
+incomplete observations hold). Demand counts runner-holding jobs: `queued`,
+`in_progress` and `requested` (created but not yet queued; counted
+conservatively). Jobs waiting for environment approval (`waiting`) or a job
+concurrency group (`pending`), completed jobs, and runs without materialized jobs
+(for example a run held by its concurrency group) are not demand; a run is a
+placeholder, not a runner. Required
+capacity is other job demand plus the larger of configured main reserve and
+observed main demand, plus **18 candidate slots**. It proceeds only when that fits
+BATCHER_RUNNER_BUDGET and no other Batch CI run occupies the single candidate
+slot. Missing budget/reserve or any unrecognized or missing job status holds
+rather than inventing capacity. Waiting, pending and job-less runs can start
+requesting runners after observation.
 stage.json exposes the measured occupied/reserved slots, configured budget and
 decision. These are explicit repository allocations, not a claim that GitHub
 granted a custom quota or that other repositories are idle. Jobs can expand or
