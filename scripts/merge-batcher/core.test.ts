@@ -1882,6 +1882,13 @@ describe("review regressions: observation, admission and telemetry", () => {
     const all = [...historical, current];
     const byTip = new Map(all.map((c) => [c.manifest.tipSha, c.manifest]));
     const ledger = emptyLedger();
+    ledger.initialization = {
+      schemaVersion: 1,
+      operationId: "12345678-1234-4123-8123-123456789abc",
+      serviceUid: "fixture",
+      serviceGeneration: "1",
+      initializedAt: NOW,
+    };
     ledger.invalidated = historical.map((c) => c.manifest.batchId);
     // Released histories are still sampled for unexpectedly late runs.
     for (const c of historical.slice(0, 25))

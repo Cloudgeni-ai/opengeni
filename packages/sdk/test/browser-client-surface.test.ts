@@ -23,7 +23,6 @@ const legacyBrowserUnusedMethods = [
   "codexAccountUsage",
   "codexDisconnect",
   "codexStatus",
-  "codexUsage",
   "createDocumentBase",
   "createWorkspaceInstructionPolicyOnboardingProposal",
   "createOrganization",
@@ -169,6 +168,13 @@ const retiredSettingsMethods = [
   "supersedePreferenceRegistry",
 ];
 
+// The web stopped calling the native Google Drive lifecycle methods when Drive
+// became one MCP connection; they remain on the SDK for existing callers.
+const retiredGoogleDriveNativeMethods = [
+  "disconnectGoogleDriveConnection",
+  "transitionGoogleDriveLifecycle",
+];
+
 // These browser-facing account APIs landed before their separately reviewed
 // settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
 // remove each entry when its browser consumer lands (the equality below enforces it).
@@ -239,6 +245,7 @@ describe("browser client runtime surface", () => {
         ...integrationMethods,
         ...nativeAppMethods,
         ...retiredSettingsMethods,
+        ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
       ].sort(),
     );

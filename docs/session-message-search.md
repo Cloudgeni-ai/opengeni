@@ -81,7 +81,11 @@ Search reads candidates from `session_message_search_texts`, which holds the
 text of every user and completed assistant message once, keyed like its event
 by workspace, session and sequence. A trigger on `session_events` writes each
 new message as it is appended; a batched migration copied history; deleting an
-event deletes its row. The application role can only read the table.
+event deletes its row. The trigger runs with the inserting role's own rights,
+so a rolling deploy introduces no new `SECURITY DEFINER` routine. A row-security
+policy admits an application-role insert only as an exact mirror of a message
+event that role can see (same key, message type and text); it cannot update or
+delete rows.
 
 Under `FORCE ROW LEVEL SECURITY` PostgreSQL only lets an index serve a
 qualifier that is leakproof or part of a row-security policy, and no text

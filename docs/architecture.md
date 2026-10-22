@@ -2999,8 +2999,10 @@ separately from runtime images. See [database backups](backups.md) for retention
 validation, isolated restoration and coverage limits.
 
 The standalone merge batcher (`scripts/merge-batcher/`) is an operational
-controller, not part of the API or Temporal workers. It reconstructs state from
-Git objects and GitHub, builds one merge commit per admitted PR without checking
+controller, not part of the API or Temporal workers. Active mode requires an
+explicitly operator-initialized ledger, never automatically recreated. Initialization
+requires proven stopped/zero-instance operation. The controller reconstructs state
+from Git objects and GitHub, builds one merge commit per admitted PR without checking
 out candidate code, and submits only the combined tip to `batch-ci.yml`. Exact
 run-attempt receipts distinguish assertion failures from infrastructure and
 cancellation. Landing requires the exact tested tip, a fast-forward base fence and

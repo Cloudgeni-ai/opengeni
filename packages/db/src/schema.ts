@@ -9904,7 +9904,8 @@ export const automaticSessionTitleFanoutOutboxV1 = opengeniPrivateSchema.table(
 
 /**
  * Searchable text of each user and completed assistant message, written only
- * by the schema owner's AFTER INSERT trigger on session_events. Its
+ * by the invoker-rights AFTER INSERT trigger on session_events (admitted as an
+ * exact mirror of a visible message event). Its
  * row-security policies are the search: rows are visible only while the
  * transaction's `opengeni.session_message_search_pattern` matches them (or the
  * text is losslessly encoded), so the trigram index can serve the pattern
