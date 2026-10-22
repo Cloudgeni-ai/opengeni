@@ -370,18 +370,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     delegatedMembershipChecks.set(subjectId, check);
     return await check;
   };
-  const resolveFrozenCredential = withFrozenPersonalConnectionDelegations({
+  const resolveCredential: typeof rawResolveCredential = withFrozenPersonalConnectionDelegations({
     resolveCredential: rawResolveCredential,
     settings: runSettings,
     personalConnectionDelegations,
     ownerHasWorkspaceMembership: delegatedOwnerHasMembership,
   });
-  const resolveCredential: typeof rawResolveCredential = async (request) => {
-    const result = await resolveFrozenCredential(request);
-    if (result.status === "ok") {
-    }
-    return result;
-  };
   const connectorActionIdentity = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
