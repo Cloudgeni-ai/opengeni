@@ -7,6 +7,7 @@ import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces"
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type {
+  AccessGrant,
   AccessContext,
   CreateSessionRequest,
   FileResourceRef,
@@ -769,7 +770,13 @@ export function createSessionProxyHandler(
         rest.length === 1 &&
         rest[0] === "me"
       ) {
-        return json(scopedAccessContext(await client.getAccessContext(), workspaceId));
+        // An external actor's access inventory is empty: its authority for this
+        // workspace is the effective grant, so the app gets exactly that grant.
+        const [access, grant] = await Promise.all([
+          client.getAccessContext(),
+          getSessionProxyWorkspaceGrant(client, workspaceId, call),
+        ]);
+        return json(scopedAccessContext(access, grant));
       }
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
@@ -1483,18 +1490,21 @@ const PASS_THROUGH_HEADERS = [
 ] as const;
 
 /** The user's access to the resolved workspace only, without key authority. */
-function scopedAccessContext(access: AccessContext, workspaceId: string): AccessContext {
-  const workspaceGrants = access.workspaceGrants.filter(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const accountIds = new Set(workspaceGrants.map((grant) => grant.accountId));
+/**
+ * The app's access context: the resolved workspace's effective grant only,
+ * never the user's other workspaces or the key's own authority.
+ */
+function scopedAccessContext(access: AccessContext, grant: AccessGrant): AccessContext {
   const { credential: _credential, ...rest } = access;
   return {
     ...rest,
-    workspaceGrants,
-    accountGrants: access.accountGrants.filter((grant) => accountIds.has(grant.accountId)),
-    defaultWorkspaceId: workspaceGrants.length > 0 ? workspaceId : null,
-    defaultAccountId: workspaceGrants[0]?.accountId ?? null,
+    subjectId: grant.subjectId,
+    workspaceGrants: [grant],
+    accountGrants: access.accountGrants.filter(
+      (accountGrant) => accountGrant.accountId === grant.accountId,
+    ),
+    defaultWorkspaceId: grant.workspaceId,
+    defaultAccountId: grant.accountId,
   };
 }
 
