@@ -544,6 +544,7 @@ export class DesktopShell {
 
   private openWindow(): void {
     const window = new MainWindow(this.config, app.getPath("userData"), {
+      connectComputer: (url) => this.handleUrl(url),
       navigated: (accountId, url) => this.rememberPath(accountId, url),
       crashed: (accountId) => this.window?.reload(accountId),
       loadFailed: (accountId, url) => this.loadFailed(accountId, url),

@@ -14,6 +14,8 @@ import {
   type WebContents,
 } from "electron";
 
+import { parseComputerConnectLink } from "@opengeni/sdk/app-links";
+
 import type { DesktopAppConfig } from "./config";
 import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
 import { routeNewWindow, routePopupNavigation } from "./popup-routing";
@@ -28,6 +30,8 @@ export interface AccountTarget {
 }
 
 export interface WindowEvents {
+  /** A validated connection link from an account page; normal authorization and consent still apply. */
+  connectComputer(url: string): void;
   /** An in-window navigation, for remembering where each account was. */
   navigated(accountId: string, url: string): void;
   /** The view's renderer went away; the shell decides whether to reload. */
@@ -375,6 +379,16 @@ export class MainWindow {
     return view;
   }
 
+  /** Dispatch only this account server's validated connect links, never arbitrary OS protocols. */
+  private openOutside(url: string, baseUrl: string | null): void {
+    const link = parseComputerConnectLink(url, this.config.scheme, this.config.webPaths);
+    if (link && baseUrl && sameOrigin(link.origin, baseUrl)) {
+      this.events.connectComputer(url);
+      return;
+    }
+    openExternalSafely(url);
+  }
+
   /**
    * Only the account's own server loads in its view; everything else opens in
    * the browser. A blank window the page reserves for a sign-in or connect
@@ -386,12 +400,12 @@ export class MainWindow {
     contents.on("will-navigate", (event, url) => {
       if (stays(url)) return;
       event.preventDefault();
-      openExternalSafely(url);
+      this.openOutside(url, baseUrl);
     });
     contents.on("will-redirect", (event, url) => {
       if (stays(url)) return;
       event.preventDefault();
-      openExternalSafely(url);
+      this.openOutside(url, baseUrl);
     });
     contents.setWindowOpenHandler(({ url }) => {
       if (routeNewWindow(url, baseUrl) === "placeholder") {
@@ -408,7 +422,7 @@ export class MainWindow {
           },
         };
       }
-      openExternalSafely(url);
+      this.openOutside(url, baseUrl);
       return { action: "deny" };
     });
     if (baseUrl) {
@@ -433,13 +447,13 @@ export class MainWindow {
         return;
       }
       event.preventDefault();
-      openExternalSafely(url);
+      this.openOutside(url, baseUrl);
       if (!popup.isVisible()) popup.destroy();
     };
     contents.on("will-navigate", route);
     contents.on("will-redirect", route);
     contents.setWindowOpenHandler(({ url }) => {
-      openExternalSafely(url);
+      this.openOutside(url, baseUrl);
       return { action: "deny" };
     });
     contents.on("will-attach-webview", (event) => event.preventDefault());
