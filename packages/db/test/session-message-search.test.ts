@@ -17,6 +17,7 @@ import {
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "../src/schema";
+import { SESSION_MESSAGE_SEARCH_WINDOW } from "../src/session-message-search";
 import { toPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "../src/lossless-json";
 import type {
   SessionMessageSearchRequest,
@@ -700,6 +701,60 @@ test("agent list reach intersects host scope before messages and counts", async 
   expect(intersected.matches).toHaveLength(0);
   expect(intersected.page.scannedMessages).toBe(0);
 }, 180_000);
+
+test("searches read bounded windows and resume exactly across window boundaries", async () => {
+  const sessions = await Promise.all([makeSession(), makeSession(), makeSession()]);
+  const [first, second, third] = sessions.sort((a, b) => (a.id < b.id ? -1 : 1));
+  const authority = {
+    subjectId,
+    authorizationScope: {
+      kind: "scoped" as const,
+      sessionIds: sessions.map((s) => s.id),
+      rootSessionIds: [],
+    },
+  };
+  // The first session spans more than two windows with hits at both ends; the
+  // second has none; the third hits only after its own full window of misses.
+  const filler = async (sessionId: string, from: number, to: number) =>
+    shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      select ${accountId}, ${workspaceId}, ${sessionId}, n, 'user.message', jsonb_build_object('text', 'unrelated ' || n)
+      from generate_series(${from}::int, ${to}::int) n`;
+  const span = SESSION_MESSAGE_SEARCH_WINDOW * 2 + 17;
+  await insert(first!.id, 1, "user.message", { text: "window-needle start" });
+  await filler(first!.id, 2, span);
+  await insert(first!.id, span + 1, "agent.message.completed", { text: "end window-needle" });
+  await filler(second!.id, 1, SESSION_MESSAGE_SEARCH_WINDOW + 3);
+  await filler(third!.id, 1, SESSION_MESSAGE_SEARCH_WINDOW - 1);
+  await insert(third!.id, SESSION_MESSAGE_SEARCH_WINDOW, "user.message", {
+    text: "WINDOW-NEEDLE last",
+  });
+  const total = span + 1 + SESSION_MESSAGE_SEARCH_WINDOW + 3 + SESSION_MESSAGE_SEARCH_WINDOW;
+  const every = await collect({ query: "window-needle" }, authority);
+  expect(every.matches.map((m) => [m.sessionId, m.sequence])).toEqual([
+    [first!.id, 1],
+    [first!.id, span + 1],
+    [third!.id, SESSION_MESSAGE_SEARCH_WINDOW],
+  ]);
+  expect(every.page.scannedMessages).toBe(total);
+  const grouped = await collect({ query: "window-needle", groupBy: "session" }, authority);
+  expect(grouped.matches.map((m) => [m.sessionId, m.sequence])).toEqual([
+    [first!.id, 1],
+    [third!.id, SESSION_MESSAGE_SEARCH_WINDOW],
+  ]);
+  // One hit per page still resumes after each window without repeating or
+  // skipping a hit, and a grouped session stays skipped past its window.
+  const paged = await collect({ query: "window-needle", limit: 1 }, authority);
+  expect(paged.matches.map((m) => m.sequence)).toEqual([
+    1,
+    span + 1,
+    SESSION_MESSAGE_SEARCH_WINDOW,
+  ]);
+  const pagedGroups = await collect(
+    { query: "window-needle", groupBy: "session", limit: 1 },
+    authority,
+  );
+  expect(pagedGroups.matches.map((m) => m.sessionId)).toEqual([first!.id, third!.id]);
+});
 
 test("workspace grouping skips prolific sessions in both buffered results and continuation", async () => {
   const sessions = await Promise.all([makeSession(), makeSession()]);
