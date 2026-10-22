@@ -1,4 +1,7 @@
 -- deployment-mode: rolling
+-- online-safety-exception: explicit-lock: the lock holds only the subscription connection, reach, policy and settings tables, which have a few rows per organization or workspace, so the owner rewrite cannot race a concurrent connect and finishes instantly
+-- online-safety-exception: unbatched-data: every rewritten table holds a handful of subscription connection, reach or policy rows per organization, so one pass finishes instantly
+-- online-safety-exception: constraint-validation: the validated table holds a handful of subscription connection rows per organization, so validating under the same lock finishes instantly
 -- contract-step: nothing in this release reads or writes subscription_connection_assignment_policies; a later contract migration drops it. A previous binary that straddles the commit reads no policy rows, so it classifies every shared connection by its manager and the stripped settings (automatic source), which is exactly the reach written here.
 --
 -- Migration 0907: every subscription connection has one owner and serves
