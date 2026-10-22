@@ -3,7 +3,7 @@ import { avatarPrompt } from "../server/prompts";
 import { AVATAR_THEMES, avatarTheme, DEFAULT_AVATAR_THEME, themeStyle } from "../server/themes";
 
 test("every agent's prompt carries the workspace house style and only its own subject", () => {
-  const theme = avatarTheme("pixel");
+  const theme = avatarTheme("outline");
   const coach = avatarPrompt({ name: "Run Coach", hint: "a running shoe", theme });
   const money = avatarPrompt({ name: "Money", description: "Tracks spending", theme });
   for (const prompt of [coach, money]) expect(prompt).toContain(theme.style);

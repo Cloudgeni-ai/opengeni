@@ -66,6 +66,34 @@ bun scripts/mock-model.ts &
 OPENGENI_MODEL_PROVIDERS_JSON="$(bun scripts/mock-model.ts --print-config)" bun run dev  # at the repo root
 ```
 
+### Against a hosted deployment
+
+`OPENGENI_SIMPLE_API_KEY_FILE` (or `OPENGENI_SIMPLE_API_KEY`) makes the server
+act with that key instead of the browser's own sign-in, so a dev instance can
+point at staging. Everyone who can open that instance acts as the key; keep it
+private.
+
+## Mac app
+
+`desktop/` wraps the app for macOS (Apple silicon). On first launch it asks for
+a server (Staging, Production or any address) and signs in through the server's
+own native sign-in page in the default browser, the same flow as the Opengeni
+desktop app. The token stays in the keychain (Electron `safeStorage`) and is
+handed to the bundled server on stdin. Each server keeps its own sign-in and
+data; **Change Server…** and **Sign Out** are in the app menu.
+
+The server only accepts the `opengeni://auth/callback` callback, which the
+Opengeni desktop app normally owns, so this app takes the scheme only while a
+sign-in is open and hands it back afterwards.
+
+```bash
+desktop/build.sh   # Linux or macOS; writes desktop/release/mac-arm64/Opengeni Simple.app
+# on the Mac, the bundle is unsigned: sign it ad hoc once
+codesign --force --deep -s - "/Applications/Opengeni Simple.app"
+```
+
+Logs: `~/Library/Application Support/Opengeni Simple/{app,server}.log`.
+
 ## Check
 
 ```bash

@@ -24,23 +24,10 @@ export const OPENGENI_THEMES: AvatarTheme[] = [
     accents: OPENGENI_ACCENTS,
   },
   {
-    id: "og-glow",
-    name: "Mono on glow",
-    blurb: "Ink glyph over the app's teal and peach corner glow.",
-    style: `minimal icon: one simple solid ink #242424 glyph centered on an off-white background washed with a very soft blurred glow of pale teal #9fe3d3 from the top-left corner and pale peach #ffb787 from the bottom-right corner, generous empty space, no outlines, no texture, ${OPENGENI_PALETTE}`,
-  },
-  {
     id: "og-ink",
     name: "Ink tile",
     blurb: "Off-white glyph on a dark ink tile, one bright accent.",
     style: `minimal icon: one simple solid off-white glyph centered on a flat deep ink #242424 background, one small accent detail in {accent}, geometric, generous empty space, no gradients, no texture, ${OPENGENI_PALETTE}`,
-    accents: OPENGENI_ACCENTS,
-  },
-  {
-    id: "og-wash",
-    name: "Tinted wash",
-    blurb: "Ink glyph on a flat teal or peach tile.",
-    style: `minimal icon: one simple solid ink #242424 glyph centered on a flat pale tint of {accent} filling the whole background, generous empty space, no gradients, no outlines, no texture, ${OPENGENI_PALETTE}`,
     accents: OPENGENI_ACCENTS,
   },
   {
@@ -73,78 +60,9 @@ export const OPENGENI_THEMES: AvatarTheme[] = [
   },
 ];
 
+/** Simple, flat styles only: no gradients, no strong background colors. */
 export const AVATAR_THEMES: AvatarTheme[] = [
   ...OPENGENI_THEMES,
-  {
-    id: "clay",
-    name: "Soft clay",
-    blurb: "Chunky matte 3D clay, pastel and friendly.",
-    style:
-      "soft matte clay 3D render, chunky rounded shapes, pastel colors, soft studio lighting with gentle shadows, the subject centered on a soft pastel gradient background",
-  },
-  {
-    id: "glass",
-    name: "Glass orbs",
-    blurb: "Glowing frosted glass, violet and pink light.",
-    style:
-      "the subject as a frosted luminous glass icon inside a glowing translucent glass orb, violet and pink light with a subtle color shift per agent, soft glow, deep violet gradient background",
-  },
-  {
-    id: "flat",
-    name: "Flat geometric",
-    blurb: "Bold vector shapes, two or three solid colors.",
-    style:
-      "bold flat geometric vector illustration, two or three solid colors, no gradients and no shading, simple circles and rounded shapes, one solid saturated background color",
-  },
-  {
-    id: "watercolor",
-    name: "Storybook watercolor",
-    blurb: "Hand-painted creatures with friendly faces.",
-    style:
-      "soft hand-painted watercolor storybook illustration in the spirit of Japanese animated films, the subject as a cute little creature with a friendly face, warm paper texture, gentle washes of color",
-  },
-  {
-    id: "pixel",
-    name: "Pixel art",
-    blurb: "Crisp retro sprites with a limited palette.",
-    style:
-      "crisp 32x32 retro pixel art sprite with visible square pixels, limited vibrant palette, centered on a solid colored background",
-  },
-  {
-    id: "origami",
-    name: "Origami",
-    blurb: "Folded paper sculptures with real shadows.",
-    style:
-      "folded origami paper sculpture with crisp folds and creases, soft realistic shadows, on a pastel paper background",
-  },
-  {
-    id: "mascot",
-    name: "Mascot family",
-    blurb: "One fluffy creature species, a different prop per agent.",
-    style:
-      "always the SAME species of mascot: a small round fluffy spirit creature with big friendly eyes, identical body and face in every image, wearing or holding a prop that shows the subject, cute character design, soft shading, soft pastel background",
-  },
-  {
-    id: "line",
-    name: "Line on gradient",
-    blurb: "One white monoline icon on a vivid gradient.",
-    style:
-      "a single clean white monoline icon with rounded strokes, centered on a vivid smooth two-color gradient background, a different gradient per agent, minimal premium app icon",
-  },
-  {
-    id: "sticker",
-    name: "Retro sticker",
-    blurb: "70s die-cut stickers, warm muted palette.",
-    style:
-      "retro 1970s die-cut sticker illustration with a thick white outline, warm muted palette of orange, mustard, teal and cream, slight halftone texture, on a solid warm background",
-  },
-  {
-    id: "isometric",
-    name: "Isometric worlds",
-    blurb: "Tiny 3D dioramas on floating platforms.",
-    style:
-      "a cute tiny isometric 3D diorama about the subject on a small floating square platform, soft colors, clean low-poly look, pastel background",
-  },
   {
     id: "duotone",
     name: "Duotone",
@@ -167,13 +85,6 @@ export const AVATAR_THEMES: AvatarTheme[] = [
       "minimal icon drawn as one thick rounded outline stroke in a single saturated color, on a very pale tint of that color, no fill, no shading, generous empty space, a different color per agent",
   },
   {
-    id: "glyph",
-    name: "Glyph on gradient",
-    blurb: "Solid white glyph on a soft gradient, like an app icon.",
-    style:
-      "minimal app icon: one simple solid white glyph centered on a soft, subtle two-color gradient background, clean and modern like a phone app icon, no outlines, no texture, a different gradient per agent",
-  },
-  {
     id: "cutout",
     name: "Paper cutout",
     blurb: "Two flat paper layers with a soft shadow.",
@@ -182,7 +93,7 @@ export const AVATAR_THEMES: AvatarTheme[] = [
   },
 ];
 
-export const DEFAULT_AVATAR_THEME = "clay";
+export const DEFAULT_AVATAR_THEME = "og-mono";
 
 /** The theme's style for one agent, with its brand accent picked stably from `seed`. */
 export function themeStyle(theme: AvatarTheme, seed: string): string {

@@ -43,8 +43,15 @@ export const dataDirectory = resolve(
  * pointing a dev instance at a remote deployment (staging) without a sign-in
  * flow. Every visitor then acts as that key, so keep such an instance private.
  */
+let stdinKey: string | null | undefined;
+
 export function opengeniApiKey(): string | null {
   if (process.env.OPENGENI_SIMPLE_API_KEY) return process.env.OPENGENI_SIMPLE_API_KEY.trim();
+  // The Mac app hands over its signed-in token on stdin, so it never touches disk or the environment.
+  if (process.env.OPENGENI_SIMPLE_API_KEY_STDIN === "1") {
+    stdinKey ??= readFileSync(0, "utf8").trim() || null;
+    return stdinKey;
+  }
   const file = process.env.OPENGENI_SIMPLE_API_KEY_FILE;
   if (file && existsSync(file)) return readFileSync(file, "utf8").trim() || null;
   return null;

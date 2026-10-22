@@ -38,7 +38,9 @@ import {
 } from "./opengeni";
 
 const serveDist = process.argv.includes("--serve-dist");
-const distDirectory = resolve(import.meta.dirname, "../dist");
+const distDirectory = resolve(
+  process.env.OPENGENI_SIMPLE_DIST_DIR ?? join(import.meta.dirname, "../dist"),
+);
 const apiUrl = opengeniApiUrl();
 const apiKey = opengeniApiKey();
 
@@ -355,7 +357,7 @@ function staticFile(pathname: string) {
 const port = serveDist ? SIMPLE_WEB_PORT : SIMPLE_SERVER_PORT;
 Bun.serve({
   port,
-  hostname: serveDist ? "0.0.0.0" : "127.0.0.1",
+  hostname: process.env.OPENGENI_SIMPLE_HOST ?? (serveDist ? "0.0.0.0" : "127.0.0.1"),
   idleTimeout: 0,
   async fetch(request) {
     const url = new URL(request.url);

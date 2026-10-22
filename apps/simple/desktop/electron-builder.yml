@@ -1,0 +1,26 @@
+appId: ai.opengeni.simple
+productName: Opengeni Simple
+electronVersion: 44.7.2
+directories:
+  output: release
+files:
+  - main.cjs
+  - package.json
+  - "!**/node_modules/**"
+# The app has no runtime dependencies; never pick up the monorepo's.
+npmRebuild: false
+extraResources:
+  - from: build/simple-server
+    to: simple-server
+  - from: build/dist
+    to: dist
+mac:
+  target:
+    - target: zip
+      arch: [arm64]
+  icon: build/icon.png
+  category: public.app-category.productivity
+  identity: null
+protocols:
+  - name: Opengeni sign-in
+    schemes: [opengeni]

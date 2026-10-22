@@ -1,0 +1,9 @@
+{
+  "name": "opengeni-simple",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opengeni Simple for macOS",
+  "author": "Opengeni",
+  "main": "main.cjs",
+  "productName": "Opengeni Simple"
+}
