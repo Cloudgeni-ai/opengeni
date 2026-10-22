@@ -27,6 +27,7 @@ function fixture(
           personal_resource_human_subject_id: "",
           personal_resource_actor_subject_id: "",
           agent_root_session_id: "",
+          agent_caller_session_id: "",
           site_id: "",
           site_viewer_principal: "",
           // A nested scope's enclosing settings (read by the same statement).
@@ -38,6 +39,7 @@ function fixture(
           parent_personal_resource_human_subject_id: "",
           parent_personal_resource_actor_subject_id: "",
           parent_agent_root_session_id: "",
+          parent_agent_caller_session_id: "",
           parent_site_id: "",
           parent_site_viewer_principal: "",
         },

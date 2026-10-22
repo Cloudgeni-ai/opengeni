@@ -2609,6 +2609,7 @@ async function validateScheduledTaskAgentConfig(input: {
           ? (fileActor.privateFileOwnerSubjectId ?? null)
           : null,
       },
+      input.grant,
     );
   });
   if (input.payload.agentConfig.slackBotConnectionId) {

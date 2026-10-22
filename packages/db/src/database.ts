@@ -72,6 +72,8 @@ export type SessionRlsActorContext = {
   initiatingHumanSubjectId?: string | null;
   /** Root reconstructed from a verified live agent attempt, never page input. */
   agentRootSessionId?: string | null;
+  /** Exact caller reconstructed from that attempt; required for cross-tree File reads. */
+  agentCallerSessionId?: string | null;
 };
 
 /** Request-local proof from the signed published-Site gateway and live viewer cookie. */
@@ -123,6 +125,7 @@ export function currentSessionRlsActorIdentityKey(): string | null {
     actor.privateFileOwnerSubjectId ?? null,
     actor.sessionAttachmentReadAccess ?? null,
     actor.agentRootSessionId ?? null,
+    actor.agentCallerSessionId ?? null,
     siteViewerRlsContext.getStore() ?? null,
   ]);
 }
@@ -175,6 +178,7 @@ type RlsContextSettings = {
   personalResourceHumanSubjectId: string;
   personalResourceActorSubjectId: string;
   agentRootSessionId: string;
+  agentCallerSessionId: string;
   siteId: string;
   siteViewerPrincipal: string;
 };
@@ -753,8 +757,10 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
     sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
     sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
     sql`set_config('opengeni.file_provenance_writer_v1', '1', true)`,
+    sql`set_config('opengeni.file_provenance_reader_v1', '1', true)`,
     sql`set_config('jit', 'off', true)`,
     sql`set_config('opengeni.agent_root_session_id', ${actor?.agentRootSessionId ?? ""}::text, true)`,
+    sql`set_config('opengeni.agent_caller_session_id', ${actor?.agentCallerSessionId ?? ""}::text, true)`,
     sql`set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}::text, true)`,
     sql`set_config('opengeni.site_viewer_principal', ${siteViewer?.principal ?? ""}::text, true)`,
   ];
@@ -777,6 +783,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
       current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
       current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
       current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
+      current_setting('opengeni.agent_caller_session_id', true) as agent_caller_session_id,
       current_setting('opengeni.site_id', true) as site_id,
       current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal)`,
     sql`resolved as materialized (select ${account} as account_id from parent)`,
@@ -806,6 +813,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
     parent_personal_resource_human_subject_id: string | null;
     parent_personal_resource_actor_subject_id: string | null;
     parent_agent_root_session_id: string | null;
+    parent_agent_caller_session_id: string | null;
     parent_site_id: string | null;
     parent_site_viewer_principal: string | null;
   }>(
@@ -824,6 +832,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
         parent.personal_resource_human_subject_id as parent_personal_resource_human_subject_id,
         parent.personal_resource_actor_subject_id as parent_personal_resource_actor_subject_id,
         parent.agent_root_session_id as parent_agent_root_session_id,
+        parent.agent_caller_session_id as parent_agent_caller_session_id,
         parent.site_id as parent_site_id,
         parent.site_viewer_principal as parent_site_viewer_principal
       from ${sql.raw(last)}, resolved, parent`,
@@ -865,6 +874,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
           personalResourceHumanSubjectId: row.parent_personal_resource_human_subject_id ?? "",
           personalResourceActorSubjectId: row.parent_personal_resource_actor_subject_id ?? "",
           agentRootSessionId: row.parent_agent_root_session_id ?? "",
+          agentCallerSessionId: row.parent_agent_caller_session_id ?? "",
           siteId: row.parent_site_id ?? "",
           siteViewerPrincipal: row.parent_site_viewer_principal ?? "",
         }
@@ -882,6 +892,7 @@ async function readRlsContextSettings(db: Database): Promise<RlsContextSettings>
     personal_resource_human_subject_id: string | null;
     personal_resource_actor_subject_id: string | null;
     agent_root_session_id: string | null;
+    agent_caller_session_id: string | null;
     site_id: string | null;
     site_viewer_principal: string | null;
   }>(
@@ -895,6 +906,7 @@ async function readRlsContextSettings(db: Database): Promise<RlsContextSettings>
       current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
       current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
       current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
+      current_setting('opengeni.agent_caller_session_id', true) as agent_caller_session_id,
       current_setting('opengeni.site_id', true) as site_id,
       current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal`,
   );
@@ -907,6 +919,7 @@ async function readRlsContextSettings(db: Database): Promise<RlsContextSettings>
     personalResourceHumanSubjectId: settings?.personal_resource_human_subject_id ?? "",
     personalResourceActorSubjectId: settings?.personal_resource_actor_subject_id ?? "",
     agentRootSessionId: settings?.agent_root_session_id ?? "",
+    agentCallerSessionId: settings?.agent_caller_session_id ?? "",
     siteId: settings?.site_id ?? "",
     siteViewerPrincipal: settings?.site_viewer_principal ?? "",
   };
@@ -940,6 +953,7 @@ async function restoreRlsContextSettings(
     personal_resource_human_subject_id: string;
     personal_resource_actor_subject_id: string;
     agent_root_session_id: string;
+    agent_caller_session_id: string;
     site_id: string;
     site_viewer_principal: string;
   }>(
@@ -953,6 +967,7 @@ async function restoreRlsContextSettings(
       set_config('opengeni.personal_resource_human_subject_id', ${settings.personalResourceHumanSubjectId}, true) as personal_resource_human_subject_id,
       set_config('opengeni.personal_resource_actor_subject_id', ${settings.personalResourceActorSubjectId}, true) as personal_resource_actor_subject_id,
       set_config('opengeni.agent_root_session_id', ${settings.agentRootSessionId}, true) as agent_root_session_id,
+      set_config('opengeni.agent_caller_session_id', ${settings.agentCallerSessionId}, true) as agent_caller_session_id,
       set_config('opengeni.site_id', ${settings.siteId}, true) as site_id,
       set_config('opengeni.site_viewer_principal', ${settings.siteViewerPrincipal}, true) as site_viewer_principal`,
   );
@@ -965,6 +980,7 @@ async function restoreRlsContextSettings(
     restored.personal_resource_human_subject_id !== settings.personalResourceHumanSubjectId ||
     restored.personal_resource_actor_subject_id !== settings.personalResourceActorSubjectId ||
     restored.agent_root_session_id !== settings.agentRootSessionId ||
+    restored.agent_caller_session_id !== settings.agentCallerSessionId ||
     restored.site_id !== settings.siteId ||
     restored.site_viewer_principal !== settings.siteViewerPrincipal
   ) {

@@ -124,12 +124,19 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM slack_interactions interaction_row
         WHERE interaction_row.account_id = source.account_id
           AND interaction_row.workspace_id = source.workspace_id
-          AND interaction_row.session_reservation_id = source_session.root_session_id))
+          AND interaction_row.session_reservation_id = source_session.root_session_id)
+      AND NOT EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications decision
+        WHERE decision.file_id = source.file_id
+          AND (decision.decision = 'human_shared'
+            OR (decision.decision = 'owner_only' AND decision.owner_subject_id IS NOT NULL))))
   THEN RAISE EXCEPTION 'Missing historical Slack audience requires operator adjudication'
     USING ERRCODE='55000'; END IF;
 END $missing_slack_audience_preflight$;
 UPDATE files f SET source_session_id = source.session_id,
-  source_session_owner_subject_id = file_source_owner_snapshot_0913(
+  source_session_owner_subject_id = coalesce(
+    (SELECT decision.owner_subject_id FROM opengeni_private.file_source_adjudications decision
+      WHERE decision.file_id = f.id AND decision.decision = 'owner_only'),
+    file_source_owner_snapshot_0913(
     CASE WHEN session_row.visibility = 'user_private' THEN coalesce(session_row.owner_subject_id,'') END,
     CASE WHEN session_row.site_access_root_id IS NOT NULL THEN coalesce(session_row.site_owner_subject_id,'') END,
     (SELECT slack.owning_subject_id FROM slack_interactions slack
@@ -137,10 +144,12 @@ UPDATE files f SET source_session_id = source.session_id,
         AND slack.workspace_id = session_row.workspace_id
         AND slack.session_reservation_id = session_row.root_session_id
         AND slack.visibility = 'private' LIMIT 1),
-    CASE WHEN session_row.memory_scope = 'user' THEN coalesce(session_row.scope_subject_id,'') END),
+    CASE WHEN session_row.memory_scope = 'user' THEN coalesce(session_row.scope_subject_id,'') END)),
   source_session_shared_unrestricted = (session_row.visibility = 'workspace_shared'
     AND session_row.memory_scope <> 'user'
     AND session_row.site_access_root_id IS NULL
+    AND NOT EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications decision
+      WHERE decision.file_id = f.id AND decision.decision = 'owner_only')
     AND NOT EXISTS (SELECT 1 FROM slack_interactions slack
       WHERE slack.account_id = session_row.account_id
         AND slack.workspace_id = session_row.workspace_id
@@ -310,6 +319,11 @@ END $multiple_private_owners_preflight$;
 -- owner differs. Set the durable owner under the maintenance lock; the runtime
 -- trigger intentionally forbids such ownership changes.
 ALTER TABLE files DISABLE TRIGGER files_personal_owner_immutable;
+UPDATE files f SET private_owner_subject_ids = ARRAY[a.owner_subject_id],
+    owner_subject_id = a.owner_subject_id
+  FROM opengeni_private.file_source_adjudications a
+  WHERE a.file_id = f.id AND a.decision = 'owner_only'
+    AND a.owner_subject_id IS NOT NULL AND f.source_session_id IS NOT NULL;
 UPDATE files f SET owner_subject_id = f.private_owner_subject_ids[1]
   WHERE f.source_session_provenance_missing
     AND f.private_owner_subject_ids IS NOT NULL
@@ -628,6 +642,22 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
     WHERE source_session.account_id = files.account_id
       AND source_session.workspace_id = files.workspace_id
       AND source_session.id = files.source_session_id
+      -- Old readers do not set the exact caller. They may keep their own tree,
+      -- but cannot widen a source File across trees after this cutover.
+      AND (nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
+        OR source_session.root_session_id::text =
+          nullif(current_setting('opengeni.agent_root_session_id', true), '')
+        OR EXISTS (SELECT 1 FROM sessions caller_session
+          WHERE caller_session.account_id = files.account_id
+            AND caller_session.workspace_id = files.workspace_id
+            AND caller_session.id::text =
+              nullif(current_setting('opengeni.agent_caller_session_id', true), '')
+            AND caller_session.root_session_id::text =
+              nullif(current_setting('opengeni.agent_root_session_id', true), '')
+            AND (caller_session.agent_access = 'workspace'
+              OR (caller_session.agent_access = 'user'
+                AND caller_session.scope_subject_id IS NOT NULL
+                AND caller_session.scope_subject_id = source_session.scope_subject_id))))
       AND (NOT EXISTS (SELECT 1 FROM slack_interactions slack
           WHERE slack.account_id = files.account_id AND slack.workspace_id = files.workspace_id
             AND slack.session_reservation_id = source_session.root_session_id
@@ -684,6 +714,11 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
           nullif(current_setting('opengeni.private_file_owner', true), '')))
     AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
     AND NOT file_source_session_exists_0913(account_id, workspace_id, source_session_id))
+);
+-- Previous application binaries never set this marker. A maintenance cutover
+-- must not let their unguarded File readers disclose any rows after restart.
+CREATE POLICY files_source_reader_upgrade_0914 ON files AS RESTRICTIVE FOR SELECT USING (
+  current_setting('opengeni.file_provenance_reader_v1', true) = '1'
 );
 
 CREATE POLICY documents_file_source_visible ON documents AS RESTRICTIVE FOR SELECT USING (

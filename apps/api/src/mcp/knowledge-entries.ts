@@ -127,6 +127,7 @@ export function registerKnowledgeEntryTools(
           subjectId: attempt.subjectId,
           initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
           agentRootSessionId: attempt.callerRootSessionId,
+          agentCallerSessionId: attempt.callerSessionId,
           privateFileOwnerSubjectId:
             learning.defaultScope === "personal" ? learning.subjectId : null,
         },

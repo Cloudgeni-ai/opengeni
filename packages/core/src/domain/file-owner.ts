@@ -63,6 +63,7 @@ export async function fileOwnerContextForAgent(
     subjectId: grant.subjectId,
     initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
     agentRootSessionId: attempt.callerRootSessionId,
+    agentCallerSessionId: attempt.callerSessionId,
     privateFileOwnerSubjectId: snapshot.defaultScope === "personal" ? snapshot.subjectId : null,
   };
 }

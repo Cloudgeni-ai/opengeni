@@ -220,6 +220,7 @@ export async function withAccessGrantSessionRlsContext<T>(
             subjectId: actor.subjectId,
             initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
             agentRootSessionId: actor.callerRootSessionId,
+            agentCallerSessionId: actor.callerSessionId,
             privateFileOwnerSubjectId:
               learning.defaultScope === "personal" ? learning.subjectId : null,
           },

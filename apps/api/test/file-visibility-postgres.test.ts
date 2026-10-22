@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import {
   fileSourceVisibleToHost,
   fileMayBeCopiedToWorkspace,
+  validateFileResources,
   sourceSessionRequiresHumanShare,
   type ObjectStorageDependency,
   type SessionWorkflowClient,
@@ -353,6 +354,91 @@ test("a session-scoped agent cannot read another shared chat's File", async () =
   };
   expect(await fileSourceVisibleToHost({ db: db.db }, grant, fileId)).toBe(false);
   expect(await fileSourceVisibleToHost({ db: db.db }, grant, ownFileId)).toBe(true);
+  const scopedActor = {
+    subjectId: grant.subjectId,
+    initiatingHumanSubjectId: f.owner.subjectId,
+    agentRootSessionId: caller.rootSessionId,
+    agentCallerSessionId: caller.id,
+  };
+  const unrelated = await withSessionRlsActorContext(scopedActor, () =>
+    getFilesForSubject(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: grant.subjectId,
+      fileIds: [fileId],
+    }),
+  );
+  expect(unrelated).toHaveLength(0);
+  const own = await withSessionRlsActorContext(scopedActor, () =>
+    getFilesForSubject(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: grant.subjectId,
+      fileIds: [ownFileId],
+    }),
+  );
+  expect(own).toHaveLength(1);
+  const workspaceCaller = await withSessionRlsActorContext({ subjectId: f.owner.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Example request",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      agentAccess: "workspace",
+      createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+      createdByContext: {},
+    }),
+  );
+  const workspaceScoped = await withSessionRlsActorContext(
+    {
+      subjectId: grant.subjectId,
+      agentRootSessionId: workspaceCaller.rootSessionId,
+      agentCallerSessionId: workspaceCaller.id,
+    },
+    () =>
+      getFilesForSubject(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        subjectId: grant.subjectId,
+        fileIds: [fileId],
+      }),
+  );
+  expect(workspaceScoped).toHaveLength(1);
+  const oldReader = await withRlsContext(
+    db.db,
+    { accountId: f.workspace.accountId, workspaceId: f.workspace.id },
+    async (tx) => {
+      await setSubjectRlsContext(tx, f.owner.subjectId);
+      await tx.execute(sql`select set_config('opengeni.file_provenance_reader_v1', '', true)`);
+      return rawRows<{ id: string }>(tx, sql`select id from files where id = ${ownFileId}`);
+    },
+  );
+  expect(oldReader).toHaveLength(0);
+  await validateFileResources(
+    db.db,
+    f.workspace.accountId,
+    f.workspace.id,
+    grant.subjectId,
+    [{ kind: "file", fileId: ownFileId, mountPath: "/workspace/input" }],
+    scopedActor,
+    grant,
+  );
+  await expect(
+    validateFileResources(
+      db.db,
+      f.workspace.accountId,
+      f.workspace.id,
+      grant.subjectId,
+      [{ kind: "file", fileId, mountPath: "/workspace/input" }],
+      scopedActor,
+      grant,
+    ),
+  ).rejects.toThrow("unknown file resource");
 });
 
 test("document authority reads an ordinary private original without opening a source chat", async () => {
@@ -622,7 +708,7 @@ test("a generated file follows its source chat when the chat becomes private", a
         fileIds: [fileId],
       }),
   );
-  expect(unrelatedAgent).toHaveLength(1);
+  expect(unrelatedAgent).toHaveLength(0);
   await transitionSessionVisibility(db.db, {
     workspaceId: f.workspace.id,
     sessionId,
@@ -1232,6 +1318,30 @@ test("migration refuses a source whose historical Slack audience was erased", as
     await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
       "Missing historical Slack audience requires operator adjudication",
     );
+    await legacy.admin`insert into opengeni_private.file_source_adjudications
+      (file_id, decision, owner_subject_id, attested_by)
+      values (${fileId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator')`;
+    await legacy.admin.unsafe(migration);
+    expect(
+      await withSessionRlsActorContext(
+        { subjectId: f.owner.subjectId, privateFileOwnerSubjectId: f.owner.subjectId },
+        () =>
+          getFilesForSubject(legacyDb.db, {
+            accountId: f.workspace.accountId,
+            workspaceId: f.workspace.id,
+            subjectId: f.owner.subjectId,
+            fileIds: [fileId],
+          }),
+      ),
+    ).toHaveLength(1);
+    expect(
+      await getFilesForSubject(legacyDb.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        subjectId: f.other.subjectId,
+        fileIds: [fileId],
+      }),
+    ).toHaveLength(0);
   } finally {
     await legacyDb.close();
     await legacy.release();

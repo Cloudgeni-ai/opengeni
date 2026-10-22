@@ -345,6 +345,7 @@ async function saveActorNewSessionDraftInFileScope(
     externalAuthorization
       ? await fileOwnerContextForAccess(deps, externalAuthorization, "sessions:create")
       : undefined,
+    grant,
   );
   assertConfiguredModel(deps.settings, input.model);
   await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, input.model);

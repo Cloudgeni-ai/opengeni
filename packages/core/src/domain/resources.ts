@@ -16,6 +16,7 @@ import {
   ResourceMountPathError,
   stableJson,
   type RepositoryResourceRef,
+  type AccessGrant,
   type ResourceRef,
   type ScheduledTaskToolPolicy,
   type ToolRef,
@@ -29,6 +30,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { fileSourceVisibleToHost } from "./file-audience";
 
 export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
   const mcpServerIds = new Set(settings.mcpServers.map((server) => server.id));
@@ -499,7 +501,8 @@ export async function validateFileResources(
   workspaceId: string,
   subjectId: string | null,
   resources: ResourceRef[],
-  privateFileContext?: SessionRlsActorContext,
+  privateFileContext: SessionRlsActorContext | undefined,
+  sourceGrant: AccessGrant,
 ): Promise<void> {
   return withSessionRlsActorContext(
     privateFileContext ?? {
@@ -529,6 +532,19 @@ export async function validateFileResources(
           throw new HTTPException(422, {
             message: `file resource ${resource.fileId} is ${file.status}`,
           });
+        }
+        if (
+          !(await fileSourceVisibleToHost(
+            { db, sessionAuthorization: null },
+            sourceGrant,
+            file.id,
+            file.workspaceId,
+            true,
+            privateFileContext?.initiatingHumanSubjectId ?? subjectId ?? sourceGrant.subjectId,
+            file,
+          ))
+        ) {
+          throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
         }
       }
     },

@@ -229,6 +229,7 @@ export function sessionRlsActorForAuthorization(
         subjectId: authorization.actor.subjectId,
         initiatingHumanSubjectId: authorization.actor.initiatingHumanSubjectId,
         agentRootSessionId: authorization.actor.callerRootSessionId,
+        agentCallerSessionId: authorization.actor.callerSessionId,
       }
     : { subjectId: authorization.actor.subjectId };
 }

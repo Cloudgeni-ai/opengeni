@@ -9,6 +9,10 @@ cannot be reconstructed, plus historical source Files with a `file.visibility.ch
 audit to workspace. The old upload and audit records do not prove whether a
 person or an agent made the sharing decision. Keep the evidence in private
 operator storage, outside the repository and deployment logs.
+For a source with a historical Slack event marker but no surviving interaction,
+verify its audience separately. Record `human_shared` only with proof of an
+independent human share, or `owner_only` with a verified `owner_subject_id`.
+The migration stops until every such File has one of those decisions.
 
 For each reviewed File, insert its ID into
 `opengeni_private.file_source_adjudications` as `human_shared` only with
@@ -21,8 +25,9 @@ precedence over a conflicting legacy stored owner for a shared File. A
 contradictory or multiple private owners, unresolved original of either audience, or
 ownerless restricted File blocks 0914. Resolve these privately before
 retrying. Apply 0914, provision runtime roles, then start only matching API
-and worker images. Do not restart older writers after enforcement activates.
-The File insert guard rejects older runtime writers after the cutover.
+and worker images. Do not restart older binaries after enforcement activates.
+The File insert guard rejects older writers, and the File read policy denies
+older readers that lack the source-visibility marker.
 
 ## Database backup and recovery
 
