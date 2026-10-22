@@ -242,8 +242,9 @@ week's certificate for that name; a daily timer renews it when fewer than
 four days are left, with a new token, so a host whose certificate expired
 gets a new one all the same. Terraform sets the group's first size; the service sizes it
 from then on. The group has no auto-healing (the service decides when a
-host is lost and fences it), and a new template reaches hosts only as they
-are replaced.
+host is lost and fences it), and a new template reaches hosts as they are
+replaced, or, when it changes only their metadata (such as the bundle),
+as the operator refreshes them to it (Upgrades).
 
 Elsewhere, install a host by hand: a systemd Linux machine with KVM, an
 XFS state volume, a name unique among the hosts, and the bundle. With no
@@ -785,9 +786,19 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   never restarted. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
-  bundle in Terraform, so hosts created from then on install it, and run
-  `install.sh` from the new bundle on each host in place, or replace
-  hosts one at a time, each drained first.
+  bundle in Terraform and apply it, so hosts created from then on install
+  it. Then replace the hosts one at a time, each drained first, or upgrade
+  each in place. A running host keeps the metadata of the template it was
+  made from, and its startup script installs the bundle that metadata
+  names at every boot, so first move it to the new template:
+  `gcloud compute instance-groups managed update-instances <group>
+  --instances <host> --minimal-action refresh
+  --most-disruptive-allowed-action refresh` applies the new template
+  without stopping or restarting the VM (for a new bundle, that is its
+  metadata), and refuses a template that would need the machine
+  restarted (such as a new machine type: replace those hosts).
+  Then run `install.sh` from the new bundle on it. A host upgraded in
+  place without the refresh goes back to its old bundle when it reboots.
 - **The control service** is a Deployment: upgrade the chart with the new
   image. Replicas share the store; one leads at a time, and a new leader
   waits a whole lease term before giving up on any host, so a rollout
