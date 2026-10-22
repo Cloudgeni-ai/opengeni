@@ -170,6 +170,46 @@ test("SUB-OWN-01 folds pool rows and the source preference into one owner and re
       values (${accountId}, 'codex', ${unused}, true, false, false, null)`;
   });
 
+  // Disconnected while beta managed it and alpha was still listed: folded
+  // nowhere above, it becomes the organization's rather than failing the
+  // reach check.
+  const retired = crypto.randomUUID();
+  await fixture(async (tx) => {
+    await tx`insert into subscription_connections (id, account_id, provider, kind,
+        credential_encrypted, credential_format, provider_account_id, plan_type, ownership,
+        scope_kind, status, allocator_enabled, allow_personal_workspaces, managed_by_workspace_id,
+        disconnected_at)
+      values (${retired}, ${accountId}, 'codex', 'subscription', '', 'v1', null, 'pro', 'shared',
+        'workspaces', 'disabled', false, false, ${beta}, now())`;
+    await tx`insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${accountId}, ${retired}, ${alpha}), (${accountId}, ${retired}, ${beta})`;
+  });
+
+  // An organization that locks providers: an entry the strip empties is
+  // cleared, while one that would keep other values fails like the 0724 guard.
+  const [lockedAccount] = await admin<{ id: string }[]>`
+    insert into managed_accounts (name) values ('locked-org') returning id`;
+  const lockedId = lockedAccount!.id;
+  const [lockedWorkspace] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${lockedId}, 'locked') returning id`;
+  await fixture(async (tx) => {
+    await tx`update subscription_settings set locked_settings = ${["providers"]}
+      where account_id = ${lockedId} and workspace_id is null`;
+    await tx`insert into subscription_settings (account_id, workspace_id, providers)
+      values (${lockedId}, ${lockedWorkspace!.id},
+        ${tx.json({ codex: { inferenceSource: "workspace", enabled: false } })})
+      on conflict (account_id, workspace_id) do update set providers = excluded.providers`;
+  });
+  await expect(
+    owner.begin(async (tx) => {
+      await executeMigrationFile(tx as unknown as postgres.Sql, FILE, migration);
+    }),
+  ).rejects.toThrow(/subscription setting providers is locked by the organization/);
+  await fixture(async (tx) => {
+    await tx`update subscription_settings set providers = ${tx.json({ codex: { inferenceSource: "workspace" } })}
+      where workspace_id = ${lockedWorkspace!.id}`;
+  });
+
   await owner.begin(async (tx) => {
     await executeMigrationFile(tx as unknown as postgres.Sql, FILE, migration);
   });
@@ -233,6 +273,17 @@ test("SUB-OWN-01 folds pool rows and the source preference into one owner and re
     reach: sorted(alpha, gamma),
   });
 
+  expect(await state(retired)).toEqual({
+    scope: "workspaces",
+    personal: false,
+    on: false,
+    owner: null,
+    reach: sorted(alpha, beta),
+  });
+  const [lockedSettings] = await admin<Array<{ providers: unknown }>>`
+    select providers from subscription_settings where workspace_id = ${lockedWorkspace!.id}`;
+  expect(lockedSettings!.providers).toEqual({});
+
   const models = async (id: string) =>
     (
       await admin<Array<{ allowed_model_ids: string[] | null }>>`
@@ -290,8 +341,12 @@ test("SUB-OWN-01 folds pool rows and the source preference into one owner and re
     where relname in ('subscription_connections', 'subscription_connection_workspaces',
       'subscription_connection_assignment_policies', 'subscription_settings')`;
   expect(forced.every((row) => row.force)).toBe(true);
-  const [guard] = await admin<Array<{ enabled: string }>>`
-    select tgenabled as enabled from pg_trigger
-    where tgname = 'subscription_connections_scope_guard'`;
-  expect(guard!.enabled).toBe("O");
+  const guards = await admin<Array<{ name: string; enabled: string }>>`
+    select tgname as name, tgenabled as enabled from pg_trigger
+    where tgname in ('subscription_connections_scope_guard',
+      'subscription_settings_locked_overrides_guard') order by tgname`;
+  expect([...guards]).toEqual([
+    { name: "subscription_connections_scope_guard", enabled: "O" },
+    { name: "subscription_settings_locked_overrides_guard", enabled: "O" },
+  ]);
 }, 120_000);
