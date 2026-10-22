@@ -1,5 +1,16 @@
 # @opengeni/browserd
 
+## 0.3.1
+
+### Patch Changes
+
+- 5c113c6: Managed browsers are now started by the browser controller itself instead of through the separate agent-browser daemon, so the controller is the browser's only DevTools client. This removes launch settings that set managed browsers apart from an ordinary Chrome (hidden scrollbars in headless mode and disabled popup blocking), a second DevTools client attached to every page, one extra process per browser with its launch overhead, and the agent-browser companion from sandbox images and agent installs. It also fixes problems the daemon had been hiding: dedicated web workers on headless pages stayed paused and never ran, a click that opened a JavaScript dialog from an upload control was reported as a completed upload, a network-idle wait could hang on unfinished requests of the page that was replaced, and a full-page overlay was mistaken for a sticky bar when the page showed scrollbars.
+- 62b21de: An idle managed browser is no longer stopped while it is still receiving a download. Before, a download that ran longer than the idle time without any request to the browser failed with `browser_ended` when the browser was released; the browser now waits until the download settles.
+- 9929a12: Managed browsers that nobody used for 10 minutes now stop. The profile, tabs and downloads stay on disk with the same recoverable receipt a controller shutdown leaves, and the browser's next request relaunches it on that profile with its tabs restored. Machines that host many agents' browsers, such as connected machines, no longer keep every idle browser running indefinitely. Set `idleReleaseMs` (0 disables) to change the time.
+- c45db0a: The browser controller starts faster on a fresh sandbox: it now checks the pinned Lightpanda binary when a Lightpanda session first needs it, instead of reading and hashing the whole file on every start. On a fresh VM's cold disk that read took about a second before the first browser could open.
+  - @opengeni/contracts@4.4.0
+  - @opengeni/interaction@4.4.0
+
 ## 0.3.0
 
 ### Minor Changes

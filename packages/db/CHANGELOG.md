@@ -1,5 +1,23 @@
 # @opengeni/db
 
+## 4.4.1
+
+### Patch Changes
+
+- 2677b14: Read router-history presence for session response pages in one scoped transaction instead of one transaction per session. Preserve the indexed history predicate and existing effective-tool response fields.
+- 9a3df31: Use keyed personal-state reads for session-list totals, with a concurrent session-first index. Generic prepared plans no longer repeatedly scan a large workspace's personal-state range when most other workspaces are small. List contents, permissions and transaction behavior are unchanged.
+- 73a4ad9: Reduce repeated database-readiness catalog work by inspecting table and routine namespaces together, aggregating policy facts once, and reading activation-presence facts with connection identity. Every readiness check still reads and validates current catalog state in one read-only repeatable-read transaction.
+- 6282659: Keep each response-page router-history probe on its early-stopping index scan, so a long-running session's router items are not all collected before the first match.
+- f0c2065: Exclude child trees outside the selected root scope before aggregating session-list totals. Preserve child visibility, archive, pin, attention and control-state semantics while avoiding unrelated descendant reads.
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/subscriptions@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

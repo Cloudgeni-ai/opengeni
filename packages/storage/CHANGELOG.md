@@ -1,5 +1,12 @@
 # @opengeni/storage
 
+## 4.4.1
+
+### Patch Changes
+
+- @opengeni/config@4.4.0
+- @opengeni/contracts@4.4.0
+
 ## 4.3.1
 
 ### Patch Changes

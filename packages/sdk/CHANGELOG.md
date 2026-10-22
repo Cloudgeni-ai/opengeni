@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 4.4.1
+
+### Patch Changes
+
+- @opengeni/connect@4.4.0
+- @opengeni/contracts@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

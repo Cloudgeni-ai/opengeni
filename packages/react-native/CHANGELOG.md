@@ -1,5 +1,22 @@
 # @opengeni/react-native
 
+## 4.4.1
+
+### Minor Changes
+
+- e3c07bc: Embedded chats can now explain why a message didn't start. When a shared chat still runs on someone else's personal computer and another participant's message is held, `SessionStartNotice` from `@opengeni/react/session-ui` says why in the reader's language, lists the machines they're allowed to use, and offers one recheck once the chat has moved. The saved message is kept and is never sent twice, and access rules are unchanged. `useSessionStart` and the matching model helpers are available from `@opengeni/react/session` for custom layouts, and all text comes from the new `sessionAdmission.*` message keys. The React Native session screen shows the same explanation and machine choices. The hosted app now uses these same components.
+
+### Patch Changes
+
+- 996e6b4: On the React Native session screen, Try again on a message that couldn't start shows as busy while it rechecks again, and a second tap before the recheck finishes no longer sends a second request.
+- Updated dependencies [a506901]
+- Updated dependencies [e3c07bc]
+- Updated dependencies [201c380]
+- Updated dependencies [67882a3]
+  - @opengeni/react@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes

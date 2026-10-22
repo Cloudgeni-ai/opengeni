@@ -1,5 +1,20 @@
 # @opengeni/react
 
+## 4.4.1
+
+### Minor Changes
+
+- e3c07bc: Embedded chats can now explain why a message didn't start. When a shared chat still runs on someone else's personal computer and another participant's message is held, `SessionStartNotice` from `@opengeni/react/session-ui` says why in the reader's language, lists the machines they're allowed to use, and offers one recheck once the chat has moved. The saved message is kept and is never sent twice, and access rules are unchanged. `useSessionStart` and the matching model helpers are available from `@opengeni/react/session` for custom layouts, and all text comes from the new `sessionAdmission.*` message keys. The React Native session screen shows the same explanation and machine choices. The hosted app now uses these same components.
+- 201c380: Add `homeSessionSections` to `@opengeni/react/session-list-model`: every pinned conversation, then up to fifteen recently used ones (running first), so pins never push recent work off a phone home screen. The mobile app's home screen now lists Pinned and Recent chats under the composer, scrolls through them, and ends with a link to all sessions. Relative times between 45 and 59 seconds now read "1m" instead of "0m".
+
+### Patch Changes
+
+- a506901: Compact session times ("3d") now count calendar days in the viewer's time zone, the same way the long form ("4 days ago") does, so the sidebar and the command menu show the same age for a chat.
+- 67882a3: Screen readers now read the session header's read-only access mark ("Workspace session access. Visible to people in …") and the Private mark for Personal workspace chats. Both were focusable spans with an `aria-label` but no role, which ARIA does not allow, so assistive technology could skip the label.
+  - @opengeni/connect@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+
 ## 4.3.1
 
 ### Minor Changes
