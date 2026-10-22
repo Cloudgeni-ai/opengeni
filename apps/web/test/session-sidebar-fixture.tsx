@@ -1,7 +1,15 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import { OpenGeniProvider } from "@opengeni/react";
-import { createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+  useRouterState,
+} from "@tanstack/react-router";
+import { SiteViewRoute } from "@opengeni/react/app/routes/site-view";
+import { siteViewSearch } from "@opengeni/react/app/lib/routes";
 import { Toaster } from "sonner";
 import { SessionList } from "@opengeni/react/app/components/rail/session-list";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
@@ -77,22 +85,42 @@ const root = createRootRoute({
               Alex Morgan
             </footer>
           </aside>
-          <section className="hidden min-w-0 flex-1 items-center justify-center p-12 md:flex">
-            <div className="max-w-sm text-center">
-              <h1 className="text-xl font-medium tracking-tight">Choose a chat</h1>
-              <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-                Your projects and conversations are in the sidebar.
-              </p>
-              <p className="mt-8 text-xs text-fg-subtle">Real components · Sample workspace data</p>
-              <RequestProfile />
-            </div>
-          </section>
+          <MainArea />
         </main>
         <Toaster />
       </TooltipProvider>
     </OpenGeniProvider>
   ),
 });
+
+/** The Site view where the app shows it; otherwise the empty chat page. */
+function MainArea() {
+  const location = useRouterState({ select: (state) => state.location });
+  const siteId = /\/sites\/([^/]+)/u.exec(location.pathname)?.[1];
+  if (siteId)
+    return (
+      <section className="hidden min-h-0 min-w-0 flex-1 md:flex">
+        <SiteViewRoute
+          key={siteId}
+          workspaceId={workspaceId}
+          siteId={siteId}
+          conversation={siteViewSearch(location.search).conversation}
+        />
+      </section>
+    );
+  return (
+    <section className="hidden min-w-0 flex-1 items-center justify-center p-12 md:flex">
+      <div className="max-w-sm text-center">
+        <h1 className="text-xl font-medium tracking-tight">Choose a chat</h1>
+        <p className="mt-2 text-sm leading-relaxed text-fg-muted">
+          Your projects and conversations are in the sidebar.
+        </p>
+        <p className="mt-8 text-xs text-fg-subtle">Real components · Sample workspace data</p>
+        <RequestProfile />
+      </div>
+    </section>
+  );
+}
 
 const preview = createRoute({
   getParentRoute: () => root,
@@ -106,5 +134,13 @@ const newSession = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/sessions",
 });
-const router = createRouter({ routeTree: root.addChildren([preview, session, newSession]) });
+const site = createRoute({
+  getParentRoute: () => root,
+  path: "/workspaces/$workspaceId/sites/$siteId",
+  // As the console registers it.
+  validateSearch: siteViewSearch,
+});
+const router = createRouter({
+  routeTree: root.addChildren([preview, session, newSession, site]),
+});
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

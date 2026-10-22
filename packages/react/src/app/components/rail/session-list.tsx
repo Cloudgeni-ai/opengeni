@@ -15,6 +15,7 @@ import {
   sessionListGroupRevision,
 } from "../../lib/session-list-dirty-scopes";
 import { SiteOriginLink } from "../session/site-origin-link";
+import { sessionSiteOrigin } from "../../lib/session-site-origin";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
 import {
@@ -207,6 +208,7 @@ import {
   type SessionForest,
   type SessionRecencyGroup,
 } from "../../lib/sessions-group";
+import { railRouteSelection } from "../../lib/routes";
 import {
   readSessionBrowsePreferences,
   DEFAULT_SESSION_BROWSE_PREFERENCES,
@@ -360,10 +362,11 @@ export function SessionList() {
   const setContextSession = context.setSession;
   const navigate = useNavigate();
   const activeSessionId = useRouterState({
-    select: (state): string | null => {
-      const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
-      return match?.[1] ?? null;
-    },
+    select: (state): string | null => railRouteSelection(state.location).sessionId,
+  });
+  // The Site view marks its Site row, or the conversation open beside it.
+  const activeSiteId = useRouterState({
+    select: (state): string | null => railRouteSelection(state.location).siteId,
   });
   const [documentForeground, setDocumentForeground] = useState(() =>
     Boolean(document.visibilityState === "visible" && document.hasFocus()),
@@ -2268,6 +2271,30 @@ export function SessionList() {
     },
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
+  // Opening one of a Site's conversations opens its Site row once per visit
+  // to that Site, as a person's own expansion would: it stays open when
+  // another session is selected, and closing it again is respected while
+  // switching between the Site's conversations.
+  const openSiteId =
+    activeSiteId ??
+    (activeSessionId &&
+    context.session?.id === activeSessionId &&
+    context.session.parentSessionId === null
+      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
+      : null);
+  const siteRouteExpansion = useRef<string | null>(null);
+  useEffect(() => {
+    if (!hierarchyMode || !openSiteId) {
+      siteRouteExpansion.current = null;
+      return;
+    }
+    // The Site itself is marked without opening its row.
+    if (!activeSessionId || siteRouteExpansion.current === openSiteId) return;
+    const rows = [...nodesById.values()].filter((node) => node.siteGroup?.siteId === openSiteId);
+    if (rows.length === 0) return;
+    siteRouteExpansion.current = openSiteId;
+    for (const row of rows) if (!expanded.has(row.session.id)) toggleExpand(row.session.id);
+  }, [activeSessionId, expanded, hierarchyMode, nodesById, openSiteId, toggleExpand]);
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
     // Channel mode replaces the ordinary recency forest with channel sections;
@@ -4318,11 +4345,15 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
   const children = expanded ? node.children : selected ? [selected] : [];
   const page = props.childPages.get(key);
   const count = siteRowConversationCount(node);
+  const activeSiteId = useRouterState({
+    select: (state): string | null => railRouteSelection(state.location).siteId,
+  });
   return (
     <div role="listitem" className="min-w-0">
       <SiteSessionGroupHeading
         origin={origin}
         workspaceId={node.session.workspaceId}
+        active={activeSiteId === origin.siteId && props.activeSessionId === null}
         expanded={expanded}
         onToggle={() => props.onToggleExpand(key)}
         summary={summary}
@@ -4338,7 +4369,7 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
               {...props}
               node={child}
               depth={props.depth + 1}
-              siteNested
+              nestedInSiteId={origin.siteId}
             />
           ))}
           {expanded && page?.loading && page.feedbackVisible ? (
@@ -4383,8 +4414,8 @@ function SessionTreeRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
-  /** Listed under its Site row, which already names the Site. */
-  siteNested?: boolean | undefined;
+  /** Listed under its Site row: opens in that Site's view, which names the Site. */
+  nestedInSiteId?: string | undefined;
 }) {
   const { node } = props;
   if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
@@ -4429,7 +4460,7 @@ function SessionTreeRow(props: {
         onUpdateAttention={props.onUpdateAttention}
         onArchive={props.onArchive}
         onRequestDelete={props.onRequestDelete}
-        siteNested={props.siteNested}
+        nestedInSiteId={props.nestedInSiteId}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
@@ -4559,7 +4590,7 @@ function SessionRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
-  siteNested?: boolean | undefined;
+  nestedInSiteId?: string | undefined;
 }) {
   const rail = useRail();
   const context = useAppContext();
@@ -4706,7 +4737,7 @@ function SessionRow(props: {
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
           {lead}
-          {props.siteNested ? null : <SiteOriginLink session={props.session} compact />}
+          {props.nestedInSiteId ? null : <SiteOriginLink session={props.session} compact />}
           <HoverCard
             openDelay={100}
             closeDelay={80}
@@ -4715,7 +4746,16 @@ function SessionRow(props: {
           >
             <HoverCardTrigger asChild>
               <Link
-                to="/workspaces/$workspaceId/sessions/$sessionId"
+                {...(props.nestedInSiteId
+                  ? {
+                      to: "/workspaces/$workspaceId/sites/$siteId",
+                      params: { workspaceId: rail.workspaceId, siteId: props.nestedInSiteId },
+                      search: { conversation: props.session.id },
+                    }
+                  : {
+                      to: "/workspaces/$workspaceId/sessions/$sessionId",
+                      params: { workspaceId: rail.workspaceId, sessionId: props.session.id },
+                    })}
                 draggable={props.session.parentSessionId === null && !props.session.archived}
                 onDragStart={(event) => {
                   if (props.session.parentSessionId !== null || props.session.archived) {
@@ -4726,7 +4766,6 @@ function SessionRow(props: {
                   event.dataTransfer.effectAllowed = "move";
                   event.dataTransfer.setData(SESSION_DRAG_TYPE, props.session.id);
                 }}
-                params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
                 data-session-index={props.index}
                 data-session-focus
                 data-session-row={props.session.id}
