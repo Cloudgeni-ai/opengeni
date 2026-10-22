@@ -17,5 +17,8 @@ export function batchedBackfillTransactionLocalSetting(
       value: "1",
     };
   }
+  if (file === "0910_session_message_search_backfill.sql") {
+    return { guc: "opengeni.session_message_search_backfill_v1", value: "1" };
+  }
   return null;
 }
