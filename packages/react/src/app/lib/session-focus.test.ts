@@ -6,6 +6,7 @@ import {
   clearSessionComposerFocusIntent,
   consumeSessionComposerFocusIntent,
   consumeSessionRowRevealIntent,
+  focusSessionComposerWhenReady,
   requestSessionComposerFocus,
   sessionComposerFocusIntentIsEligible,
   shouldFocusSessionComposer,
@@ -285,5 +286,118 @@ describe("deferred session focus completion", () => {
     pending.current = { operation: 2, settled: true };
     oldFrame();
     expect(pending.current).toEqual({ operation: 2, settled: true });
+  });
+});
+
+describe("composer focus when a chat opens", () => {
+  test("a keyboard jump replaces the previous chat's focus; a load only fills empty focus", () => {
+    const body = fakeElement();
+    const elsewhere = fakeElement({}, { closestSessionRow: "other-session" });
+    expect(shouldFocusSessionComposer(elsewhere, SESSION_ID, body, false, "keyboard")).toBe(true);
+    expect(shouldFocusSessionComposer(elsewhere, SESSION_ID, body, false, "load")).toBe(false);
+    expect(shouldFocusSessionComposer(body, SESSION_ID, body, false, "load")).toBe(true);
+    expect(shouldFocusSessionComposer(null, SESSION_ID, body, false, "load")).toBe(true);
+    expect(shouldFocusSessionComposer(elsewhere, SESSION_ID, body, true, "keyboard")).toBe(false);
+  });
+
+  test("keyboard intents carry their source", () => {
+    clearSessionComposerFocusIntent();
+    const app = new EventTarget();
+    requestSessionComposerFocus(app, "workspace-a", SESSION_ID, "keyboard");
+    expect(consumeSessionComposerFocusIntent(app, "workspace-a", SESSION_ID)).toMatchObject({
+      source: "keyboard",
+    });
+    requestSessionComposerFocus(app, "workspace-a", SESSION_ID);
+    expect(consumeSessionComposerFocusIntent(app, "workspace-a", SESSION_ID)).toMatchObject({
+      source: "rail",
+    });
+  });
+
+  function harness() {
+    let clock = 0;
+    const frames: Array<() => void> = [];
+    const state = {
+      dialog: true as boolean,
+      textarea: null as { disabled: boolean; focused: number } | null,
+      active: null as unknown,
+    };
+    const body = fakeElement();
+    const doc = {
+      body,
+      get activeElement() {
+        return state.active ?? body;
+      },
+      querySelector: () => (state.dialog ? {} : null),
+    } as unknown as Document;
+    const textareaFor = () => {
+      const current = state.textarea;
+      if (!current) return null;
+      return {
+        disabled: current.disabled,
+        focus: () => {
+          current.focused += 1;
+          state.active = textareaFor();
+        },
+      } as unknown as HTMLTextAreaElement;
+    };
+    const run = (source: "keyboard" | "load" | "rail") =>
+      focusSessionComposerWhenReady({
+        textarea: textareaFor,
+        sessionId: SESSION_ID,
+        source,
+        doc,
+        now: () => clock,
+        requestFrame: (callback) => frames.push(callback),
+        cancelFrame: () => {},
+      });
+    const tick = (ms = 16) => {
+      clock += ms;
+      const callback = frames.shift();
+      callback?.();
+    };
+    return { state, run, tick, frames, body };
+  }
+
+  test("waits for the command menu to close and the composer to enable, then focuses once", () => {
+    const { state, run, tick } = harness();
+    run("keyboard");
+    tick();
+    state.textarea = { disabled: true, focused: 0 };
+    tick();
+    expect(state.textarea.focused).toBe(0);
+    state.dialog = false;
+    tick();
+    expect(state.textarea.focused).toBe(0);
+    state.textarea.disabled = false;
+    tick();
+    expect(state.textarea.focused).toBe(1);
+  });
+
+  test("gives up after a few seconds and when cancelled", () => {
+    const slow = harness();
+    slow.run("keyboard");
+    slow.tick(3_500);
+    slow.state.dialog = false;
+    slow.state.textarea = { disabled: false, focused: 0 };
+    slow.tick();
+    expect(slow.state.textarea.focused).toBe(0);
+
+    const cancelled = harness();
+    const cancel = cancelled.run("keyboard");
+    cancel();
+    cancelled.state.dialog = false;
+    cancelled.state.textarea = { disabled: false, focused: 0 };
+    cancelled.tick();
+    expect(cancelled.state.textarea.focused).toBe(0);
+  });
+
+  test("a load leaves focus the person already placed elsewhere", () => {
+    const { state, run, tick } = harness();
+    state.dialog = false;
+    state.textarea = { disabled: false, focused: 0 };
+    state.active = fakeElement({}, { closestSessionRow: "other-session" });
+    run("load");
+    tick();
+    expect(state.textarea.focused).toBe(0);
   });
 });

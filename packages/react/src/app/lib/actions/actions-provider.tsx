@@ -22,6 +22,7 @@ import { requestConversationFind } from "../conversation-find-event";
 import { desktopBridge, desktopCapability } from "../desktop";
 import { useNavigate, useRouterState } from "../navigation";
 import { requestSessionSearch } from "../session-search-route";
+import { requestSessionComposerFocus } from "../session-focus";
 import { useSessionUiFeature } from "../session-ui-features";
 import { useUiEventTarget } from "../ui-events";
 import { t } from "../console-text";
@@ -254,6 +255,18 @@ export function ActionsProvider(props: { children: ReactNode }) {
     return (id: string) => ids.has(id) || id === workspaceId;
   }, [workspaces, workspaceId]);
 
+  // A chat opened from the keyboard (⌘K, Control+Tab, next/previous chat) is
+  // opened to type in: hand its composer the focus once it is ready.
+  const openChatForTyping = useCallback(
+    (chatId: string, inWorkspaceId?: string) => {
+      if (!rail.isMobile) {
+        requestSessionComposerFocus(windowEvents, inWorkspaceId ?? workspaceId, chatId, "keyboard");
+      }
+      rail.openSession(chatId, inWorkspaceId);
+    },
+    [rail, windowEvents, workspaceId],
+  );
+
   const env = useMemo<ActionEnv>(
     () => ({
       workspaceId,
@@ -267,7 +280,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       workspaces,
       canForkCurrentChat,
       newChat: () => rail.startNewSession(),
-      openChat: (chatId, inWorkspaceId) => rail.openSession(chatId, inWorkspaceId),
+      openChat: (chatId, inWorkspaceId) => openChatForTyping(chatId, inWorkspaceId),
       openWorkspace: (id) => rail.openWorkspace(id),
       openWorkspacePicker: () => openCommandMenu(true),
       openInbox: () => {
@@ -290,7 +303,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
         const directory = readChatDirectory(subjectId, workspaceId);
         const target = openChatSwitcher(directory, routeChatId, false, reachable);
         const id = target?.ids[target.index];
-        if (id) rail.openSession(id, directory.rows.get(id)?.workspaceId);
+        if (id) openChatForTyping(id, directory.rows.get(id)?.workspaceId);
       },
       sidebarOrder: () => readChatDirectory(subjectId, workspaceId).sidebarOrder,
       pinnedOrder: () => readChatDirectory(subjectId, workspaceId).pinnedOrder,
@@ -310,6 +323,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       inspectorOpen,
       setInspectorOpen,
       rail,
+      openChatForTyping,
       navigate,
       uiEvents,
       windowEvents,

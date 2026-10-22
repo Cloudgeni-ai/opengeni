@@ -221,8 +221,8 @@ import { UnavailableModelNotice } from "../components/session/unavailable-model-
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
+  focusSessionComposerWhenReady,
   sessionComposerFocusIntentIsEligible,
-  shouldFocusSessionComposer,
   type SessionComposerFocusIntent,
 } from "../lib/session-focus";
 import {
@@ -2149,13 +2149,37 @@ function SessionChatPane(props: {
     focusEvents.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
     return () => focusEvents.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
   }, [focusEvents, props.session.id, props.session.workspaceId]);
+  // Opening a chat (a sidebar click, ⌘K, Control+Tab, a link or a reload)
+  // puts the cursor in its composer, since typing is what comes next. Without
+  // an explicit intent, only the first effect run for a chat may do this, and
+  // only while nothing else has focus.
+  const loadFocusSessionRef = useRef<string | null>(null);
+  // The wait outlives effect re-runs (status, approvals) but not the chat.
+  const composerFocusWaitRef = useRef<{ sessionId: string; cancel: () => void } | null>(null);
+  useEffect(
+    () => () => {
+      composerFocusWaitRef.current?.cancel();
+      composerFocusWaitRef.current = null;
+    },
+    [],
+  );
   useEffect(() => {
+    if (
+      composerFocusWaitRef.current &&
+      composerFocusWaitRef.current.sessionId !== props.session.id
+    ) {
+      composerFocusWaitRef.current.cancel();
+      composerFocusWaitRef.current = null;
+    }
     const intent = consumeSessionComposerFocusIntent(
       focusEvents,
       props.session.workspaceId,
       props.session.id,
     );
-    if (!intent) return;
+    const firstRunForChat = loadFocusSessionRef.current !== props.session.id;
+    loadFocusSessionRef.current = props.session.id;
+    const source = intent?.source ?? (firstRunForChat ? "load" : null);
+    if (!source) return;
     if (
       !sessionComposerFocusIntentIsEligible({
         viewportWidth: globalThis.innerWidth,
@@ -2168,25 +2192,15 @@ function SessionChatPane(props: {
     ) {
       return;
     }
-    const frame = globalThis.requestAnimationFrame(() => {
-      const textarea = composerRegionRef.current?.querySelector("textarea");
-      if (!textarea || textarea.disabled) return;
-      const dialogOpen = Boolean(
-        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
-      );
-      if (
-        !shouldFocusSessionComposer(
-          document.activeElement instanceof HTMLElement ? document.activeElement : null,
-          props.session.id,
-          document.body,
-          dialogOpen,
-        )
-      ) {
-        return;
-      }
-      textarea.focus();
-    });
-    return () => globalThis.cancelAnimationFrame(frame);
+    composerFocusWaitRef.current?.cancel();
+    composerFocusWaitRef.current = {
+      sessionId: props.session.id,
+      cancel: focusSessionComposerWhenReady({
+        textarea: () => composerRegionRef.current?.querySelector("textarea"),
+        sessionId: props.session.id,
+        source,
+      }),
+    };
   }, [
     composerFocusSignal,
     focusEvents,
