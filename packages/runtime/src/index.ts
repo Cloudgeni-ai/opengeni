@@ -7530,18 +7530,33 @@ export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"):
     error,
     phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
   );
+  // The MCP SDK's HTTP transports (StreamableHTTPError, SseError) report the
+  // response status as a numeric `code`, with no `status`. McpError's `code` is
+  // the server's JSON-RPC error code, which can be any integer (including
+  // positive ones such as 403) and is never an HTTP status. Match McpError by
+  // name, which its subclasses inherit, so duplicate SDK copies are covered.
+  const status =
+    fields.status ??
+    (fields.causeName !== "McpError" &&
+    fields.causeNumber !== undefined &&
+    fields.causeNumber >= 100 &&
+    fields.causeNumber <= 599
+      ? fields.causeNumber
+      : undefined);
   const code =
     fields.causeCode ??
-    (fields.causeNumber === undefined ? undefined : `code ${fields.causeNumber}`);
+    (fields.causeNumber === undefined || fields.causeNumber === status
+      ? undefined
+      : `code ${fields.causeNumber}`);
   const detail = [
-    fields.status === undefined ? undefined : `HTTP ${fields.status}`,
+    status === undefined ? undefined : `HTTP ${status}`,
     [fields.causeName, code].filter(Boolean).join(" ") || undefined,
   ]
     .filter(Boolean)
     .join(", ");
   const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
   const next =
-    fields.status === 401 || fields.status === 403
+    status === 401 || status === 403
       ? "; its connection may need to be signed in again"
       : fields.retryable
         ? "; this may be temporary"
