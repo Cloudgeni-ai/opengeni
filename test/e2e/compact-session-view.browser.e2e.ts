@@ -550,15 +550,45 @@ describe("compact session view on the live local workspace route (API fixture)",
       { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
     );
   };
-  // The rail starts its re-read asynchronously after an invalidation. Wait for
-  // that request to reach the fixture instead of a fixed delay; the bound stays
-  // well below the rail's 15s fallback poll.
-  const awaitBrowseReadStart = () =>
-    waitFor(() => archiveFixture?.readStarted === true, {
+  // The rail's fallback poll and failed-read retry can also start a browse
+  // read, so arrival alone does not prove the invalidation caused it. The
+  // listener runs synchronously; timers cannot run until this task's microtasks
+  // drain, so a root browse fetch issued before the next task came from the
+  // invalidation. Then wait for that request to reach the fixture.
+  const invalidateBrowseRead = async () => {
+    const modulePath = `/@fs${new URL("../../packages/react/src/app/lib/session-list-invalidation.tsx", import.meta.url).pathname}`;
+    const startedByInvalidation = await page.evaluate(
+      async ({ targetWorkspaceId, moduleUrl }) => {
+        const { notifySessionListChanged } = await import(moduleUrl);
+        const originalFetch = window.fetch;
+        let started = false;
+        window.fetch = function (input, init) {
+          const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+          if (
+            url.pathname.endsWith("/sessions") &&
+            url.searchParams.get("parentSessionId") === "null" &&
+            !url.searchParams.get("search")
+          )
+            started = true;
+          return originalFetch.call(this, input, init);
+        };
+        try {
+          notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        } finally {
+          window.fetch = originalFetch;
+        }
+        return started;
+      },
+      { targetWorkspaceId: workspaceId, moduleUrl: modulePath },
+    );
+    expect(startedByInvalidation).toBe(true);
+    await waitFor(() => archiveFixture?.readStarted === true, {
       timeoutMs: 5_000,
       intervalMs: 10,
-      describe: () => "No browse read started after the session list invalidation.",
+      describe: () => "The invalidated browse read did not reach the fixture.",
     });
+  };
   const settleRead = async () => {
     await page.waitForLoadState("networkidle");
     await page.evaluate(
@@ -683,8 +713,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       const delayed = deferred();
       archiveFixture.holdRead = delayed;
       archiveFixture.readStarted = false;
-      await invalidate();
-      await awaitBrowseReadStart();
+      await invalidateBrowseRead();
       expect(archiveFixture.readStarted).toBe(true);
       // Pending transitions cannot be revived by an invalidation.
       expect(await matchingChildren.count()).toBe(0);
@@ -935,8 +964,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       const oldWorkspaceRead = deferred();
       archiveFixture.holdRead = oldWorkspaceRead;
       archiveFixture.readStarted = false;
-      await invalidate();
-      await awaitBrowseReadStart();
+      await invalidateBrowseRead();
       expect(archiveFixture.readStarted).toBe(true);
       await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Other workspace/ }).click();
