@@ -1497,7 +1497,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.list();
@@ -1511,7 +1511,7 @@ export class BrowserSupervisor {
     if (!store) {
       throw new InteractionControllerError(
         "unsupported",
-        "browser placement does not expose managed downloads",
+        "Lightpanda browsers do not expose downloads",
       );
     }
     return await store.get(downloadId);
@@ -2101,7 +2101,10 @@ export class BrowserSupervisor {
       throw error;
     }
     let downloadStore: BrowserDownloadStore | null = null;
-    if (options.transport.kind === "managed" && options.transport.engine !== "lightpanda") {
+    if (
+      options.transport.kind === "attached_chrome" ||
+      (options.transport.kind === "managed" && options.transport.engine !== "lightpanda")
+    ) {
       try {
         downloadStore = await BrowserDownloadStore.open({
           rootDirectory: downloadDirectory,
@@ -3322,7 +3325,12 @@ async function createBrowserDriver(
         ? { authorityFile: context.transport.authorityFile }
         : {}),
     });
-    return createAttachedChromeDriver(context, attached, context.resolveWorkspaceFiles);
+    return createAttachedChromeDriver(
+      context,
+      attached,
+      context.resolveWorkspaceFiles,
+      context.downloadEvents,
+    );
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {

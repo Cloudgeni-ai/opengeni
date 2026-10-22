@@ -93,6 +93,66 @@ describe("BrowserDownloadStore", () => {
     await reopened.close();
   });
 
+  test("copies a file the person's own browser saved and never touches it", async () => {
+    const { store } = await fixture();
+    const personFolder = await newRoot();
+    const personFile = join(personFolder, "report (2).pdf");
+    await writeFile(personFile, "%PDF person");
+    await chmod(personFile, 0o644);
+    await store.begin({ guid: "person-guid", targetId: "7", suggestedFilename: "report.pdf" });
+    await store.progress({
+      guid: "person-guid",
+      state: "completed",
+      receivedBytes: 11,
+      totalBytes: 11,
+      personFilePath: personFile,
+    });
+    const completed = (await store.get(firstDownloadId))!;
+    expect(completed).toMatchObject({ status: "completed", receivedBytes: 11, failureCode: null });
+    expect(JSON.stringify(completed)).not.toContain(personFolder);
+    expect(await readFile((await store.completedFile(firstDownloadId)).path, "utf8")).toBe(
+      "%PDF person",
+    );
+    // Their file stays where Chrome saved it, unchanged.
+    expect(await readFile(personFile, "utf8")).toBe("%PDF person");
+    expect((await fsPromises.stat(personFile)).mode & 0o777).toBe(0o644);
+    await store.close();
+    expect(await readFile(personFile, "utf8")).toBe("%PDF person");
+  });
+
+  test("fails a person's download whose file is unknown or not its bytes", async () => {
+    const { store } = await fixture();
+    const personFolder = await newRoot();
+    const personFile = join(personFolder, "other.txt");
+    await writeFile(personFile, "not these bytes");
+    await store.begin({ guid: "unknown-guid", targetId: "7", suggestedFilename: "a.txt" });
+    await store.progress({
+      guid: "unknown-guid",
+      state: "completed",
+      receivedBytes: 4,
+      totalBytes: 4,
+      personFilePath: null,
+    });
+    await store.begin({ guid: "mismatch-guid", targetId: "7", suggestedFilename: "b.txt" });
+    await store.progress({
+      guid: "mismatch-guid",
+      state: "completed",
+      receivedBytes: 4,
+      totalBytes: 4,
+      personFilePath: personFile,
+    });
+    expect(await store.get(firstDownloadId)).toMatchObject({
+      status: "failed",
+      failureCode: "download_location_unavailable",
+    });
+    expect(await store.get(secondDownloadId)).toMatchObject({
+      status: "failed",
+      failureCode: "download_integrity_failed",
+    });
+    expect(await readFile(personFile, "utf8")).toBe("not these bytes");
+    await store.close();
+  });
+
   test("keeps each download's bytes when a later one replaces its name", async () => {
     const rootDirectory = await newRoot();
     let next = 0;

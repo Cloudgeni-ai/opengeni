@@ -1,6 +1,6 @@
 # Opengeni Browser privacy notice
 
-Effective September 7, 2026. Published by Cloudgeni AS.
+Effective October 22, 2026. Published by Cloudgeni AS.
 
 Opengeni Browser connects a Chrome profile to the Opengeni machine agent on
 your computer. That agent connects to the Opengeni deployment you configure.
@@ -21,6 +21,11 @@ this may include personal details, communications, financial or health
 information, authentication information, and location information present in
 pages or browser responses. Use a profile containing only information you intend
 to make available to your Opengeni deployment.
+
+When a tab Opengeni operates downloads a file, the extension looks up that
+download in Chrome's download list (completed downloads of the same address
+started since then) to find where Chrome saved it, so the machine agent can copy
+the file for the task. The file stays in your downloads folder.
 
 ## Purpose and destinations
 

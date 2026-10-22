@@ -477,6 +477,10 @@ export type AgentBrowserDriverOptions = {
       cancellation: "confirmed" | "uncertain",
     ): Promise<void>;
   };
+  /** Downloads are saved by the person's own browser (attached Chrome) in
+   * their own downloads folder: completed events carry that file's path, the
+   * store copies it, and the person's download is never cancelled. */
+  downloadsSavedByPerson?: boolean;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome" | "lightpanda";
   /** Whether the lifecycle runner or this controller-owned CDP connection
@@ -610,6 +614,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     | undefined;
   private readonly downloadDirectory: string | null;
   private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
+  private readonly downloadsSavedByPerson: boolean;
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
   /** The size the agent last set. Tabs that open afterwards get it too, as
@@ -701,6 +706,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? resolvePath(options.downloadDirectory)
       : null;
     this.downloadEvents = options.downloadEvents;
+    this.downloadsSavedByPerson = options.downloadsSavedByPerson ?? false;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
     this.windowParking =
       options.parkIdleWindowsAfterMs === undefined
@@ -2161,11 +2167,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             (candidate) => candidate.frame.id === frameId,
           );
           // Browser download events are process-wide. Unknown frames must not
-          // become downloads belonging to another context.
-          if (this.browserContextId && !state) return;
+          // become downloads belonging to another context, nor, in the
+          // person's own browser, to this session.
+          if ((this.browserContextId || this.downloadsSavedByPerson) && !state) return;
           if (this.downloadEvents) {
             const guid = typeof event.params.guid === "string" ? event.params.guid : "";
-            if (this.browserContextId) this.ownedDownloads.add(guid);
+            if (this.browserContextId || this.downloadsSavedByPerson) this.ownedDownloads.add(guid);
             const suggestedFilename =
               typeof event.params.suggestedFilename === "string"
                 ? event.params.suggestedFilename
@@ -2194,7 +2201,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         connection.on("Browser.downloadProgress", (event) => {
           if (!this.downloadEvents) return;
           const guid = typeof event.params.guid === "string" ? event.params.guid : "";
-          if (this.browserContextId && !this.ownedDownloads.has(guid)) return;
+          if (
+            (this.browserContextId || this.downloadsSavedByPerson) &&
+            !this.ownedDownloads.has(guid)
+          )
+            return;
           const state = event.params.state;
           if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
           const receivedBytes = event.params.receivedBytes;
@@ -2216,10 +2227,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state,
               receivedBytes,
               totalBytes: typeof totalBytes === "number" ? totalBytes : null,
-              filePath,
+              ...(this.downloadsSavedByPerson
+                ? state === "completed"
+                  ? { personFilePath: filePath }
+                  : {}
+                : { filePath }),
               // Browser events and replies share this connection in order, so
               // a reply proves every earlier download event was delivered.
-              ...(state === "completed"
+              ...(state === "completed" && !this.downloadsSavedByPerson
                 ? {
                     eventBarrier: () => connection.send("Browser.getVersion").then(() => undefined),
                   }
@@ -2228,6 +2243,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             .then(async ({ cancelReason }) => {
               if (state !== "inProgress") this.ownedDownloads.delete(guid);
               if (!cancelReason) return;
+              // The person's download is theirs to keep; only this session's
+              // copy is refused, and the store kept none.
+              if (this.downloadsSavedByPerson) {
+                await this.downloadEvents?.reject(guid, cancelReason, "confirmed");
+                return;
+              }
               const cancelled = await connection
                 .send("Browser.cancelDownload", { guid, ...this.contextScope() })
                 .then(

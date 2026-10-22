@@ -15,6 +15,7 @@ import {
   type AgentUnavailable,
   type AttachedTab,
   type BridgeCommand,
+  type FoundDownload,
   type BridgeDebuggerEvent,
   type ExtensionDevice,
   type ExtensionCommandResult,
@@ -393,6 +394,8 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       const response = await chrome.debugger.sendCommand(source, command.method, command.params);
       return { result: response ?? {} };
     }
+    case "downloads.find":
+      return { downloads: await findDownloads(command.url, command.startedAfter) };
     case "debugger.poll": {
       const firstSequence = debuggerEvents[0]?.sequence ?? debuggerSequence + 1;
       const available = debuggerEvents.filter((event) => event.sequence > command.afterSequence);
@@ -405,6 +408,26 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       };
     }
   }
+}
+
+const MAX_FOUND_DOWNLOADS = 16;
+
+/** Completed downloads of one address since a time, as Chrome saved them. */
+async function findDownloads(url: string, startedAfter: string): Promise<FoundDownload[]> {
+  const found = new Map<number, chrome.downloads.DownloadItem>();
+  for (const query of [{ url }, { finalUrl: url }]) {
+    for (const item of await chrome.downloads.search({ ...query, startedAfter, state: "complete" }))
+      found.set(item.id, item);
+  }
+  return [...found.values()]
+    .filter((item) => item.exists && item.filename.length > 0)
+    .sort((left, right) => left.startTime.localeCompare(right.startTime))
+    .slice(0, MAX_FOUND_DOWNLOADS)
+    .map((item) => ({
+      id: item.id,
+      filePath: item.filename,
+      sizeBytes: item.fileSize >= 0 ? item.fileSize : item.bytesReceived,
+    }));
 }
 
 async function requireControllableTab(tabId: number): Promise<void> {

@@ -1916,7 +1916,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "downloads"],
     title: "Inspect browser downloads",
     description:
-      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. Attached browsers and Lightpanda do not expose managed downloads.",
+      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. In attached Chrome the person's own file also stays in their downloads folder. Lightpanda has no downloads.",
     input: BrowserDownloadsInput,
     output: z.union([BrowserDownloadListResponse, BrowserDownload]),
     readOnly: true,
@@ -1957,7 +1957,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "downloadSave"],
     title: "Save browser download to workspace",
     description:
-      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Missing folders on that path are created. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+      "Save one exact completed browser download to a portable relative path in the browser's source session workspace. Missing folders on that path are created. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation.",
     input: BrowserDownloadSaveInput,
     output: BrowserDownloadSaveResponse,
     readOnly: false,
