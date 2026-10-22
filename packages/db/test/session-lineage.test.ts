@@ -289,5 +289,51 @@ describe("session lineage", () => {
     const lineage = await getSessionLineage(db, workspaceId, root.id);
     expect(lineage?.truncated).toBe(true);
     expect(countLineageNodes(lineage?.children ?? [])).toBeLessThanOrEqual(200);
+    // The cap drops the oldest agent, never an arbitrary one.
+    const kept = new Set(lineage?.children.map((node) => node.session.initialMessage));
+    expect(kept.has("child 0")).toBe(false);
+    expect(kept.has("child 200")).toBe(true);
+  }, 120_000);
+
+  test("getSessionLineage lists each level newest first, children before grandchildren", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const base = {
+      accountId,
+      workspaceId,
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    };
+    const root = await createSession(db, { ...base, initialMessage: "root" });
+    const make = (name: string, parentSessionId: string) =>
+      createSession(db, { ...base, initialMessage: name, parentSessionId });
+    const first = await make("first", root.id);
+    const second = await make("second", root.id);
+    const third = await make("third", root.id);
+    const olderGrandchild = await make("older grandchild", first.id);
+    const newerGrandchild = await make("newer grandchild", first.id);
+    // Creation time decides the order, whatever order the ids sort in.
+    const at = (id: string, minutes: number) =>
+      admin`update sessions set created_at = now() - make_interval(mins => ${minutes}) where id = ${id}`;
+    await at(first.id, 30);
+    await at(second.id, 20);
+    await at(third.id, 10);
+    await at(olderGrandchild.id, 25);
+    await at(newerGrandchild.id, 5);
+
+    const lineage = await getSessionLineage(db, workspaceId, root.id);
+    expect(lineage?.children.map((node) => node.session.id)).toEqual([
+      third.id,
+      second.id,
+      first.id,
+    ]);
+    expect(lineage?.children[2]?.children.map((node) => node.session.id)).toEqual([
+      newerGrandchild.id,
+      olderGrandchild.id,
+    ]);
   }, 120_000);
 });

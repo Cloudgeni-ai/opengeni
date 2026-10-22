@@ -132,6 +132,11 @@ export interface SessionRowProps {
   onTogglePin?: (() => void) | undefined;
   /** The workspace the chat lives in, when it is not the one on screen (search results). */
   workspaceName?: string | undefined;
+  /**
+   * A word the person must act on (a sub-agent that failed, is stuck, needs
+   * them or is paused). It replaces the last-update time and sets the dot's tone.
+   */
+  attention?: { word: string; tone: "failed" | "waiting" } | null | undefined;
   now?: Date | undefined;
 }
 
@@ -142,6 +147,7 @@ export function SessionRow({
   onPress,
   onTogglePin,
   workspaceName,
+  attention,
   now,
 }: SessionRowProps) {
   const theme = useNativeTimelineTheme();
@@ -150,7 +156,8 @@ export function SessionRow({
   const t = useOpenGeniText();
   const rows = useMemo(() => projectClientModelRows(t, [...models]), [t, models]);
   const title = sessionDisplayTitle(session);
-  const status = recentSessionStatus(session);
+  const recent = recentSessionStatus(session);
+  const status = attention ? { tone: attention.tone, pulse: false } : recent;
   const model = recentSessionModelPresentation(session.model, rows);
   const repo = sessionRepoLabel(session);
   const meta = [model.label, repo].filter(Boolean).join(" · ");
@@ -186,6 +193,7 @@ export function SessionRow({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={[title, pinned ? m.pinned : null, workspaceName ?? null]
+        .concat(attention ? [attention.word] : [])
         .filter(Boolean)
         .join(", ")}
       accessibilityActions={onTogglePin ? [{ name: "pin", label: pinLabel }] : undefined}
@@ -241,14 +249,18 @@ export function SessionRow({
         {pinned ? <Icon name="pin" size={11} color={c["fg-subtle"]} /> : null}
         <Text
           style={{
-            ...fontStyle(theme, 400),
+            ...fontStyle(theme, attention ? 500 : 400),
             fontSize: 11,
             lineHeight: 16,
-            color: c["fg-subtle"],
+            color: attention
+              ? attention.tone === "failed"
+                ? c["status-failed"]
+                : c["status-waiting"]
+              : c["fg-subtle"],
             fontVariant: ["tabular-nums"],
           }}
         >
-          {relativeTimeLabel(t, session.updatedAt, now)}
+          {attention ? attention.word : relativeTimeLabel(t, session.updatedAt, now)}
         </Text>
       </View>
     </Pressable>

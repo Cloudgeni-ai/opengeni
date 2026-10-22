@@ -2769,8 +2769,14 @@ export const englishMessages = {
   "sessionAdmission.tryAgain": "Try again",
   "sessionAgentsModel.active": "Active",
   "sessionAgentsModel.completed": "Completed",
+  "sessionAgentsModel.couldNotStartItsNextStep": "Could not start its next step",
+  "sessionAgentsModel.failed": "Failed",
   "sessionAgentsModel.idle": "Idle",
+  "sessionAgentsModel.needsYou": "Needs you",
+  "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
+  "sessionAgentsModel.stuck": "Stuck",
+  "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
     "Reconnect this integration to use its tools in this conversation.",
   "sessionAuthRecommendation.reviewPermissionToUseYour":
