@@ -94,8 +94,12 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 
 ### Ownership and scope
 
-- **SUB-OWN-01** Connections are owned by the organization. A workspace
-  never owns a connection. Verification: pending (data-model).
+- **SUB-OWN-01** Every connection has exactly one owner: the organization,
+  one shared workspace, or one person (a personal connection). A connection
+  serves wherever it reaches and nowhere else; there is no second, hidden
+  per-workspace copy of it and no per-workspace preference between the
+  workspace's own connections and the organization's. Verification:
+  `packages/db/test/subscription-core-one-owner-postgres.test.ts`.
 - **SUB-OWN-02** A connection's scope is one of: the whole organization,
   a set of chosen workspaces (with a separate switch for Personal workspaces),
   or a set of chosen people. Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
@@ -103,9 +107,11 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   in every workspace that person can use, including their Personal workspace,
   without exposing private workspace inventory to administrators.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-OWN-04** An organization administrator can delegate management of a
-  connection to a workspace administrator; ownership stays with the
-  organization. Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`, `packages/db/test/subscription-core-m2-postgres.test.ts`.
+- **SUB-OWN-04** A workspace's own connection reaches only that workspace
+  and is managed by that workspace's administrators. Organization
+  administrators see it, labelled as that workspace's, and can make it the
+  organization's; only an organization connection reaches other workspaces
+  or chosen people. Verification: `packages/db/test/subscription-core-one-owner-postgres.test.ts`.
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
@@ -126,13 +132,11 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   (provider-account uniqueness per organization/provider/owner).
 - **SUB-OWN-09** A shared workspace's administrator, without being an
   organization administrator, can connect a new account of any provider for
-  that workspace and remove it again. It is the workspace's own account: the
-  organization owns it (SUB-OWN-01), it serves only that workspace and never
-  Personal workspaces, the workspace manages it (SUB-OWN-04), and the
-  organization's administrators see it and alone widen its scope or change
-  its manager. Once it serves any other workspace, only an organization
-  administrator removes it. An upstream account already connected elsewhere
-  in the organization is refused, never duplicated or taken over.
+  that workspace and remove it again. It is the workspace's own account
+  (SUB-OWN-01): it serves only that workspace and never Personal workspaces,
+  and the workspace manages it (SUB-OWN-04). An upstream account already
+  connected elsewhere in the organization is refused, never duplicated or
+  taken over.
   Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`,
   `apps/web/src/components/models/workspace-models-page.test.tsx`.
 
@@ -164,10 +168,11 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-SET-05** One organization overview lists every workspace's effective
   settings and highlights overrides. Verification: `packages/db/test/subscription-settings-postgres.test.ts`.
 - **SUB-SET-06** Per workspace and provider, effective settings can turn the
-  provider off or stop using organization accounts, without changing any
-  connection's scope or the workspace model allowlist. Verification:
+  provider off without changing any connection's reach or the workspace
+  model allowlist. Which connections a workspace uses is decided only by
+  their reach and their one on/off switch (SUB-OWN-01, D-50). Verification:
   `packages/db/test/subscription-core-m2-postgres.test.ts` (provider switch
-  overrides and SQL/TypeScript parity; M2 has no production selector).
+  overrides and SQL/TypeScript parity).
 
 ### Eligibility
 
@@ -537,6 +542,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-47 | 2026-10-13 | The product owner accepted refusing cross-provider switching while `remote_v2` is in use. This supersedes D-40 and Q-05 as delivery requirements: portable conversion is deferred; preserve clear refusal, original history and mode. No conversion retry or production deployment is authorized. |
 | D-48 | 2026-10-13 | Finish-line implementation scope: chat-turn renewal is a lease ownership/liveness check, not a second authorization system; operation leases retain their existing extra access check. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
 | D-49 | 2026-10-14 | The product owner decided that a workspace administrator connects subscription accounts for their own workspace without being an organization administrator (SUB-OWN-09). Before, only an organization administrator could create any new shared connection, so a workspace administrator saw providers they could not add. The workspace's own account is exactly the shape an organization administrator already created from a workspace route, so selection, pools and settings are unchanged, and organization ownership, visibility and scope changes stay with the organization (SUB-OWN-01/04). |
+| D-50 | 2026-10-22 | The product owner decided that every connection has exactly one owner (the organization, one shared workspace, or one person) and serves exactly where it reaches (SUB-OWN-01, SUB-OWN-04). This retires the per-workspace "inference pool" split, where one connection could sit in a workspace twice, once as the workspace's own copy and once as the organization's, each with its own on/off switch; the per-workspace preference (`providers.<id>.inferenceSource` and the older `useOrganizationAccounts`) that chose between those copies; and the "Set aside" state it produced. A connection has one on/off switch. A workspace's own connection reaches only that workspace; making it serve more workspaces makes it the organization's. Migration 0907 keeps everyone's access exactly as it was: a workspace that used a connection keeps it, a workspace that had it switched off or excluded by its preference loses it from the connection's reach (an organization-wide connection becomes a list of the workspaces that used it, still reaching workspaces created later), and a connection whose only use was as one workspace's own copy becomes that workspace's. A connection that was switched off everywhere keeps its listed reach, so switching it on serves where it was meant to. The assignment-policy table is no longer read or written; it is emptied here and dropped in a later contract step. |
 
 ### Open decisions
 

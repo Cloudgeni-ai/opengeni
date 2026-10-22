@@ -34,10 +34,7 @@ export const SUBSCRIPTION_SETTING_KEYS: readonly SubscriptionSettingKey[] = Obje
 /** Default when a provider has no rotation entry: spread work (design 3.3). */
 export const DEFAULT_ROTATION: RotationSetting = Object.freeze({ mode: "spread" });
 
-export const DEFAULT_PROVIDER_SWITCHES: ProviderSwitches = Object.freeze({
-  useOrganizationAccounts: true,
-  enabled: true,
-});
+export const DEFAULT_PROVIDER_SWITCHES: ProviderSwitches = Object.freeze({ enabled: true });
 
 /**
  * Resolve one workspace's effective settings (SUB-SET-01..03).
@@ -74,9 +71,7 @@ export function effectiveSettings(
     const value: Record<string, unknown> = { ...base };
     const sources: Record<string, SettingSource> = {};
     for (const [entryKey, entry] of Object.entries(base)) {
-      if (key === "providers" && (entry as ProviderSwitches).inferenceSource !== undefined) {
-        value[entryKey] = resolveProviderSwitches(entry as ProviderSwitches);
-      }
+      if (key === "providers") value[entryKey] = normalizeProviderSwitches(entry);
       sources[entryKey] = "organization";
     }
     for (const [entryKey, entry] of Object.entries(entries ?? {})) {
@@ -131,27 +126,13 @@ export function providerSwitchesFor(
   settings: SubscriptionSettingValues,
   provider: ProviderId,
 ): ProviderSwitches {
-  return settings.providers[provider] ?? DEFAULT_PROVIDER_SWITCHES;
+  const entry = settings.providers[provider];
+  return entry ? normalizeProviderSwitches(entry) : DEFAULT_PROVIDER_SWITCHES;
 }
 
-/** Legacy boolean rows remain readable; all effective values expose one source. */
-export function resolveProviderSwitches(switches: ProviderSwitches): ProviderSwitches & {
-  inferenceSource: NonNullable<ProviderSwitches["inferenceSource"]>;
-} {
-  const inferenceSource =
-    switches.inferenceSource ?? (switches.useOrganizationAccounts ? "automatic" : "workspace");
-  return {
-    ...switches,
-    inferenceSource,
-    useOrganizationAccounts: inferenceSource !== "workspace",
-  };
-}
-
-export function inferenceSourceFor(
-  settings: SubscriptionSettingValues,
-  provider: ProviderId,
-): NonNullable<ProviderSwitches["inferenceSource"]> {
-  return resolveProviderSwitches(providerSwitchesFor(settings, provider)).inferenceSource;
+/** A stored provider entry as its one switch; keys from older releases are ignored. */
+function normalizeProviderSwitches(entry: unknown): ProviderSwitches {
+  return { enabled: (entry as Partial<ProviderSwitches> | undefined)?.enabled !== false };
 }
 
 export function isSubscriptionSettingKey(value: unknown): value is SubscriptionSettingKey {
@@ -361,22 +342,5 @@ function mergeProviderSwitches(
   base: ProviderSwitches | undefined,
   override: Partial<ProviderSwitches>,
 ): ProviderSwitches {
-  const inherited = resolveProviderSwitches({ ...DEFAULT_PROVIDER_SWITCHES, ...base });
-  const inferenceSource =
-    override.inferenceSource ??
-    (override.useOrganizationAccounts === undefined
-      ? inherited.inferenceSource
-      : override.useOrganizationAccounts
-        ? "automatic"
-        : "workspace");
-  const hasAuthoritativeSource =
-    override.inferenceSource !== undefined || base?.inferenceSource !== undefined;
-  const { inferenceSource: _inheritedSource, ...inheritedValues } = inherited;
-  const { inferenceSource: _overrideSource, ...overrideValues } = override;
-  return {
-    ...inheritedValues,
-    ...overrideValues,
-    ...(hasAuthoritativeSource ? { inferenceSource } : {}),
-    useOrganizationAccounts: inferenceSource !== "workspace",
-  };
+  return { enabled: override.enabled ?? base?.enabled ?? true };
 }

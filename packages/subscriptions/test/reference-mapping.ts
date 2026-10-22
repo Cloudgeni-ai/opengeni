@@ -120,9 +120,6 @@ function mapConnection(connection: ReferenceConnection, now: number): Subscripti
     entitledModelIds: providerModelsEntitled,
     excludedModelIds: [],
     allowedModelIds: connection.allowedModelIds ?? null,
-    ...(connection.assignmentPolicies === undefined
-      ? {}
-      : { assignmentPolicies: connection.assignmentPolicies }),
     refreshGeneration: 1,
     quota: mapQuota(connection, now),
   };
@@ -133,16 +130,7 @@ function mapSettings(
 ): SubscriptionSettingValues {
   return {
     rotation: settings.rotation,
-    providers: Object.fromEntries(
-      Object.entries(settings.inferenceSource ?? {}).map(([provider, inferenceSource]) => [
-        provider,
-        {
-          inferenceSource,
-          useOrganizationAccounts: inferenceSource !== "workspace",
-          enabled: true,
-        },
-      ]),
-    ),
+    providers: {},
     crossProviderFailover: settings.crossProviderFailover,
     fallbackOrder: settings.fallbackOrder,
     personalConnectionsAllowed: settings.personalConnectionsAllowed,
@@ -151,31 +139,11 @@ function mapSettings(
 }
 
 export function mapSettingsPolicy(world: ReferenceWorld): SubscriptionSettingsPolicy {
-  const mapOverrides = (override: Partial<ReferenceWorld["settings"]["organization"]>) => {
-    const { inferenceSource, ...rest } = override;
-    return {
-      ...rest,
-      ...(inferenceSource === undefined
-        ? {}
-        : {
-            providers: Object.fromEntries(
-              Object.entries(inferenceSource).map(([provider, source]) => [
-                provider,
-                {
-                  inferenceSource: source,
-                  useOrganizationAccounts: source !== "workspace",
-                  enabled: true,
-                },
-              ]),
-            ),
-          }),
-    } as Partial<SubscriptionSettingValues>;
-  };
+  const mapOverrides = (override: Partial<ReferenceWorld["settings"]["organization"]>) =>
+    override as Partial<SubscriptionSettingValues>;
   return {
     organization: mapSettings(world.settings.organization),
-    locked: world.settings.locked.map((key) =>
-      key === "inferenceSource" ? "providers" : key,
-    ) as SubscriptionSettingsPolicy["locked"],
+    locked: world.settings.locked as SubscriptionSettingsPolicy["locked"],
     workspaces: Object.fromEntries(
       Object.entries(world.settings.workspaceOverrides).map(([workspaceId, override]) => [
         workspaceId,
