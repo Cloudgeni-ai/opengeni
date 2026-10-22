@@ -62,7 +62,15 @@ occurs: candidates use the existing `GitStore` merge-tree/commit-tree builder.
   position, then PR number. Deduplicate identical records, reject inconsistent
   projections. A reused/changed historical head can cause a disagreement; it is
   not silently replaced with the squash commit.
-- Cohorts have at most 16 members. Version PRs are singleton barriers. Reconstruct
+- Cohorts have at most 16 members. Version PRs are singleton barriers. Actual
+  main commits changing any `ADAPTER_PATHS` entry (including the entire `scripts`
+  tree) are also singleton barriers: preserve the changing PR in the report,
+  but do not let it poison otherwise eligible adjacent FIFO segments. A change
+  in an unselected intervening main commit starts a new segment and remains
+  visible in collection coverage. Missing/unretained projections are isolated,
+  never dropped. This is selection only: every synthetic candidate still passes
+  the same unchanged-adapter guard; actual landing bytes are not substituted for
+  its observed PR head. Reconstruct
   the base from the first actual merge's first parent, not today's main. Compare
   every synthetic member tree with its actual merge tree and the whole tip with
   the last actual merge. Single-parent landings are labelled squash-or-rebase:
@@ -96,6 +104,27 @@ Each observation writes timestamped JSON plus atomically replaced `latest.json`:
 input/proxy metadata, candidates/manifests, per-member/tree comparisons, main CI
 runs, actual build/collection durations, stage counts, disagreements and optional
 publication comparisons. No readiness-to-CI latency is claimed from `mergedAt`.
+
+Each built cohort includes `adapterCheck`: exact base/tip SHAs and the first
+failed path, object IDs and reason (changed/invalid, non-tree or unavailable).
+The whole-scripts guard deliberately also rejects changed tests/operator helpers.
+Segmentation preserves this conservative coverage; it does not promise that every
+window has an eligible cohort or that historical composition represents a live queue.
+
+For continuous service retention, the separately reviewed supervisor integration
+emits `trafficEvidenceRecords` through its existing structured stdout log sink.
+The child output alone is insufficient: that supervisor discards subprocess stdout.
+Each successful cycle emits canonical full report JSON as indexed base64 chunks
+of at most 64 KiB raw bytes, with a common SHA-256 `reportDigest`, total count and
+byte length. Decode chunks individually, concatenate in index order, then verify
+SHA-256 of the canonical decoded JSON. Missing chunks mean incomplete evidence,
+not a complete retained report. Limit: 2 MiB raw report per cycle (at most 32 chunks);
+larger reports emit one explicit `traffic_report_overflow` record and are not
+claimed durably retained. No credentials/environment or raw provider responses
+are added. Existing provider log retention applies; there is no new cloud store
+or API writer. Local JSON remains the full report, with the supervisor's existing
+64-file retention. This requires the reviewed wrapper patch in the same-source
+image; adding the helper alone does not change a previously deployed supervisor.
 
 `traffic-cache` retains checksummed local GET snapshots (five-minute TTL), completed
 attempt job pages only after the exact attempt is terminal, and exact verified
