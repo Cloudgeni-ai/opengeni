@@ -7530,18 +7530,28 @@ export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"):
     error,
     phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
   );
+  // The MCP SDK's HTTP transports report the response status as a numeric
+  // `code` (StreamableHTTPError, SseError), with no `status`. JSON-RPC error
+  // codes are negative, so a code in the HTTP range is that status.
+  const status =
+    fields.status ??
+    (fields.causeNumber !== undefined && fields.causeNumber >= 100 && fields.causeNumber <= 599
+      ? fields.causeNumber
+      : undefined);
   const code =
     fields.causeCode ??
-    (fields.causeNumber === undefined ? undefined : `code ${fields.causeNumber}`);
+    (fields.causeNumber === undefined || fields.causeNumber === status
+      ? undefined
+      : `code ${fields.causeNumber}`);
   const detail = [
-    fields.status === undefined ? undefined : `HTTP ${fields.status}`,
+    status === undefined ? undefined : `HTTP ${status}`,
     [fields.causeName, code].filter(Boolean).join(" ") || undefined,
   ]
     .filter(Boolean)
     .join(", ");
   const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
   const next =
-    fields.status === 401 || fields.status === 403
+    status === 401 || status === 403
       ? "; its connection may need to be signed in again"
       : fields.retryable
         ? "; this may be temporary"

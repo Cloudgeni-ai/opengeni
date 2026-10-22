@@ -108,6 +108,7 @@ import {
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
   SESSION_TITLE_GENERATION_INSTRUCTIONS,
   mcpToolErrorOutput,
+  mcpUnavailableReason,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
@@ -13021,6 +13022,63 @@ describe("runtime event normalization", () => {
       brokenOptional.close();
       healthy.close();
     }
+  });
+
+  test("an unavailable integration's MCP SDK 401 asks for sign-in at connect and list", async () => {
+    // The SDK's HTTP transport reports a 401 as a numeric `code` with no
+    // `status`, which is also how an expired connection credential surfaces.
+    const connectUnauthorized = startTestMcpServer({ unauthorizedForMethods: ["initialize"] });
+    const listUnauthorized = startTestMcpServer({ unauthorizedForMethods: ["tools/list"] });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            { id: "connect-auth", url: connectUnauthorized.url, cacheToolsList: false },
+            { id: "list-auth", url: listUnauthorized.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "connect-auth", optional: true },
+          { kind: "mcp", id: "list-auth", optional: true },
+        ],
+      );
+      try {
+        await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        expect(Object.fromEntries(prepared.unavailableMcpServers)).toEqual({
+          "connect-auth":
+            "could not connect (HTTP 401, Error); its connection may need to be signed in again",
+          "list-auth":
+            "connected but could not list its tools (HTTP 401, Error); its connection may need to be signed in again",
+        });
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      connectUnauthorized.close();
+      listUnauthorized.close();
+    }
+  });
+
+  test("unavailable reasons read only HTTP-range numeric codes as a status", () => {
+    const failure = (fields: Record<string, unknown>) =>
+      Object.assign(new Error("provider body that must not be quoted"), fields);
+    expect(mcpUnavailableReason(failure({ code: 403 }), "list")).toBe(
+      "connected but could not list its tools (HTTP 403, Error); its connection may need to be signed in again",
+    );
+    // JSON-RPC error codes stay codes.
+    expect(mcpUnavailableReason(failure({ code: -32_603 }), "list")).toBe(
+      "connected but could not list its tools (Error code -32603)",
+    );
+    // An explicit status wins, and a different numeric code is still shown.
+    expect(mcpUnavailableReason(failure({ status: 400, code: 7 }), "connect")).toBe(
+      "could not connect (HTTP 400, Error code 7)",
+    );
+    expect(mcpUnavailableReason(failure({ status: 401, code: 401 }), "connect")).toBe(
+      "could not connect (HTTP 401, Error); its connection may need to be signed in again",
+    );
   });
 
   test("REQUIRED server whose tools/list throws at RUN time still fails the turn", async () => {
