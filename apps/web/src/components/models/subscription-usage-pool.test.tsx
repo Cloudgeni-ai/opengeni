@@ -147,6 +147,19 @@ test("the real Claude rows and pool agree in the six-account regression preview"
   expect(container.textContent).not.toContain("No capacity available.");
 });
 
+test("a projected run-out whose time passed does not declare a positive observed pool exhausted", async () => {
+  const pool = pooledLimitsFixture("workspace", false, true);
+  const weekly = pool.windows[0]!;
+  weekly.forecast.runsOutAt = new Date(POOL_PREVIEW_NOW - 1).toISOString();
+  await act(async () =>
+    root.render(<SubscriptionUsagePoolView pool={pool} now={POOL_PREVIEW_NOW} />),
+  );
+  expect(container.textContent).toContain("62% left");
+  expect(container.textContent).toContain("Waiting for updated limits.");
+  expect(container.textContent).not.toContain("No capacity available");
+  expect(container.textContent).not.toContain("you'll run out");
+});
+
 test("workspace scope and sparse/unknown readings remain truthful", async () => {
   const pool = pooledLimitsFixture("workspace", true);
   pool.windows[0]!.remainingPercent = null;

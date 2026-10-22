@@ -622,6 +622,7 @@ describe("capacity usable across both limits", () => {
     const weekly = result(data, "weekly");
     expect(weekly.accounts[3]!.remainingPercent).toBe(44);
     expect(weekly.remainingPercent).toBe(0);
+    expect(weekly.forecast.utilizationPercent).toBeNull();
     expect(weekly.forecast).toMatchObject({
       kind: "runs_out",
       runsOutAt: NOW,

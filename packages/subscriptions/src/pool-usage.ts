@@ -319,7 +319,8 @@ export function buildSubscriptionUsagePool(
         runsOutAt: input.now,
         nextResetAt: returns.length ? Math.min(...returns) : null,
         unusedPercent: null,
-        utilizationPercent: 100,
+        // A short-window hold does not mean the weekly allowance was consumed.
+        utilizationPercent: known.every((account) => account.remainingPercent === 0) ? 100 : null,
         lowestPercent: 0,
         historyDays,
       };

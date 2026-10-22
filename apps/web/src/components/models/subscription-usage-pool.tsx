@@ -14,11 +14,13 @@ export function poolForecastSentence(
   if (forecast.kind === "insufficient_history")
     return "Not enough history to forecast this week's usage yet.";
   if (forecast.kind === "runs_out" && forecast.runsOutAt) {
-    if (Date.parse(forecast.runsOutAt) <= now) {
+    if (forecast.basis.startsWith("Observed pool exhaustion")) {
       return forecast.nextResetAt && Date.parse(forecast.nextResetAt) > now
         ? `No capacity available. Next reset ${formatShortTime(forecast.nextResetAt, { now })}.`
         : "No capacity available. Waiting for updated limits.";
     }
+    // A prediction whose time passed is not a new provider observation.
+    if (Date.parse(forecast.runsOutAt) <= now) return "Waiting for updated limits.";
     const gap = forecast.nextResetAt
       ? Math.max(
           0,
