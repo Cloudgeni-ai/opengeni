@@ -29,6 +29,7 @@ const PAGES = new Set([
   "playground",
   "read-only-chats",
   "inbox",
+  "sites",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".
