@@ -21,6 +21,79 @@ function call(partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">): Tool
 }
 
 describe("shared tool row presentation", () => {
+  test("skill steps say skill and name which one", () => {
+    const skillOutput = {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            skillId: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53",
+            files: [
+              {
+                path: "SKILL.md",
+                content:
+                  "---\nname: operate-smart-home\ndescription: Use for the house.\n---\n# Home",
+              },
+            ],
+          }),
+        },
+      ],
+    };
+    const read = toolRowPresentation(
+      englishText,
+      call({
+        name: "skill_read",
+        arguments: { skill: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53" },
+        output: skillOutput,
+      }),
+    );
+    expect(read.title).toBe("Read skill");
+    expect(read.preview).toEqual({ kind: "text", text: "Operate smart home" });
+    const running = toolRowPresentation(
+      englishText,
+      call({ name: "skill_read", status: "running", arguments: { skill: "builtin:documents" } }),
+    );
+    expect(running.title).toBe("Reading skill");
+    expect(running.preview).toMatchObject({ text: "Documents" });
+    const byId = toolRowPresentation(
+      englishText,
+      call({
+        name: "skill_read",
+        arguments: { skill: "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53" },
+        output: { content: [{ type: "text", text: '{"alreadyInContext":true}' }] },
+      }),
+    );
+    expect(byId.preview).toEqual({ kind: "text", text: "Done" });
+    const search = toolRowPresentation(
+      englishText,
+      call({ name: "skill_search", arguments: { query: "excel" }, output: "[]" }),
+    );
+    expect(search.title).toBe("Searched skills");
+    expect(search.preview).toEqual({ kind: "text", text: "excel" });
+    const preview = (skill: string, content: string) =>
+      toolRowPresentation(
+        englishText,
+        call({
+          name: "skill_read",
+          arguments: { skill },
+          output: {
+            content: [
+              { type: "text", text: JSON.stringify({ files: [{ path: "SKILL.md", content }] }) },
+            ],
+          },
+        }),
+      ).preview;
+    const id = "3e8b5d21-7c4a-4f9e-b6d2-1a0c9e8f7b53";
+    expect(preview(id, '---\r\nname: "quoted-name"\r\n---\r\n# Body')).toMatchObject({
+      text: "Quoted name",
+    });
+    expect(preview(id, "---\ndescription: none\n---\nname: body-line\n")).toEqual({
+      kind: "text",
+      text: "Done",
+    });
+    expect(preview(`builtin:${id}`, "no front matter")).toEqual({ kind: "text", text: "Done" });
+  });
+
   test("tool_search reads as a lookup with the disclosed tools", () => {
     const row = toolRowPresentation(
       englishText,
