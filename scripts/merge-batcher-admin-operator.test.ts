@@ -100,6 +100,9 @@ if(method !== "GET") {
     result = { ...state.rulesets.find(r => r.id === id), ...await Bun.file(args[args.indexOf("--input")+1]).json() };
     state.rulesets = state.rulesets.map(r => r.id === id ? result : r);
   } else if(method === "DELETE") state.rulesets = state.rulesets.filter(r => r.id !== id);
+  if(process.env.OMIT_UPDATE_DEFAULT) for(const r of state.rulesets) {
+    if(Array.isArray(r.rules)) r.rules = r.rules.map(rule => rule.type === 'update' && rule.parameters?.update_allows_fetch_and_merge === false ? {type:'update'} : rule);
+  }
   if(process.env.WRITE_DRIFT && method === "PUT") state.rulesets.find(r=>r.id===id).enforcement="disabled";
   if(process.env.WRITE_DRIFT && method === "DELETE") state.rulesets.push({id:999,name:"unexpected"});
   await Bun.write(process.env.FIXTURE_STATE, JSON.stringify(state));
@@ -295,6 +298,43 @@ test("explicit write opt-in, unknown actions and classic-read failure issue zero
       0,
     );
     expect((await h.events()).filter((e) => e.method !== "GET")).toEqual([]);
+  } finally {
+    await h.close();
+  }
+});
+test("provider omitted update default survives live-shaped receipt, apply and one-command OFF", async () => {
+  const h = await harness();
+  try {
+    const operator = await offHarness(h);
+    for (const action of ["create-guard", "create-namespace", "admit"]) {
+      const result = await h.run(action, "--apply-after-go", { OMIT_UPDATE_DEFAULT: "1" });
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+    }
+    const receipt = JSON.parse(await readFile(join(h.root, "plan/namespace-receipt.json"), "utf8"));
+    expect(receipt.rules).toEqual([{ type: "creation" }, { type: "update" }]);
+    const request = JSON.parse(
+      await readFile(join(h.root, "plan/create-namespace-attempt/request.json"), "utf8"),
+    );
+    expect(request.rules).toEqual([
+      { type: "creation" },
+      { type: "update", parameters: { update_allows_fetch_and_merge: false } },
+    ]);
+    expect((await h.run("check", "applied")).code).toBe(0);
+    const offResult = await operator.run({ OMIT_UPDATE_DEFAULT: "1" });
+    expect(offResult.stderr).toBe("");
+    expect(offResult.code).toBe(0);
+    expect(offResult.stdout).toContain("normal reviewed squash path restored");
+    expect((await h.run("check-stable", "original")).code).toBe(0);
+    expect((await h.events()).filter((e) => e.method !== "GET").map((e) => e.method)).toEqual([
+      "POST",
+      "POST",
+      "PUT",
+      "STOP",
+      "PUT",
+      "DELETE",
+      "DELETE",
+    ]);
   } finally {
     await h.close();
   }
