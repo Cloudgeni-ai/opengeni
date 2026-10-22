@@ -87,7 +87,7 @@ export function DesktopUpdateButton(props: {
       title={props.collapsed ? undefined : hint}
       onClick={busy ? undefined : install}
       className={cn(
-        "flex items-center rounded-md text-sm font-normal text-fg outline-none transition-colors motion-reduce:transition-none",
+        "flex items-center rounded-md text-sm font-normal text-fg outline-hidden transition-colors motion-reduce:transition-none",
         "focus-visible:ring-2 focus-visible:ring-ring/50",
         busy ? "cursor-default" : "hover:bg-hover",
         props.collapsed
