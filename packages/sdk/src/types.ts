@@ -2047,19 +2047,20 @@ export type SessionListTotals = {
 };
 
 /**
- * One Site's own root conversations in one project (`siteConversations:
- * "group"`). Counts are complete for the viewer, independent of page size.
+ * One Site row in one project (`siteConversations: "group"`): a Site with
+ * the viewer's conversations, created by a chat they list, or opened by them.
+ * Counts are complete for the viewer, independent of page size.
  */
 export type SiteConversationGroup = {
   siteId: string;
   channelId: string | null;
   /** The Site's current title when the viewer can read it, else its creation label. */
   title: string;
-  /** Root conversations in the group. */
+  /** Root conversations in the group; 0 for a Site with none yet. */
   conversations: number;
-  /** Latest activity across the group's conversations. */
+  /** Latest activity: its conversations, its own changes, or the viewer opening it. */
   updatedAt: string;
-  /** Creation time of the group's newest conversation. */
+  /** Creation time of the group's newest conversation, else of the Site. */
   createdAt: string;
   total: number;
   attention: number;

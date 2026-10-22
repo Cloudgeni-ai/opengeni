@@ -25,7 +25,12 @@ const navigations: unknown[] = [];
 const requests: Array<{ path: string; init: RequestInit | undefined }> = [];
 const conversationProps: Array<Record<string, unknown>> = [];
 const composerProps: Array<Record<string, unknown>> = [];
+const opens: string[] = [];
 const client = {
+  recordSiteOpened: async (_workspace: string, opened: string) => {
+    opens.push(opened);
+    return { openedAt: new Date().toISOString() };
+  },
   listSessionPage: async (_workspace: string, options: SessionListPageOptions) => {
     listCalls.push(options);
     return listPage?.(options) ?? { pinned: [], sessions: conversations, nextCursor: null };
@@ -299,6 +304,21 @@ test("an update keeps the older conversations the person loaded", async () => {
   expect(listCalls.at(-1)?.cursor).toBeUndefined();
   expect(rows(container)).toHaveLength(35);
   expect(button(container, "Show older")).toBeUndefined();
+});
+
+test("opening the Site records it once, so its sidebar row moves up", async () => {
+  conversations = [];
+  opens.length = 0;
+  let announced = 0;
+  const listener = () => announced++;
+  window.addEventListener("opengeni:site-opened", listener);
+  try {
+    await render();
+    expect(opens).toEqual([siteId]);
+    expect(announced).toBe(1);
+  } finally {
+    window.removeEventListener("opengeni:site-opened", listener);
+  }
 });
 
 test("a chosen conversation is the one open", async () => {

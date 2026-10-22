@@ -316,6 +316,30 @@ export const siteSessionAccess = pgTable(
   ],
 );
 
+/** When each person last opened a Site (migration 0908); personal ordering only. */
+export const siteOpens = pgTable(
+  "site_opens",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_opens_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
 export const workspaceArtifactUploads = pgTable(
   "workspace_artifact_uploads",
   {

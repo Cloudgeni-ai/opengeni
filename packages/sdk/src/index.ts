@@ -532,6 +532,7 @@ export type {
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  SiteOpenedResponse,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifactVisibility,

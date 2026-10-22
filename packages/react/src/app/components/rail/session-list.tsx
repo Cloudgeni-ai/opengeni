@@ -5,6 +5,7 @@
 // active session (from the URL) is highlighted with an accent bar.
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
+import { useSiteOpenedListener } from "../../lib/site-opened";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -536,6 +537,13 @@ export function SessionList() {
       ]);
     },
     [refresh, refreshGlobalPins, refreshChannels],
+  );
+  // Opening a Site moves its row: only the grouped root page carries Site rows.
+  const refreshSiteRows = useCallback(() => void refresh(), [refresh]);
+  useSiteOpenedListener(
+    rail.workspaceId,
+    refreshSiteRows,
+    hierarchyMode && browseStatus !== "archived",
   );
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
@@ -3632,7 +3640,15 @@ export function SessionList() {
             ) : null}
             {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
               <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                Some older Sites aren&apos;t shown. Search to find their conversations.
+                Some older Sites aren&apos;t shown. Find them in{" "}
+                <Link
+                  to="/workspaces/$workspaceId/artifacts"
+                  params={{ workspaceId: rail.workspaceId }}
+                  className="underline underline-offset-2 hover:text-fg"
+                >
+                  Artifacts
+                </Link>
+                .
               </p>
             ) : null}
             {browseStatus === "archived" ? null : channelMode ? (

@@ -892,6 +892,7 @@ test("the row hover explains status, model and activity from the compact list ro
 }, 30_000);
 
 const usageSiteId = "00000000-0000-4000-a000-000000000001";
+const checklistSiteId = "00000000-0000-4000-a000-000000000004";
 const conversationId = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
 const sidebar = () => page.getByRole("complementary", { name: "Workspace sidebar" });
 const sitePanel = () => page.getByRole("complementary", { name: "Conversations" });
@@ -949,6 +950,37 @@ test("a Site row keeps its conversations nested whichever session is selected", 
     .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
     .click();
   for (const title of usageConversations) await railConversation(title).waitFor();
+}, 30_000);
+
+test("a Site a chat made sits in that chat's project, and opening a Site moves its row up", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light`);
+  // "Pricing page copy" made it in Website redesign; nobody has asked it
+  // anything, so the row has no count and nothing to disclose.
+  await group("Website redesign")
+    .getByRole("link", { name: "Open Pricing calculator. Site", exact: true })
+    .waitFor();
+  expect(
+    await sidebar()
+      .getByRole("button", { name: /from Pricing calculator$/u })
+      .count(),
+  ).toBe(0);
+  // An untouched Site sorts down with the old rows, behind Default's first step.
+  expect(await siteRow("Launch checklist").count()).toBe(0);
+  await showMore("Default").click();
+  await siteRow("Launch checklist").click();
+  await page.waitForURL(new RegExp(`/sites/${checklistSiteId}$`, "u"));
+  await page.waitForFunction(
+    (id) => window.sessionSidebarQa.siteOpens.includes(id),
+    checklistSiteId,
+  );
+  // Opening it is activity: it now leads Default.
+  await page.waitForFunction(() => {
+    const folder = document.querySelector('[role="group"][aria-label="Default"]');
+    const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
+    return first?.textContent?.includes("Launch checklist") === true;
+  });
+  expect(await siteRow("Launch checklist").getAttribute("aria-current")).toBe("page");
+  await capture("site-row-opened");
 }, 30_000);
 
 test("a Site row opens the Site beside its conversations; a nested one opens selected", async () => {

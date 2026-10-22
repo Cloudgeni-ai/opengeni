@@ -30,6 +30,8 @@ export function SiteSessionGroupHeading({
   active?: boolean | undefined;
 }) {
   const conversations = `${count} ${count === 1 ? "conversation" : "conversations"}`;
+  // A Site without conversations is a plain row: nothing to disclose.
+  const disclosable = count > 0 || expanded;
   return (
     <div
       data-site-row={origin.siteId}
@@ -44,17 +46,19 @@ export function SiteSessionGroupHeading({
         className="flex w-4 shrink-0 items-center"
         style={depth > 0 ? { marginLeft: visualTreeDepth(depth) * 12 } : undefined}
       >
-        <button
-          type="button"
-          aria-label={`${expanded ? "Collapse" : "Expand"} ${conversations} from ${origin.title}`}
-          aria-expanded={expanded}
-          onClick={onToggle}
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
-        >
-          <ChevronRightIcon
-            className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")}
-          />
-        </button>
+        {disclosable ? (
+          <button
+            type="button"
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${conversations} from ${origin.title}`}
+            aria-expanded={expanded}
+            onClick={onToggle}
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden hover:text-fg focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:h-11 pointer-coarse:w-11"
+          >
+            <ChevronRightIcon
+              className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")}
+            />
+          </button>
+        ) : null}
       </span>
       <Link
         to="/workspaces/$workspaceId/sites/$siteId"
@@ -62,14 +66,17 @@ export function SiteSessionGroupHeading({
         // The Site is the open page only while none of its conversations is.
         activeOptions={{ exact: true, includeSearch: true }}
         aria-current={active ? "page" : undefined}
-        aria-label={`Open ${origin.title}. Site, ${conversations}. ${summary.label}`}
+        // Without conversations there is no status to announce.
+        aria-label={`Open ${origin.title}. Site${count > 0 ? `, ${conversations}. ${summary.label}` : ""}`}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
       >
         <PanelsTopLeftIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-muted" />
         <span className="min-w-0 truncate">{origin.title}</span>
-        <span aria-hidden="true" className="shrink-0 text-xs tabular-nums text-fg-subtle">
-          {count}
-        </span>
+        {count > 0 ? (
+          <span aria-hidden="true" className="shrink-0 text-xs tabular-nums text-fg-subtle">
+            {count}
+          </span>
+        ) : null}
         <span className="min-w-0 flex-1" />
         <RailTrailingMetadata summary={summary} relativeTime={relativeTime} />
       </Link>
