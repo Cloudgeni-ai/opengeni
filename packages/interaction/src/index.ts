@@ -72,6 +72,8 @@ export type BrowserInteractionControllerOptions = {
   onJournalRecord?: (record: BrowserOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => BrowserOperationJournalRecord | null;
+  /** Operator logging for a dispatch error the driver did not classify. */
+  onUnexpectedDispatchError?: (error: unknown, command: BrowserActionCommandValue) => void;
 };
 
 /** Placement-resident BrowserSession mutation authority. */
@@ -95,6 +97,9 @@ export class BrowserInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      ...(options.onUnexpectedDispatchError
+        ? { onUnexpectedDispatchError: options.onUnexpectedDispatchError }
+        : {}),
       commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "browser",
@@ -274,6 +279,8 @@ export type ComputerInteractionControllerOptions = {
   onJournalRecord?: (record: ComputerOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => ComputerOperationJournalRecord | null;
+  /** Operator logging for a dispatch error the driver did not classify. */
+  onUnexpectedDispatchError?: (error: unknown, command: ComputerOperationCommand) => void;
 };
 
 /** Placement-resident ComputerSession mutation authority. Linux AT-SPI/X11,
@@ -358,6 +365,9 @@ export class ComputerInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      ...(options.onUnexpectedDispatchError
+        ? { onUnexpectedDispatchError: options.onUnexpectedDispatchError }
+        : {}),
       commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "computer",
