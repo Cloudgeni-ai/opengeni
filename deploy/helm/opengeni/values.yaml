@@ -663,6 +663,31 @@ web:
   # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
   # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
   preStopDrainSeconds: 10
+  # Keep serving the content-hashed assets (lazy route chunks, stylesheets) of
+  # previous web builds after a rollout, so a tab still running an older build
+  # does not fail to load them. Each previous image runs once per pod as an init
+  # container that copies its asset directories into a pod-local emptyDir; the
+  # server answers an asset it lacks from there, newest build first. `helm
+  # upgrade` finds the previous images by looking up the live web Deployment:
+  # its image plus the images it already carried (annotation
+  # opengeni.ai/previous-web-images). Offline renders (`helm template`) cannot
+  # look up, so they carry nothing unless `images` is set; `helm rollback`
+  # restores the earlier revision's chain. Every new web pod (scale-ups, node
+  # replacement) pulls the carried images, so keep them in the registry. During
+  # the rollout itself see ingress.webAssetsIngress.
+  previousAssets:
+    enabled: true
+    # Most previous builds carried, newest first. 0 disables carrying.
+    maxImages: 2
+    # Explicit previous web image references, newest first, for offline
+    # renders. A non-empty list replaces the live lookup; it is still
+    # de-duplicated, capped at maxImages and never includes the deployed image.
+    images: []
+    # Where a web image keeps its built dist.
+    distPath: /app/apps/web/dist
+    # Optional size limit for the shared emptyDir, for example 1Gi. Empty
+    # leaves it unbounded.
+    sizeLimit: ""
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -1175,6 +1200,24 @@ ingress:
   # the primary Ingress with auth annotations must repeat them here.
   mcpOAuthIngress:
     enabled: true
+    annotations: {}
+  # During a web rollout old and new web pods serve side by side and every
+  # request is balanced separately, so a page from one build can ask a pod of
+  # the other build for a hashed asset it does not have. This extra Ingress
+  # routes only the hashed asset paths (/assets, /office/assets,
+  # /react-demo/assets) of hosts that already send them to the web service, and
+  # has ingress-nginx retry a 404, connection error or timeout on another web
+  # pod (best effort: a retry can land on the same pod). It keeps the primary
+  # Ingress class, TLS and rendered annotations, except cert-manager,
+  # external-dns, canary, rewrite-target, app-root, server-snippet and
+  # server-alias annotations; `annotations` here are applied last.
+  webAssetsIngress:
+    enabled: true
+    # Render only when ingress.className contains "nginx". Set false to render
+    # it for an ingress-nginx controller registered under another class name.
+    requireNginxClassName: true
+    # Attempts for one asset request, including the first.
+    nextUpstreamTries: 3
     annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
