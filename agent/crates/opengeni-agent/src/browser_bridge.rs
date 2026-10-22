@@ -2544,7 +2544,7 @@ mod tests {
             install_native_host_manifests_in(&binary, directory.path(), std::slice::from_ref(&own))
                 .expect("install");
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        assert!(!manifests.is_empty());
+        assert_ne!(manifests, [] as [std::path::PathBuf; 0]);
         for path in &manifests {
             let manifest: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(path).expect("manifest")).expect("json");
