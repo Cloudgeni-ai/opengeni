@@ -62,6 +62,7 @@ import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
+import { reopenablePath } from "./page-paths";
 import {
   installAppImageIntegration,
   installLinuxAutostart,
@@ -141,17 +142,6 @@ async function recordMemory(): Promise<void> {
 function openedAtLogin(): boolean {
   if (process.argv.includes("--hidden")) return true;
   return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
-}
-
-/** The path a person was on, when it is one the app reopens: a workspace or a session. */
-function reopenablePath(
-  url: string,
-  paths: AppWebPaths,
-): { path: string; workspaceId: string | null } | null {
-  const link = parseAppLink(url, { paths });
-  if (!link?.workspaceId) return null;
-  const parsed = new URL(link.webUrl);
-  return { path: parsed.pathname, workspaceId: link.workspaceId };
 }
 
 /**
@@ -594,7 +584,11 @@ export class DesktopShell {
     const reopen = reopenablePath(url, this.paths);
     if (!reopen) return;
     this.lastPaths.set(accountId, reopen.path);
-    this.store.update(accountId, { lastPath: reopen.path, workspaceId: reopen.workspaceId });
+    // A page whose address doesn't name its workspace keeps the one last known.
+    this.store.update(accountId, {
+      lastPath: reopen.path,
+      ...(reopen.workspaceId ? { workspaceId: reopen.workspaceId } : {}),
+    });
   }
 
   private showAccount(accountId: string, path?: string): void {

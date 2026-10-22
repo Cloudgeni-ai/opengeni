@@ -64,7 +64,9 @@ export interface AppWebPaths {
    * The workspace or session a page shows, read from its path and query
    * (`?a=b`, or "" for none), or null for any other page: those stay in the
    * browser and aren't reopened. A workspace-less session link has a null
-   * `workspaceId`.
+   * `workspaceId`. A page the app should reopen whose address names neither
+   * (say, one addressed by the product's own names) returns both null: the
+   * desktop app then reopens it, but a link to it still opens in the browser.
    */
   match(
     path: string,
