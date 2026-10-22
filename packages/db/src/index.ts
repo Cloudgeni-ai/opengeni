@@ -41036,6 +41036,8 @@ export async function getActiveSessionHistoryItemsPaged(
   Array<{
     id: string;
     position: number;
+    /** The turn that wrote this row; null for rows a compaction rewrote without one. */
+    turnId: string | null;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt: Date | null;
   }>
@@ -41180,6 +41182,7 @@ export async function getActiveSessionHistoryItemsPaged(
       const rows: Array<{
         id: string;
         position: number;
+        turnId: string | null;
         item: Record<string, unknown>;
         providerArtifactInvalidatedAt: Date | null;
       }> = [];
@@ -41188,6 +41191,7 @@ export async function getActiveSessionHistoryItemsPaged(
         const page: Array<{
           id: string;
           position: number;
+          turnId: string | null;
           item: Record<string, unknown>;
           itemCodecVersion: number | null;
           providerArtifactInvalidatedAt: Date | null;
@@ -41195,6 +41199,7 @@ export async function getActiveSessionHistoryItemsPaged(
           .select({
             id: schema.sessionHistoryItems.id,
             position: schema.sessionHistoryItems.position,
+            turnId: schema.sessionHistoryItems.turnId,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
             providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
@@ -41391,12 +41396,27 @@ export type ApplyContextCompactionResult =
     }
   | { applied: false; reason: TurnAttemptFenceRejectReason };
 
+const RETAINED_ROW_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function retainedRowTurnId(
+  turnId: string | null | undefined,
+  sessionTurnIds: ReadonlySet<string>,
+): string | null {
+  return typeof turnId === "string" && sessionTurnIds.has(turnId) ? turnId : null;
+}
+
 /**
  * Atomically install the Codex-style replacement history for one exact turn
  * attempt. The old active rows remain as inactive audit evidence; the retained
  * user messages and summary receive fresh whole-number positions after every
  * existing row. A paused, replaced, recovered, or terminal attempt cannot
  * mutate conversation truth.
+ *
+ * `replacementTurnIds`, aligned with `replacementItems`, keeps the turn each
+ * retained message (or retained reply) came from, so a later compaction can
+ * still pair a request with its own turn's answer. An id that is not a turn of
+ * this session is stored as null, like rows written without one.
  */
 export async function applyContextCompaction(
   db: Database,
@@ -41408,12 +41428,19 @@ export async function applyContextCompaction(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
+    replacementTurnIds?: ReadonlyArray<string | null | undefined>;
     summaryItem: Record<string, unknown>;
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
 ): Promise<ApplyContextCompactionResult> {
+  if (
+    input.replacementTurnIds !== undefined &&
+    input.replacementTurnIds.length !== input.replacementItems.length
+  ) {
+    throw new Error("Compaction replacement turn ids must align with replacement items");
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -41467,6 +41494,30 @@ export async function applyContextCompaction(
               eq(schema.sessionHistoryItems.active, true),
             ),
           );
+        const requestedTurnIds = [
+          ...new Set(
+            (input.replacementTurnIds ?? []).filter(
+              (turnId): turnId is string =>
+                typeof turnId === "string" && RETAINED_ROW_TURN_ID_PATTERN.test(turnId),
+            ),
+          ),
+        ];
+        const sessionTurnIds = new Set(
+          requestedTurnIds.length === 0
+            ? []
+            : (
+                await tx
+                  .select({ id: schema.sessionTurns.id })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                      eq(schema.sessionTurns.sessionId, input.sessionId),
+                      inArray(schema.sessionTurns.id, requestedTurnIds),
+                    ),
+                  )
+              ).map((row) => row.id),
+        );
         if (input.replacementItems.length > 0) {
           await tx.insert(schema.sessionHistoryItems).values(
             withLosslessContentWriteVersion(
@@ -41474,7 +41525,7 @@ export async function applyContextCompaction(
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: null,
+                turnId: retainedRowTurnId(input.replacementTurnIds?.[index], sessionTurnIds),
                 position: supersededFrom + index,
                 item: omitOutputOnlyHistoryItemFields(item),
                 active: true,

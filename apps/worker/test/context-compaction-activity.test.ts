@@ -37,7 +37,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   CompactionNeededError,
   AnthropicRequestSizeError,
@@ -243,6 +243,179 @@ describe("standalone context compaction execution", () => {
         await reopened.close();
       }
       expect(providerCalls).toBe(1);
+    });
+  }
+
+  for (const mode of ["portable", "remote_v2"] as const) {
+    test(`${mode} pairs retained requests with their own turn's reply and keeps their turn ids`, async () => {
+      const suffix = crypto.randomUUID();
+      const access = await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: `account-${suffix}`,
+        accountName: "Turn reply compaction test",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `workspace-${suffix}`,
+        workspaceName: "Turn reply compaction test",
+        subjectId: `subject-${suffix}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      const workspaceId = grant.workspaceId!;
+      const session = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        initialMessage: "",
+        resources: [],
+        metadata: {},
+        model: "scripted-compactor",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      const [finished] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db
+          .insert(schema.sessionTurns)
+          .values({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `session-${session.id}`,
+            status: "completed",
+            source: "user",
+            prompt: "What did we decide about the cache key?",
+            position: 0,
+            resources: [],
+            tools: [],
+            model: "scripted-compactor",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+          })
+          .returning(),
+      );
+      const message = (role: string, text: string) =>
+        role === "assistant"
+          ? { type: "message", role, content: [{ type: "output_text", text }] }
+          : { type: "message", role, content: text };
+      await withWorkspaceRls(client.db, workspaceId, async (db) => {
+        await db.insert(schema.sessionHistoryItems).values(
+          [
+            // Rows an older compaction rewrote without a turn.
+            [null, message("user", "Legacy request")],
+            [null, message("assistant", "Legacy answer")],
+            [finished!.id, message("user", "What did we decide about the cache key?")],
+            [finished!.id, message("assistant", "We kept one key per session.")],
+          ].map(([turnId, item], position) => ({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            turnId: turnId as string | null,
+            position,
+            item: item as Record<string, unknown>,
+          })),
+        );
+      });
+      const update = await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `turn-replies:${suffix}`,
+        summary: "Continue the migration",
+        payload: {
+          type: "agent_message",
+          operationId: crypto.randomUUID(),
+          text: "Continue the migration.",
+        },
+      });
+      if (!update.added) throw new Error("Agent-message input was not inserted");
+      const attemptId = crypto.randomUUID();
+      const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+      // The running turn's own request and mid-turn text (layout A shape).
+      const appendToRunningTurn = (items: Array<Record<string, unknown>>) =>
+        withWorkspaceRls(client.db, workspaceId, async (db) => {
+          const [{ max } = { max: 0 }] = await db
+            .select({ max: sql<number>`max(${schema.sessionHistoryItems.position})` })
+            .from(schema.sessionHistoryItems)
+            .where(eq(schema.sessionHistoryItems.sessionId, session.id));
+          await db.insert(schema.sessionHistoryItems).values(
+            items.map((item, index) => ({
+              accountId: grant.accountId,
+              workspaceId,
+              sessionId: session.id,
+              turnId: turn.id,
+              position: Math.floor(Number(max)) + 1 + index,
+              item,
+            })),
+          );
+        });
+      await appendToRunningTurn([
+        message("user", "Run the migration"),
+        message("assistant", `Migration applied to staging. ${"detail ".repeat(4_000)}`),
+      ]);
+      const compact = () =>
+        maybeCompactContext(
+          client.db,
+          testSettings({ contextWindowTokens: 250_000 }),
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            turnId: turn.id,
+            executionGeneration: turn.executionGeneration,
+            attemptId,
+          },
+          null,
+          async () => `Checkpoint ${crypto.randomUUID()}`,
+          {
+            force: true,
+            codexCompactionMode: mode,
+            isCodexSubscriptionTurn: mode === "remote_v2",
+            requestRemoteCompactionV2: async () => ({
+              type: "compaction",
+              encrypted_content: `checkpoint-${crypto.randomUUID()}`,
+            }),
+          },
+        );
+      const retained = async () =>
+        (await getActiveSessionHistoryItemsPaged(client.db, workspaceId, session.id))
+          .filter(
+            (row) =>
+              row.item.type === "message" &&
+              (row.item.role === "user" || row.item.role === "assistant") &&
+              !String(JSON.stringify(row.item.content)).includes("Checkpoint"),
+          )
+          .map((row) => ({
+            turnId: row.turnId,
+            role: row.item.role,
+            text:
+              typeof row.item.content === "string"
+                ? row.item.content
+                : (row.item.content as Array<{ text: string }>).map((part) => part.text).join(""),
+          }));
+      const expected = [
+        { turnId: null, role: "user", text: "Legacy request" },
+        { turnId: finished!.id, role: "user", text: "What did we decide about the cache key?" },
+        { turnId: finished!.id, role: "assistant", text: "We kept one key per session." },
+        { turnId: turn.id, role: "user", text: "Run the migration" },
+      ];
+      expect((await compact()).compacted).toBe(true);
+      expect(await retained()).toEqual(expected);
+      // A second compaction reads the preserved turn ids back from the
+      // database and keeps the same single pairing.
+      await appendToRunningTurn([
+        message("assistant", `Still migrating. ${"progress ".repeat(4_000)}`),
+      ]);
+      expect((await compact()).compacted).toBe(true);
+      expect(await retained()).toEqual(expected);
+      const batch = (
+        await getActiveSessionHistoryItemsPaged(client.db, workspaceId, session.id)
+      ).find(
+        (row) => row.item.role === "system" && String(row.item.content).includes(update.update.id),
+      );
+      expect(batch?.turnId).toBe(turn.id);
     });
   }
 

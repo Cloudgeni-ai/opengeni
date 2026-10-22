@@ -250,6 +250,24 @@ not `stop` cannot replace active history, even if it contains partial text.
 Provider-specific output ceilings are not in the model catalog; a provider
 that rejects this cap fails compaction with the existing active history intact.
 
+Both rebuilds (portable and remote v2) keep the answer of a retained request.
+
+- **Pairing.** Each history row carries the turn that wrote it. A retained
+  person message is followed by a text-only copy of the last assistant reply of
+  that same turn. The copy keeps the reply's start and end, at most 512 tokens,
+  and is charged to the same retained budget, so the retained window overshoots
+  that budget by at most one bounded reply.
+- **What is never paired.**
+  - The turn running the compaction, whose request may still be open.
+  - A reply from a different turn.
+  - A message whose turn is unknown: rows an earlier compaction rewrote before
+    turn ids were kept, and deferred rows.
+- **Duplicates.** A turn's reply follows only its last retained request.
+- **Repeated compactions.** Retained messages and reply copies keep their
+  original turn id in `session_history_items.turn_id`, so a later compaction
+  pairs them again. The summary row keeps the compacting turn, and deferred
+  rows stay unattributed.
+
 Explicit compaction is a new accepted logical turn and therefore composes the
 same deterministic workspace instruction-policy and preference-descriptor
 governance as an ordinary agent turn. Its service initiator may inherit the
