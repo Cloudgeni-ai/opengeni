@@ -681,19 +681,21 @@ test("a generated file follows its source chat when the chat becomes private", a
   });
   expect(inheritedSource).toBeDefined();
   expect(await fileMayBeCopiedToWorkspace({ db: db.db }, ownerGrant, inheritedSource!)).toBe(false);
-  expect(
-    (
-      await updateFileVisibility(db.db, {
-        accountId: f.workspace.accountId,
-        workspaceId: f.workspace.id,
-        fileId,
-        visibility: "workspace",
-        actorSubjectId: f.owner.subjectId,
-        auditSubjectId: "agent:example",
-        agentAttempt: true,
-      })
-    ).kind,
-  ).toBe("not_changeable");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect(
+      (
+        await updateFileVisibility(db.db, {
+          accountId: f.workspace.accountId,
+          workspaceId: f.workspace.id,
+          fileId,
+          visibility: "workspace",
+          actorSubjectId: f.owner.subjectId,
+          auditSubjectId: "agent:example",
+          agentAttempt: true,
+        })
+      ).kind,
+    ).toBe("unchanged");
+  }
   const [sharingFlag] = await shared.admin`
     select source_session_audience_explicit as explicit from files where id = ${fileId}`;
   expect(sharingFlag?.explicit).toBe(false);
@@ -720,6 +722,24 @@ test("a generated file follows its source chat when the chat becomes private", a
     expectedAuthorityEpoch: 1,
     operationKey: `file-visibility:${crypto.randomUUID()}`,
   });
+  const privateSourceAgentShare = await withSessionRlsActorContext(
+    {
+      subjectId: "agent:example",
+      initiatingHumanSubjectId: f.owner.subjectId,
+      agentRootSessionId: sessionId,
+    },
+    () =>
+      updateFileVisibility(db.db, {
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        fileId,
+        visibility: "workspace",
+        actorSubjectId: f.owner.subjectId,
+        auditSubjectId: "agent:example",
+        agentAttempt: true,
+      }),
+  );
+  expect(privateSourceAgentShare.kind).toBe("not_changeable");
   const wrongOwnerShare = await f.call(
     f.owner,
     "PUT",

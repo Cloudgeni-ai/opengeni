@@ -7938,14 +7938,19 @@ export async function updateFileVisibility(
         input.visibility === "workspace" &&
         (row.sourceSessionId !== null || row.sourceSessionProvenanceMissing) &&
         !row.sourceSessionAudienceExplicit;
+      // An agent may repeat a no-op on an inherited shared File, but must
+      // never turn that request into an explicit share of source output.
+      if (
+        current === input.visibility &&
+        (!explicitShare || (input.agentAttempt && row.sourceSessionSharedUnrestricted))
+      )
+        return { kind: "unchanged", file: mapFile(row) };
       if (
         input.agentAttempt &&
         input.visibility === "workspace" &&
         (row.sourceSessionId !== null || row.sourceSessionProvenanceMissing)
       )
         return { kind: "not_changeable" };
-      if (current === input.visibility && !explicitShare)
-        return { kind: "unchanged", file: mapFile(row) };
       if (row.status !== "ready" || UNSHAREABLE_FILE_OBJECT_KEY.test(row.objectKey))
         return { kind: "not_changeable" };
       const sharing = input.visibility === "workspace";
