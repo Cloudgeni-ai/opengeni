@@ -3629,7 +3629,15 @@ export function SessionList() {
             ) : null}
             {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
               <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                Some older Sites aren&apos;t shown. Find them in Artifacts.
+                Some older Sites aren&apos;t shown. Find them in{" "}
+                <Link
+                  to="/workspaces/$workspaceId/artifacts"
+                  params={{ workspaceId: rail.workspaceId }}
+                  className="underline underline-offset-2 hover:text-fg"
+                >
+                  Artifacts
+                </Link>
+                .
               </p>
             ) : null}
             {browseStatus === "archived" ? null : channelMode ? (
