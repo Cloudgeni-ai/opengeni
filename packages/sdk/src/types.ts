@@ -2096,6 +2096,8 @@ export type SessionListResponse = {
   siteConversations?: "include" | "group";
   /** Complete Site rows for a `group` root page, newest activity first. */
   siteGroups?: SiteConversationGroup[];
+  /** True when Site rows beyond the server bound were omitted. */
+  siteGroupsTruncated?: true;
   sessions: Session[];
   nextCursor: string | null;
 };

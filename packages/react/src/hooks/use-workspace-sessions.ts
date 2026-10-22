@@ -53,6 +53,8 @@ export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Se
   totals: SessionListTotals | null;
   /** Complete Site rows for a `group` page; null when not requested or unsupported. */
   siteGroups: SiteConversationGroup[] | null;
+  /** True when the server omitted Site rows beyond its bound. */
+  siteGroupsTruncated: boolean;
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
@@ -200,6 +202,7 @@ export function useWorkspaceSessions(
     pinnedTruncated: page?.pinnedTruncated ?? false,
     totals: page?.totals ?? null,
     siteGroups: page?.siteGroups ?? null,
+    siteGroupsTruncated: page?.siteGroupsTruncated === true,
     nextCursor: page?.nextCursor ?? null,
     // `usePolledValue` clears the old data and starts the new request in an
     // effect. During that query-key transition render, its old loading flag

@@ -16197,6 +16197,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     siteConversations: z.enum(["include", "group"]).optional(),
     /** Complete Site rows for a `group` root page, newest activity first. */
     siteGroups: z.array(SiteConversationGroup).optional(),
+    /** True when Site rows beyond the server bound were omitted. */
+    siteGroupsTruncated: z.literal(true).optional(),
     /** True when older matching pins were omitted from this bounded page. */
     pinnedTruncated: z.boolean().optional(),
     sessions: z.array(Session),

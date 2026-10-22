@@ -29,6 +29,8 @@ import {
   setSessionAttention,
   setSessionChannel,
   setSessionPin,
+  listVisibleSessionInvalidationHints,
+  SITE_CONVERSATION_GROUP_LIMIT,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceRls,
@@ -1810,6 +1812,154 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       SessionListCursorError,
     );
   }, 60_000);
+
+  test("Site rows follow archive scope, attention, projects, titles and agent bounds", async () => {
+    if (!available) return;
+    const { workspace, subjectId } = await siteViewerWorkspace();
+    const other = `user:site-scope-other-${crypto.randomUUID()}`;
+    const project = await createChannel(db, { ...workspace, name: "Site project" });
+    const siteA = crypto.randomUUID();
+    const siteB = crypto.randomUUID();
+    const siteSession = (siteId: string, title: string, message: string, channelId?: string) =>
+      session({
+        ...workspace,
+        message,
+        ...(channelId ? { channelId } : {}),
+        metadata: { _opengeniSiteOrigin: { siteId, title } },
+        privateOwnerSubjectId: subjectId,
+        createdBy: { kind: "subject", subjectId },
+      });
+    const a1 = await siteSession(siteA, "Analytics", "A one");
+    const a2 = await siteSession(siteA, "Analytics", "A two");
+    const aProject = await siteSession(siteA, "Analytics", "A in project", project.id);
+    const b1 = await siteSession(siteB, "Budget", "B one");
+    const ordinary = await session({ ...workspace, message: "Ordinary" });
+    // A readable Site shows its current title; an unreadable one its label.
+    await admin`
+      insert into workspace_artifacts (id, account_id, workspace_id, slug, title, created_by_subject_id)
+      values (${siteA}, ${workspace.accountId}, ${workspace.workspaceId},
+        ${`site-${siteA.slice(0, 8)}`}, 'Analytics live', ${subjectId})`;
+    await admin`
+      insert into workspace_artifacts (id, account_id, workspace_id, slug, title,
+        created_by_subject_id, visibility, owner_subject_id)
+      values (${siteB}, ${workspace.accountId}, ${workspace.workspaceId},
+        ${`site-${siteB.slice(0, 8)}`}, 'Hidden budget', ${other}, 'user_private', ${other})`;
+    const grouped = (extra: Record<string, unknown> = {}) =>
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        subjectId,
+        parentSessionId: null,
+        siteConversations: "group",
+        includePinned: false,
+        limit: 10,
+        ...extra,
+      });
+    const rows = (page: Awaited<ReturnType<typeof grouped>>) =>
+      (page.siteGroups ?? [])
+        .map((group) => [group.siteId, group.channelId, group.title, group.conversations])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const sorted = (...expected: (string | number | null)[][]) =>
+      expected.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+    // One row per Site and project.
+    expect(rows(await grouped())).toEqual(
+      sorted(
+        [siteA, null, "Analytics live", 2],
+        [siteA, project.id, "Analytics live", 1],
+        [siteB, null, "Budget", 1],
+      ),
+    );
+    expect(rows(await grouped({ channelId: project.id }))).toEqual([
+      [siteA, project.id, "Analytics live", 1],
+    ]);
+
+    // Needs you counts exactly the attention conversations.
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set status = 'requires_action' where id = ${a2.id}`,
+    );
+    const attention = await grouped({ needsYouOnly: true });
+    expect(rows(attention)).toEqual([[siteA, null, "Analytics live", 1]]);
+    expect(attention.siteGroups?.[0]?.attention).toBe(1);
+
+    // Archived conversations leave Active Site rows but count under All.
+    await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: b1.id,
+      archived: true,
+      expectedVersion: 0,
+    });
+    expect(rows(await grouped()).some(([siteId]) => siteId === siteB)).toBe(false);
+    const all = await grouped({ archiveStatus: "all" });
+    expect(all.sessions.map((row) => row.id)).toEqual([ordinary.id]);
+    expect(all.siteGroups?.find((group) => group.siteId === siteB)).toMatchObject({
+      conversations: 1,
+      total: 0,
+    });
+    await expect(grouped({ archiveStatus: "archived" })).rejects.toBeInstanceOf(
+      SessionListCursorError,
+    );
+
+    // An agent caller keeps its own-root bound even when it asks to include.
+    const agentViewer = {
+      kind: "all" as const,
+      agentAccessViewer: {
+        callerRootSessionId: a1.id,
+        agentAccess: "workspace" as const,
+        scopeSubjectId: null,
+      },
+    };
+    const agentPage = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      siteConversations: "include",
+      includePinned: false,
+      limit: 10,
+      authorizationScope: agentViewer,
+    });
+    expect(new Set(agentPage.sessions.map((row) => row.id))).toEqual(new Set([ordinary.id, a1.id]));
+
+    // Hints split Site conversations from ordinary IDs, with the same bounds.
+    const candidates = [ordinary.id, a1.id, a2.id, aProject.id];
+    const hints = await listVisibleSessionInvalidationHints(db, workspace.workspaceId, candidates, {
+      subjectId,
+    });
+    expect(hints.sessionIds).toEqual([ordinary.id]);
+    expect(new Set(hints.siteSessionIds)).toEqual(new Set([a1.id, a2.id, aProject.id]));
+    const agentHints = await listVisibleSessionInvalidationHints(
+      db,
+      workspace.workspaceId,
+      candidates,
+      { subjectId, authorizationScope: agentViewer },
+    );
+    expect(new Set(agentHints.sessionIds)).toEqual(new Set([ordinary.id, a1.id]));
+    expect(agentHints.siteSessionIds).toEqual([]);
+  }, 60_000);
+
+  test("bounds Site rows and reports the omission", async () => {
+    if (!available) return;
+    const { workspace, subjectId } = await siteViewerWorkspace();
+    // One conversation in each of more Sites than the bound.
+    for (let index = 0; index <= SITE_CONVERSATION_GROUP_LIMIT; index += 1)
+      await session({
+        ...workspace,
+        message: `Site ${index}`,
+        metadata: { _opengeniSiteOrigin: { siteId: crypto.randomUUID(), title: `Site ${index}` } },
+        privateOwnerSubjectId: subjectId,
+        createdBy: { kind: "subject", subjectId },
+      });
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      siteConversations: "group",
+      includePinned: false,
+      limit: 10,
+    });
+    expect(page.siteGroups).toHaveLength(SITE_CONVERSATION_GROUP_LIMIT);
+    expect(page.siteGroupsTruncated).toBe(true);
+    // The newest Sites are the ones kept.
+    expect(page.siteGroups?.[0]?.title).toBe(`Site ${SITE_CONVERSATION_GROUP_LIMIT}`);
+  }, 180_000);
 
   test("keeps project, creator, and date filters bound to their continuation cursor", async () => {
     if (!available) return;

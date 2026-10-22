@@ -839,7 +839,9 @@ function siteRowSummaries(
     const { siteId, channelId, title, ...summary } = group;
     const current = rows.get(key);
     if (!current) {
-      rows.set(key, { origin: { siteId, title }, channelId, summary: { ...summary } });
+      // A Site this viewer cannot read and that kept no label still needs a name.
+      const origin = { siteId, title: title.trim() || "Untitled Site" };
+      rows.set(key, { origin, channelId, summary: { ...summary } });
       continue;
     }
     const merged = current.summary;
@@ -971,7 +973,11 @@ export function attachSiteRows(
   return [...rest, ...siteRows];
 }
 
-/** How many conversations a Site row stands for, loaded or not. */
+/**
+ * How many conversations a Site row stands for, loaded or not. The server
+ * counts Site conversations; an older chat that only carries a Site label
+ * joins the row when loaded, so the count can grow by those on expansion.
+ */
 export function siteRowConversationCount(node: SessionTreeNode): number {
   return Math.max(node.siteSummary?.conversations ?? 0, node.children.length);
 }

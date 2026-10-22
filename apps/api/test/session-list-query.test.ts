@@ -34,10 +34,19 @@ describe("session list sorting and archive query", () => {
       { siteConversations: "group" },
       { parentSessionId: siteId, siteConversations: "group" },
       { parentSessionId: "null", pinsOnly: "true", siteConversations: "group" },
+      { parentSessionId: "null", archiveStatus: "archived", siteConversations: "group" },
+      { parentSessionId: "null", archivedOnly: "true", siteConversations: "group" },
       { originSiteId: siteId, siteConversations: "include" },
       { siteAccessId: siteId, siteConversations: "include" },
     ])
       expect(() => sessionListQuery(query)).toThrow();
+    expect(
+      sessionListQuery({
+        parentSessionId: "null",
+        archiveStatus: "all",
+        siteConversations: "group",
+      }).siteConversations,
+    ).toBe("group");
     expect(() => sessionListQuery({ siteConversations: "include" }, false)).toThrow();
   });
 

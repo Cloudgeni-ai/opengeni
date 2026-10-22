@@ -33045,7 +33045,8 @@ async function sessionListTotalsInScope(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
-): Promise<SessionListTotals & { sites: SiteConversationGroup[] }> {
+  withSiteRows = false,
+): Promise<SessionListTotals & { sites: SiteConversationGroup[]; sitesTruncated: boolean }> {
   const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
   // A grouped rail counts Site conversations in its project totals and gets
   // their Site rows here; its ordinary rows still omit them.
@@ -33222,19 +33223,39 @@ async function sessionListTotalsInScope(
         count(*) filter (where unread)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
-    ), site_grouped as (
-      -- One row per Site and project. The title is the Site's current one when
-      -- this viewer can read it (RLS applies), else the creation-time label.
-      select root_site_id as "siteId", channel_id as "channelId",
+    ), site_rows as (
+      -- One row per Site and project over the requested archive scope; pinned
+      -- conversations live in the pinned section. The title is the Site's
+      -- current one when its audience includes this viewer (the catalog's
+      -- rule; RLS only isolates the workspace), else the creation-time label.
+      -- One extra row reports truncation.
+      select root.site_id as "siteId", root.channel_id as "channelId",
         coalesce((
           select site.title from ${schema.workspaceArtifacts} site
-          where site.workspace_id = ${workspaceId} and site.id = root_site_id
-        ), (array_agg(root_origin_title order by root_updated_at desc, root_id desc)
-          filter (where root_origin_title is not null))[1], '') as title,
-        count(distinct root_id)::int as conversations,
-        max(root_updated_at) as "updatedAt",
-        max(root_created_at) as "createdAt",
-        count(*)::int as total,
+          where site.workspace_id = ${workspaceId} and site.id = root.site_id
+            and (site.visibility = 'workspace_shared' or site.owner_subject_id = ${options.subjectId})
+        ), (array_agg(root.origin_title order by root.updated_at desc, root.id desc)
+          filter (where root.origin_title is not null))[1], '') as title,
+        count(*)::int as conversations,
+        max(root.updated_at) as "updatedAt",
+        max(root.created_at) as "createdAt"
+      from roots root
+      where ${
+        withSiteRows
+          ? sql`root.site_conversation and root.site_id is not null and not root.pinned
+            ${
+              options.needsYouOnly
+                ? sql`and root.id in (select id from root_attention where needs_you)`
+                : sql``
+            }`
+          : sql`false`
+      }
+      group by root.site_id, root.channel_id
+      order by max(root.updated_at) desc, root.site_id, root.channel_id
+      limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
+    ), site_status as (
+      -- Status counts follow project totals: active, unpinned trees only.
+      select root_site_id, channel_id, count(*)::int as total,
         count(*) filter (where status = 'requires_action')::int as attention,
         min(attention_since) as "attentionSince",
         count(*) filter (where status = 'failed' and unread)::int as failed,
@@ -33246,10 +33267,17 @@ async function sessionListTotalsInScope(
         count(*) filter (where unread)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured
-      where ${siteConversations ? sql`root_site_conversation and root_site_id is not null` : sql`false`}
+      where ${withSiteRows ? sql`root_site_conversation and root_site_id is not null` : sql`false`}
       group by root_site_id, channel_id
-      order by max(root_updated_at) desc, root_site_id
-      limit ${SITE_CONVERSATION_GROUP_LIMIT}
+    ), site_grouped as (
+      select site_rows.*, coalesce(status.total, 0) as total,
+        coalesce(status.attention, 0) as attention, status."attentionSince",
+        coalesce(status.failed, 0) as failed, coalesce(status.active, 0) as active,
+        coalesce(status.queued, 0) as queued, coalesce(status.waiting, 0) as waiting,
+        coalesce(status.unread, 0) as unread, coalesce(status."activeWork", 0) as "activeWork"
+      from site_rows left join site_status status
+        on status.root_site_id = site_rows."siteId"
+        and status.channel_id is not distinct from site_rows."channelId"
     )
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
       coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
@@ -33260,23 +33288,25 @@ async function sessionListTotalsInScope(
   );
   const result = rows[0];
   const iso = (value: string | null) => (value ? new Date(value).toISOString() : null);
+  const sites = result?.sites ?? [];
   return {
     needsYouCount: Number(result?.needsYouCount ?? 0),
     groups: (result?.groups ?? []).map((group) => ({
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: (result?.sites ?? []).map((site) => ({
+    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map((site) => ({
       ...site,
       updatedAt: iso(site.updatedAt)!,
       createdAt: iso(site.createdAt)!,
       attentionSince: iso(site.attentionSince),
     })),
+    sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
 
 /** Defensive bound on Site rows; a person rarely has conversations in more. */
-const SITE_CONVERSATION_GROUP_LIMIT = 200;
+export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
 function sessionFilters(
   options: Pick<
@@ -33324,10 +33354,14 @@ function sessionFilters(
       eq(schema.sessions.siteId, options.originSiteId),
       sql`${schema.sessions.siteAccessRootId} is not null`,
     );
-  } else if (options.siteConversations !== "include") {
+  } else if (
+    options.siteConversations !== "include" ||
+    options.authorizationScope?.agentAccessViewer
+  ) {
     // App-internal execution is not ordinary workspace conversation discovery.
     // This is presentation scope only: native ownership and Site RLS still apply.
-    // The console rail opts in explicitly (`include` or `group`).
+    // The console rail opts in explicitly (`include` or `group`); agent
+    // callers keep their own-root bound so the option never widens discovery.
     const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
     filters.push(
       ownRoot
@@ -33953,7 +33987,27 @@ export async function listVisibleSessionInvalidationIds(
   sessionIds: string[],
   authority: SessionListReadAuthority,
 ): Promise<string[]> {
-  if (!sessionIds.length) return [];
+  return (await listVisibleSessionInvalidationHints(db, workspaceId, sessionIds, authority))
+    .sessionIds;
+}
+
+/**
+ * Ordinary IDs plus, separately, the viewer's own visible Site conversations.
+ * A rail with Site rows refreshes their summaries for the latter without
+ * treating every unknown Site conversation as a full list invalidation.
+ */
+export async function listVisibleSessionInvalidationHints(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authority: SessionListReadAuthority,
+): Promise<{ sessionIds: string[]; siteSessionIds: string[] }> {
+  if (!sessionIds.length) return { sessionIds: [], siteSessionIds: [] };
+  // Exactly the rows ordinary discovery omits (an agent keeps its own root).
+  const ownRoot = authority.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+  const siteOnly = ownRoot
+    ? sql<boolean>`(${schema.sessions.siteAccessRootId} is not null and ${schema.sessions.rootSessionId} is distinct from ${ownRoot}::uuid)`
+    : sql<boolean>`${schema.sessions.siteAccessRootId} is not null`;
   return await withWorkspaceSubjectRls(
     db,
     workspaceId,
@@ -33961,18 +34015,24 @@ export async function listVisibleSessionInvalidationIds(
     async (tx) => {
       await requireSessionListReadAuthorityInScope(tx, workspaceId, authority);
       const rows = await tx
-        .select({ id: schema.sessions.id })
+        .select({
+          id: schema.sessions.id,
+          site: siteOnly,
+        })
         .from(schema.sessions)
         .where(
           and(
             eq(schema.sessions.workspaceId, workspaceId),
             inArray(schema.sessions.id, sessionIds),
-            // Hints carry no content. A rail that shows Site rows must hear
-            // about its own Site conversations too.
+            // Hints carry no content. Site conversations use the same viewer
+            // authorization (and agent bound) as `siteConversations=include`.
             ...sessionFilters({ ...authority, archiveStatus: "all", siteConversations: "include" }),
           ),
         );
-      return rows.map((row) => row.id);
+      return {
+        sessionIds: rows.filter((row) => !row.site).map((row) => row.id),
+        siteSessionIds: rows.filter((row) => row.site).map((row) => row.id),
+      };
     },
     { isolationLevel: "read committed" },
   );
@@ -34008,10 +34068,11 @@ async function readSessionListForSubject(
           groupSites &&
           (options.parentSessionId !== null ||
             options.pinsOnly ||
+            archiveMode === "archived" ||
             options.originSiteId ||
             options.siteAccessId)
         )
-          throw new SessionListCursorError("Site rows require an ordinary root page");
+          throw new SessionListCursorError("Site rows require an ordinary, non-archived root page");
         // Site rows are a complete section like pins: read once, with page one.
         const siteGroupsRequested = groupSites && !options.cursor;
         const completeTotals =
@@ -34022,6 +34083,7 @@ async function readSessionListForSubject(
                 options.pinsOnly
                   ? { ...options, archiveStatus: "active", parentSessionId: null }
                   : options,
+                siteGroupsRequested,
               )
             : undefined;
         const totals =
@@ -34029,6 +34091,7 @@ async function readSessionListForSubject(
             ? { needsYouCount: completeTotals.needsYouCount, groups: completeTotals.groups }
             : undefined;
         const siteGroups = siteGroupsRequested ? (completeTotals?.sites ?? []) : undefined;
+        const siteGroupsTruncated = siteGroupsRequested && completeTotals?.sitesTruncated === true;
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
         // A pinned Site conversation is a personal shortcut like any other pin.
         const pinnedFilters = groupSites
@@ -34501,6 +34564,7 @@ async function readSessionListForSubject(
             ...(options.mineOnly ? { mineOnly: true as const } : {}),
             ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
             ...(siteGroups ? { siteGroups } : {}),
+            ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -34515,6 +34579,7 @@ async function readSessionListForSubject(
           ...(options.mineOnly ? { mineOnly: true as const } : {}),
           ...(options.siteConversations ? { siteConversations: options.siteConversations } : {}),
           ...(siteGroups ? { siteGroups } : {}),
+          ...(siteGroupsTruncated ? { siteGroupsTruncated: true } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),

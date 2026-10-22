@@ -24906,6 +24906,7 @@
         "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
         "$.siteGroups": "array?",
         "$.siteGroups[]": "ref(SiteConversationGroup)",
+        "$.siteGroupsTruncated": "const?=[\"true\"]",
         "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
         "$.totals": "ref(SessionListTotals)?"
       }
@@ -24931,6 +24932,7 @@
         "$.siteConversations": "enum?=[\"\\\"group\\\"\",\"\\\"include\\\"\"]",
         "$.siteGroups": "array?",
         "$.siteGroups[]": "ref(SiteConversationGroup)",
+        "$.siteGroupsTruncated": "const?=[\"true\"]",
         "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]",
         "$.totals": "ref(SessionListTotals)?"
       }

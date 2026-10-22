@@ -532,8 +532,16 @@ export function SessionList() {
   );
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
-    if (workspaceSessionListEvent.available)
-      void refreshSessionPages(workspaceSessionListEvent.sessionIds);
+    if (!workspaceSessionListEvent.available) return;
+    const { sessionIds, siteSessionIds = [] } = workspaceSessionListEvent;
+    // A Site conversation the rail has not loaded sits in a collapsed Site
+    // row, whose summary arrives with the root page this always re-reads.
+    // Only loaded ones dirty their own branch; none forces a full reload.
+    void refreshSessionPages(
+      sessionIds === null
+        ? null
+        : [...sessionIds, ...siteSessionIds.filter((id) => knownListSessions.current.has(id))],
+    );
   }, [workspaceSessionListEvent, rail.workspaceId, refreshSessionPages]);
   useEffect(() => {
     if (workspaceControlEvent) void refreshSessionPages();
@@ -722,7 +730,8 @@ export function SessionList() {
     branchSummaryKeys.current.clear();
     activeBranchHydration.current = null;
     setChildPages(new Map());
-  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus]);
+    // Site rows list root conversations, so the root filters scope them too.
+  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus, needsYouOnly, mineOnly]);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
@@ -2044,6 +2053,10 @@ export function SessionList() {
                     parentSessionId: null,
                     originSiteId: siteRow.siteId,
                     ...(siteRow.channelId !== undefined ? { channelId: siteRow.channelId } : {}),
+                    // Its conversations are roots: list exactly the set the
+                    // Site row's count was computed over.
+                    ...(needsYouOnly ? { needsYouOnly: true } : {}),
+                    ...(mineOnly ? { mineOnly: true } : {}),
                   }
                 : // Work spawned by a Site conversation runs inside the Site too.
                   { parentSessionId, siteConversations: "include" as const }),
@@ -2086,6 +2099,8 @@ export function SessionList() {
       branchReadRevision,
       browseSortBy,
       browseStatus,
+      needsYouOnly,
+      mineOnly,
     ],
   );
   // The active route supplies exact child + ancestor detail even before the
@@ -2189,8 +2204,20 @@ export function SessionList() {
     for (const [key, page] of childPages) {
       if (!parseSiteRowKey(key)) continue;
       const summary = nodesById.get(key)?.siteSummary;
+      // Membership and status always matter; activity time only when the
+      // rows are ordered by it.
       const next = summary
-        ? [summary.conversations, summary.updatedAt, summary.total].join(":")
+        ? [
+            summary.conversations,
+            summary.total,
+            summary.attention,
+            summary.failed,
+            summary.active,
+            summary.queued,
+            summary.waiting,
+            summary.unread,
+            browseSortBy === "updatedAt" ? summary.updatedAt : "",
+          ].join(":")
         : "";
       const previous = siteRowSummaryKeys.current.get(key);
       if (page.loading) continue;
@@ -2208,7 +2235,7 @@ export function SessionList() {
       }
       return next;
     });
-  }, [childPages, expanded, loadChildPage, nodesById]);
+  }, [childPages, expanded, loadChildPage, nodesById, browseSortBy]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -3564,6 +3591,11 @@ export function SessionList() {
                   </p>
                 ) : null}
               </>
+            ) : null}
+            {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
+              <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                Showing the 200 most recently active Sites. Search to find older Site conversations.
+              </p>
             ) : null}
             {browseStatus === "archived" ? null : channelMode ? (
               renderedChannelSections.map((section) => (

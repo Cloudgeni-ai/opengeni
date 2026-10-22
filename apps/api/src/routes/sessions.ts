@@ -5945,6 +5945,14 @@ export function sessionListQuery(
       throw new HTTPException(400, {
         message: 'siteConversations="group" requires a root page (parentSessionId=null)',
       });
+    // Archived is a flat list: its Site conversations are ordinary rows.
+    if (
+      siteConversations === "group" &&
+      (query.archiveStatus === "archived" || query.archivedOnly === "true")
+    )
+      throw new HTTPException(400, {
+        message: 'siteConversations="group" cannot list archived sessions; use "include"',
+      });
   }
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
