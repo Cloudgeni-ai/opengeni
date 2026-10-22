@@ -561,7 +561,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
           />
         </Suspense>
       ) : null}
-      {switcher?.visible ? (
+      {/* Mounted from the first press, so it reads chat statuses before it shows. */}
+      {switcher ? (
         <Suspense fallback={null}>
           <ChatSwitcher
             state={switcher}
