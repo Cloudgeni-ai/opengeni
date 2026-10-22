@@ -2104,6 +2104,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(await rows({ channelId: project.id })).toEqual([[fromChat, project.id, 1]]);
     expect(await rows({ channelId: null })).toEqual([[direct, null, 0]]);
 
+    // Root filters list only Sites their listed chats created or hold
+    // conversations of: an opened Site follows them like any other row.
+    expect((await rows({ mineOnly: true })).map(([siteId]) => siteId)).not.toContain(direct);
+    expect(await rows({ search: "zzzz-no-match" })).toEqual([]);
+    expect((await rows({ search: "Build a report" })).map(([siteId]) => siteId)).toEqual([
+      fromChat,
+    ]);
+
     // An archived Site keeps only rows that still have conversations.
     await admin`update workspace_artifacts set status = 'archived' where id = ${direct}`;
     expect((await rows()).map(([siteId]) => siteId)).toEqual([fromChat]);

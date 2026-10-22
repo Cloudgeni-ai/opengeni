@@ -957,7 +957,7 @@ test("a Site a chat made sits in that chat's project, and opening a Site moves i
   // "Pricing page copy" made it in Website redesign; nobody has asked it
   // anything, so the row has no count and nothing to disclose.
   await group("Website redesign")
-    .getByRole("link", { name: /^Open Pricing calculator\. Site\. /u })
+    .getByRole("link", { name: "Open Pricing calculator. Site", exact: true })
     .waitFor();
   expect(
     await sidebar()

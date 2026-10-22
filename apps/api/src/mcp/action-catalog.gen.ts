@@ -6412,7 +6412,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened",
     "request": [],
-    "response": []
+    "response": [
+      "SiteOpenedResponse"
+    ]
   },
   {
     "id": "recoverSandbox",

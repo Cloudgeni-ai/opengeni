@@ -66,7 +66,8 @@ export function SiteSessionGroupHeading({
         // The Site is the open page only while none of its conversations is.
         activeOptions={{ exact: true, includeSearch: true }}
         aria-current={active ? "page" : undefined}
-        aria-label={`Open ${origin.title}. Site${count > 0 ? `, ${conversations}` : ""}. ${summary.label}`}
+        // Without conversations there is no status to announce.
+        aria-label={`Open ${origin.title}. Site${count > 0 ? `, ${conversations}. ${summary.label}` : ""}`}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
       >
         <PanelsTopLeftIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-muted" />

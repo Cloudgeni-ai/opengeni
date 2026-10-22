@@ -12,7 +12,11 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import { digestAttemptToolCatalog } from "@opengeni/codemode";
-import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
+import {
+  withSiteSessionOrigin,
+  type ApiRouteDeps,
+  type ObjectStorageDependency,
+} from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
@@ -879,6 +883,13 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       await (await requestAsCanonicalLocalHuman(path, { method: "POST" })).json(),
     );
     expect(Date.parse(again.openedAt)).toBeGreaterThanOrEqual(Date.parse(opened.openedAt));
+
+    // A Site page (a request inside a Site origin) cannot record an open.
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Opened board" },
+      () => requestAsCanonicalLocalHuman(path, { method: "POST" }),
+    );
+    expect(fromSite.status).toBe(403);
 
     // Reading is enough; without it, or from another workspace, nothing is recorded.
     expect((await request(grant, ["sessions:read"], path, { method: "POST" })).status).toBe(403);

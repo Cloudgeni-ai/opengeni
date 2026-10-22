@@ -33086,6 +33086,22 @@ async function sessionListTotalsInScope(
   // A grouped rail counts Site conversations in its project totals and gets
   // their Site rows here; its ordinary rows still omit them.
   const siteConversations = options.siteConversations ? "include" : undefined;
+  // Sites this person opened join the rows only in the plain view: a root
+  // filter (Mine, search, creator, dates, archived content, another person's
+  // scope) or an agent caller lists only Sites its listed chats created.
+  const withOpenedSites =
+    withSiteRows &&
+    !options.needsYouOnly &&
+    !options.mineOnly &&
+    !options.search?.trim() &&
+    !options.contentArchivedOnly &&
+    !options.scopeSubjectId &&
+    !options.createdBy &&
+    !options.updatedFrom &&
+    !options.updatedBefore &&
+    !options.createdFrom &&
+    !options.createdBefore &&
+    !options.authorizationScope?.agentAccessViewer;
   const rootFilters = and(
     eq(schema.sessions.workspaceId, workspaceId),
     ...sessionFilters({
@@ -33258,26 +33274,6 @@ async function sessionListTotalsInScope(
         count(*) filter (where unread)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
-    ), site_home as (
-      -- A Site sits in the project of the chat that created it (the tree of
-      -- its first version's session), as far as this viewer can see that
-      -- chat; new Site conversations are filed there too. The Site is listed
-      -- through that chat when this viewer lists the chat in this scope.
-      select version.artifact_id as site_id, creator.channel_id,
-        exists (select 1 from roots listed where listed.id = creator.id) as listed
-      from ${schema.workspaceArtifactVersions} version
-      join ${schema.sessions} source
-        on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
-      join ${schema.sessions} creator
-        on creator.workspace_id = ${workspaceId} and creator.id = source.root_session_id
-        and creator.site_access_root_id is null
-      where ${withSiteRows ? sql`true` : sql`false`}
-        and version.workspace_id = ${workspaceId} and version.revision = 1
-        and (exists (select 1 from roots listed where listed.id = creator.id)
-          or version.artifact_id in (
-            select opened.site_id from ${schema.siteOpens} opened
-            where opened.workspace_id = ${workspaceId}
-              and opened.subject_id = ${options.subjectId}))
     ), site_conv as (
       -- Site conversations nest under their Site's row in their own project.
       -- Pinned ones live with pins.
@@ -33293,32 +33289,49 @@ async function sessionListTotalsInScope(
             }`
           : sql`false`
       }
+    ), site_conv_totals as (
+      select site_id, row_channel_id as channel_id, count(*)::int as conversations,
+        max(updated_at) as updated_at, max(created_at) as created_at,
+        (array_agg(origin_title order by updated_at desc, id desc)
+          filter (where origin_title is not null))[1] as origin_title
+      from site_conv group by site_id, row_channel_id
+    ), site_home as (
+      -- A Site sits in the project of the chat that created it (the tree of
+      -- its first version's session), as far as this viewer can see that
+      -- chat; new Site conversations are filed there too. A Site without
+      -- conversations here is listed when this viewer lists its creating
+      -- chat, or opened it. Candidates are the live Sites in this viewer's
+      -- audience (one row each); revision 1 is a unique-index lookup.
+      select artifact.id as site_id, creator.channel_id
+      from ${schema.workspaceArtifacts} artifact
+      join lateral (
+        select version.source_session_id from ${schema.workspaceArtifactVersions} version
+        where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
+          and version.revision = 1
+      ) first_version on true
+      left join ${schema.sessions} source
+        on source.workspace_id = ${workspaceId} and source.id = first_version.source_session_id
+      left join ${schema.sessions} creator
+        on creator.workspace_id = ${workspaceId} and creator.id = source.root_session_id
+        and creator.site_access_root_id is null
+      where ${withSiteRows && !options.needsYouOnly ? sql`true` : sql`false`}
+        and artifact.workspace_id = ${workspaceId} and artifact.status = 'active'
+        and (artifact.visibility = 'workspace_shared'
+          or artifact.owner_subject_id = ${options.subjectId})
+        and artifact.id not in (select site_id from site_conv)
+        and (exists (select 1 from roots listed where listed.id = creator.id)
+          ${
+            withOpenedSites
+              ? sql`or exists (
+            select 1 from ${schema.siteOpens} opened
+            where opened.workspace_id = ${workspaceId}
+              and opened.subject_id = ${options.subjectId} and opened.site_id = artifact.id)`
+              : sql``
+          })
     ), site_keys as (
-      select site_id, row_channel_id as channel_id from site_conv
-      ${
-        withSiteRows && !options.needsYouOnly
-          ? sql`
-      -- Sites a listed chat created, and Sites this person opened, without
-      -- conversations here: one row in the creating chat's project.
-      union
-      select site_id, channel_id from site_home
-      where listed and site_id not in (select site_id from site_conv)
-      ${
-        options.createdBy ||
-        options.updatedFrom ||
-        options.updatedBefore ||
-        options.createdFrom ||
-        options.createdBefore
-          ? sql``
-          : sql`
-      union
-      select opened.site_id, home.channel_id
-      from ${schema.siteOpens} opened left join site_home home on home.site_id = opened.site_id
-      where opened.workspace_id = ${workspaceId} and opened.subject_id = ${options.subjectId}
-        and opened.site_id not in (select site_id from site_conv)`
-      }`
-          : sql``
-      }
+      select * from site_conv_totals
+      union all
+      select site_id, channel_id, 0, null, null, null from site_home
     ), site_rows as (
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
@@ -33327,10 +33340,10 @@ async function sessionListTotalsInScope(
       -- latest of its conversations, its own changes and this person opening
       -- it. One extra row reports truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
-        coalesce(site.title, conv.origin_title, '') as title,
-        conv.conversations,
-        greatest(conv.updated_at, site.updated_at, opened.opened_at) as "updatedAt",
-        coalesce(conv.created_at, site.created_at) as "createdAt"
+        coalesce(site.title, key.origin_title, '') as title,
+        key.conversations,
+        greatest(key.updated_at, site.updated_at, opened.opened_at) as "updatedAt",
+        coalesce(key.created_at, site.created_at) as "createdAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at, artifact.updated_at
@@ -33340,19 +33353,11 @@ async function sessionListTotalsInScope(
             or artifact.owner_subject_id = ${options.subjectId})
       ) site on true
       left join lateral (
-        select count(*)::int as conversations, max(conv.updated_at) as updated_at,
-          max(conv.created_at) as created_at,
-          (array_agg(conv.origin_title order by conv.updated_at desc, conv.id desc)
-            filter (where conv.origin_title is not null))[1] as origin_title
-        from site_conv conv
-        where conv.site_id = key.site_id and conv.row_channel_id is not distinct from key.channel_id
-      ) conv on true
-      left join lateral (
         select opened.opened_at from ${schema.siteOpens} opened
         where opened.workspace_id = ${workspaceId} and opened.subject_id = ${options.subjectId}
           and opened.site_id = key.site_id
       ) opened on true
-      where (conv.conversations > 0 or site.status = 'active')
+      where (key.conversations > 0 or site.status = 'active')
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
       order by 5 desc, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
@@ -33407,7 +33412,10 @@ async function sessionListTotalsInScope(
   };
 }
 
-/** Defensive bound on Site rows; a person rarely has conversations in more. */
+/**
+ * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
+ * for a long time fall past it; the Artifacts page lists every Site.
+ */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 
 function sessionFilters(

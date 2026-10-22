@@ -534,9 +534,13 @@ export function SessionList() {
     },
     [refresh, refreshGlobalPins, refreshChannels],
   );
-  // Opening a Site moves its row: only the root page carries Site rows.
+  // Opening a Site moves its row: only the grouped root page carries Site rows.
   const refreshSiteRows = useCallback(() => void refresh(), [refresh]);
-  useSiteOpenedListener(rail.workspaceId, refreshSiteRows);
+  useSiteOpenedListener(
+    rail.workspaceId,
+    refreshSiteRows,
+    hierarchyMode && browseStatus !== "archived",
+  );
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
     if (!workspaceSessionListEvent.available) return;
@@ -3625,7 +3629,7 @@ export function SessionList() {
             ) : null}
             {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
               <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                Some older Sites aren&apos;t shown. Search to find their conversations.
+                Some older Sites aren&apos;t shown. Find them in Artifacts.
               </p>
             ) : null}
             {browseStatus === "archived" ? null : channelMode ? (

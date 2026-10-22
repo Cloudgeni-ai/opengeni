@@ -66,9 +66,10 @@
   It is a row of its own rather than a child of that chat because a chat's
   children in the sidebar are the work it spawned, and a Site outlives and is
   used apart from its chat. The row is listed when the viewer lists that chat
-  (respecting its archive state and filters) or has opened the Site, and only
-  for a Site in the viewer's audience; other artifacts never get rows.
-  Opening a Site in the console (`POST
+  (respecting its archive state and filters) or, with no filter or search
+  applied, has opened the Site, and only for a Site in the viewer's audience;
+  other artifacts never get rows. Opening the Site view (`/sites/:id`) in the
+  console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
   latest open. A row's activity is the latest of its conversations, the

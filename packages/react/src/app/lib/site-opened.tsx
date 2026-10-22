@@ -31,13 +31,18 @@ export function useRecordSiteOpened(
 }
 
 /** Calls `onOpened` after this workspace records a Site open. */
-export function useSiteOpenedListener(workspaceId: string, onOpened: () => void): void {
+export function useSiteOpenedListener(
+  workspaceId: string,
+  onOpened: () => void,
+  enabled = true,
+): void {
   useEffect(() => {
+    if (!enabled) return;
     const listener = (event: Event) => {
       const detail = (event as CustomEvent<SiteOpenedDetail>).detail;
       if (detail?.workspaceId === workspaceId) onOpened();
     };
     window.addEventListener(SITE_OPENED_EVENT, listener);
     return () => window.removeEventListener(SITE_OPENED_EVENT, listener);
-  }, [workspaceId, onOpened]);
+  }, [workspaceId, onOpened, enabled]);
 }
