@@ -3015,6 +3015,48 @@ Pools are lazy; observed idle/active counts are not the rollout upper bound.
 Set server capacity against that budget and measured backend memory rather
 than shrinking application pools to fit an accidental server default.
 
+Budget PostgreSQL memory per connection too. Each backend keeps its catalog
+cache and the plans of every statement it has prepared until its connection
+closes, and an idle connection keeps all of it. Replaying the 908 distinct
+statements a staging deployment ran, on the migrated schema as the FORCE-RLS
+runtime role, one backend grew from about 2 MB to:
+
+| Statements run                       | Prepared statements off | On (default for direct URLs) |
+| ------------------------------------ | ----------------------- | ---------------------------- |
+| Each once                            | 45 MB                   | 126 MB                       |
+| Each six times (generic plans cached) | 50 MB                   | 223 MB                       |
+
+Prepared statements save a round trip and a re-plan per query, and cost about
+80 MB, up to 170 MB, more per backend that has run everything; a superuser
+bypasses row-level security and measures far less (72 and 94 MB), so measure
+as the runtime role. Most backends run only part of the set. Size the server so
+that `max_connections` × per-backend memory fits beside `shared_buffers` and the
+operating system: a 32 GiB server with 8 GiB of `shared_buffers` has roughly
+20 GiB for backends, about 400 backends at 50 MB but about 90 at 220 MB. To
+estimate per-backend memory for your own workload, divide the server's used
+memory minus its idle baseline by the connection count.
+
+The pools bound how long a backend can accumulate, for the API, worker and
+editable-artifact service pools alike:
+
+- `OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS` (default 30) closes idle
+  connections, so the backend count follows actual concurrency. A longer
+  timeout saves bursty work a reconnect (tens of milliseconds) but keeps every
+  idle backend's memory: at five minutes, staging's backends averaged about
+  65 MB and its 32 GiB server ran out of memory at about 340 connections.
+- `OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS` (default 600) bounds each
+  connection's age. Each connection draws its lifetime from the top quarter
+  below the bound (450-600 s by default), so pools opened together do not
+  reconnect together. A pool reuses its most recently idle connection first, so
+  a busy one never reaches the idle timeout; the lifetime stops it collecting
+  new statements, generic plans and every arity of statements whose text varies
+  with a list's length. A replacement backend spends well under a second of
+  extra query time re-warming. An expiring connection finishes its current
+  query or transaction first.
+- `0` turns either timer off.
+- If backends still do not fit, add memory, reduce pool sizes or replicas, or
+  set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false`.
+
 Scoped transactions retry transient connection acquisition up to eight times
 with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
 sleep, plus driver connection time). This never replays a callback that has

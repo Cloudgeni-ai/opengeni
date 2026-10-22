@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { eq, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
+import type { Settings } from "@opengeni/config";
 import postgres from "postgres";
 import { databaseBootConnectOptions } from "./boot-connect";
 
@@ -259,6 +260,19 @@ export type CreateDbOptions = {
    */
   preparedStatements?: boolean;
   /**
+   * Seconds an idle pooled connection stays open before it closes. Unset →
+   * {@link DEFAULT_DATABASE_POOL_IDLE_TIMEOUT_SECONDS}; 0 keeps idle connections
+   * open until their lifetime ends.
+   */
+  idleTimeoutSeconds?: number;
+  /**
+   * Upper bound, in seconds, on a pooled connection's age. Each connection slot
+   * draws its own lifetime between 75% and 100% of this, so connections opened
+   * together do not all reconnect together. Unset →
+   * {@link DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS}; 0 never recycles.
+   */
+  maxLifetimeSeconds?: number;
+  /**
    * Connection-local default transaction isolation sent in the postgres-js
    * startup parameters. This is intentionally not a role/database default:
    * tests and embedded callers can exercise a different ambient isolation
@@ -443,6 +457,66 @@ export function defaultDatabasePreparedStatements(databaseUrl: string): boolean 
   return !authority.split(",").some((host) => host.endsWith(`:${PGBOUNCER_PORT}`));
 }
 
+/**
+ * Each PostgreSQL backend keeps its catalog cache, and the plans of every
+ * statement it has prepared, until the connection closes. Measured on the
+ * migrated schema as the FORCE-RLS runtime role, a backend that has run the
+ * app's statements holds about 45 MB unprepared and 125-220 MB prepared, and an
+ * idle one keeps all of it. Close idle connections after 30 seconds: reopening
+ * costs the next query a connection handshake (tens of milliseconds) and about
+ * 0.25 ms of cache warmup per statement it runs again.
+ */
+export const DEFAULT_DATABASE_POOL_IDLE_TIMEOUT_SECONDS = 30;
+
+/**
+ * The pool reuses the most recently idle connection first, so a busy
+ * connection never reaches the idle timeout. Its memory keeps growing with
+ * every new statement text, every generic plan, and every IN-list or multi-row
+ * VALUES arity it prepares. Recycling at most every ten minutes bounds that
+ * growth; a new backend pays its warmup again (well under a second for every
+ * statement the app runs), about 0.05% of the lifetime.
+ */
+export const DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS = 600;
+
+function poolSeconds(name: string, value: number): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new TypeError(`createDb: ${name} must be a non-negative number of seconds`);
+  }
+  return value;
+}
+
+/**
+ * postgres.js evaluates a function `max_lifetime` once per connection slot,
+ * which is how its own default (30-60 minutes) is jittered. Draw from the top
+ * quarter below the configured bound so the bound holds.
+ */
+export function jitteredDatabaseMaxLifetime(maxSeconds: number): () => number {
+  const bound = poolSeconds("maxLifetimeSeconds", maxSeconds);
+  return () => bound * (0.75 + Math.random() / 4);
+}
+
+/** Pool options taken from deployment settings; unset fields keep the pool defaults. */
+export function databasePoolOptions(
+  settings: Pick<
+    Settings,
+    | "databasePreparedStatements"
+    | "databasePoolIdleTimeoutSeconds"
+    | "databasePoolMaxLifetimeSeconds"
+  >,
+): Pick<CreateDbOptions, "preparedStatements" | "idleTimeoutSeconds" | "maxLifetimeSeconds"> {
+  return {
+    ...(settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements }),
+    ...(settings.databasePoolIdleTimeoutSeconds === undefined
+      ? {}
+      : { idleTimeoutSeconds: settings.databasePoolIdleTimeoutSeconds }),
+    ...(settings.databasePoolMaxLifetimeSeconds === undefined
+      ? {}
+      : { maxLifetimeSeconds: settings.databasePoolMaxLifetimeSeconds }),
+  };
+}
+
 type PostgresSql = postgres.Sql | postgres.TransactionSql;
 const databaseQuerySignal = new AsyncLocalStorage<AbortSignal>();
 
@@ -487,6 +561,15 @@ function abortableQuery<T extends postgres.Row[]>(
  * `prepare` option says. Ask on every call, including inside transactions and
  * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
  * parameters keep postgres-js's one-message simple protocol.
+ *
+ * Some statements vary their SQL text by list length (`in ($1, $2, ...)` from
+ * `inArray`, multi-row inserts), and each length becomes another named
+ * statement on every connection that runs it: 0.13-0.56 MB each as the RLS role.
+ * Staging's 908 distinct statements held 24 such families with 107 texts;
+ * preparing only the first text of each saved 7% of a warm backend's memory.
+ * That is too little to justify a per-query family check here, so every text is
+ * still prepared and the connection lifetime bounds the accumulation. Pass a
+ * list as one array parameter with `anyOf` (`./sql-arrays`) where it is hot.
  */
 function preparingUnsafe<T extends PostgresSql>(target: T, prepare = true, reserved = false): T {
   const wrapScoped = (args: unknown[]) =>
@@ -526,20 +609,27 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   const preparedStatements =
     options.preparedStatements ?? defaultDatabasePreparedStatements(databaseUrl);
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
-  // is never reused indefinitely, and bound each connection's prepared-statement
-  // cache; application_name aids server-side diagnostics.
-  // Opening a connection costs tens of milliseconds (TCP, TLS, auth, startup
-  // parameters) on the request that needs it, while an idle one costs the server
-  // only a backend slot. With a 30 s idle timeout, bursty workers reopened about
-  // one connection a second in steady state; five minutes keeps a worker's pool
-  // warm between turns. postgres.js TCP keepalive (60 s) keeps NAT and load
-  // balancer flow state alive for idle connections, and max_lifetime still
-  // bounds every connection's age.
+  // is never reused indefinitely, and bound the memory each backend holds.
+  // An idle connection is not just a backend slot: the backend keeps its
+  // catalog cache and every prepared plan (tens to hundreds of megabytes on
+  // this schema), so idle connections close after 30 s by default. A five-minute
+  // idle timeout (#5215) let staging's backends average about 65 MB and run a
+  // 32 GiB server out of memory at about 340 connections. See the defaults'
+  // docs above and docs/deployment.md for sizing.
+  const idleTimeoutSeconds = poolSeconds(
+    "idleTimeoutSeconds",
+    options.idleTimeoutSeconds ?? DEFAULT_DATABASE_POOL_IDLE_TIMEOUT_SECONDS,
+  );
+  const maxLifetime = jitteredDatabaseMaxLifetime(
+    options.maxLifetimeSeconds ?? DEFAULT_DATABASE_POOL_MAX_LIFETIME_SECONDS,
+  );
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
     prepare: preparedStatements,
-    idle_timeout: 300,
-    max_lifetime: 1800,
+    idle_timeout: idleTimeoutSeconds,
+    // postgres.js accepts a function here (its own default is one) but types
+    // the option as a number.
+    max_lifetime: maxLifetime as unknown as number,
     // postgres.js grows one pool-wide reconnect delay after every refused or
     // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
     // After a restart or failover that left the server refusing connections

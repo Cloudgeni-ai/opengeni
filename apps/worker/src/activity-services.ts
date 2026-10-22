@@ -10,6 +10,7 @@ import {
   configureChildLifecycleNotices,
   configureCodeSearchDeploymentPolicy,
   createDb,
+  databasePoolOptions,
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -50,9 +51,7 @@ export function createSharedActivityServices(
         : createDb(settings.databaseUrl, {
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
-            ...(settings.databasePreparedStatements === undefined
-              ? {}
-              : { preparedStatements: settings.databasePreparedStatements }),
+            ...databasePoolOptions(settings),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;
