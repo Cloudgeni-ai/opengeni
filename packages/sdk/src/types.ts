@@ -2860,6 +2860,8 @@ export type ToolAuthNeededPayload = {
     | undefined;
   /** The Connected Machine the agent asked for; names the request, grants nothing. */
   requestedSandboxId?: string | undefined;
+  /** `chrome`: a Connected Machine card posted because the agent needs the person's own Chrome. */
+  purpose?: "chrome" | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is

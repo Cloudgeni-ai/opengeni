@@ -1,4 +1,5 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
+import { userSetupCardPoster } from "./user-setup-card";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -933,6 +934,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
+      postSetupCard: userSetupCardPoster({
+        db,
+        bus,
+        connectedMachinesEnabled: runSettings.sandboxSelfhostedEnabled,
+        webBaseUrl: runSettings.webBaseUrl ?? runSettings.publicBaseUrl,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: input.attemptId,
+      }),
     }),
     ...(googleDrivePublicationTool && googleDrivePublicationAllowed
       ? [googleDrivePublicationTool]

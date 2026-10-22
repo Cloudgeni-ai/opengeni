@@ -26,6 +26,7 @@ import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
   nativeCuaSchema,
+  type UserSetupCardPoster,
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
 
@@ -1727,7 +1728,10 @@ describe("interaction attempt tools", () => {
         updatedAt,
       };
     };
-    const open = async (devices: ReturnType<typeof profile>[]) => {
+    const open = async (
+      devices: ReturnType<typeof profile>[],
+      postSetupCard?: UserSetupCardPoster,
+    ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
         transport: partialTransport({
@@ -1742,6 +1746,7 @@ describe("interaction attempt tools", () => {
         sessionId,
         selectedTools: ["browser_open"],
         permissions: ["sessions:control"],
+        ...(postSetupCard ? { postSetupCard } : {}),
       });
       const result = await definitions[0]!.execute(
         { placement: { kind: "attached_device" } },
@@ -1785,7 +1790,115 @@ describe("interaction attempt tools", () => {
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
       expect(JSON.stringify(result.structuredContent)).toContain("attached_browser_unavailable");
+      // Without a card poster, the model is told to post the card itself.
+      expect(JSON.stringify(result.structuredContent)).toContain(
+        "capability_authorization_request (capabilityId api:connected-machine)",
+      );
     });
+
+    test("posts the Chrome setup card on the first failed open and says so", async () => {
+      const posted: Array<{ code: string; purpose?: string; toolName: string }> = [];
+      const chatUrl = "https://app.example.test/workspaces/w/sessions/s";
+      const { result, createRequest } = await open([], async (blocker, toolName) => {
+        posted.push({ code: blocker.code, purpose: blocker.purpose, toolName });
+        return { chatUrl };
+      });
+      expect(posted).toEqual([
+        { code: "attached_browser_unavailable", purpose: "chrome", toolName: "browser_open" },
+      ]);
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      const text = JSON.stringify(result.structuredContent);
+      expect(text).toContain("attached_browser_unavailable");
+      expect(text).toContain("No Chrome profile is connected");
+      expect(text).toContain("A card that fixes this is now posted in this chat");
+      expect(text).toContain("do not post another card");
+      expect(text).toContain(chatUrl);
+      expect(text).not.toContain("capability_authorization_request");
+    });
+
+    test("asks the model to offer the fix when the card can't be posted", async () => {
+      for (const poster of [
+        async () => null,
+        async () => {
+          throw new Error("turn replaced");
+        },
+      ]) {
+        const { result } = await open([], poster);
+        expect(result.isError).toBe(true);
+        const text = JSON.stringify(result.structuredContent);
+        expect(text).toContain("attached_browser_unavailable");
+        expect(text).not.toContain("now posted in this chat");
+        expect(text).toContain("Offer the fix in this reply");
+        expect(text).toContain(
+          "capability_authorization_request (capabilityId api:connected-machine)",
+        );
+        expect(text).toContain("chromewebstore.google.com");
+      }
+    });
+
+    test("does not post the setup card when a profile is connected", async () => {
+      let posts = 0;
+      const { result } = await open([profile("Personal", "2026-10-15T10:00:00.000Z")], async () => {
+        posts += 1;
+        return { chatUrl: null };
+      });
+      expect(result.isError).toBeFalsy();
+      expect(posts).toBe(0);
+    });
+
+    test("says the fix isn't available when this deployment can't offer it", async () => {
+      const { result } = await open([], async () => "unavailable");
+      expect(result.isError).toBe(true);
+      const text = JSON.stringify(result.structuredContent);
+      expect(text).toContain("attached_browser_unavailable");
+      expect(text).toContain("can't fix it here");
+      expect(text).not.toContain("now posted in this chat");
+      expect(text).not.toContain("capability_authorization_request");
+    });
+  });
+
+  test("any tool refused for something the person can fix posts the same setup card", async () => {
+    const posted: Array<{ code: string; toolName: string }> = [];
+    const refuse = (code: string) =>
+      createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            throw new OpenGeniApiError(409, "The machine's owner has not allowed this chat.", {
+              code,
+            });
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_open"],
+        permissions: ["sessions:read", "sessions:control"],
+        postSetupCard: async (blocker, toolName) => {
+          posted.push({ code: blocker.code, toolName });
+          return { chatUrl: null };
+        },
+      })[0]!.execute(
+        { mode: "new" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
+      );
+
+    const fixable = await refuse("personal_machine_permission_required");
+    expect(posted).toEqual([
+      { code: "personal_machine_permission_required", toolName: "computer_open" },
+    ]);
+    expect(fixable.isError).toBe(true);
+    expect(JSON.stringify(fixable.structuredContent)).toContain(
+      "A card that fixes this is now posted in this chat",
+    );
+
+    // A refusal the person can't fix is returned unchanged, with no card.
+    const other = await refuse("personal_machine_not_permitted");
+    expect(posted).toHaveLength(1);
+    expect(other.isError).toBe(true);
+    const text = JSON.stringify(other.structuredContent);
+    expect(text).toContain("has not allowed this chat");
+    expect(text).not.toContain("now posted in this chat");
   });
 
   test("projects one permission-filtered definition set into the exact attempt catalog", () => {

@@ -600,6 +600,8 @@ export type AuthNeededItem = {
   setupRequest?: ToolAuthNeededPayload["setupRequest"] | null | undefined;
   /** The Connected Machine the agent asked for, when the card names one. */
   requestedSandboxId?: string | null | undefined;
+  /** `chrome`: the Connected Machine card is for the person's own Chrome. */
+  purpose?: "chrome" | undefined;
   /**
    * A later Connected Machine card in this chat asks for the same thing, so
    * this one is shown as a short note instead of a second full card.

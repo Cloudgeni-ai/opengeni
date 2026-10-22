@@ -4114,6 +4114,117 @@ export const OPENGENI_BROWSER_EXTENSION_URL =
   "https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch";
 
 /**
+ * A tool refusal the person can fix themselves, such as a missing machine,
+ * extension or permission. Every tool that hits one posts the same setup card
+ * (a `tool.auth_needed` capability card) in the calling turn, so the person
+ * sees how to fix it in the same reply instead of only reading what's wrong.
+ * Add a refusal code here to give it a card; no tool needs its own handling.
+ */
+export type UserSetupBlocker = {
+  /** The refusal code (OpenGeniApiError.code or a typed refusal's `code`). */
+  code: string;
+  /** The capability card that fixes it. */
+  capabilityId: string;
+  /** Which variant of that card to show, when the capability has several. */
+  purpose?: "chrome";
+  /** What blocked the tool, for the agent. */
+  problem: string;
+  /** What the card asks the person to do. */
+  rationale: string;
+  /** The exact next step, for the agent, when no card can be posted. */
+  nextStep: string;
+};
+
+export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
+  {
+    code: "attached_browser_unavailable",
+    capabilityId: "api:connected-machine",
+    purpose: "chrome",
+    problem: "No Chrome profile is connected through the browser extension.",
+    rationale: "Connect your Chrome so the agent can use it.",
+    nextStep: `connect their computer as a Connected Machine, then add the browser extension to Chrome: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+  },
+  {
+    code: "personal_machine_permission_required",
+    capabilityId: "api:connected-machine",
+    problem:
+      "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
+    rationale: "Allow this chat to use your computer.",
+    nextStep: "open this chat in Opengeni and allow it to use their machine",
+  },
+];
+
+/** The blocker a refusal code names, or null when the person can't fix it. */
+export function userSetupBlocker(code: string | null | undefined): UserSetupBlocker | null {
+  if (!code) return null;
+  return USER_SETUP_BLOCKERS.find((blocker) => blocker.code === code) ?? null;
+}
+
+/**
+ * What the agent reads once the setup card is posted. The card is in this
+ * chat's timeline, but the person may be reading the chat elsewhere (Slack, a
+ * worker or scheduled chat), so the text names the chat link rather than
+ * promising the card is in front of them. Finishing the card sends a message
+ * that continues the chat, so the agent has nothing to wait for or retry.
+ */
+export function userSetupCardShownMessage(
+  blocker: UserSetupBlocker,
+  chatUrl: string | null = null,
+): string {
+  const elsewhere = chatUrl
+    ? `If they are reading this chat somewhere else (for example Slack, or this is a worker or scheduled chat), give them this link to it: ${chatUrl}. `
+    : "If they are reading this chat somewhere else (for example Slack, or this is a worker or scheduled chat), tell them to open this chat in Opengeni to use it. ";
+  return (
+    `${blocker.problem} ` +
+    "A card that fixes this is now posted in this chat in Opengeni. " +
+    "If they are reading this chat in Opengeni, tell them in one short sentence to use it there; do not describe its buttons or steps, and do not post another card. " +
+    elsewhere +
+    "Do not wait for it and do not retry: finishing the card sends a message that continues this chat."
+  );
+}
+
+/** What the agent reads when the setup card could not be posted for it. */
+export function userSetupCardUnpostedMessage(blocker: UserSetupBlocker): string {
+  return (
+    `${blocker.problem} The person can fix this. Offer the fix in this reply: post the setup card with capability_authorization_request (capabilityId ${blocker.capabilityId}) if that tool is available, ` +
+    `and tell them the exact next step: ${blocker.nextStep}. ` +
+    "Do not only report that it is unavailable."
+  );
+}
+
+/**
+ * What the agent reads when the card's capability is turned off on this
+ * deployment, so the person cannot fix the blocker here.
+ */
+export function userSetupUnavailableMessage(blocker: UserSetupBlocker): string {
+  return (
+    `${blocker.problem} This deployment doesn't support the setup that fixes it, so the person can't fix it here. ` +
+    "Tell them that in one short sentence and carry on without it; do not post a setup card."
+  );
+}
+
+/** The web link to a chat, or null when no safe web base is configured. */
+export function sessionChatUrl(
+  base: string | null | undefined,
+  workspaceId: string,
+  sessionId: string,
+): string | null {
+  if (!base) return null;
+  try {
+    const url = new URL(
+      `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
+      base,
+    );
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Who can use a machine connected with an enroll token. `user` makes it the
  * minting person's own machine (it follows them across same-organization
  * workspaces they can access; nobody else can use it). `workspace` shares it
@@ -17184,6 +17295,13 @@ export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
        * nothing.
        */
       requestedSandboxId: z.string().uuid().optional(),
+      /**
+       * Why a Connected Machine card was posted, when it is for something
+       * narrower than running this chat on a machine. `chrome`: the agent needs
+       * the person's own Chrome, so the card leads with connecting a computer
+       * and adding the Opengeni Browser extension. Grants nothing.
+       */
+      purpose: z.literal("chrome").optional(),
     })
     .superRefine((payload, context) => {
       if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {

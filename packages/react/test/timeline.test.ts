@@ -3623,6 +3623,45 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("a Chrome setup card keeps its purpose and repeats separately from machine requests", () => {
+    reset();
+    const card = (turnId: string, purpose?: "chrome") =>
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: purpose ? "browser_open" : "sandbox_swap",
+          providerDomain: "opengeni.ai",
+          reason: "missing_connection",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Connect your Chrome so the agent can use it.",
+            requiredVariables: [],
+          },
+          ...(purpose ? { purpose } : {}),
+        },
+        { turnId },
+      );
+    const items = buildTimeline(englishText, [
+      card("turn-1", "chrome"),
+      card("turn-2"),
+      card("turn-3", "chrome"),
+      card("turn-4"),
+    ]).filter((item) => item.kind === "auth-needed");
+    expect(
+      items.map((item) => [item.turnId, item.purpose ?? null, item.askedAgainLater ?? false]),
+    ).toEqual([
+      ["turn-1", "chrome", true],
+      ["turn-2", null, true],
+      ["turn-3", "chrome", false],
+      ["turn-4", null, false],
+    ]);
+  });
+
   test("agent-proposed MCP setup stays distinct from an installed catalog capability", () => {
     reset();
     const items = buildTimeline(englishText, [

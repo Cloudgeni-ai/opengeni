@@ -1474,24 +1474,60 @@ own computer, the agent posts the **Connected Machine card**: either
 `sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
 `tool.auth_needed` event with that capability id; the event carries no token.
 
-The card also appears without an agent decision. When `sandbox_swap`,
-`sandbox_attach` or `run_on` is refused with
-`personal_machine_permission_required` (the machine's owner started the turn
-but has not allowed this chat yet), the API posts the same card in the calling
-turn (`apps/api/src/mcp/machine-permission-card.ts`). The refusal the agent
-reads then says the card is posted in this chat in Opengeni, carries the chat
-link (`chatUrl`), and tells the agent to tell the person in one sentence: that
-they can allow it in the chat, or, when they read the chat elsewhere (Slack, a
-worker or a scheduled chat), to open the link. It must not wait or retry:
-choosing the machine sends the message that continues the chat. A repeated
-refusal in the same turn reuses that turn's machine card, since one card lists
-every machine; the lookup and append run atomically under the turn-attempt
-fence (`appendTurnCapabilityCardOnce`), so parallel refusals cannot stack
-copies. Cards for other capabilities, such as Slack and GitHub in the same
-turn, are never limited. `personal_machine_not_permitted` (not
-the owner, or not the owner's turn) and every other failure stay plain
-refusals, and callers without an exact agent attempt get no card. If the card
-cannot be posted, the original refusal is returned unchanged.
+The card also appears without an agent decision. A tool refusal the person can
+fix themselves is listed once in `USER_SETUP_BLOCKERS` (`packages/contracts`),
+which names the refusal code, the capability card that fixes it and an optional
+card `purpose`. Whatever tool hits one, the setup card is posted in the calling
+turn through one shared path: `userSetupCardPayload` (`packages/core`) builds
+the `tool.auth_needed` payload, and `appendTurnCapabilityCardOnce` appends it
+under the turn-attempt fence. API tools use `withUserSetupCard`
+(`apps/api/src/mcp/user-setup-card.ts`); every worker interaction tool
+(`browser_*`, `computer_*`) goes through the same wrapper in
+`packages/runtime/src/interaction-tools.ts`, posting with
+`apps/worker/src/activities/agent-turn/user-setup-card.ts`. Giving another
+refusal a card means adding it to the registry; no tool needs its own handling.
+
+The refusal the agent reads then says the card is posted in this chat in
+Opengeni, carries the chat link when a web base is configured, and tells the
+agent to tell the person in one sentence to use it, or, when they read the chat
+elsewhere (Slack, a worker or a scheduled chat), to open the link. It must not
+describe the card's steps, post another card, wait or retry: finishing the card
+sends the message that continues the chat. If the card can't be posted, an API
+refusal is returned unchanged, and a worker tool's error tells the agent to
+offer the fix itself in the same reply (`capability_authorization_request`, and
+the exact next step). The agent instructions carry the same general rule: when
+something the user can fix blocks a tool, offer the fix in the same reply.
+
+Two refusals are registered today:
+
+- `personal_machine_permission_required`: `sandbox_swap`, `sandbox_attach` or
+  `run_on` was refused because the machine's owner started the turn but has not
+  allowed this chat yet. The plain machine card, naming the requested machine.
+  `personal_machine_not_permitted` (not the owner, or not the owner's turn) and
+  every other failure stay plain refusals, and callers without an exact agent
+  attempt get no card. Only these API tools emit it today; the worker poster
+  passes no requested machine, so an interaction tool that emitted it would get
+  a machine card that names no machine.
+- `attached_browser_unavailable`: `browser_open` with
+  `placement: {kind: "attached_device"}` found no connected Chrome profile. The
+  **Chrome setup card**, the machine card with `purpose: "chrome"`
+  (`session-chrome-card.tsx`), shows one step at a time: **Connect a
+  computer** when no online machine with a display exists, then **Add to
+  Chrome** (the Opengeni Browser extension), then **Continue** once a Chrome
+  profile `browser_open` can drive (connected, with debugger attachment)
+  links up, which sends `Chrome is connected. Continue.` When a computer comes
+  online, the card keeps checking Chrome for up to a minute. It offers Continue
+  only after it saw Chrome missing, so an old or reloaded card sends nothing. The card reflects
+  the viewer's own machines and Chrome; in a shared workspace a teammate may see
+  a different step than the person who started the turn. When Connected
+  Machines are off on the deployment, nothing is posted and the agent is told
+  the person can't fix it here.
+
+A repeated refusal in the same turn reuses that turn's card for the same
+capability, requested machine and purpose; the lookup and append run atomically,
+so parallel refusals cannot stack copies, and a plain machine card does not hide
+the Chrome card. Cards for other capabilities, such as Slack and GitHub in the
+same turn, are never limited.
 
 The card (`packages/react/src/app/components/capabilities/session-machine-card.tsx`):
 

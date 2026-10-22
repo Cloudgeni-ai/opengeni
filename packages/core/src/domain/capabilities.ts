@@ -25,6 +25,8 @@ import {
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
   type SocialConnection,
+  ToolAuthNeededPayload,
+  type UserSetupBlocker,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -1887,6 +1889,41 @@ export function nativeConnectionCapabilityRecommendations(
     );
   }
   return items;
+}
+
+/**
+ * The `tool.auth_needed` payload of the setup card that fixes a person-fixable
+ * tool refusal (see USER_SETUP_BLOCKERS). Every tool and route that hits such a
+ * refusal posts this same card in the calling turn, so the person sees the fix
+ * on the first attempt. Null when the blocker's capability is not a native
+ * card this deployment can show.
+ */
+export function userSetupCardPayload(
+  blocker: UserSetupBlocker,
+  options: { toolName: string; requestedSandboxId?: string | null },
+): ToolAuthNeededPayload | null {
+  const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+    (candidate) => candidate.id === blocker.capabilityId,
+  );
+  if (!item) return null;
+  return ToolAuthNeededPayload.parse({
+    serverId: "opengeni",
+    toolName: options.toolName,
+    // Built-in capabilities are Opengeni's own; a blank domain must not fail the card.
+    providerDomain: item.providerDomain?.trim() || "opengeni.local",
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: "connect",
+      rationale: blocker.rationale,
+      requiredVariables: [],
+    },
+    ...(options.requestedSandboxId ? { requestedSandboxId: options.requestedSandboxId } : {}),
+    ...(blocker.purpose ? { purpose: blocker.purpose } : {}),
+  });
 }
 
 function socialConnectionCounts(
