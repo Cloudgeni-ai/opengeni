@@ -12,6 +12,7 @@ import {
   getFileSourceSessionReference,
   getSessionAuthorityProjection,
   getSlackInteractionSessionAccess,
+  hasSlackSourceMarker,
   updateFileVisibility,
   type Database,
 } from "@opengeni/db";
@@ -58,7 +59,8 @@ export async function sourceSessionRequiresHumanShare(
   )
     return true;
   const slack = await getSlackInteractionSessionAccess(db, workspaceId, source.rootSessionId);
-  return slack?.visibility === "private";
+  return slack?.visibility === "private" ||
+    (!slack && await hasSlackSourceMarker(db, workspaceId, source.rootSessionId));
 }
 
 /** A host that denies the live source chat also denies its inherited File ID.

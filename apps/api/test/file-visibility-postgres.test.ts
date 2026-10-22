@@ -944,8 +944,16 @@ test("a private Slack source keeps its File ID private", async () => {
         where id = ${interaction.id}`)(),
   ).rejects.toThrow("Slack interaction audience is immutable");
   await expect(
+    (async () => await shared.admin`update slack_interactions
+      set session_reservation_id = ${crypto.randomUUID()}, session_id = null
+      where id = ${interaction.id}`)(),
+  ).rejects.toThrow("Slack interaction audience is immutable");
+  await expect(
     (async () => await shared.admin`delete from connections where id = ${connection!.id}`)(),
   ).rejects.toThrow();
+  await expect(
+    (async () => await shared.admin`delete from slack_interactions where id = ${interaction.id}`)(),
+  ).rejects.toThrow("Slack source audience must survive its session tree");
   const laterFileId = crypto.randomUUID();
   await withSessionRlsActorContext(
     { subjectId: f.owner.subjectId, privateFileOwnerSubjectId: f.owner.subjectId },
@@ -972,6 +980,61 @@ test("a private Slack source keeps its File ID private", async () => {
   await shared.admin`delete from connections where id = ${connection!.id}`;
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+});
+
+test("a Slack-marked source with no audience cannot create a File", async () => {
+  const f = await fixture();
+  const session = await createSession(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Synthetic Slack request",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    createdByContext: {},
+  });
+  await initializeSessionStartAtomically(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+    clientEventId: "slack:synthetic-event",
+  });
+  expect(
+    await sourceSessionRequiresHumanShare(db.db, f.workspace.id, session.id),
+  ).toBe(true);
+  const fileId = crypto.randomUUID();
+  await expect(
+    createFileUpload(db.db, {
+      accountId: f.workspace.accountId,
+      workspaceId: f.workspace.id,
+      fileId,
+      sourceSessionId: session.id,
+      filename: "output.txt",
+      safeFilename: "output.txt",
+      contentType: "text/plain",
+      sizeBytes: 4,
+      bucket: "fixture",
+      objectKey: `workspaces/${f.workspace.id}/files/${fileId}/original/output.txt`,
+      expiresAt: new Date(Date.now() + 60_000),
+    }),
+  ).rejects.toMatchObject({ cause: { code: "42501" } });
+  await expect(
+    (async () => await shared.admin`insert into video_generation_operations (
+      account_id, workspace_id, session_id, tool_call_id, admission_key,
+      request_digest, prompt_digest, model_id, source_mode, capability_revision,
+      credential_version, provider_idempotency_key, expected_artifact_id,
+      expected_file_id, reserved_bytes, recovery_deadline_at)
+      values (${f.workspace.accountId}, ${f.workspace.id}, ${session.id}, 'fixture-call',
+        ${"a".repeat(64)}, ${"b".repeat(64)}, ${"c".repeat(64)}, 'fixture-model',
+        'text', ${"d".repeat(64)}, 1, 'fixture-key', ${crypto.randomUUID()},
+        ${crypto.randomUUID()}, 1, now() + interval '1 hour')`)(),
+  ).rejects.toMatchObject({ code: "42501" });
 });
 
 test("a host denial also hides a shared source File ID and listing", async () => {
@@ -1527,6 +1590,16 @@ test("migration refuses a source whose historical Slack audience was erased", as
       createdEventPayload: {},
       clientEventId: "slack:synthetic-event",
     });
+    const migration = await readFile(
+      new URL(
+        "../../../packages/db/drizzle/0914_session_file_source_visibility.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
+      "Missing historical Slack audience requires operator adjudication",
+    );
     const fileId = await f.readyFile(null, f.owner.subjectId);
     await legacy.admin`insert into generated_image_artifacts (
       artifact_id, account_id, workspace_id, session_id, settlement_key,
@@ -1536,13 +1609,6 @@ test("migration refuses a source whose historical Slack audience was erased", as
       ${"d".repeat(64)}, 'fixture-call', 'provider_adapter', 'fixture', ${"e".repeat(64)},
       'ready', 'image/png', 4, ${"a".repeat(64)}, 1, 1,
       ${`/workspace/generated-images/generated-image-${fileId}.png`}, now())`;
-    const migration = await readFile(
-      new URL(
-        "../../../packages/db/drizzle/0914_session_file_source_visibility.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    );
     await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
       "Missing historical Slack audience requires operator adjudication",
     );
@@ -1559,6 +1625,18 @@ test("migration refuses a source whose historical Slack audience was erased", as
     );
     await legacy.admin`update opengeni_private.file_source_adjudications
       set owner_subject_id = ${f.owner.subjectId} where file_id = ${fileId}`;
+    const [connection] = await legacy.admin<{ id: string }[]>`
+      insert into connections (account_id, workspace_id, subject_id, provider_domain,
+        kind, credential_encrypted, metadata)
+      values (${f.workspace.accountId}, ${f.workspace.id}, null, 'slack.com',
+        'app_install', repeat('x', 32), '{}'::jsonb) returning id`;
+    await legacy.admin`insert into slack_interactions (
+      account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
+      slack_thread_ts, route_key, triggering_provider_event_id,
+      owning_subject_id, visibility, session_reservation_id, session_id)
+      values (${f.workspace.accountId}, ${f.workspace.id}, ${connection!.id},
+        'T_EXAMPLE', 'D_EXAMPLE', '1710000000.000001', 'D_EXAMPLE:1710000000.000001',
+        'E_EXAMPLE', ${f.owner.subjectId}, 'private', ${session.rootSessionId}, ${session.id})`;
     await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
       "Legacy private file owner conflicts with operator adjudication",
     );

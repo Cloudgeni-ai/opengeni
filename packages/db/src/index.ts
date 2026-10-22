@@ -14221,6 +14221,28 @@ export async function getSlackInteractionSessionAccess(
   });
 }
 
+/** A surviving Slack event without its interaction has no attested audience. */
+export async function hasSlackSourceMarker(
+  db: Database,
+  workspaceId: string,
+  rootSessionId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.sessionEvents.id })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, rootSessionId),
+          sql`${schema.sessionEvents.clientEventId} LIKE 'slack:%'`,
+        ),
+      )
+      .limit(1);
+    return !!row;
+  });
+}
+
 export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {

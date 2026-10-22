@@ -1683,6 +1683,7 @@ Session-produced Files keep source-chat provenance. Ordinary File reads follow
 the chat's live visibility unless the File owner explicitly shares that File;
 after chat deletion, inherited shared Files fail closed, private output stays
 with its recorded owner, and independently shared Files keep that audience.
+Slack-origin output requires a surviving, verified interaction audience.
 Historical output whose source chat cannot be recovered is restricted to its
 recorded owner.
 Workspace Office imports and retained Knowledge text require a File audience

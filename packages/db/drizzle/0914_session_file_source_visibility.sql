@@ -117,30 +117,21 @@ BEGIN
       USING ERRCODE='55000';
   END IF;
 END $known_source_owner_only_preflight$;
--- An older hard-deleted Slack connection cascaded its interaction row. The
--- surviving Slack message marker proves origin but not its private audience.
+-- An older hard-deleted Slack connection cascaded its interaction row. A
+-- surviving Slack chat can still produce new files, so no file-level decision
+-- can repair a missing audience for the whole source tree.
 DO $missing_slack_audience_preflight$
 BEGIN
-  IF EXISTS (SELECT 1 FROM session_file_sources_0913 source
-    JOIN sessions source_session ON source_session.account_id = source.account_id
-      AND source_session.workspace_id = source.workspace_id
-      AND source_session.id = source.session_id
-    JOIN files source_file ON source_file.account_id = source.account_id
-      AND source_file.workspace_id = source.workspace_id AND source_file.id = source.file_id
-    WHERE source_file.private_owner_subject_ids IS NULL
-      AND EXISTS (SELECT 1 FROM session_events event_row
-        WHERE event_row.account_id = source.account_id
-          AND event_row.workspace_id = source.workspace_id
-          AND event_row.session_id = source_session.root_session_id
-          AND event_row.client_event_id LIKE 'slack:%')
+  IF EXISTS (SELECT 1 FROM session_events event_row
+    WHERE event_row.client_event_id LIKE 'slack:%'
+      AND EXISTS (SELECT 1 FROM sessions source_session
+        WHERE source_session.account_id = event_row.account_id
+          AND source_session.workspace_id = event_row.workspace_id
+          AND source_session.root_session_id = event_row.session_id)
       AND NOT EXISTS (SELECT 1 FROM slack_interactions interaction_row
-        WHERE interaction_row.account_id = source.account_id
-          AND interaction_row.workspace_id = source.workspace_id
-          AND interaction_row.session_reservation_id = source_session.root_session_id)
-      AND NOT EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications decision
-        WHERE decision.file_id = source.file_id
-          AND (decision.decision = 'human_shared'
-            OR (decision.decision = 'owner_only' AND decision.owner_subject_id IS NOT NULL))))
+        WHERE interaction_row.account_id = event_row.account_id
+          AND interaction_row.workspace_id = event_row.workspace_id
+          AND interaction_row.session_reservation_id = event_row.session_id))
   THEN RAISE EXCEPTION 'Missing historical Slack audience requires operator adjudication'
     USING ERRCODE='55000'; END IF;
 END $missing_slack_audience_preflight$;
@@ -606,13 +597,82 @@ CREATE TRIGGER sync_file_source_session_owner_0913
 CREATE FUNCTION freeze_slack_source_audience_0913() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
 BEGIN
-  RAISE EXCEPTION 'Slack interaction audience is immutable' USING ERRCODE='55000';
+  IF OLD.visibility IS DISTINCT FROM NEW.visibility
+    OR OLD.owning_subject_id IS DISTINCT FROM NEW.owning_subject_id
+    OR OLD.account_id IS DISTINCT FROM NEW.account_id
+    OR OLD.workspace_id IS DISTINCT FROM NEW.workspace_id
+    OR OLD.session_reservation_id IS DISTINCT FROM NEW.session_reservation_id
+    OR (OLD.session_id IS NOT NULL AND OLD.session_id IS DISTINCT FROM NEW.session_id)
+  THEN RAISE EXCEPTION 'Slack interaction audience is immutable' USING ERRCODE='55000'; END IF;
+  RETURN NEW;
 END $body$;
 CREATE TRIGGER freeze_slack_source_audience_0913
-  BEFORE UPDATE OF visibility, owning_subject_id ON slack_interactions
-  FOR EACH ROW WHEN (OLD.visibility IS DISTINCT FROM NEW.visibility
-    OR OLD.owning_subject_id IS DISTINCT FROM NEW.owning_subject_id)
+  BEFORE UPDATE OF visibility, owning_subject_id, account_id, workspace_id,
+    session_reservation_id, session_id ON slack_interactions
+  FOR EACH ROW
   EXECUTE FUNCTION freeze_slack_source_audience_0913();
+
+-- Deleting an interaction directly must not recreate a missing audience. A
+-- deferred check permits a source session and its interaction to be removed
+-- together while refusing to leave any surviving member of that tree.
+CREATE FUNCTION retain_slack_source_audience_0914() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
+BEGIN
+  IF EXISTS (SELECT 1 FROM sessions source_session
+    WHERE source_session.account_id = OLD.account_id
+      AND source_session.workspace_id = OLD.workspace_id
+      AND source_session.root_session_id = OLD.session_reservation_id)
+  THEN RAISE EXCEPTION 'Slack source audience must survive its session tree'
+    USING ERRCODE='55000'; END IF;
+  RETURN OLD;
+END $body$;
+DO $search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION retain_slack_source_audience_0914() SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END $search_path$;
+REVOKE ALL ON FUNCTION retain_slack_source_audience_0914() FROM PUBLIC;
+CREATE CONSTRAINT TRIGGER retain_slack_source_audience_0914
+  AFTER DELETE ON slack_interactions DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION retain_slack_source_audience_0914();
+
+-- A new source File or video operation cannot guess that an origin with a
+-- missing Slack interaction was workspace-shared. This also fences direct
+-- app-role writes if a historical row is introduced after the preflight.
+CREATE FUNCTION require_source_slack_audience_0914() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
+DECLARE source_id uuid;
+BEGIN
+  IF TG_TABLE_NAME = 'files' THEN
+    source_id := NEW.source_session_id;
+  ELSE
+    source_id := NEW.session_id;
+  END IF;
+  IF source_id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions source_session
+    WHERE source_session.account_id = NEW.account_id
+      AND source_session.workspace_id = NEW.workspace_id
+      AND source_session.id = source_id
+      AND NOT EXISTS (SELECT 1 FROM slack_interactions interaction_row
+        WHERE interaction_row.account_id = source_session.account_id
+          AND interaction_row.workspace_id = source_session.workspace_id
+          AND interaction_row.session_reservation_id = source_session.root_session_id)
+      AND EXISTS (SELECT 1 FROM session_events event_row
+        WHERE event_row.account_id = source_session.account_id
+          AND event_row.workspace_id = source_session.workspace_id
+          AND event_row.session_id = source_session.root_session_id
+          AND event_row.client_event_id LIKE 'slack:%'))
+  THEN RAISE EXCEPTION 'Slack source audience unavailable' USING ERRCODE='42501'; END IF;
+  RETURN NEW;
+END $body$;
+DO $search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION require_source_slack_audience_0914() SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END $search_path$;
+REVOKE ALL ON FUNCTION require_source_slack_audience_0914() FROM PUBLIC;
+CREATE TRIGGER require_file_source_slack_audience_0914
+  BEFORE INSERT ON files FOR EACH ROW EXECUTE FUNCTION require_source_slack_audience_0914();
+CREATE TRIGGER require_video_source_slack_audience_0914
+  BEFORE INSERT ON video_generation_operations FOR EACH ROW
+  EXECUTE FUNCTION require_source_slack_audience_0914();
 
 -- A hidden live chat must never look deleted to a file-read policy. Check
 -- existence under the system's empty-subject posture, then restore the actor.
