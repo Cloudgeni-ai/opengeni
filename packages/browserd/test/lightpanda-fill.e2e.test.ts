@@ -10,7 +10,6 @@ const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" && binaryPath ? test : tes
 
 e2e("Lightpanda fill replaces existing values and emits native input events", async () => {
   const directory = await mkdtemp("/tmp/ogb-lp-fill-");
-  const socketDirectory = `/tmp/lpf-${randomUUID().slice(0, 8)}`;
   const binary = await resolvePinnedLightpandaBinary({
     binaryPath: binaryPath!,
   });
@@ -52,7 +51,6 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
   });
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
     lightpandaBinary: async () => binary,
   });
   const reference = {
@@ -213,7 +211,6 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
     page.stop(true);
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
   }
 });
 

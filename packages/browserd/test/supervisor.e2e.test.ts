@@ -11,7 +11,7 @@ import type {
 import { resolvePinnedHeadlessShell } from "../src/headless-shell";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserSupervisor,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
 } from "../src";
@@ -53,7 +53,6 @@ recoveryE2e.each(recoveryCases)(
   "a $ending controller leaves the same live browser and unsaved page state (headed: $headed)",
   async ({ ending, headed }) => {
     const directory = await mkdtemp("/tmp/ogb-recovery-e2e-");
-    const socketRootDirectory = await mkdtemp("/tmp/ogg-");
     const rootDirectory = join(directory, "state");
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -100,7 +99,7 @@ recoveryE2e.each(recoveryCases)(
     const failures: unknown[] = [];
     try {
       if (ending === "graceful") {
-        first = await openManagedRecoverySupervisor(rootDirectory, socketRootDirectory);
+        first = await openManagedRecoverySupervisor(rootDirectory);
         const created = await first.createSession(options);
         const clicked = await first.action(clickFirstButton(created.observation));
         expect(clicked.state).toBe("completed");
@@ -112,7 +111,7 @@ recoveryE2e.each(recoveryCases)(
           [
             process.execPath,
             join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
-            JSON.stringify({ rootDirectory, socketRootDirectory, options }),
+            JSON.stringify({ rootDirectory, options }),
           ],
           { stdout: "pipe", stderr: "inherit" },
         );
@@ -144,7 +143,7 @@ recoveryE2e.each(recoveryCases)(
             "--",
             process.execPath,
             join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
-            JSON.stringify({ rootDirectory, socketRootDirectory, options }),
+            JSON.stringify({ rootDirectory, options }),
           ],
           { stdin: "ignore", stdout: "pipe", stderr: "inherit" },
         );
@@ -167,7 +166,7 @@ recoveryE2e.each(recoveryCases)(
       // The controller is gone; the browser it launched is not.
       const inode = (await stat(profile)).ino;
       expect(() => process.kill(browserPid!, 0)).not.toThrow();
-      second = await openManagedRecoverySupervisor(rootDirectory, socketRootDirectory);
+      second = await openManagedRecoverySupervisor(rootDirectory);
       const { initialUrl, ...recoveryOptions } = options;
       const recovered = await second.createSession({
         ...recoveryOptions,
@@ -210,7 +209,6 @@ recoveryE2e.each(recoveryCases)(
       failures.push(...cleanupFailures);
       if (!cleanupFailures.length) {
         await rm(directory, { recursive: true, force: true });
-        await rm(socketRootDirectory, { recursive: true, force: true });
       }
     }
     if (failures.length) throw new AggregateError(failures, "managed recovery fixture failed");
@@ -227,7 +225,6 @@ recoveryE2e(
   "a lost controller and browser relaunch the same directory through the browser launcher",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-relaunch-e2e-");
-    const socketRootDirectory = await mkdtemp("/tmp/ogr-");
     const rootDirectory = join(directory, "state");
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -279,7 +276,7 @@ recoveryE2e(
         [
           process.execPath,
           join(import.meta.dir, "fixtures", "managed-recovery-fixture.ts"),
-          JSON.stringify({ rootDirectory, socketRootDirectory, options }),
+          JSON.stringify({ rootDirectory, options }),
         ],
         { stdout: "pipe", stderr: "inherit" },
       );
@@ -296,7 +293,7 @@ recoveryE2e(
       for (const pid of [daemon, ...drains, browserPid]) await waitForProcessDeath(pid);
       const inode = (await stat(profile)).ino;
 
-      second = await openManagedRecoverySupervisor(rootDirectory, socketRootDirectory);
+      second = await openManagedRecoverySupervisor(rootDirectory);
       const { initialUrl, ...recoveryOptions } = options;
       const recovered = await second.createSession({
         ...recoveryOptions,
@@ -324,7 +321,6 @@ recoveryE2e(
       await second?.close();
       server.stop(true);
       await rm(directory, { recursive: true, force: true });
-      await rm(socketRootDirectory, { recursive: true, force: true });
     }
   },
   90_000,
@@ -332,14 +328,12 @@ recoveryE2e(
 
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
-  const socketDirectory = await mkdtemp("/tmp/ogs-");
   const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
     ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
     : undefined;
   const supervisor = await BrowserSupervisor.open({
     ...(headlessShell ? { headlessShell } : {}),
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
   });
   const first = reference();
   const second = reference();
@@ -373,7 +367,6 @@ e2e("runs multiple real browser sessions through one placement supervisor", asyn
   } finally {
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
   }
 });
 
@@ -381,13 +374,11 @@ e2e.each(["read", "capture"] as const)(
   "recovers after exact Chromium process loss before %s without reusing target refs",
   async (operation) => {
     const directory = await mkdtemp("/tmp/ogb-browser-loss-e2e-");
-    const socketDirectory = await mkdtemp("/tmp/ogl-");
     let driverLifecycles = 0;
     let uploads = 0;
     let profileDirectory: string | undefined;
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
-      socketRootDirectory: socketDirectory,
       uploadArtifact: async (path) => {
         expect((await stat(path)).size).toBeGreaterThan(0);
         uploads += 1;
@@ -395,13 +386,8 @@ e2e.each(["read", "capture"] as const)(
       createDriver: async (driverContext) => {
         profileDirectory = driverContext.profileDirectory;
         driverLifecycles += 1;
-        const runner = await AgentBrowserJsonRunner.create({
-          namespace: "og",
-          sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-          socketDirectory: driverContext.socketDirectory,
+        const runner = await ManagedBrowserRunner.create({
           profileDirectory: driverContext.profileDirectory,
-          downloadDirectory: driverContext.downloadDirectory,
-          screenshotDirectory: driverContext.screenshotDirectory,
           headed: false,
           browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
         });
@@ -460,7 +446,6 @@ e2e.each(["read", "capture"] as const)(
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });
-      await rm(socketDirectory, { recursive: true, force: true });
     }
   },
 );

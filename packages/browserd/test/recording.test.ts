@@ -3,8 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentBrowserDriver } from "../src";
-import { AgentBrowserJsonRunner } from "../src/runner";
-import { resolvePinnedAgentBrowserBinary } from "../src/binary";
+import { ManagedBrowserRunner } from "../src/runner";
 import {
   BrowserRecording,
   RECORDING_BUNDLE_MAGIC,
@@ -136,22 +135,12 @@ chromiumE2e(
   "records a changing background tab from Chromium's screencast",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-recording-e2e-");
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `rec_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
     });
     const driver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),

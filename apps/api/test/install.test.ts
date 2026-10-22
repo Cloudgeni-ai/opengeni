@@ -29,12 +29,9 @@ function appFor(settings: Settings) {
 // build artifacts; the baked-path tests stage a throwaway file and clean it up.
 const BAKED_DIR = fileURLToPath(new URL("../../../agent/install/baked/", import.meta.url));
 const BAKED_TARGET = "x86_64-unknown-linux-musl-test-fixture";
-const BAKED_ASSETS = [
-  "opengeni-agent",
-  "opengeni-browserd",
-  "opengeni-agent-browser",
-  "opengeni-computer-native",
-].map((name) => `${name}-${BAKED_TARGET}`);
+const BAKED_ASSETS = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"].map(
+  (name) => `${name}-${BAKED_TARGET}`,
+);
 const BAKED_FIXTURE = BAKED_ASSETS[0]!;
 const BAKED_FILES = BAKED_ASSETS.flatMap((asset) =>
   ["", ".sha256", ".minisig"].map((suffix) => `${asset}${suffix}`),

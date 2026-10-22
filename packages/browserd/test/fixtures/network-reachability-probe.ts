@@ -7,7 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentBrowserJsonRunner } from "../../src/runner";
+import { ManagedBrowserRunner } from "../../src/runner";
 
 const mode = process.argv[2] as "isolated" | "shared";
 const shapes = [
@@ -30,14 +30,8 @@ const listen = async (label: string, host: string) => {
 const targets = [];
 for (const [shape, host] of shapes) targets.push(await listen(`${shape} before`, host));
 const root = await mkdtemp(join(tmpdir(), `og-reachability-${mode}-`));
-const socketDirectory = await mkdtemp("/tmp/og-reach-");
-const runner = await AgentBrowserJsonRunner.create({
-  namespace: "og",
-  sessionName: mode,
-  socketDirectory,
+const runner = await ManagedBrowserRunner.create({
   profileDirectory: join(root, "profile"),
-  downloadDirectory: join(root, "downloads"),
-  screenshotDirectory: join(root, "screenshots"),
   headed: false,
   systemdScope: false,
   networkIsolation: mode === "isolated",
@@ -97,5 +91,4 @@ try {
   await runner.terminate();
   for (const server of servers) server.close();
   await rm(root, { recursive: true, force: true });
-  await rm(socketDirectory, { recursive: true, force: true });
 }

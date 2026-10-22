@@ -451,7 +451,6 @@ function Test-SignatureOpenssl($file, $sig) {
 function Install-VerifiedInteractionRuntime($agentAsset, $tmp, $installDir) {
   $target = $agentAsset -replace '^opengeni-agent-', '' -replace '\.exe$', ''
   $browserd = "opengeni-browserd-$target.exe"
-  $agentBrowser = "opengeni-agent-browser-$target.exe"
   $computerNative = "opengeni-computer-native-$target.exe"
   $probe = Join-Path $tmp 'interaction-runtime-probe.sha256'
   if (-not (Test-ReleaseAssetAvailable $browserd $probe)) {
@@ -461,7 +460,6 @@ function Install-VerifiedInteractionRuntime($agentAsset, $tmp, $installDir) {
 
   $runtime = @(
     @{ Asset = $browserd; Destination = 'opengeni-browserd.exe' },
-    @{ Asset = $agentBrowser; Destination = 'agent-browser.exe' },
     @{ Asset = $computerNative; Destination = 'opengeni-computer-native.exe' }
   )
   $staged = Join-Path $tmp 'interaction-runtime'

@@ -9,12 +9,7 @@ import type {
   BrowserPasskeyEvent,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
-import {
-  AgentBrowserDriver,
-  AgentBrowserJsonRunner,
-  BrowserPasskeyManager,
-  resolvePinnedAgentBrowserBinary,
-} from "../src";
+import { AgentBrowserDriver, ManagedBrowserRunner, BrowserPasskeyManager } from "../src";
 import { startFakeLoginServer, type FakeLoginServer } from "../../testing/src/fake-login/server";
 
 // Fake-login suite through the real browserd driver and Chrome: passkeys
@@ -254,22 +249,12 @@ type Browser = {
 
 async function launch(label: string): Promise<Browser> {
   const directory = await mkdtemp(`/tmp/w4cdp-${label}-`);
-  const runner = await AgentBrowserJsonRunner.create({
-    namespace: `w4${randomUUID().slice(0, 8)}`,
-    sessionName: "s",
-    socketDirectory: join(directory, "s"),
+  const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
-    downloadDirectory: join(directory, "downloads"),
-    screenshotDirectory: join(directory, "screenshots"),
     headed,
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
       : {}),
-    binary: await resolvePinnedAgentBrowserBinary(
-      process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-        ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-        : {},
-    ),
   });
   const browserSessionId = randomUUID();
   const controllerGeneration = `controller-${randomUUID()}`;

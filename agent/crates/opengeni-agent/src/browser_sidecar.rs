@@ -33,7 +33,6 @@ use tokio::{
 };
 
 const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
-const AGENT_BROWSER_BINARY_ENV: &str = "OPENGENI_BROWSERD_AGENT_BROWSER_BINARY";
 const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
 /// Helper file names. People see them as process names (Activity Monitor, Task
@@ -463,7 +462,6 @@ fn take_sidecar_pipes(
 
 fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
     for (environment, names) in [
-        (AGENT_BROWSER_BINARY_ENV, &["agent-browser"][..]),
         (LIGHTPANDA_BINARY_ENV, &["lightpanda"][..]),
         (
             COMPUTER_NATIVE_BINARY_ENV,
@@ -952,7 +950,7 @@ fn signal_sidecar_termination(child: &mut Child) -> bool {
         // browserd's Bun standalone reliably runs its registered graceful
         // shutdown path for SIGINT. On macOS a SIGTERM exits the standalone at
         // the native launcher boundary before Bun dispatches the JS signal
-        // listener, orphaning its private agent-browser/Chromium daemon. SIGINT
+        // listener, skipping its graceful managed-browser shutdown. SIGINT
         // is still a cooperative termination request; the bounded wait + exact
         // child kill below remains the hard-stop fallback.
         return kill(Pid::from_raw(id), Signal::SIGINT).is_ok();
@@ -2076,11 +2074,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("fixture runtime root");
         let adjacent = directory.path().join("adjacent");
         std::fs::create_dir(&adjacent).expect("adjacent fixture directory");
-        for name in [
-            "opengeni-browserd",
-            "agent-browser",
-            "opengeni-computer-native",
-        ] {
+        for name in ["opengeni-browserd", "opengeni-computer-native"] {
             std::fs::write(adjacent.join(companion_name(name)), b"stale helper")
                 .expect("stale adjacent fixture");
         }
@@ -2093,10 +2087,7 @@ mod tests {
         let mut command = Command::new(&binary);
         configure_companion_binaries(&mut command, &binary);
         let environment = command.as_std().get_envs().collect::<HashMap<_, _>>();
-        for (key, name) in [
-            (AGENT_BROWSER_BINARY_ENV, "agent-browser"),
-            (COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE),
-        ] {
+        for (key, name) in [(COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE)] {
             let expected = runtime.join(companion_name(name));
             assert_eq!(
                 environment
@@ -2298,10 +2289,9 @@ mod tests {
         });
         let binary = temporary.path().join("fake-browserd");
         let environment_capture = temporary.path().join("sidecar-environment");
-        let agent_browser = temporary.path().join(companion_name("agent-browser"));
         let lightpanda = temporary.path().join(companion_name("lightpanda"));
         let computer_native = temporary.path().join(companion_name(COMPUTER_NATIVE_FILE));
-        for companion in [&agent_browser, &lightpanda, &computer_native] {
+        for companion in [&lightpanda, &computer_native] {
             std::fs::write(companion, "companion").expect("write sidecar companion");
             std::fs::set_permissions(companion, std::fs::Permissions::from_mode(0o700))
                 .expect("make sidecar companion executable");
@@ -2311,7 +2301,7 @@ mod tests {
             format!(
                 concat!(
                     "#!/bin/sh\n",
-                    "printf '%s\\n%s\\n%s\\n' \"$OPENGENI_BROWSERD_AGENT_BROWSER_BINARY\" \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
+                    "printf '%s\\n%s\\n' \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
                     "printf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",",
                     "\"protocolVersion\":1,\"runtimeBuildId\":\"{build_id}\",\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
                     "exec sleep 30\n",
@@ -2341,7 +2331,7 @@ mod tests {
                 .lines()
                 .map(PathBuf::from)
                 .collect::<Vec<_>>(),
-            [agent_browser, lightpanda, computer_native],
+            [lightpanda, computer_native],
         );
         let replay = manager
             .ensure(&request)

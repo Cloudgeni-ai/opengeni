@@ -34,7 +34,7 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const targetArchitecture = dockerfile.indexOf("\nARG TARGETARCH\n", targetCodemode);
   const nativeCompile = dockerfile.indexOf("bun build --compile \\", targetArchitecture);
   const targetController = dockerfile.indexOf(
-    'install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}"',
+    'install -m 0755 "/lightpanda-assets/${lightpanda_native}" /out/lightpanda',
     nativeCompile,
   );
   const nextStage = dockerfile.indexOf("\nFROM ", targetController);

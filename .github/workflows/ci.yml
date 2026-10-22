@@ -2025,7 +2025,7 @@ jobs:
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            for component in opengeni-agent opengeni-browserd opengeni-agent-browser opengeni-computer-native; do
+            for component in opengeni-agent opengeni-browserd opengeni-computer-native; do
               asset="agent/install/baked/$component-$target"
               test -s "$asset"
               test -s "$asset.sha256"
