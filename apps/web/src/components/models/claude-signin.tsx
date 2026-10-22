@@ -266,9 +266,9 @@ export function ClaudeSignInPage({
               journey.current = beginIntegrationConnect("claude_subscription", "oauth");
               popup.current = navigation.navigation.openPopup(started.authorizationUrl);
               return false;
-            } catch (error) {
+            } catch (startError) {
               navigation.close();
-              throw error;
+              throw startError;
             }
           }
           if (Date.parse(attempt.expiresAt) <= Date.now()) {
@@ -281,12 +281,15 @@ export function ClaudeSignInPage({
               ? target.client.completeOrganizationClaudeSubscriptionOAuth(scopeId, request)
               : target.client.completeWorkspaceClaudeSubscriptionOAuth(scopeId, request));
             savedAccountId.current = connected.accountId;
-          } catch (error) {
-            if (error instanceof OpenGeniApiError && [403, 409, 410, 502].includes(error.status))
+          } catch (completeError) {
+            if (
+              completeError instanceof OpenGeniApiError &&
+              [403, 409, 410, 502].includes(completeError.status)
+            )
               reset();
-            journey.current?.finish(integrationConnectErrorOutcome(error));
+            journey.current?.finish(integrationConnectErrorOutcome(completeError));
             journey.current = null;
-            throw error;
+            throw completeError;
           }
           journey.current?.finish("connected");
           journey.current = null;
