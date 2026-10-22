@@ -1151,12 +1151,14 @@ Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
 
-Startup metadata reads overlap only within independent pairs: video policy and
-Skill descriptors after native-link authorization, then per-attempt recovery
-instructions and a second live video-policy read before agent construction.
-Both pairs finish before downstream catalog writes; each reader retains its
-own RLS scope. Recovery reads remain unconditional, policy reads remain fresh,
-and failures prevent downstream preparation without bypassing execution fences.
+Startup metadata reads overlap only within independent pairs. When Skills are
+enabled, video policy and Skill descriptors load after native-link authorization;
+disabled Skills skip those reads and bundled Skill files. An empty bundled Skill
+selection reads no packaged files. Before agent construction, per-attempt recovery
+instructions and the live video-policy read still run unconditionally. Each
+required pair finishes before downstream catalog writes and each reader retains
+its own RLS scope. Required-read failures prevent downstream preparation without
+bypassing execution fences.
 
 An explicitly empty effective first-party permission ceiling is zero delegated
 authority. Before eager/deferred preparation, runtime omits only remote
