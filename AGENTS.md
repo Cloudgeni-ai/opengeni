@@ -796,9 +796,21 @@ services. Obtain an independent agent review of the exact candidate head. Post
 one PR evidence comment containing that head SHA, commands/results, reviewer
 session and any limitations. Recheck the evidence after substantive head changes.
 
+Admission is ordered: complete the relevant full VM suites, obtain genuine
+independent review of that exact head, then post the real evidence and apply
+`queue-ready` only when the rollout owner has enabled intake. Never fabricate a
+test/reviewer receipt, copy evidence from another head, or treat a green provider
+check as independent review. A changed head revokes the old admission; repeat
+tests/review for the new head before signalling readiness again. Version PRs
+need the same human-readable exact-head evidence, not a bot exemption.
+
 Bendik selected the in-house batcher on October 21, 2026. GitHub native queue
 enforcement and vendor installation stay off. The batcher starts in read-only
 shadow mode; only the rollout owner's explicit go permits activation.
+Candidate-only CI shadow permission is not permission to control main or change
+rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
+does not activate anything; keep main control inactive until the release hold is
+cleared and the rollout owner gives a separate explicit go.
 Before activation, use the repository's normal squash merge after the same
 local-test and independent-review evidence. Once active, submit the documented
 ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and observe the **Batch ready**

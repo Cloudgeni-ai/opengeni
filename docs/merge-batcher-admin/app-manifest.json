@@ -1,0 +1,13 @@
+{
+  "name": "Cloudgeni-ai Opengeni merge batcher",
+  "url": "https://github.com/Cloudgeni-ai/opengeni",
+  "public": false,
+  "default_events": [],
+  "default_permissions": {
+    "contents": "write",
+    "workflows": "write",
+    "actions": "write",
+    "pull_requests": "write",
+    "issues": "write"
+  }
+}

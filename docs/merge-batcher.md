@@ -63,6 +63,14 @@ dependencies, not substitutes for missing provider transaction guarantees.
 The parent workflow integration and production deployment are separate work.
 No branch/ruleset/permission/cloud activation is performed by this code change.
 
+The [administration bundle](merge-batcher-admin/README.md) prepares the dedicated
+App and reversible split rulesets offline. It is not an activation mechanism.
+Main control remains held through the second production release until the
+rollout owner explicitly authorizes it; candidate-only CI shadow does not lift
+that hold. The tested-descendant release-lane ops change also has its own held
+merge/rollout decision. Preserve the existing manual squash and full-main release
+proof paths until those coordinated decisions are made.
+
 ## Commands
 
 ```sh
