@@ -5358,8 +5358,10 @@ describe("transient provider error classifier", () => {
       error: "The context checkpoint request did not finish. The same turn will retry it.",
       code: "provider_unavailable",
       retryable: true,
+      detail: wrapped.message,
       providerCondition: "unavailable",
     });
+    expect(wrapped.message).toContain('"code":"invalid_sse_terminal"');
     expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
   });
 
@@ -6168,6 +6170,47 @@ describe("transient provider error classifier", () => {
       // The same failures on an ordinary model request stay terminal.
       expect(agentRunFailurePayload(cause, { isCodexTurn: true }).retryable).toBe(false);
     }
+  });
+
+  test("a retried checkpoint keeps its transport cause, timeout class and request", () => {
+    const truncated = Object.assign(new Error("stream ended without a terminal event"), {
+      name: "CodexStreamingTerminalError",
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+      request_id: "req_checkpoint_sse",
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const sse = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(truncated),
+      truncated,
+    );
+    expect(sse.message).toContain('"code":"invalid_sse_terminal"');
+    expect(sse.message).toContain("req_checkpoint_sse");
+    expect(agentRunFailurePayload(sse)).toEqual({
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: sse.message,
+      providerCondition: "unavailable",
+    });
+
+    // The cause's own timeout class, not the wrapper's default.
+    const timedOut = new CodexResponseTimeoutError("idle_stream", "attempt:2:1:4", true);
+    const timeout = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(timedOut),
+      timedOut,
+    );
+    expect(agentRunFailurePayload(timeout)).toEqual({
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "idle_stream",
+      responseObserved: true,
+      requestId: "attempt:2:1:4",
+      detail: timeout.message,
+      providerCondition: "unresponsive",
+    });
   });
 
   test("a Codex encrypted-content rejection of the compaction request recovers through artifact invalidation", () => {

@@ -7,7 +7,7 @@ import { ToolCallError } from "@openai/agents";
 
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
-import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
+import { CODEX_TRANSPORT_ERROR_HEADER, CodexResponseTimeoutError } from "@opengeni/codex";
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import {
   CompactionProviderResponseError,
@@ -2026,6 +2026,64 @@ describe("historical pre-cutover Codex plan entitlement settlement", () => {
       listAccounts.mockRestore();
       quarantine.mockRestore();
       failover.mockRestore();
+    }
+  });
+});
+
+describe("a cut-off checkpoint request", () => {
+  const timedOutCheckpoint = () => {
+    const timeout = new CodexResponseTimeoutError("idle_stream", "attempt:1:1:7", true);
+    return new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(timeout),
+      timeout,
+    );
+  };
+
+  test("retries within the provider budget and an exhausted terminal keeps its cause", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    const settle = mock(async (_input: unknown) => true);
+    try {
+      const error = timedOutCheckpoint();
+      const { deps } = codexFailureDeps({ error });
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recovery).toHaveBeenLastCalledWith(
+        {},
+        "workspace-1",
+        expect.objectContaining({
+          reason: "provider_unavailable",
+          providerRecoveryCount: 1,
+          detail: expect.objectContaining({
+            code: "provider_unavailable",
+            timeoutClass: "idle_stream",
+            responseObserved: true,
+            requestId: "attempt:1:1:7",
+            detail: error.message,
+          }),
+        }),
+      );
+
+      recovery.mockClear();
+      const exhausted = codexFailureDeps({ error: timedOutCheckpoint(), settle });
+      exhausted.deps.attempt.providerRecoveryCount = 5;
+      expect(await settleTurnFailure(exhausted.deps as never)).toMatchObject({
+        status: "failed",
+      });
+      expect(recovery).not.toHaveBeenCalled();
+      expect((settle.mock.calls[0]![0] as any).events[0].payload).toMatchObject({
+        code: "provider_unavailable",
+        retryable: false,
+        recoveryExhausted: true,
+        providerRecoveryCount: 5,
+        maxProviderRecoveryCount: 5,
+        timeoutClass: "idle_stream",
+        requestId: "attempt:1:1:7",
+        detail: error.message,
+      });
+    } finally {
+      recovery.mockRestore();
     }
   });
 });
