@@ -23,7 +23,14 @@ only in their own Personal workspace through the existing owner-only reader.
 A workspace with no available accounts shows no pool. Limits belong to provider
 accounts: forecasts use total account usage, including other workspaces, not a
 workspace-attributed fraction. The headline forecasts this week's included utilization, with one
-plan-size-weighted total remaining bar beneath it. Account rows and their individual
+plan-size-weighted **Available now** bar beneath it. A window's total withholds an account's
+remaining capacity while its other main limit is exhausted; it does not add weekly capacity
+that a five-hour block prevents using. Individual window readings stay unchanged. Forecasts
+withhold that capacity until the blocking window's first reset, then let it serve again;
+they do not predict future five-hour blocks. When nothing is usable now, the headline reports
+the next usable reset: the earliest account's later binding reset, not a future runout or a
+reset that leaves that account blocked. Unknown or elapsed return times wait for new readings.
+Account rows and their individual
 usage remain in the account list, not repeated in the pool card.
 Five-hour limits appear only as a muted line when currently blocking an account;
 there is no window toggle. No monetary or absolute usage unit is returned by the pooled API.
