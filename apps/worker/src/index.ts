@@ -743,6 +743,8 @@ export async function registerSessionStorageMaintenanceSchedule(
 }
 
 export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
+  /** Host-owned deadline hook, shared by signal and internal drain requests. */
+  onDrainStarted?: () => void;
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /** Host-owned final containment after a stalled cleanup has drained peers.
    * The standalone process exits; embedded hosts own their termination policy. */
@@ -1004,6 +1006,7 @@ export async function createOpenGeniWorkerService(
   });
   const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
+    ...(options.onDrainStarted ? { onDrainStarted: options.onDrainStarted } : {}),
     role: options.role,
     worker: {
       shutdown: () => activeWorkerBundle.worker.shutdown(),
@@ -1018,14 +1021,16 @@ export async function createOpenGeniWorkerService(
       closeWorkerHttpAfterActivityExecution(activeWorkerBundle.activityTelemetry, () =>
         httpServer?.stop(true),
       );
-      await Promise.allSettled([
-        turnCapacityMonitor?.close(),
-        sessionRecoveryMonitor?.close(),
-        contextCompactionPendingMonitor?.close(),
-        activeWorkerBundle.connection.close(),
-        activeSignaler?.close(),
-        ...schedules.map((schedule) => schedule.close()),
-      ]);
+      await Promise.all(
+        [
+          () => turnCapacityMonitor?.close(),
+          () => sessionRecoveryMonitor?.close(),
+          () => contextCompactionPendingMonitor?.close(),
+          () => activeWorkerBundle.connection.close(),
+          () => activeSignaler?.close(),
+          ...schedules.map((schedule) => () => schedule.close()),
+        ].map((close) => closeWithinBudget(close)),
+      );
     },
     onReady: () => {
       observability.info("Opengeni worker listening", {
@@ -1224,7 +1229,7 @@ export async function startWorker() {
     await runOpenGeniWorker({
       role,
       terminateWorker: () => process.exit(1),
-      onShutdownSignal: armExitDeadline,
+      onDrainStarted: armExitDeadline,
       settings,
       databasePosture,
       http: { readinessDb: readinessDbClient.db },

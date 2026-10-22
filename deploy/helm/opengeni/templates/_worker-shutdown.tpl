@@ -22,7 +22,7 @@ the process before the force time, or leave no checkpoint window, fail.
 {{- $config := .Values.config | default dict -}}
 {{- $force := 0 -}}
 {{- if kindIs "invalid" $shutdown.forceSeconds -}}
-{{- $force = max 10 (sub $podGrace 15) -}}
+{{- $force = min 3600 (max 10 (sub $podGrace 15)) -}}
 {{- else -}}
 {{- if not (and (or (kindIs "float64" $shutdown.forceSeconds) (kindIs "int" $shutdown.forceSeconds) (kindIs "int64" $shutdown.forceSeconds)) (eq (float64 $shutdown.forceSeconds) (float64 (int $shutdown.forceSeconds)))) -}}
 {{- fail "worker.turns.shutdown.forceSeconds must be a whole number of seconds or null" -}}
@@ -50,6 +50,9 @@ the process before the force time, or leave no checkpoint window, fail.
 {{- fail (printf "worker.turns.shutdown.graceSeconds (%d) must end at least 10 seconds before forceSeconds (%d) so cancelled turns can checkpoint" $grace $force) -}}
 {{- end -}}
 {{- end -}}
+{{- if or (gt $force 3600) (gt $grace 3600) (ge (add $force 10) $podGrace) (gt (add $grace 10) $force) -}}
+{{- fail "resolved turn shutdown sequence must fit application limits (3600 seconds) and leave a checkpoint window and force + 10 seconds strictly below pod grace" -}}
+{{- end }}
 {{- if not (hasKey $config "OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS") }}
 - name: OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS
   value: {{ mul $grace 1000 | quote }}

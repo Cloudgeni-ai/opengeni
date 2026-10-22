@@ -81,6 +81,7 @@ export function createWorkerServiceLifecycle(input: {
   observability: Observability;
   closeOwnedResources: () => Promise<void>;
   onReady?: () => void;
+  onDrainStarted?: () => void;
   now?: () => number;
 }): WorkerServiceLifecycle {
   const now = input.now ?? (() => performance.now());
@@ -164,6 +165,7 @@ export function createWorkerServiceLifecycle(input: {
       state = "draining";
       try {
         input.worker.shutdown();
+        safeLifecycleLog(() => input.onDrainStarted?.());
         return true;
       } catch {
         state = previousState;

@@ -473,6 +473,84 @@ describe("worker restart resilience", () => {
     }
   }, 180_000);
 
+  test("a draining worker completes a streamed turn naturally beyond the old five-second grace", async () => {
+    const grant = await testGrant();
+    const taskQueue = `natural-drain-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      {
+        id: "natural",
+        outputText: "finished normally",
+        chunks: Array.from({ length: 16 }, () => "tick "),
+        delayMs: 500,
+      },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+    });
+    const activities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "finish naturally",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "finish naturally",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities, 90_000);
+    const running = worker.run();
+    const client = new Client({ connection });
+    const handle = await client.workflow.start("sessionWorkflow", {
+      taskQueue,
+      workflowId: `session-${session.id}`,
+      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+    });
+    await waitFor(() => model.calls === 1);
+    worker.shutdown();
+    await running;
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(0);
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).map(
+        (turn) => turn.status,
+      ),
+    ).toEqual(["completed"]);
+    expect(model.calls).toBe(1);
+    // A replacement control poller consumes the activity completion after the
+    // original control poller has stopped; no second model call is necessary.
+    const replacement = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const replacementRun = replacement.run();
+    try {
+      await handle.result();
+    } finally {
+      replacement.shutdown();
+      await replacementRun;
+    }
+    expect(model.calls).toBe(1);
+  }, 180_000);
+
   test("graceful worker shutdown before model progress recovers the same turn untouched", async () => {
     const grant = await testGrant();
     const taskQueue = `worker-restart-early-${crypto.randomUUID()}`;
@@ -979,6 +1057,7 @@ async function restartTestWorker(
   nativeConnection: NativeConnection,
   taskQueue: string,
   activities: ReturnType<typeof createActivityTestHarness>,
+  graceMs = 5_000,
 ): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
   const { runAgentTurn, ...controlActivities } = activities;
   const [control, turns] = await Promise.all([
@@ -1001,8 +1080,8 @@ async function restartTestWorker(
       // 90-second production default reserves for turns outlasting the drain.
       ...temporalWorkerShutdownOptions(
         resolveWorkerShutdownTiming("turn", {
-          turnWorkerShutdownGraceMs: 5_000,
-          turnWorkerShutdownForceMs: 100_000,
+          turnWorkerShutdownGraceMs: graceMs,
+          turnWorkerShutdownForceMs: graceMs + 15_000,
         }),
       ),
       tuner: integrationTurnTuner(),

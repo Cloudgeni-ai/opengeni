@@ -265,6 +265,38 @@ describe("shutdown phase telemetry", () => {
 });
 
 describe("standalone process exit", () => {
+  test("an internal drain arms the host deadline once even when service close stalls", async () => {
+    let expired = 0;
+    let armed = 0;
+    let finish!: () => void;
+    const lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      observability: createObservability(testSettings(), { component: "worker-test" }),
+      worker: {
+        run: () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+        shutdown: () => finish(),
+      },
+      onDrainStarted: () => {
+        armed++;
+        armWorkerProcessExitDeadline({
+          deadlineMs: 10,
+          onExpired: () => {
+            expired++;
+          },
+        });
+      },
+      closeOwnedResources: () => new Promise(() => undefined),
+    });
+    void lifecycle.run();
+    lifecycle.drain("memory pressure guard");
+    lifecycle.drain("SIGTERM");
+    await Bun.sleep(40);
+    expect(armed).toBe(1);
+    expect(expired).toBe(1);
+  });
   test("resource closes are bounded and never reject", async () => {
     expect(await closeWithinBudget(async () => undefined, 1_000)).toBe("closed");
     expect(

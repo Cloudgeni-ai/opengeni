@@ -89,6 +89,21 @@ function expectConsistentSequence(manifest: Deployment) {
 }
 
 describe("turn worker natural drain", () => {
+  test("derived boundary budgets fit the application and pod", async () => {
+    for (const seconds of [0, 10, 15, 20]) {
+      expect(
+        await renderError({ worker: { turns: { terminationGracePeriodSeconds: seconds } } }),
+      ).toContain("resolved turn shutdown sequence");
+    }
+    for (const seconds of [21, 25, 3615, 7200]) {
+      const turns = deployment(
+        await render({ worker: { turns: { terminationGracePeriodSeconds: seconds } } }),
+        "drain-opengeni-worker-turns",
+      );
+      expectConsistentSequence(turns);
+      expect(turnSequence(turns).forceMs).toBeLessThanOrEqual(3_600_000);
+    }
+  });
   test("defaults surge a replacement and drain 90s naturally, force at 105s, inside 120s", async () => {
     const manifests = await render();
     const turns = deployment(manifests, "drain-opengeni-worker-turns");

@@ -267,13 +267,15 @@ the same turn-worker shutdown sequence:
 | --- | --- | --- |
 | Stop polling | At once | None; new and recovered turns go to other workers |
 | Natural completion of in-flight turns | 90 s | `OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` |
-| `WORKER_SHUTDOWN` cancellation and checkpoint of the rest, SDK force stop | 105 s | `OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS` |
+| `WORKER_SHUTDOWN` cancellation and checkpoint of the rest | At 90 s | End of natural grace |
+| SDK force stop | At 105 s | `OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS` |
 | Standalone process exit, at the latest | Force time + 10 s (115 s) | Derived |
 | Kubernetes termination grace | 120 s | `worker.turns.terminationGracePeriodSeconds` |
 
 The chart renders both settings from `worker.turns.shutdown` and, when unset,
-derives them from the turn pod grace with 15 seconds between phases. It
-refuses explicit values that would leave less than a 10-second checkpoint
+derives them from the turn pod grace with 15 seconds between phases, capped
+at the application's 3600-second maximum. It rejects impossible pod budgets
+and values that would leave less than a 10-second checkpoint
 window or let the kubelet kill the process before its exit margin. The worker
 also keeps a 10-second checkpoint window itself, shortening an oversized grace.
 Control workers keep 5 seconds of natural completion and a 100-second force
