@@ -1,9 +1,11 @@
 # Prepared administration bundle — inactive
 
-This bundle **does not apply configuration**. `bundle.ts` is offline: it reads
-saved JSON and creates payloads/readback assertions only. The API write examples
-below are for an authorized repository administrator **after a separate rollout
-go**. Publishing this documentation, creating an App, or permitting candidate-only
+This bundle is **inactive by default**. `bundle.ts` is offline: it reads saved
+JSON and creates payloads/readback assertions only. `stage.sh` has read-only
+observation/reconciliation actions and separately named write actions requiring
+an explicit flag. Those write actions are for an authorized repository
+administrator **after a separate rollout go**. Publishing this documentation,
+creating an App, or permitting candidate-only
 CI shadow does not authorize main control. Main control and the tested-descendant
 ops release-lane change remain held through the second production release until
 their rollout owner explicitly releases those holds.
@@ -41,6 +43,10 @@ protections and application behavior still matter. This is not an assertion of
 universal branch confinement or inability of a repository administrator to edit
 the rules later.
 
+The no-bypass deletion guard also prevents candidate/state ref pruning. Future
+compaction requires a separately reviewed guard change and retained audit evidence;
+neither a controller cleanup job nor this rollback may silently delete those refs.
+
 ## Dedicated App registration and installation (manual, not performed here)
 
 Use [app-manifest.json](app-manifest.json) as the exact registration specification.
@@ -73,27 +79,22 @@ workspace's immutable GitHub token. Runtime uses `GITHUB_APP_ID`,
 `GITHUB_TOKEN` unset in the controller, since they take precedence over App auth.
 No token is minted by this bundle.
 
-Before planning, an administrator/deployment owner supplies the assigned numeric
-`APP_ID` and `INSTALLATION_ID`, an App JWT in `APP_JWT`, and a short-lived scoped
-installation token in `INSTALLATION_TOKEN` through the secret mechanism (do not
-echo them). With `umask 077`, save these **GET** readbacks outside the checkout:
+Before planning, an administrator/deployment owner supplies and exports the assigned
+numeric `APP_ID` and `INSTALLATION_ID`, an App JWT in `APP_JWT`, and a short-lived
+scoped installation token in `INSTALLATION_TOKEN` through the secret mechanism
+(do not echo them). The checked-in [read.sh](read.sh) makes both JWT identity GETs
+with an explicit `Authorization: Bearer` header, never the default `GH_TOKEN`
+`token` scheme. Installation-token minting, if performed separately by its owner,
+also requires Bearer for its App JWT. This bundle does not mint it.
+
+Create a new private task directory **once**, record its exact path in the
+operator's retained handoff, then run the identity check:
 
 ```sh
-set -euo pipefail
-umask 077
-ADMIN_DIR=$(mktemp -d /workspace/tasks/batcher-admin.XXXXXX)
+ADMIN_DIR=$(umask 077; mktemp -d /workspace/tasks/batcher-admin.XXXXXX)
 export ADMIN_DIR
-GH_TOKEN="$APP_JWT" gh api /app > "$ADMIN_DIR/app.json"
-GH_TOKEN="$APP_JWT" gh api "/app/installations/$INSTALLATION_ID" > "$ADMIN_DIR/installation.json"
-GH_TOKEN="$INSTALLATION_TOKEN" gh api --paginate /installation/repositories > "$ADMIN_DIR/installed-repositories.json"
-jq -e --argjson app "$APP_ID" '.id == $app and .owner.login == "Cloudgeni-ai"' "$ADMIN_DIR/app.json"
-jq -e --argjson app "$APP_ID" --argjson installation "$INSTALLATION_ID" \
-  '.id == $installation and .app_id == $app and .account.login == "Cloudgeni-ai" and .repository_selection == "selected" and .suspended_at == null' \
-  "$ADMIN_DIR/installation.json"
-jq -se '[.[].repositories[].full_name] == ["Cloudgeni-ai/opengeni"]' "$ADMIN_DIR/installed-repositories.json"
-jq -e --slurpfile manifest docs/merge-batcher-admin/app-manifest.json \
-  '(.permissions | del(.metadata)) == $manifest[0].default_permissions and .permissions.metadata == "read"' \
-  "$ADMIN_DIR/installation.json"
+PLAN="$ADMIN_DIR/plan"
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" identity
 ```
 
 Stop if any assertion fails. These checks establish identity/configuration, not a
@@ -109,42 +110,35 @@ repository rule.
 Use an administrator's authorized `gh` context for complete bypass readbacks, not
 the runtime App token. Keep snapshots/receipts private and retained outside Git.
 Run from the reviewed repository checkout; require `bun`, `gh`, `jq` and Bash.
-The function below makes only repository/organization GET requests and a read-only
-GraphQL query. Each invocation retains a fresh raw inventory and every detail.
+The checked-in helper makes only repository/organization GET requests and a
+read-only GraphQL query. Each invocation retains a fresh raw inventory and every
+detail. Missing/inaccessible classic or inherited protection data fails; it is
+not interpreted as absence.
 
 ```bash
-set -euo pipefail
-umask 077
-snapshot() {
-  local capture id source_type source endpoint
-  capture=$(mktemp -d "$ADMIN_DIR/readback.XXXXXX") || return
-  gh api /repos/Cloudgeni-ai/opengeni > "$capture/repository-raw.json" || return
-  jq '{full_name,default_branch,allow_squash_merge,allow_auto_merge,allow_merge_commit,allow_rebase_merge}' \
-    "$capture/repository-raw.json" > "$capture/repository.json" || return
-  gh api --paginate '/repos/Cloudgeni-ai/opengeni/rulesets?includes_parents=true&per_page=100' \
-    > "$capture/pages.json" || return
-  jq -s 'add' "$capture/pages.json" > "$capture/list.json" || return
-  while IFS=$'\t' read -r id source_type source; do
-    case "$source_type" in
-      Repository) endpoint="/repos/$source/rulesets/$id" ;;
-      Organization) endpoint="/orgs/$source/rulesets/$id" ;;
-      *) echo 'Unsupported inherited rule source: stop for review' >&2; return 1 ;;
-    esac
-    gh api "$endpoint" > "$capture/rule-$id.json" || return
-  done < <(jq -r '.[] | [.id,.source_type,.source] | @tsv' "$capture/list.json")
-  jq -s '.' "$capture"/rule-*.json > "$capture/rulesets.json" || return
-  gh api graphql -f query='query { repository(owner:"Cloudgeni-ai",name:"opengeni") { branchProtectionRules(first:100) { nodes { id pattern } pageInfo { hasNextPage } } } }' \
-    > "$capture/classic-raw.json" || return
-  jq -e '.data.repository.branchProtectionRules' "$capture/classic-raw.json" > "$capture/classic.json" || return
-  jq -n --slurpfile repository "$capture/repository.json" --slurpfile rulesets "$capture/rulesets.json" --slurpfile classic "$capture/classic.json" \
-    '{repository:$repository[0],rulesets:$rulesets[0],classic:$classic[0]}' > "$capture/snapshot.json" || return
-  printf '%s\n' "$capture/snapshot.json"
-}
-BEFORE=$(snapshot) || exit 1
-PLAN="$ADMIN_DIR/plan"
-bun docs/merge-batcher-admin/bundle.ts prepare "$BEFORE" "$APP_ID" "$INSTALLATION_ID" "$PLAN"
-sha256sum "$PLAN"/*.json
+(
+  set -euo pipefail
+  BEFORE=$(bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" snapshot)
+  bun docs/merge-batcher-admin/bundle.ts prepare "$BEFORE" "$APP_ID" "$INSTALLATION_ID" "$PLAN"
+  sha256sum "$PLAN"/*.json
+)
 ```
+
+After any shell/process failure, **re-enter the existing directory**, never create
+a new plan to bypass a write intent. Load the reviewed files again; do not re-run
+`prepare`. Replace the path below with the exact retained path (not a new guessed
+directory). Inject secrets again through the secret mechanism if needed:
+
+```sh
+export ADMIN_DIR=/workspace/tasks/batcher-admin.RETAINED_PATH
+PLAN="$ADMIN_DIR/plan"
+# Each call is its own fail-stop process; it cannot terminate the login shell.
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check original
+```
+
+Select the appropriate check/reconciliation stage below if effects already
+occurred. `read.sh` may also be sourced for read-only helper definitions; sourcing
+it has no side effects or shell-option changes. `stage.sh` sources it itself.
 
 `prepare` refuses an existing output directory. It locates the unique
 repository-owned `Protection` by its readback identity; no hardcoded live ruleset
@@ -161,6 +155,17 @@ actors and every PR parameter. API-generated timestamps/links are retained in
 the raw snapshot but are not valid PUT fields. `guard.json`, `namespace.json`,
 `admission.json` are concrete API JSON, not templates needing guessed actor IDs.
 
+**Unproven provider round-trip:** the current GET includes the undocumented PR
+parameter `require_extra_approval_for_unattributed_changes`. It is deliberately
+preserved in admission and restore payloads, not dropped to satisfy a narrower
+OpenAPI schema. No no-op PUT is executed by this task. If forward or restore PUT
+returns **422**, leave all writers stopped, retain the exact payload/response and
+read back the current stage. In particular, a rejected restore may leave
+`applied` in place: its no-bypass guard and ordinary manual squash path remain.
+Do not remove protective rules, omit the field or weaken policy to make recovery
+pass. Provider/admin resolution and a newly reviewed round-trip plan are required;
+exact-prior restoration is prepared but not proven accepted by GitHub.
+
 ## Prepared API changes — administrator runs only after explicit go
 
 Coordinate an exclusive admin change window and stop all live controllers first.
@@ -170,41 +175,47 @@ that happens. Reconfirm identity/install permission receipts and the original
 snapshot immediately before the first mutation. Guard first; admission last:
 
 ```sh
-set -euo pipefail
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" original
-# Only proceed when the preceding command succeeds and operator go is recorded.
-gh api --method POST /repos/Cloudgeni-ai/opengeni/rulesets --input "$PLAN/guard.json" > "$PLAN/guard-receipt.json"
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" guard
-
-gh api --method POST /repos/Cloudgeni-ai/opengeni/rulesets --input "$PLAN/namespace.json" > "$PLAN/namespace-receipt.json"
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" namespace
-
-ADMISSION_ID=$(jq -er '.admissionId' "$PLAN/plan.json")
-gh api --method PUT "/repos/Cloudgeni-ai/opengeni/rulesets/$ADMISSION_ID" --input "$PLAN/admission.json" > "$PLAN/admission-receipt.json"
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" applied
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" create-guard --apply-after-go
+# Check success and readback before issuing the next stage.
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" create-namespace --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" admit --apply-after-go
 ```
 
-Use one dedicated Bash shell with `set -euo pipefail`; a failed command must end
-the sequence, not fall through to the next mutation. Execute each block only
-after checking the prior result; these are not a blind
-paste-and-run activation script. Readback verification compares the **entire**
+These are separate deliberate operator invocations, not an activation script.
+The flag is an explicit local write opt-in, not an authority grant. Each stage
+checks its full prerequisite inventory, creates a non-overwriting local intent
+directory, issues exactly one API write, and verifies the resulting stage.
+`create-*` use POST `/repos/Cloudgeni-ai/opengeni/rulesets`; `admit` uses PUT of
+`admission.json` to the snapshotted `admissionId`. See [stage.sh](stage.sh) for the
+exact calls. API responses/errors stay in unique per-action attempt directories;
+validated creation receipts are retained separately, never overwritten by errors.
+Readback verification compares the **entire**
 ruleset inventory (production/tags/inherited rules included), unchanged repository
 merge settings and classic protections. Read the effective rules with
 `gh api /repos/Cloudgeni-ai/opengeni/rules/branches/main` and the corresponding
 `queue%2Flive%2F<existing-candidate-id>` / `batcher-state` branch endpoints when
 those refs exist. Absence of refs is not proof the patterns fail or succeed.
 
-For a timeout/ambiguous POST, **do not repeat POST**. Take a new snapshot, find
-exactly one repository-owned ruleset with the intended unique name, retrieve its
-detail into the corresponding receipt file, then verify that stage. Zero or
-multiple matches require operator reconciliation before proceeding. An ambiguous
-PUT is reconciled by comparing the full inventory to the before/after stages,
-not by assuming failure. Preserve all raw receipts; do not overwrite a valid
-creation receipt with a retry's error output.
+For a timeout or failed post-write readback, use these **read-only remote** stages:
+
+```sh
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reconcile-guard
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reconcile-namespace
+# Ambiguous admit PUT: check after, or before; neither match means stop for drift.
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check applied
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check namespace
+```
+
+Choose the single relevant action, not all four blindly. Reconciliation uses a
+concrete jq selection of exact name + repository ownership, requires exactly one
+match, then validates its payload **and the entire inventory** before retaining
+the receipt. If the first snapshot has zero matches, it waits 30 seconds and reads
+again. Two empty observations are **not proof** a timed-out POST can never appear:
+the intent stays blocked, no POST is repeated, and the operator must resolve the
+provider outcome before a separately reviewed new attempt. Multiple matches or
+drift also block. All snapshots/failed raw responses are retained. Re-entry after
+confirmed success uses the next stage; the existing intent prevents accidentally
+replaying the previous write even if the process died before saving its receipt.
 
 ## Controller enable and one-step stop
 
@@ -260,29 +271,33 @@ Stop writers first. Verify `applied` against a **fresh** snapshot. Restore origi
 admission before removing either protective ruleset; verify after every call:
 
 ```sh
-set -euo pipefail
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" applied
-ADMISSION_ID=$(jq -er '.admissionId' "$PLAN/plan.json")
-gh api --method PUT "/repos/Cloudgeni-ai/opengeni/rulesets/$ADMISSION_ID" --input "$PLAN/restore.json" > "$PLAN/restore-receipt.json"
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" namespace
-
-NAMESPACE_ID=$(jq -er '.id' "$PLAN/namespace-receipt.json")
-gh api --method DELETE "/repos/Cloudgeni-ai/opengeni/rulesets/$NAMESPACE_ID"
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" guard
-
-GUARD_ID=$(jq -er '.id' "$PLAN/guard-receipt.json")
-gh api --method DELETE "/repos/Cloudgeni-ai/opengeni/rulesets/$GUARD_ID"
-CURRENT=$(snapshot)
-bun docs/merge-batcher-admin/bundle.ts verify "$PLAN" "$CURRENT" restored
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" restore-admission --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-namespace --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-guard --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check restored
 ```
 
-For partial setup, start from its verified stage and reverse only completed steps:
-`namespace` → delete that namespace → `guard` → delete that guard → `restored`;
-`guard` → delete that guard → `restored`. For drift or ambiguous outcomes, stop and
-reconcile; never restore over another administrator's changed policy or delete by
+Run each separately and stop on failure. These reverse steps use PUT `restore.json`
+to the retained admission ID, then DELETE only the exact validated creation-receipt
+IDs. For partial setup, concrete entry points are:
+
+```sh
+# If namespace was created but admission was not changed:
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check namespace
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-namespace --apply-after-go
+# If only guard remains (or guard was the only completed creation):
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check guard
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-guard --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check restored
+```
+
+After ambiguous restore PUT, `check namespace` means original admission is restored;
+`check applied` means it is not (including a possible 422). After ambiguous namespace
+DELETE, `check guard` confirms its absence; `check namespace` confirms it remains.
+After ambiguous guard DELETE, `check restored` confirms full restoration; `check
+guard` confirms it remains. Neither matching means drift: stop. No mutation is
+replayed by a check, and existing intents remain blocked rather than being erased
+to retry. Never restore over another administrator's changed policy or delete by
 name alone. Exact original configuration restores its original administrator
 bypass as well; it is not a claim that the old policy had stronger guards. No App
 uninstallation, secret revocation, branch deletion or CI cancellation is implied.
@@ -290,7 +305,7 @@ uninstallation, secret revocation, branch deletion or CI cancellation is implied
 ## Local validation and API references
 
 ```sh
-bun test --max-concurrency 2 scripts/merge-batcher-admin.test.ts
+bun test --max-concurrency 2 scripts/merge-batcher-admin*.test.ts
 node node_modules/typescript/bin/tsc -p docs/merge-batcher-admin/tsconfig.json
 ```
 

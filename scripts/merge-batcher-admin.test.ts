@@ -95,6 +95,8 @@ describe("offline batcher administration contract", () => {
     }
   });
   test("App has exact runtime permissions without administration or events", () => {
+    expect(manifest.name).toBe("Opengeni merge batcher");
+    expect(manifest.name.length).toBeLessThanOrEqual(34);
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual([]);
     expect(manifest.default_permissions).toEqual({
@@ -205,6 +207,39 @@ describe("offline batcher administration contract", () => {
     protection.updated_at = "2026-10-22T00:00:00Z";
     verify(plan, current, "original");
   });
+  test("canonical comparison preserves duplicate rule and actor multiplicity", () => {
+    const plan = prepare(fixture(), 501, 999);
+    for (const field of ["rules", "bypass_actors"]) {
+      const current = structuredClone(plan.before);
+      const values = current.rulesets[0]![field];
+      if (!Array.isArray(values)) throw new Error("Invalid fixture");
+      values.push(structuredClone(values[0]!));
+      expect(() => verify(plan, current, "original")).toThrow("readback drift");
+    }
+  });
+  test("squash-only prior admission is required, not silently widened", () => {
+    const snapshot = fixture();
+    snapshot.rulesets[0]!.rules = [
+      { type: "deletion" },
+      { type: "non_fast_forward" },
+      {
+        type: "pull_request",
+        parameters: { allowed_merge_methods: ["squash", "merge"] },
+      },
+    ];
+    expect(() => prepare(snapshot, 501, 999)).toThrow("Manual merge methods");
+  });
+  test("offline bundle imports only filesystem/path and exposes no network executor", async () => {
+    const source = await readFile(
+      new URL("../docs/merge-batcher-admin/bundle.ts", import.meta.url),
+      "utf8",
+    );
+    expect([...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1])).toEqual([
+      "node:fs/promises",
+      "node:path",
+    ]);
+    expect(source).not.toMatch(/\b(?:fetch|spawn|exec|execFile)\s*\(/);
+  });
   test("repository merge-setting changes and classic protection drift fail", () => {
     const plan = prepare(fixture(), 501, 999);
     const current = structuredClone(plan.before);
@@ -216,6 +251,9 @@ describe("offline batcher administration contract", () => {
   });
   test("prepare refuses unsupported prior policy instead of dropping it", () => {
     for (const mutate of [
+      (s: Snapshot) => {
+        s.repository.full_name = "another/repository";
+      },
       (s: Snapshot) => {
         s.repository.default_branch = "trunk";
       },
@@ -243,13 +281,18 @@ describe("offline batcher administration contract", () => {
       (s: Snapshot) => {
         s.rulesets[1]!.name = "Opengeni batcher dedicated writer";
       },
+      (s: Snapshot) => {
+        s.rulesets[1]!.name = "Opengeni batcher immutable refs";
+      },
     ]) {
       const snapshot = fixture();
       mutate(snapshot);
       expect(() => prepare(snapshot, 501, 999)).toThrow();
     }
-    for (const id of [0, -1, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1])
+    for (const id of [0, -1, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       expect(() => prepare(fixture(), id, 999)).toThrow("assigned");
+      expect(() => prepare(fixture(), 501, id)).toThrow("assigned");
+    }
   });
   test("CLI has no apply path and refuses overwriting retained plans", async () => {
     const dir = await mkdtemp(join(tmpdir(), "batcher-admin-test-"));

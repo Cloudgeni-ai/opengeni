@@ -172,6 +172,35 @@ async function json<T>(path: string): Promise<T> {
 }
 export async function cli(args: string[]): Promise<void> {
   const [command, ...rest] = args;
+  if (command === "receipt" && rest.length === 4) {
+    const [directory, snapshot, kind, candidatePath] = rest as [string, string, string, string];
+    if (kind !== "guard" && kind !== "namespace") throw new Error("Unknown receipt kind");
+    const plan = await json<Plan>(join(directory, "plan.json"));
+    const candidate = await json<RuleSet>(candidatePath);
+    if (candidate.source_type !== "Repository" || candidate.source !== "Cloudgeni-ai/opengeni") {
+      throw new Error("Creation receipt must belong to this repository");
+    }
+    const receipts: { guard?: RuleSet; namespace?: RuleSet } = { [kind]: candidate };
+    if (kind === "namespace") receipts.guard = await json(join(directory, "guard-receipt.json"));
+    verify(plan, await json<Snapshot>(snapshot), kind, receipts);
+    const destination = join(directory, `${kind}-receipt.json`);
+    try {
+      const existing = await json<RuleSet>(destination);
+      equal(
+        { id: existing.id, ...writable(existing) },
+        { id: candidate.id, ...writable(candidate) },
+        "Retained receipt",
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await writeFile(destination, `${JSON.stringify(candidate, null, 2)}\n`, {
+        flag: "wx",
+        mode: 0o600,
+      });
+    }
+    console.log(`Verified and retained ${kind} receipt; no API writes.`);
+    return;
+  }
   if (command === "prepare" && rest.length === 4) {
     const [snapshot, app, installation, output] = rest as [string, string, string, string];
     const plan = prepare(await json<Snapshot>(snapshot), Number(app), Number(installation));
@@ -210,7 +239,7 @@ export async function cli(args: string[]): Promise<void> {
     return;
   }
   throw new Error(
-    "Usage: bundle.ts prepare SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY | verify OUTPUT_DIRECTORY CURRENT_SNAPSHOT original|guard|namespace|applied|restored",
+    "Usage: bundle.ts prepare SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY | verify OUTPUT_DIRECTORY CURRENT_SNAPSHOT original|guard|namespace|applied|restored | receipt OUTPUT_DIRECTORY CURRENT_SNAPSHOT guard|namespace CANDIDATE_JSON",
   );
 }
 if (import.meta.main) await cli(process.argv.slice(2));
