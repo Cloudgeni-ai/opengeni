@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { scheduledTaskSessionTitle } from "../src/activities/scheduled-tasks";
+import { scheduledTaskSessionTitle } from "../src/activities/scheduled-task-title";
 
 describe("scheduled session title", () => {
   test("names the task", () => {
@@ -22,25 +22,15 @@ describe("scheduled session title", () => {
     expect(title).not.toContain("UTC");
   });
 
-  test("a reusable session keeps one correct title across every run", () => {
-    // The defect this replaces: a reusable_session task generates its session on
-    // the first fire and reuses it forever, so a title naming run 1's instant is
-    // wrong for runs 2..N. A name-only title is true on every run, which is why
-    // the scheduler can title the session once at generation and never revisit
-    // it.
-    const runOne = scheduledTaskSessionTitle("Nightly backup audit");
-    const runSeventy = scheduledTaskSessionTitle("Nightly backup audit");
-    expect(runOne).toBe(runSeventy);
-  });
-
-  test("the same task always produces the same text", () => {
-    // Normal dispatch and a later recovery of the same run execute in different
-    // worker processes and must land byte-identical text. With no Intl call
-    // there is no host ICU or tzdata build left to make the two differ.
-    expect(scheduledTaskSessionTitle("Weekly digest")).toBe(
-      scheduledTaskSessionTitle("Weekly digest"),
-    );
-  });
+  test.each(["Nightly backup audit", "Weekly digest"])(
+    "repeated normalization preserves %s",
+    (name) => {
+      // This proves deterministic title normalization, not session reuse or
+      // cross-process scheduler recovery, which belong to the activity tests.
+      expect(scheduledTaskSessionTitle(name)).toBe(name);
+      expect(scheduledTaskSessionTitle(name)).toBe(name);
+    },
+  );
 
   test("an unbounded task name uses the short automatic-title ceiling without artifacts", () => {
     const title = scheduledTaskSessionTitle("x".repeat(400));

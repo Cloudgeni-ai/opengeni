@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { testSettings } from "@opengeni/testing/settings";
+import { Hono } from "hono";
 import {
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
 } from "@opengeni/db";
-import { interactionResourceRouteError } from "../src/routes/interaction-resources";
+import {
+  interactionResourceRouteError,
+  registerInteractionResourceRoutes,
+} from "../src/routes/interaction-resources";
 
 const routeUrl = new URL("../src/routes/interaction-resources.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
@@ -32,16 +38,45 @@ describe("interaction resource routes", () => {
     );
   });
 
-  test("authenticates before parsing mutations and preserves intervention provenance", async () => {
+  test.each([
+    ["POST", "network-routes"],
+    ["PATCH", "network-routes/resource"],
+    ["POST", "site-auth-connections"],
+    ["PATCH", "site-auth-connections/resource"],
+    ["POST", "interaction-interventions"],
+    ["POST", "interaction-interventions/resource/resolve"],
+  ])("%s %s authenticates before parsing malformed mutation bodies", async (method, resource) => {
+    let databaseReads = 0;
+    const db = new Proxy({} as ApiRouteDeps["db"], {
+      get() {
+        databaseReads += 1;
+        throw new Error("unauthenticated request reached the database");
+      },
+    });
+    const app = new Hono();
+    registerInteractionResourceRoutes(app, {
+      db,
+      settings: testSettings({ productAccessMode: "managed" }),
+    } as ApiRouteDeps);
+    const response = await app.request(`/v1/workspaces/workspace/${resource}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    expect(response.status).toBe(401);
+    expect(await response.text()).toBe("authentication required");
+    expect(databaseReads).toBe(0);
+  });
+
+  test("retains the intervention provenance wiring", async () => {
     const source = await readFile(routeUrl, "utf8");
     const createStart = source.indexOf(
       'app.post("/v1/workspaces/:workspaceId/interaction-interventions"',
     );
     const createEnd = source.indexOf("app.get(", createStart);
+    expect(createStart).toBeGreaterThanOrEqual(0);
+    expect(createEnd).toBeGreaterThan(createStart);
     const create = source.slice(createStart, createEnd);
-    expect(create.indexOf('preamble(context, deps, "sessions:control")')).toBeLessThan(
-      create.indexOf("parseJsonBody(context, CreateInteractionInterventionRequest)"),
-    );
     expect(create).toContain("resourceSourceSessionId");
     expect(create).toContain("originatingToolOperationId");
   });
