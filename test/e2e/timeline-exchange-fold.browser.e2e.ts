@@ -1273,9 +1273,12 @@ describe("readable timeline browser regression", () => {
           await nextPaint(page);
           expect(await header.textContent()).toContain("Working");
           expect(await page.locator("[data-og-wide-table-message]").count()).toBe(4);
+          // ShimmerText draws a running row's highlight from a copy of its text inside
+          // .og-shimmer-beam; wait for the title itself.
           await page
             .locator("[data-og-exchange-preview]")
             .getByText("record-analysis-metadata", { exact: false })
+            .and(page.locator(":not(.og-shimmer-beam *)"))
             .waitFor({ state: "visible" });
           await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.total);
           await nextPaint(page);
