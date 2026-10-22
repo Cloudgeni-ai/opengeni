@@ -217,12 +217,10 @@ test("Claude credentials use distinct accessible forms and explain subscription 
       expect(submitButton().textContent).toContain("Sign in to Claude");
       expect(submitButton().disabled).toBe(false);
       expect(
-        container
-          .querySelector('input[aria-label="Claude subscription setup token"]')
-          ?.closest('[data-state="closed"]') !== null,
-      ).toBe(true);
-      const setup = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-        button.textContent?.includes("Use a setup token"),
+        container.querySelector('input[aria-label="Claude subscription setup token"]'),
+      ).toBeNull();
+      const setup = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Setup token",
       )!;
       await act(async () => setup.click());
     }
