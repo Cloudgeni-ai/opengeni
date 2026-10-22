@@ -59,6 +59,13 @@ function harness() {
         return port;
       },
     },
+    alarms: {
+      onAlarm: event(),
+      created: [] as { name: string; info: object }[],
+      async create(name: string, info: object) {
+        this.created.push({ name, info });
+      },
+    },
     storage: {
       local: {
         get: async () => ({ ...storage }),
@@ -182,6 +189,31 @@ describe("extension updates", () => {
 });
 
 describe("native bridge reconnection", () => {
+  test("a wake-up alarm reconnects a worker whose connection dropped", async () => {
+    const h = harness();
+    await flush();
+    expect(h.chrome.alarms.created).toEqual([
+      { name: "reconnect", info: { periodInMinutes: 0.5 } },
+    ]);
+    // While connected, the alarm leaves the live port alone.
+    h.chrome.alarms.onAlarm.emit({ name: "reconnect" });
+    await flush();
+    expect(h.ports).toHaveLength(1);
+    // Chrome stopped the worker's timers with it; only the alarm is left.
+    h.ports[0].onDisconnect.emit();
+    await flush();
+    h.chrome.alarms.onAlarm.emit({ name: "reconnect" });
+    await flush();
+    expect(h.ports).toHaveLength(2);
+    expect(h.ports[1].messages[0].type).toBe("hello");
+    // Other alarms are not ours.
+    h.ports[1].onDisconnect.emit();
+    await flush();
+    h.chrome.alarms.onAlarm.emit({ name: "something-else" });
+    await flush();
+    expect(h.ports).toHaveLength(2);
+  });
+
   test("a native reconnect keeps the worker's state generation on a new port generation", async () => {
     const h = harness();
     await flush();

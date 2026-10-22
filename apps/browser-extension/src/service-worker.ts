@@ -25,6 +25,9 @@ import {
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const RECONNECT_MAX_MS = 30_000;
+// Chrome's shortest alarm period; it wakes a stopped worker to reconnect.
+const RECONNECT_ALARM = "reconnect";
+const RECONNECT_ALARM_PERIOD_MINUTES = 0.5;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const INVENTORY_DEBOUNCE_MS = 100;
 const MAX_DEBUGGER_EVENTS = 10_000;
@@ -683,4 +686,14 @@ chrome.runtime.onUpdateAvailable?.addListener(() => {
 });
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());
+// Chrome stops an idle service worker, and a stopped worker's reconnect timer
+// dies with it. Without a wake-up, a dropped agent connection stays down until
+// the person happens to touch a tab. An alarm restarts a stopped worker, and
+// its handler reconnects when nothing is connected.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM && !nativePort) void connect();
+});
+void chrome.alarms
+  .create(RECONNECT_ALARM, { periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES })
+  .catch(() => undefined);
 void connect();

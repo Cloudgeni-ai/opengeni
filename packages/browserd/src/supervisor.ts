@@ -122,6 +122,7 @@ import {
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
 import { markProfileExitedCleanly } from "./profile-exit-state";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -2811,6 +2812,8 @@ export class BrowserSupervisor {
           initialJournal,
           onJournalRecord: (record) => runtime.journal.write(record),
           loadJournalRecord: (operationId) => runtime.journal.read(operationId),
+          onUnexpectedDispatchError: (error, command) =>
+            reportUnexpectedDispatchError("browser", error, command),
           authority: {
             authorizeDispatch: async (command) => {
               if (runtime.lifecycle !== "active") {

@@ -11,6 +11,7 @@ import type {
   ComputerSessionCapabilities,
   ComputerTarget,
 } from "@opengeni/contracts";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   ComputerInteractionController,
@@ -515,6 +516,8 @@ export class ComputerSupervisor {
             initialJournal,
             onJournalRecord: (record) => journal.write(record),
             loadJournalRecord: (operationId) => journal.read(operationId),
+            onUnexpectedDispatchError: (error, command) =>
+              reportUnexpectedDispatchError("computer", error, command),
             authority: {
               authorizeDispatch: async (command) => {
                 if (runtime?.lifecycle !== "active") {
