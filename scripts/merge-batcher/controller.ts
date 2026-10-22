@@ -32,7 +32,8 @@ export type Effect =
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string }
   | { kind: "retry"; run: Run }
-  | { kind: "announce"; number: number; body: string; key: string };
+  | { kind: "announce"; number: number; body: string; key: string }
+  | { kind: "park"; number: number; body: string; key: string };
 export interface Transaction {
   expectedState: string | null;
   nextState: string;
@@ -173,7 +174,8 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(this.config.mode === "active" ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // Do not make full-main-CI observation availability a hidden admission
+      // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
       ready: eligible,
       candidates,
@@ -321,6 +323,17 @@ export class Controller {
       ledger.retries[id] = retry;
       if (ledger.stages[id]) ledger.stages[id]!.retry = retry;
       effect = { kind: "retry", run: action.run };
+    } else if (action.kind === "park") {
+      const item = action.parked;
+      ledger.parked = (ledger.parked ?? []).map((entry) =>
+        entry.batchId === item.batchId ? { ...entry, announced: true } : entry,
+      );
+      effect = {
+        kind: "park",
+        number: item.pull.number,
+        key: item.batchId,
+        body: `Merge batcher parked exact head ${item.pull.headSha} after singleton batch ${item.batchId} failed on base ${item.baseSha} (run ${item.runId}, attempt ${item.attempt}). This is not a culprit attribution or ejection. Other ready heads may proceed. This head will not automatically retry, including after a new ready event or main advancement; a changed head can re-enter. Comparable base evidence is unavailable; job names do not establish a common failure.\n\n<!-- batcher-parking:${item.batchId} -->`,
+      };
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
       ledger.ejected = ledger.ejected.map((e) =>

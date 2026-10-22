@@ -203,6 +203,7 @@ export class GitStore {
       !Array.isArray(state.landed) ||
       !Array.isArray(state.invalidated) ||
       !Array.isArray(state.ejected) ||
+      (state.parked !== undefined && !Array.isArray(state.parked)) ||
       !Array.isArray(state.recovery) ||
       !state.retries ||
       !state.codeFailures

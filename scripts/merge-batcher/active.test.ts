@@ -640,7 +640,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         l.ejected.push({
           pull: f.makePull(),
           batchId: "a".repeat(64),
-          reason: "failure",
+          reason: "merge-tree conflict against candidate predecessor",
           announced: false,
         });
       });
@@ -664,7 +664,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "b".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -697,7 +697,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "c".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -717,7 +717,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "d".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -745,7 +745,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "e".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -775,7 +775,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       l.ejected.push({
         pull: f.makePull(),
         batchId: "f".repeat(64),
-        reason: "failure",
+        reason: "merge-tree conflict against candidate predecessor",
         announced: false,
       });
     });
@@ -798,8 +798,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(Object.values((await f.state()).ledger.effects)[0]?.status).toBe("done");
     expect(f.api.calls).toHaveLength(1);
   });
-  test.each(["red", "unknown"] as const)(
-    "inherited #5243-style %s base holds innocent batch and recovers on green main",
+  test.each(["red", "unknown", "green"] as const)(
+    "inherited #5243-style singleton is parked without blame on %s main; new base does not retry it",
     async (status) => {
       const f = await fixture();
       const m = await f.publish();
@@ -807,49 +807,98 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       f.api.baseStatus = status;
       expect((await f.controller().step()).action.kind).toBe("record");
       const held = (await f.state()).ledger;
-      expect(held.baseHold?.status).toBe(status);
       expect(held.ejected).toEqual([]);
       expect(held.recovery).toEqual([]);
-      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect(held.parked?.[0]?.baseSha).toBe(f.base);
+      expect((await f.controller().step()).action.kind).toBe("park");
       expect(f.api.calls).toEqual([]);
+      await f.controller().step();
+      expect(f.api.comments).toHaveLength(1);
+      expect(f.api.comments[0]).toContain("not a culprit attribution");
       await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
       f.api.baseStatus = "green";
-      expect((await f.controller().step()).action.kind).toBe("record"); // invalidate old base
-      expect((await f.controller().step()).action.kind).toBe("record"); // clear durable hold
-      const replacement = await f.publish();
-      expect(replacement.baseSha).toBe(f.divergent);
+      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect((await f.state()).ledger.parked).toHaveLength(1);
+      expect(f.api.calls).toHaveLength(1);
       expect((await f.state()).ledger.baseHold).toBeUndefined();
       expect((await f.state()).ledger.ejected).toEqual([]);
     },
   );
-  test("exact green base permits singleton code-failure exclusion without retry", async () => {
+  test("green full-main CI is not comparable base-suite evidence for singleton ejection", async () => {
     const f = await fixture(),
       m = await f.publish();
     f.verdict(m, "code_failure");
     expect((await f.controller().step()).action.kind).toBe("record");
-    expect((await f.state()).ledger.ejected).toHaveLength(1);
+    expect((await f.state()).ledger.ejected).toEqual([]);
+    expect((await f.state()).ledger.parked?.[0]?.pull.headSha).toBe(f.head);
     expect((await f.state()).ledger.retries).toEqual({});
   });
-  test("base CI becoming unknown before landing or pending ejection comment prevents the effect", async () => {
-    const f = await fixture(),
-      m = await f.publish();
-    f.verdict(m);
-    f.api.onReady = () => {
-      f.api.baseStatus = "unknown";
-    };
-    await f.controller().step();
-    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
-    expect((await f.state()).ledger.landed).toEqual([]);
-    f.api.onReady = null;
-    f.api.baseStatus = "green";
-    await f.controller().step(); // clear hold
-    f.api.workflowRuns = [];
+  test("parking comment lost response is reconciled after restart, never blindly replayed", async () => {
+    const f = await fixture();
+    const m = await f.publish();
     f.verdict(m, "code_failure");
-    await f.controller().step(); // isolate on green base
-    await f.controller().step(); // persist announcement intent
-    f.api.baseStatus = "unknown";
+    await f.controller().step();
+    expect((await f.controller().step()).action.kind).toBe("park");
+    f.api.response = "lost";
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    f.advance();
+    await f.executor().maintain();
+    const parked = (await f.state()).ledger.parked![0]!;
+    expect(parked.announced).toBe(true);
+    expect((await f.state()).ledger.effects[parked.effectId!]!.status).toBe("done");
+    expect(f.api.comments).toHaveLength(1);
+    expect(f.api.calls).toHaveLength(1);
+  });
+  test.each(["red", "unknown"] as const)(
+    "exact green batch builds and lands on %s full-main CI",
+    async (status) => {
+      const f = await fixture();
+      f.api.baseStatus = status;
+      await f.seed((l) => {
+        l.baseHold = { sha: f.base, status: "red", runId: 50, attempt: 1, reason: "legacy hold" };
+      });
+      const m = await f.publish();
+      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+      f.verdict(m);
+      // Main-CI observation failure must not become an indirect admission gate.
+      f.api.baseCI = async () => {
+        throw Error("full main CI unavailable");
+      };
+      expect((await f.controller().step()).action.kind).toBe("land");
+      expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+      expect((await f.state()).ledger.landed).toContain(m.batchId);
+      expect(f.api.comments).toHaveLength(1);
+      expect(f.api.comments[0]).toContain("landed the exact tested PR head");
+      expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
+    },
+  );
+  test("legacy pending code-failure comment holds even with green full-main CI", async () => {
+    const f = await fixture();
+    await f.seed((l) => {
+      l.ejected.push({
+        pull: f.makePull(),
+        batchId: "f".repeat(64),
+        reason: "merge-tree conflict against candidate predecessor",
+        announced: false,
+      });
+    });
+    await f.controller().step(); // Create a real durable effect, then model old code-blame state.
+    await f.seed((l) => {
+      l.ejected[0]!.reason = "non-retryable exact-candidate code failure";
+      for (const effect of Object.values(l.effects))
+        if (effect.kind === "comment")
+          effect.body = effect.body.replace(
+            "merge-tree conflict against candidate predecessor",
+            l.ejected[0]!.reason,
+          );
+    });
     await f.executor().maintain();
     expect(f.api.calls).toEqual([]);
+    expect(Object.values((await f.state()).ledger.effects)[0]?.lastError).toContain(
+      "base batch-suite",
+    );
   });
   test("main race outside tested ancestry rejects entire atomic landing", async () => {
     const f = await fixture(),
