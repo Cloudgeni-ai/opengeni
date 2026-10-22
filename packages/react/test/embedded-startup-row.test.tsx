@@ -300,7 +300,7 @@ test("the first prompt stays with its own session when the controller moves to a
   }
 });
 
-test("the composer is read-only until the host's session exists", async () => {
+test("the composer is disabled until the host's session exists", async () => {
   const fixture = client({ session: () => session("queued"), history: () => [accepted] });
   const render = (sessionId: string | null) => (
     <SessionConversation
@@ -313,11 +313,11 @@ test("the composer is read-only until the host's session exists", async () => {
   const view = await renderComponent(render(null));
   try {
     await flush(50);
-    const field = view.container.querySelector("textarea");
-    expect(field?.readOnly).toBe(true);
+    // Disabled as a whole: typing, dictation and the model choice are all off.
+    expect(view.container.querySelector("textarea")?.disabled).toBe(true);
     await view.rerender(render(SESSION_ID));
     await flush(80);
-    expect(view.container.querySelector("textarea")?.readOnly).toBe(false);
+    expect(view.container.querySelector("textarea")?.disabled).toBe(false);
   } finally {
     await view.unmount();
   }

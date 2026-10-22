@@ -710,14 +710,11 @@ function ConversationView({
                   )
                 }
                 transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
-                // While the host creates the session there is no draft to keep
-                // typing into; the field stays as it looks, read-only.
-                {...(sessionId === null
-                  ? { inputProps: { ...composerProps?.inputProps, readOnly: true } }
-                  : {})}
                 composer={composer}
                 attachments={uploadsEnabled ? files : undefined}
-                disabled={terminal || composerProps?.disabled}
+                // Nothing can be written (typed, dictated or chosen) into a
+                // session the host is still creating.
+                disabled={sessionId === null || terminal || composerProps?.disabled}
                 controlsStart={
                   composerProps?.controlsStart ??
                   (showModelPicker && composer.policy && (
@@ -730,7 +727,7 @@ function ConversationView({
                       latencyMode={composer.policy.latencyMode}
                       loading={catalog.loading}
                       error={catalog.error?.message}
-                      disabled={terminal}
+                      disabled={sessionId === null || terminal}
                       // A session frozen on Codex remote compaction refuses
                       // other providers' models; offer them only as disabled.
                       codexOnly={detail.session?.codexCompactionMode === "remote_v2"}

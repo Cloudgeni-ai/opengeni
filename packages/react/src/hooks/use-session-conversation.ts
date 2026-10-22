@@ -50,6 +50,9 @@ export type UseSessionConversationOptions = ClientOverride & {
    * keeps them while the session id is still `null` and history loads, and
    * then hands over to the live timeline without a blank frame or a second
    * loading style. Read once per conversation; later changes are ignored.
+   * While the id is `null` nothing can be sent, and the stock view disables
+   * its composer; a custom layout should disable its composer too, since a
+   * draft written then is not carried into the created session.
    */
   pendingPrompt?: PendingPrompt | null | undefined;
 };
