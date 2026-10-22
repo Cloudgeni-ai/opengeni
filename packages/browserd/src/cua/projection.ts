@@ -116,6 +116,16 @@ export function unindexedTextByElement(
 type CuaElement = z.infer<typeof Element>;
 
 /**
+ * A macOS element activated by opening it rather than pressing it: a folder
+ * or file in a file dialog's or Finder's list (AXOpen goes into the folder or
+ * chooses the file, as a double-click does) and a sidebar place. Invoking it
+ * opens it.
+ */
+export function opensOnInvoke(element: { readonly actions: readonly string[] }): boolean {
+  return element.actions.includes("AXOpen") && !element.actions.includes("AXPress");
+}
+
+/**
  * The macOS elements that belong to web content, by element_index: an
  * AXWebArea and everything CUA lists under it. WebKit and Chromium report
  * AXShowMenu on every element of a page; it opens the page's context menu,
@@ -188,7 +198,9 @@ export function projectElements(
       if (
         platform === "linux"
           ? element.actions.some((action) => ["click", "press", "activate"].includes(action))
-          : element.actions.includes(platform === "windows" ? "invoke" : "AXPress")
+          : platform === "windows"
+            ? element.actions.includes("invoke")
+            : element.actions.includes("AXPress") || opensOnInvoke(element)
       )
         actions.push("invoke");
       if (
@@ -202,7 +214,10 @@ export function projectElements(
           ? ["text", "entry", "password text", "combo box", "slider"].includes(element.role)
           : platform === "windows"
             ? element.actions.includes("set_value")
-            : [
+            : // An item of a file list is shown as a text field, but its text is
+              // the item's name, not something to edit.
+              !opensOnInvoke(element) &&
+              [
                 "AXTextField",
                 "AXTextArea",
                 "AXSecureTextField",
