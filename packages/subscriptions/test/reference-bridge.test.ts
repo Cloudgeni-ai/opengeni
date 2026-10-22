@@ -151,8 +151,7 @@ function randomProductionInput(seed: number): PlacementInput {
   }
   const providers: Record<string, ProviderSwitches> = {};
   for (const provider of PROVIDERS) {
-    if (rng.bool(0.3))
-      providers[provider] = { enabled: rng.bool(0.8) };
+    if (rng.bool(0.3)) providers[provider] = { enabled: rng.bool(0.8) };
   }
   const owner = workspace.kind === "personal" ? "member-a" : rng.pick(PEOPLE);
   return {
@@ -340,5 +339,4 @@ describe("reference bridge", () => {
       checkPlacementDecision(input, ranAnyway).map((violation) => violation.requirement),
     ).toContain("SUB-ELIG-01");
   });
-
 });

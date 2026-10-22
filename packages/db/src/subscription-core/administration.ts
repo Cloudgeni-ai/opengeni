@@ -436,6 +436,8 @@ export async function readSubscriptionCoreOrganizationPool(
    * the workspace's own, as `readSubscriptionCoreWorkspacePool` classifies it.
    */
   ownInWorkspaceIds: Map<string, string[]>;
+  /** Per connection, who it reaches, so a list can say so without reading each one's access. */
+  reach: Map<string, SubscriptionCoreConnectionReach>;
   primaryConnectionId: string | null;
   rotationMode: "spread" | "primary_first";
 } | null> {
@@ -482,15 +484,100 @@ export async function readSubscriptionCoreOrganizationPool(
       for (const row of rows)
         if (row.managed_by_workspace_id !== null)
           ownInWorkspaceIds.set(row.id, [row.managed_by_workspace_id]);
+      const reach = new Map<string, SubscriptionCoreConnectionReach>();
+      if (rows.length > 0) {
+        const reachRows = await rawRows<{
+          id: string;
+          scope_kind: "organization" | "workspaces" | "people";
+          allow_personal_workspaces: boolean;
+          managed_by_workspace_id: string | null;
+          every_workspace: boolean | null;
+          workspace_ids: string[] | null;
+          people: number | string;
+        }>(
+          tx,
+          sql`select connection.id::text as id, connection.scope_kind,
+            connection.allow_personal_workspaces,
+            connection.managed_by_workspace_id::text as managed_by_workspace_id,
+            (opengeni_private.subscription_core_reach(${providerId}::text,
+              connection.account_id, connection.id)->>'sharedWorkspaces')::boolean as every_workspace,
+            array(select assignment.workspace_id::text
+              from subscription_connection_workspaces assignment
+              where assignment.account_id = connection.account_id
+                and assignment.connection_id = connection.id
+                and assignment.workspace_id in (
+                  select inventory.workspace_id
+                  from list_organization_workspace_ids(connection.account_id) inventory)
+              order by assignment.workspace_id) as workspace_ids,
+            (select count(*) from subscription_connection_people person
+              where person.account_id = connection.account_id
+                and person.connection_id = connection.id) as people
+          from subscription_connections connection
+          where connection.account_id = ${input.organizationId}::uuid
+            and connection.id in (select jsonb_array_elements_text(
+              ${JSON.stringify(rows.map((row) => row.id))}::jsonb)::uuid)`,
+        );
+        for (const row of reachRows) {
+          const owner = row.managed_by_workspace_id;
+          reach.set(
+            row.id,
+            row.scope_kind === "organization"
+              ? {
+                  ownerWorkspaceId: owner,
+                  everyWorkspace: true,
+                  workspaceIds: [],
+                  personalWorkspaces: true,
+                  people: null,
+                }
+              : row.scope_kind === "people"
+                ? {
+                    ownerWorkspaceId: owner,
+                    everyWorkspace: false,
+                    workspaceIds: [],
+                    personalWorkspaces: false,
+                    people: Number(row.people),
+                  }
+                : {
+                    ownerWorkspaceId: owner,
+                    everyWorkspace: owner === null && row.every_workspace === true,
+                    workspaceIds:
+                      owner === null && row.every_workspace === true
+                        ? []
+                        : (row.workspace_ids ?? []),
+                    personalWorkspaces: row.allow_personal_workspaces,
+                    people: null,
+                  },
+          );
+        }
+      }
       return {
         rows,
         ownInWorkspaceIds,
+        reach,
         primaryConnectionId,
         rotationMode: (org?.mode ?? "spread") === "primary_first" ? "primary_first" : "spread",
       };
     },
   );
 }
+
+/**
+ * Who an organization-listed connection reaches: its owning workspace (a
+ * workspace's own account, used only there), every workspace including new
+ * ones, chosen shared workspaces, Personal workspaces, or chosen people.
+ */
+export type SubscriptionCoreConnectionReach = {
+  /** The workspace whose own account this is, or null for an organization account. */
+  ownerWorkspaceId: string | null;
+  /** Every shared workspace, including ones created later. */
+  everyWorkspace: boolean;
+  /** The shared workspaces it reaches, when not every one. */
+  workspaceIds: string[];
+  /** Every Personal workspace. */
+  personalWorkspaces: boolean;
+  /** How many chosen people, or null when it is not limited to people. */
+  people: number | null;
+};
 
 /** A workspace's pool as one person sees it: the shared pool plus, in their own Personal workspace, their personal connections. */
 export type SubscriptionCoreWorkspaceView = {

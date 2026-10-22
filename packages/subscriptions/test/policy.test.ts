@@ -375,7 +375,6 @@ describe("provider switches", () => {
       earliestResetAt: NOW + 60_000,
     });
   });
-
 });
 
 describe("eligibility", () => {

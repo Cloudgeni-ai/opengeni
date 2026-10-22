@@ -22,6 +22,7 @@ import {
   listSubscriptionCorePersonalConnectionRowsInTransaction,
   readSubscriptionCoreCutoverDisposition,
   readSubscriptionCoreOrganizationPool,
+  type SubscriptionCoreConnectionReach,
   readSubscriptionCoreWorkspacePool,
   readSubscriptionCoreWorkspaceView,
   renameSubscriptionCoreConnection,
@@ -330,6 +331,7 @@ export async function getSubscriptionCoreOrganizationCodexProjection(
         primaryConnectionId: pool.primaryConnectionId,
       }),
       ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+      ...reachOf(pool.reach, row.id),
     })),
     rotation: rotationSettings(pool.primaryConnectionId, pool.rotationMode === "spread"),
   };
@@ -354,10 +356,19 @@ export async function getSubscriptionCoreOrganizationCodexAccount(
       primaryConnectionId: pool.primaryConnectionId,
     }),
     ownInWorkspaceIds: pool.ownInWorkspaceIds.get(row.id) ?? [],
+    ...reachOf(pool.reach, row.id),
   };
 }
 
 type Administration = SubscriptionCoreAdministration;
+
+function reachOf(
+  reach: ReadonlyMap<string, SubscriptionCoreConnectionReach>,
+  id: string,
+): { reach?: SubscriptionCoreConnectionReach } {
+  const found = reach.get(id);
+  return found ? { reach: found } : {};
+}
 
 export type SubscriptionCoreCodexAllocatorResult = SubscriptionCoreAllocatorResult;
 

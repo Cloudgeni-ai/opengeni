@@ -966,6 +966,7 @@ export type {
   CodexConnectStart,
   CodexConnectPoll,
   SuperGrokAccount,
+  SubscriptionAccountReach,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
   SuperGrokAllocatorUpdate,

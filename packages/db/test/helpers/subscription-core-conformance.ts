@@ -2673,6 +2673,21 @@ export function describeSubscriptionCoreConformance<Credential>(
         subjectId: org.ownerSubjectId,
       });
       expect(organizationPool!.rows.map((row) => row.id).sort()).toEqual([a, b].sort());
+      // The list says who each account reaches, without reading its access.
+      expect(organizationPool!.reach.get(a)).toEqual({
+        ownerWorkspaceId: null,
+        everyWorkspace: true,
+        workspaceIds: [],
+        personalWorkspaces: true,
+        people: null,
+      });
+      expect(organizationPool!.reach.get(b)).toEqual({
+        ownerWorkspaceId: null,
+        everyWorkspace: false,
+        workspaceIds: [org.sharedWorkspaceId],
+        personalWorkspaces: false,
+        people: null,
+      });
       const workspacePool = await withRlsContext(
         db(),
         { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },

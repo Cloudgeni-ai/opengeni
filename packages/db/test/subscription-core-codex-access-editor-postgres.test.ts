@@ -671,6 +671,19 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       managedByWorkspaceId: org.sharedWorkspaceId,
       peopleSupported: false,
     });
+    // The organization's list says whose it is without reading its access.
+    const listed = await getSubscriptionCoreOrganizationCodexAccount(client!.db, {
+      organizationId: org.accountId,
+      subjectId: org.ownerSubjectId,
+      connectionId: id,
+    });
+    expect(listed?.reach).toEqual({
+      ownerWorkspaceId: org.sharedWorkspaceId,
+      everyWorkspace: false,
+      workspaceIds: [org.sharedWorkspaceId],
+      personalWorkspaces: false,
+      people: null,
+    });
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
     expect(await servedIn(org, org.personalWorkspaceId, org.ownerSubjectId)).toEqual([]);

@@ -4942,6 +4942,8 @@ export type CodexAccount = {
    * their own (it was connected there).
    */
   ownInWorkspaceIds?: string[];
+  /** The organization's list only: who the account reaches. */
+  reach?: SubscriptionAccountReach;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -5124,12 +5126,32 @@ export type CodexConnectPoll =
       isActive?: boolean;
     };
 
+/**
+ * Who an account in the organization's list reaches: the workspace that owns
+ * it (its own account, used only there), every workspace including new ones,
+ * chosen shared workspaces, Personal workspaces, or chosen people.
+ */
+export type SubscriptionAccountReach = {
+  /** The workspace whose own account this is, or null for an organization account. */
+  ownerWorkspaceId: string | null;
+  /** Every shared workspace, including ones created later. */
+  everyWorkspace: boolean;
+  /** The shared workspaces it reaches, when not every one. */
+  workspaceIds: string[];
+  /** Every Personal workspace. */
+  personalWorkspaces: boolean;
+  /** How many chosen people, or null when it is not limited to people. */
+  people: number | null;
+};
+
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
 export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  /** The organization's list only: who the account reaches. */
+  reach?: SubscriptionAccountReach;
   plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
