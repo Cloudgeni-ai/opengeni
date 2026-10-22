@@ -7098,6 +7098,11 @@ export type SandboxRecoverySelection = {
   revision: string;
   capturedAt: string;
 };
+/** The checkpoint automatic recovery restores, native or portable.
+ * `artifactId` is null for a portable archive. */
+export type SandboxCheckpointSelection = Omit<SandboxRecoverySelection, "artifactId"> & {
+  artifactId: string | null;
+};
 export type SandboxRecoveryTarget = {
   sessionId: string;
   sandboxGroupId: string;
@@ -7115,6 +7120,8 @@ export type SandboxRecoveryProjection = {
   version: 1;
   status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
   reason: string | null;
+  /** The registered native checkpoint a person can consent to restore, and for
+   * an automatic Retry its checkpoint when that one is native. */
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
   target?: SandboxRecoveryTarget;
@@ -7122,9 +7129,12 @@ export type SandboxRecoveryProjection = {
   freshWorkspaceAvailable?: boolean;
   groupSessionCount?: number;
   automaticAvailable?: boolean;
-  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
-   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  /** What an automatic Retry does: restore `automaticCheckpoint`, or continue
+   * on a new empty workspace because no usable checkpoint survived the loss. */
   automaticLane?: "checkpoint" | "fresh_workspace";
+  /** The checkpoint an automatic Retry restores (lane `checkpoint`), native or
+   * portable. `checkpoint` is set as well only when it is native. */
+  automaticCheckpoint?: SandboxCheckpointSelection;
   /** For a timed recovery wait: the earliest time a Retry or a new message can
    * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;

@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
+  SandboxCheckpointSelection,
   SandboxFreshWorkspaceRecovery,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
+  SandboxRecoverySelection,
   automaticSandboxRecoveryDiscontinuity,
   freshWorkspaceSandboxRecoveryDiscontinuity,
   sandboxRecoveryDiscontinuity,
@@ -181,4 +183,24 @@ test("shared checkpoint and empty-workspace warnings never claim success, counts
   expect(SandboxFreshWorkspaceRecovery.safeParse({ ...recovery, reason: "other" }).success).toBe(
     false,
   );
+});
+test("a portable checkpoint is named only by automaticCheckpoint, never the public selection", () => {
+  const portable = { ...selection, artifactId: null };
+  expect(SandboxRecoverySelection.safeParse(portable).success).toBe(false);
+  expect(SandboxCheckpointSelection.parse(portable)).toEqual(portable);
+  const projection = {
+    version: 1,
+    status: "eligible",
+    reason: null,
+    checkpoint: null,
+    operationId: null,
+    automaticAvailable: true,
+    automaticLane: "checkpoint",
+    automaticCheckpoint: portable,
+  };
+  expect(SandboxRecoveryProjection.parse(projection)).toEqual(projection);
+  expect(SandboxRecoveryProjection.safeParse({ ...projection, checkpoint: portable }).success).toBe(
+    false,
+  );
+  expect(automaticSandboxRecoveryDiscontinuity(portable)).toContain(selection.capturedAt);
 });

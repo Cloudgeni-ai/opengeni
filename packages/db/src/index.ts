@@ -316,6 +316,7 @@ import {
   childTerminalResultFinalAnswerWithGoalContinuations,
   type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
   SandboxRecoveryTarget,
   SandboxRecoveryResponse,
@@ -45855,7 +45856,7 @@ async function verifiedAutomaticCheckpointSelectionTx(
   row: LeaseRow,
   session: typeof schema.sessions.$inferSelect,
   recovery: SandboxRecoveryState,
-): Promise<import("@opengeni/contracts").SandboxRecoverySelection | null> {
+): Promise<SandboxCheckpointSelection | null> {
   const descriptor = recovery.archive.current;
   if (
     recovery.archive.status !== "available" ||
@@ -45891,8 +45892,8 @@ function checkpointSelectionForSession(
   row: LeaseRow,
   session: Pick<typeof schema.sessions.$inferSelect, "id" | "activeEpoch" | "authorityEpoch">,
   descriptor: { revision: string; capturedAt: string },
-): import("@opengeni/contracts").SandboxRecoverySelection | null {
-  const parsed = SandboxRecoverySelection.safeParse({
+): SandboxCheckpointSelection | null {
+  const parsed = SandboxCheckpointSelection.safeParse({
     version: 1,
     sessionId: session.id,
     sandboxGroupId: row.sandbox_group_id,
@@ -45963,7 +45964,7 @@ type AutomaticRecoveryLane =
   | {
       kind: "checkpoint";
       state: "available" | "authorized";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       operationId: string | null;
       initiatingSessionId: string | null;
       attempt: number;
@@ -46434,10 +46435,18 @@ async function projectPublicSandboxRecovery(
   if (purpose === "preview") {
     const lane = await automaticRecoveryLaneTx(tx, row, session);
     if (lane.kind === "checkpoint" || lane.kind === "fresh_workspace") {
-      const checkpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      const automaticCheckpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      // `checkpoint` keeps its public shape: a native checkpoint only. A
+      // portable one is named by `automaticCheckpoint` alone.
+      const nativeCheckpoint = SandboxRecoverySelection.safeParse(automaticCheckpoint);
+      const checkpoint = nativeCheckpoint.success ? nativeCheckpoint.data : null;
+      const blocked = (blockedReason: string): SandboxRecoveryProjection => ({
+        ...unavailable(blockedReason, checkpoint),
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
+      });
       const reason =
         lane.state === "authorized" ? null : await automaticLaneQuiescenceReason(tx, row, session);
-      if (reason) return unavailable(reason, checkpoint);
+      if (reason) return blocked(reason);
       // Retry reopens the latest failed turn, and never with a tool call whose
       // outcome it cannot prove. A new message still recovers the sandbox.
       const [retryTarget] = await rawRows<{ unresolved: boolean }>(
@@ -46448,12 +46457,13 @@ async function projectPublicSandboxRecovery(
               where turn.workspace_id = ${input.workspaceId} and turn.session_id = ${session.id}
               order by turn.position desc, turn.created_at desc limit 1)) as unresolved`,
       );
-      if (retryTarget?.unresolved) return unavailable("retry_tool_outcome_unresolved", checkpoint);
+      if (retryTarget?.unresolved) return blocked("retry_tool_outcome_unresolved");
       return {
         version: 1,
         status: "eligible",
         reason: null,
         checkpoint,
+        ...(automaticCheckpoint ? { automaticCheckpoint } : {}),
         operationId: null,
         automaticAvailable: true,
         automaticLane: lane.kind,
@@ -46498,8 +46508,13 @@ async function projectPublicSandboxRecovery(
     !row.current_checkpoint_artifact_id
   )
     return unavailable("registered_current_checkpoint_required");
-  const selection = checkpointSelectionForSession(row, session, descriptor);
-  if (!selection) return unavailable("checkpoint_metadata_invalid");
+  // Human consent is offered only for a registered native checkpoint, so the
+  // public selection always names its artifact.
+  const parsedSelection = SandboxRecoverySelection.safeParse(
+    checkpointSelectionForSession(row, session, descriptor),
+  );
+  if (!parsedSelection.success) return unavailable("checkpoint_metadata_invalid");
+  const selection = parsedSelection.data;
   if (selection.archiveGeneration >= selection.workspaceGeneration)
     return unavailable("historical_checkpoint_not_required", selection);
   if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
@@ -46917,7 +46932,7 @@ export type AutomaticSandboxRecoveryAuthorization =
   | {
       status: "authorized" | "already_authorized";
       lane: "checkpoint";
-      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      selection: SandboxCheckpointSelection;
       groupSessionCount: number;
     }
   | {
@@ -46969,7 +46984,7 @@ async function writeAutomaticRecoveryReceiptsTx(
           ? input.actor
           : { type: "service", subjectId: AUTOMATIC_SANDBOX_RECOVERY_SUBJECT };
       if (input.lane.kind === "checkpoint") {
-        const checkpoint = SandboxRecoverySelection.parse({
+        const checkpoint = SandboxCheckpointSelection.parse({
           ...input.lane.selection,
           sessionId: member.id,
           routeEpoch: member.activeEpoch,
@@ -47375,7 +47390,7 @@ export async function getSandboxRecoveryDiscontinuity(
       );
     }
     if (rows[0].action === "sandbox.recovery.automatic") {
-      const selection = SandboxRecoverySelection.parse(rows[0].result.checkpoint);
+      const selection = SandboxCheckpointSelection.parse(rows[0].result.checkpoint);
       return automaticSandboxRecoveryDiscontinuity(
         selection,
         rows[0].result.scope === "shared" ? "shared" : "session",
