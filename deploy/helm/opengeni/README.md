@@ -125,6 +125,19 @@ artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.
+## Web assets across rollouts
+
+`web.previousAssets` carries the hashed assets of up to `maxImages` (default 2)
+previous web images into each web pod: one init container per image copies
+them into an emptyDir that the server reads when an asset is missing locally.
+`helm upgrade` finds the images with a `lookup` of the live web Deployment and
+its `opengeni.ai/previous-web-images` annotation. Offline renders carry only an
+explicit `web.previousAssets.images` list. `ingress.webAssetsIngress` adds an
+ingress-nginx Ingress for the hashed asset paths that retries a 404 on another
+web pod during the rollout. Test both with
+`bun test ./deploy/helm/opengeni/test/web-asset-skew.test.ts`. See
+[`docs/deployment.md`](../../../docs/deployment.md#web-assets-across-rollouts).
+
 ## Replicas and autoscaling
 
 When a workload's `autoscaling.enabled` is true (API, web, relay, control

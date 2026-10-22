@@ -1885,7 +1885,10 @@ filesystems even though Docker accepts the mount.
 The production web image serves the built SPA through the repository-owned Bun
 server, not Vite's preview server. The build precompresses text assets;
 content-hashed `/assets/*` responses are served with immutable one-year caching,
-while the HTML shell revalidates. Every shell response carries
+while the HTML shell revalidates. A hashed asset the build lacks is answered
+from the previous builds' assets listed in `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`
+(comma-separated, newest first), which the Helm chart fills; see
+[Web assets across rollouts](#web-assets-across-rollouts). Every shell response carries
 `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 strict-origin-when-cross-origin` (the setup-account page keeps its stricter
 `no-referrer`). The server deliberately sets no `X-Frame-Options`,
@@ -2707,7 +2710,61 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
-The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
+The chart defaults the API, web, relay and control-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`), and API and web pods drain for `preStopDrainSeconds` before SIGTERM. Turn workers default to zero-surge (`maxSurge: 0`, `maxUnavailable: 1`). One-node smoke clusters without spare capacity can set zero surge for the others too.
+
+### Web assets across rollouts
+
+The console loads route code and stylesheets lazily from content-hashed
+`/assets/*` files, and each web build has its own names. Without help, two
+kinds of tab fail to load them during and after a web rollout:
+
+- A tab opened before the rollout keeps asking for the previous build's names
+  after every pod runs the new build.
+- During the rollout, old and new pods serve behind one Service and
+  ingress-nginx balances each request separately, so a page from one build can
+  ask a pod of the other build for a name it does not have.
+
+The chart covers both directions. `web.previousAssets` (on by default, at most
+`maxImages: 2`) gives each web pod one init container per previous web image.
+It runs that image's Bun with a short copy script (old images may have no
+shell) and copies its `assets`, `office/assets` and `react-demo/assets`
+directories into a pod-local emptyDir. The server answers an asset it lacks
+from those copies, newest build first, with the usual cache headers. HTML is
+never served from them and a missing asset is still a 404. `helm upgrade`
+finds the previous images with a `lookup` of the live web Deployment: its
+current image followed by the images it already carried, which the chart
+records in the Deployment annotation `opengeni.ai/previous-web-images`. The
+list is de-duplicated and never contains the image being deployed. A
+config-only upgrade keeps the chain, and deploying an older image keeps the
+newer build's assets. Offline renders (`helm template`, client dry runs) cannot
+look up, so they carry nothing and render the web Deployment exactly as before
+unless `web.previousAssets.images` lists the previous image references
+explicitly; a non-empty list replaces the lookup. The copy script never fails
+the pod, but a previous image the registry no longer serves blocks the new
+pods in `Init:ImagePullBackOff`. Keep at least the last `maxImages` web images
+in the registry, or set `maxImages: 0` to turn carrying off. An optional
+`sizeLimit` bounds the emptyDir.
+
+`ingress.webAssetsIngress` (on by default) adds a second Ingress,
+`<release>-web-assets`, for the same hashed asset paths. It renders only when
+`ingress.className` contains `nginx`; set `requireNginxClassName: false` for an
+ingress-nginx controller with another class name. It sets
+`nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout http_404"` and
+`proxy-next-upstream-tries` (`nextUpstreamTries`, default 3), so a 404 from a
+pod of the other build is retried on another web pod. It covers only hosts and
+asset paths whose longest matching primary route already goes to the web
+service, and it copies the primary class, TLS and annotations, including edge
+auth. cert-manager issuance annotations stay on the primary Ingress so that
+only one Ingress owns each certificate. `webAssetsIngress.annotations` are
+applied last. Other paths keep their primary routing.
+
+The first upgrade that ships this replaces pods without it. The new pods carry
+the live pre-upgrade image, so tabs on the old build keep working after the
+rollout. A page served by a new pod that asks an old pod for a new asset gets
+that 404 retried on another pod. The console's one-time automatic reload on a
+failed chunk load (`apps/web/src/lib/vite-preload-recovery.ts`) remains the last
+resort. For example, it still applies when only one pod is serving, or when
+every carried build is older than the tab's build.
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
