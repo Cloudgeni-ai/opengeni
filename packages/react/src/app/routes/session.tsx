@@ -57,6 +57,7 @@ import {
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider } from "../../timeline";
+import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
 import type { WorkspaceTab } from "../../components/workspace-dock";
@@ -182,7 +183,6 @@ import type {
   SessionEditableArtifactsStatus,
 } from "../components/session/editable-artifacts-workspace";
 import {
-  normalizeProviderDomain,
   oauthConnectionOwnership,
   oauthConnectionRef,
   catalogConnectionAccountSelection,
@@ -1159,20 +1159,15 @@ export function SessionRoute({
   // The workspace shell already needs the capability catalog for session tool
   // policy. Reuse that authoritative read for timeline logos instead of
   // downloading the same large catalog again from the session route.
-  const providerLogos = useMemo(() => {
-    const logos = new Map<string, string>();
-    for (const capability of context.workspaceCapabilityCatalog) {
-      const domain = capability.providerDomain ?? capability.connectionRef?.providerDomain ?? null;
-      const url = context.client.catalogAssetUrl(capability.logoAssetPath);
-      if (domain && url) {
-        const key = normalizeProviderDomain(domain);
-        if (!logos.has(key)) logos.set(key, url);
-      }
-    }
-    return logos;
-  }, [context.client, context.workspaceCapabilityCatalog]);
+  const providerLogos = useMemo(
+    () =>
+      connectorLogoIndex(context.workspaceCapabilityCatalog, (path) =>
+        context.client.catalogAssetUrl(path ?? null),
+      ),
+    [context.client, context.workspaceCapabilityCatalog],
+  );
   const resolveProviderLogo = useCallback(
-    (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
+    (domain: string) => connectorLogo(providerLogos, domain),
     [providerLogos],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
