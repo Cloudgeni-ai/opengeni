@@ -1332,6 +1332,31 @@ unexpected successful non-JSON response to a mutation has `outcomeUnknown:
 true` because the mutation might already have been accepted. Never turn that
 condition into a new operation by changing its idempotency key.
 
+### Transient read retry
+
+Safe JSON reads (`GET` and `HEAD`) that fail transiently are retried quietly
+inside a small budget, so an API rolling deploy or a short network blip does
+not surface as an error. A failure is transient when the request never got a
+response (`fetch` rejected with a `TypeError`, such as a reset connection) or a
+gateway answered `502`, `503` or `504`. Retries use jittered exponential
+backoff, or the server's `Retry-After` when it fits the budget, and stop as
+soon as the caller's signal aborts. Every attempt of one call carries the same
+correlation ID. Mutations are never retried; they keep the `outcomeUnknown`
+semantics above. Auth, permission, not-found, validation, rate-limit and other
+server errors surface immediately.
+
+```ts
+const client = new OpenGeniClient({
+  baseUrl,
+  // Defaults: 4 attempts, 250 ms first backoff, 2000 ms backoff cap, 5000 ms total.
+  readRetry: { maxAttempts: 4, initialDelayMs: 250, maxDelayMs: 2_000, maxElapsedMs: 5_000 },
+  // readRetry: false turns it off.
+});
+```
+
+`isTransientRequestError(error)` reports whether an error is this kind of
+transient failure, for callers that keep their own longer retry loop.
+
 ## Streaming guarantees
 
 `client.streamEvents(...)` (and the underlying `streamSessionEvents`) delivers

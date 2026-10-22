@@ -151,6 +151,17 @@ import {
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
 import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
+import {
+  abortableReadRetryDelay,
+  isSafeReadMethod,
+  isTransientGatewayStatus,
+  isTransientRequestError,
+  parseRetryAfterMs,
+  readRetryDelayMs,
+  resolveReadRetryPolicy,
+  type OpenGeniReadRetryOptions,
+  type ReadRetryPolicy,
+} from "./read-retry";
 import type {
   SkillRecord,
   SkillSummary,
@@ -923,6 +934,9 @@ export type WorkspaceControlEventPage = {
   nextAfter: number | null;
 };
 
+/** What one safe-read attempt observed, for the retry decision. */
+type ReadAttemptOutcome = { gatewayFailure: boolean; retryAfterMs: number | null };
+
 export type OpenGeniClientOptions = {
   /** Explicit compatibility for an API predating targeted tool calls. No automatic downgrade. */
   toolGatewayMode?: "target" | "catalog";
@@ -962,6 +976,14 @@ export type OpenGeniClientOptions = {
    * `"compatible"` everywhere else.
    */
   apiContract?: "strict" | "compatible" | undefined;
+  /**
+   * Bounded quiet retry for safe JSON reads (`GET`/`HEAD`) that fail
+   * transiently: a transport error or a 502, 503 or 504 (honoring
+   * `Retry-After`). This rides out API rolling deploys and short network
+   * blips. Mutations are never retried. On by default (4 attempts within
+   * 5 seconds); pass `false` to turn it off or options to tune it.
+   */
+  readRetry?: OpenGeniReadRetryOptions | false | undefined;
 };
 
 function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "compatible" {
@@ -1198,6 +1220,7 @@ export class OpenGeniClient {
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
   private readonly apiContractStrict: boolean;
+  private readonly readRetryPolicy: ReadRetryPolicy | null;
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
@@ -1220,6 +1243,7 @@ export class OpenGeniClient {
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
     this.apiContractStrict = defaultApiContractMode(options) === "strict";
+    this.readRetryPolicy = resolveReadRetryPolicy(options.readRetry);
     this.interaction = new OpenGeniInteractionClient(this);
     this.tools = createLazyToolsFacade(this);
   }
@@ -11383,61 +11407,120 @@ export class OpenGeniClient {
     const correlationId = crypto.randomUUID();
     const abort = requestAbortSignal(options);
     try {
-      if (abort.signal?.aborted) {
-        throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
-      }
-      const headers = this.headers(correlationId);
-      let response: FetchResponse;
-      try {
-        response = await awaitWithAbort(
-          this.fetchImpl(this.url(path, query), {
-            method,
-            headers: {
-              ...headers,
-              Accept: "application/json",
-              ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-            },
-            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-            ...(abort.signal ? { signal: abort.signal } : {}),
-          }),
+      const retryPolicy = isSafeReadMethod(method) ? this.readRetryPolicy : null;
+      if (!retryPolicy) {
+        return await this.requestJsonAttempt<T>(
+          method,
+          path,
+          body,
+          query,
+          options,
           abort.signal,
+          correlationId,
+          null,
         );
-      } catch (error) {
-        if (options.signal?.aborted) throw error;
-        if (isMutationMethod(method)) {
-          throw mutationTransportError(correlationId);
-        }
-        throw error;
       }
-      assertApiContractResponse(response, this.apiContractStrict);
-      try {
-        if (!response.ok) {
-          throw await awaitWithAbort(
-            apiErrorFromResponse(response, { method, correlationId }),
+      // Safe reads only: a transient failure is retried quietly with jittered
+      // backoff (or the server's Retry-After) inside a small total budget.
+      const startedAt = Date.now();
+      for (let retry = 1; ; retry += 1) {
+        const attempt: ReadAttemptOutcome = { gatewayFailure: false, retryAfterMs: null };
+        try {
+          return await this.requestJsonAttempt<T>(
+            method,
+            path,
+            body,
+            query,
+            options,
             abort.signal,
+            correlationId,
+            attempt,
           );
-        }
-        if (options.responseType === "void") {
-          await awaitWithAbort(
-            cancelResponseBody(response, "discarding void API response"),
-            abort.signal,
+        } catch (error) {
+          // Only the transport itself or a real 502/503/504 response is
+          // transient; a malformed success response is not retried.
+          const transient =
+            error instanceof TypeError ||
+            (attempt.gatewayFailure && isTransientRequestError(error));
+          if (abort.signal?.aborted || !transient) throw error;
+          const delay = readRetryDelayMs(
+            retryPolicy,
+            retry,
+            Date.now() - startedAt,
+            attempt.retryAfterMs,
           );
-          return undefined as T;
+          if (delay === null) throw error;
+          await abortableReadRetryDelay(delay, abort.signal);
         }
-        await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
-        const value = await awaitWithAbort(response.json(), abort.signal);
-        recordObservedSessionSequence(value, response.headers.get(SESSION_SEQUENCE_HEADER));
-        return value as T;
-      } catch (error) {
-        if (options.signal?.aborted) throw error;
-        if (error instanceof OpenGeniApiError) throw error;
-        if (isMutationMethod(method)) {
-          throw mutationTransportError(correlationId);
-        }
-        throw error;
       }
     } finally {
       abort.dispose();
+    }
+  }
+
+  private async requestJsonAttempt<T>(
+    method: string,
+    path: string,
+    body: unknown,
+    query: Record<string, string>,
+    options: OpenGeniRequestOptions,
+    signal: AbortSignal | undefined,
+    correlationId: string,
+    attempt: ReadAttemptOutcome | null,
+  ): Promise<T> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("Request aborted", "AbortError");
+    }
+    const headers = this.headers(correlationId);
+    let response: FetchResponse;
+    try {
+      response = await awaitWithAbort(
+        this.fetchImpl(this.url(path, query), {
+          method,
+          headers: {
+            ...headers,
+            Accept: "application/json",
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          ...(signal ? { signal } : {}),
+        }),
+        signal,
+      );
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
+    assertApiContractResponse(response, this.apiContractStrict);
+    try {
+      if (!response.ok) {
+        if (attempt && isTransientGatewayStatus(response.status)) {
+          attempt.gatewayFailure = true;
+          attempt.retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        }
+        throw await awaitWithAbort(
+          apiErrorFromResponse(response, { method, correlationId }),
+          signal,
+        );
+      }
+      if (options.responseType === "void") {
+        await awaitWithAbort(cancelResponseBody(response, "discarding void API response"), signal);
+        return undefined as T;
+      }
+      await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), signal);
+      const value = await awaitWithAbort(response.json(), signal);
+      recordObservedSessionSequence(value, response.headers.get(SESSION_SEQUENCE_HEADER));
+      return value as T;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      if (error instanceof OpenGeniApiError) throw error;
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
     }
   }
 
