@@ -7,8 +7,7 @@ import type {
 } from "@opengeni/sdk";
 import { createRoot } from "react-dom/client";
 import { fakeClient, WORKSPACE_ID } from "../../../../../packages/react/test/fake-client";
-import { CodexAccountIndicator } from "@opengeni/react/app/components/session/codex-account-indicator";
-import { ModelAccountIndicator } from "@opengeni/react/app/components/session/model-account-indicator";
+import { SubscriptionAccountIndicator } from "@opengeni/react/app/components/session/subscription-account-indicator";
 import "../../../src/styles.css";
 import { ServingPreview } from "./serving-preview";
 
@@ -247,22 +246,13 @@ createRoot(document.getElementById("root")!).render(
               ? "SuperGrok"
               : "Claude Opus 5.5"}
         </span>
-        {codexReference ? (
-          <CodexAccountIndicator
-            workspaceId={WORKSPACE_ID}
-            sessionId="preview-session"
-            model="codex/gpt-6-astra"
-            events={[]}
-          />
-        ) : (
-          <ModelAccountIndicator
-            workspaceId={WORKSPACE_ID}
-            sessionId="preview-session"
-            organizationId="acme"
-            provider={neutralProvider}
-            events={[]}
-          />
-        )}
+        <SubscriptionAccountIndicator
+          workspaceId={WORKSPACE_ID}
+          sessionId="preview-session"
+          organizationId="acme"
+          provider={codexReference ? "codex" : neutralProvider}
+          events={[]}
+        />
       </header>
       <p className="fixed right-3 bottom-3 left-3 text-xs text-fg-subtle">
         Preview · Synthetic stored snapshots · Production UI/API contract · No live provider probe

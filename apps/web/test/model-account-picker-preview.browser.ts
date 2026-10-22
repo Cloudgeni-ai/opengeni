@@ -29,7 +29,7 @@ try {
         `${base}/test/fixtures/model-account-picker-preview/?session=${session}&theme=${theme}${extra}`,
         { waitUntil: "networkidle" },
       );
-      await page.getByRole("button", { name: /^(Model account|Switch Codex account)/ }).click();
+      await page.getByRole("button", { name: /^(Claude|SuperGrok|Codex) account/ }).click();
       await page.getByText("Use for next turn").waitFor();
     };
     const shot = (name: string) => page.screenshot({ path: `${output}/${name}-${width}.png` });
@@ -64,7 +64,7 @@ try {
     await page.getByRole("menu").getByTestId("billing-class-icon-claude_subscription").waitFor();
     await page.getByText("team-a@example.test", { exact: true }).waitFor();
     await page.getByText("Max · Organization", { exact: true }).waitFor();
-    await page.getByText(/Cached observation/).waitFor();
+    await page.getByText(/^Updated /).waitFor();
     assert((await page.getByRole("progressbar").count()) === 2, "stored quota not rendered");
     assert(
       (await page.getByRole("progressbar", { name: "5h used" }).getAttribute("aria-valuenow")) ===
@@ -78,17 +78,17 @@ try {
       !(await currentRow.textContent())?.includes("36%"),
       "bound usage duplicated below header",
     );
-    assert((await otherRow.textContent())?.includes("74% used"), "other account usage missing");
+    assert((await otherRow.textContent())?.includes("5h 74%"), "other account usage missing");
 
     // Choosing their own account retains the provider mark and shows ownership.
     await page.getByRole("menuitem", { name: /My Claude/ }).click();
     await page.getByText("Selection saved for the next turn.").waitFor();
     await page
-      .getByRole("button", { name: "Model account · My Claude", exact: true, includeHidden: true })
+      .getByRole("button", { name: "Claude account · My Claude", exact: true, includeHidden: true })
       .waitFor();
     await assertAccountActionsOnly();
     await page.getByText("Pro · Your account", { exact: true }).waitFor();
-    await page.getByText("No stored usage", { exact: true }).waitFor();
+    await page.getByText("No usage reading yet", { exact: true }).waitFor();
     assert(
       JSON.stringify(await receipts()) === '[{"choose":"mine"}]',
       "unexpected personal action",
@@ -106,7 +106,7 @@ try {
     await page.keyboard.press("Escape");
     await page.getByRole("menu").waitFor({ state: "hidden" });
     await page.waitForFunction(() =>
-      document.activeElement?.getAttribute("aria-label")?.startsWith("Model account ·"),
+      document.activeElement?.getAttribute("aria-label")?.startsWith("Claude account ·"),
     );
 
     // A shared chat: only the person's own explicit choice is available.
@@ -160,7 +160,7 @@ try {
     await assertAccountActionsOnly();
     await shot("partial-unknown");
     await open("private", "&usage=stale");
-    await page.getByText(/Reset time passed; current usage unknown/).waitFor();
+    await page.getByText(/Reset passed; usage may be outdated/).waitFor();
     assert(
       (await page.getByRole("progressbar", { name: "5h used" }).getAttribute("aria-valuenow")) ===
         "100",
@@ -168,7 +168,7 @@ try {
     );
     await shot("stale-snapshot");
     await open("private", "&usage=missing");
-    await page.getByText("Usage not reported", { exact: true }).waitFor();
+    await page.getByText("No usage reading yet", { exact: true }).waitFor();
     assert(
       (await page.getByRole("progressbar").count()) === 0,
       "missing projection manufactured usage",
@@ -188,18 +188,17 @@ try {
     );
     await shot("xai-account");
 
-    // The actual Codex component uses the same extracted view with its real
-    // adapter's usage/freshness path (synthetic readings, not production quotas).
+    // Codex renders the same control from its own session data and live usage
+    // check (synthetic readings, not production quotas).
     await open("private", "&provider=codex");
-    await page.getByRole("progressbar", { name: "Week remaining" }).waitFor();
+    await page.getByRole("progressbar", { name: "Week used" }).waitFor();
     assert((await page.getByRole("progressbar").count()) === 2, "Codex usage lost");
     assert(
-      (await page
-        .getByRole("progressbar", { name: "Week remaining" })
-        .getAttribute("aria-valuenow")) === "38",
+      (await page.getByRole("progressbar", { name: "Week used" }).getAttribute("aria-valuenow")) ===
+        "62",
       "Codex quota changed",
     );
-    await page.getByText("relogin", { exact: true }).waitFor();
+    await page.getByText("Needs reconnect", { exact: true }).waitFor();
     await assertAccountActionsOnly();
     await shot("codex-reference");
 
