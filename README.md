@@ -54,6 +54,14 @@ Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#
 
 ## Run it locally
 
+Repository changes follow the [merge batcher runbook](docs/merge-batcher.md): full
+relevant VM tests and independent review precede readiness. The required batch CI
+suite tests plan/source/impact-selected units/Batch ready on the exact stacked
+tree; its trusted green result can land independently of red or unknown full-main
+CI. Full main CI remains a separate backstop and release gate. Failed candidate
+blame, splitting and ejection stay held until comparable same-job base batch-suite
+evidence is supported; full-main green alone is not such evidence.
+
 For development, or to evaluate Opengeni before self-hosting. You need [Bun at the exact version in `.bun-version`](.bun-version), Git, curl, Docker, [rustup](https://rustup.rs), a C compiler (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu), and an OpenAI or Azure OpenAI key.
 
 ```bash

@@ -852,8 +852,16 @@ candidate. Version PRs always occupy their own batch.
 
 Queue-green is not release-green. Releases require full main CI on the exact
 released tip, with verified Version ancestry and matching image provenance.
+The required batch suite is plan/source/impact-selected units/Batch ready on the
+exact stacked candidate tree. Its verified latest-attempt success may land even
+when full-main CI is red or unknown; full main CI remains an independent backstop,
+not a candidate admission gate. Full relevant VM suites and independent review
+remain required before readiness. Failed candidate code must not trigger retries,
+splits or member ejection without comparable same-job base batch-suite evidence;
+until that separate contract is implemented, hold the failed path. Full-main CI
+success is not a substitute for that evidence.
 Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
-the controller owns the single unchanged-input flaky retry. Do not stack manual
+the controller owns the single unchanged-input infrastructure-only retry. Do not stack manual
 or in-job retries on it, or silently resubmit an ejected unchanged head.
 Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
 the plan and task receipts are deliberately bound to one run attempt.

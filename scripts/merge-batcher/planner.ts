@@ -1,7 +1,6 @@
 import {
   bindingKey,
   compareText,
-  canonical,
   ejectionKey,
   type BatchSpec,
   type Candidate,
@@ -149,48 +148,9 @@ export function plan(o: Observation, c: Config): Action {
     const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
     return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
   }, 0);
-  if (c.mode === "active") {
-    const base =
-      o.baseCI?.sha === o.baseSha
-        ? o.baseCI
-        : {
-            sha: o.baseSha,
-            status: "unknown" as const,
-            runId: null,
-            attempt: null,
-            reason: "Exact-base full main CI evidence unavailable",
-          };
-    if (
-      ledger.baseHold?.status === "red" &&
-      ledger.baseHold.sha === o.baseSha &&
-      base.status !== "red"
-    )
-      return {
-        kind: "wait",
-        reason: "base_broken: require a later green main tip, not a rerun of the broken base",
-      };
-    if (base.status !== "green") {
-      if (canonical(ledger.baseHold ?? null) !== canonical(base)) {
-        ledger.baseHold = structuredClone(base);
-        return record(
-          base.status === "red"
-            ? "base_broken: hold queue; alert parent/F; no member ejection"
-            : "base_unknown: hold landing and culprit decisions",
-        );
-      }
-      return {
-        kind: "wait",
-        reason:
-          base.status === "red"
-            ? "base_broken: awaiting green main tip"
-            : "base_unknown: awaiting exact full main CI success",
-      };
-    }
-    if (ledger.baseHold) {
-      delete ledger.baseHold;
-      return record("base_recovered: exact current main tip has full CI success");
-    }
-  }
+  // Full main CI is an independent backstop, not candidate admission evidence.
+  // Retain any legacy baseHold for audit; it neither blocks a tested green tip
+  // nor authorizes attribution of a failed subset to one of its members.
   const root = live.find((x) => x.manifest.baseSha === o.baseSha);
   if (root) {
     const run = latestRun(root, c);
@@ -212,30 +172,11 @@ export function plan(o: Observation, c: Config): Action {
         }
       }
       if (run.trusted && run.outcome === "code_failure") {
-        ledger.invalidated = [
-          ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
-        ];
-        const pulls: Pull[] = root.manifest.pulls.map(({ mergeSha, ...p }) => {
-          void mergeSha;
-          return p;
-        });
-        if (pulls.length === 1)
-          ledger.ejected.push({
-            pull: pulls[0]!,
-            reason: "non-retryable exact-candidate code failure; no automatic code/test retry",
-            batchId: root.manifest.batchId,
-            announced: false,
-          });
-        else {
-          const middle = Math.ceil(pulls.length / 2);
-          ledger.recovery.unshift(
-            { batchId: root.manifest.batchId, pulls: pulls.slice(0, middle) },
-            { batchId: root.manifest.batchId, pulls: pulls.slice(middle) },
-          );
-        }
-        return record(
-          pulls.length === 1 ? "isolate exact-head culprit" : "deterministic bisection",
-        );
+        return {
+          kind: "wait",
+          reason:
+            "base_batch_suite_unknown: code failure held without retry, split or ejection; comparable same-job base evidence is not implemented",
+        };
       }
       const intent = ledger.retries[root.manifest.batchId];
       if (intent)
@@ -267,25 +208,19 @@ export function plan(o: Observation, c: Config): Action {
       };
   }
   const unannounced = ledger.ejected.find((e) => !e.announced && !e.effectId);
-  if (unannounced) return { kind: "announce", ejection: unannounced };
-  // Recovery groups are tested sequentially against the actual landed base.
+  if (unannounced)
+    return unannounced.reason === "merge-tree conflict against candidate predecessor"
+      ? { kind: "announce", ejection: unannounced }
+      : {
+          kind: "wait",
+          reason: "legacy code-failure ejection held pending comparable base batch-suite evidence",
+        };
+  // Do not replay bisection work persisted by the former full-main-green policy.
   if (!live.length && ledger.recovery.length) {
-    const group = ledger.recovery[0]!;
-    const pulls = group.pulls.filter(
-      (p) => matches(p) && !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
-    );
-    if (!pulls.length) {
-      ledger.recovery.shift();
-      return record("discard obsolete recovery bindings");
-    }
-    return makeBuild(
-      o.baseSha,
-      null,
-      pulls,
-      group.batchId,
-      inflight < c.maxInflight && !o.mainBusy,
-      0,
-    );
+    return {
+      kind: "wait",
+      reason: "legacy bisection held pending comparable base batch-suite evidence",
+    };
   }
   if (ledger.recovery.length || live.some((item) => item.manifest.recoveryOf !== null))
     return { kind: "wait", reason: "bisection recovery is sequential; no speculative regrouping" };

@@ -375,24 +375,26 @@ observed demand, not an atomic GitHub scheduler or cancellation mechanism.
 Invalidated descendants still occupy CI slots while running: no cancellation
 operation exists in the adapter.
 
-Before active landing or code-failure isolation, the exact base tip must have a
-verified full-main-CI success receipt for the newest run's current, completed attempt. Red main
-records a durable `base_broken` alert and holds without ejecting members; missing,
-running, cancelled or unknown evidence also holds. A later green main tip clears
-the red hold and obsolete candidates rebuild and retest; a green rerun of the same
-broken base does not clear it. Alerts are durable state/stage events for observers,
-not automatic external notifications.
+The required batch suite is the current plan/source/impact-selected unit/Batch
+ready subset on the exact stacked candidate tree. Its trusted, completed, latest
+run-attempt success permits landing even when full-main CI is red, missing,
+running, cancelled or unknown. This is not full-CI equivalence or release evidence.
+Full main CI remains an independent post-merge backstop. Capacity admission still
+respects observed main runner demand; main advancing still invalidates obsolete
+candidates and requires a new exact-tree test. Legacy `baseHold` records remain
+audit history, not green-candidate admission gates.
 
-With policy-green base evidence, the first trusted code-red result splits the
-ordered candidate at `ceil(length / 2)`; halves are tested sequentially against the
-actual landed base. An isolated singleton failure ejects that exact head with an
-exact-head reason comment, without rerunning its failed code/test attempt.
-Changed heads and new ready events may return; merely editing evidence cannot
-re-enqueue the same excluded head/event. Merge-tree conflicts retain their distinct
-conflict reason, not a fabricated CI failure. This policy isolates failing
-integrations; a green baseline does not prove a universally bad PR or rule out
-environment-dependent flakes. Legacy receipt `retryable` flags do not override
-the controller's no-code-retry policy.
+A trusted candidate code failure is **not** proof that a member caused it. Until
+the separate producer/consumer contract supplies comparable same-job base batch-suite
+evidence, failed candidates hold with `base_batch_suite_unknown`: no code retry,
+bisection or singleton ejection, even if full-main CI is green. Existing pending
+code-blame comments and bisection recovery groups also hold; nothing is silently
+cleared or reinterpreted as comparable evidence. No base-only workflow is invoked
+by this implementation. Failed speculative descendants may be invalidated, but
+running CI is never cancelled. Main advancing or readiness changing still permits
+normal invalidation and rebuilding. Merge-tree conflicts retain their distinct
+conflict reason and comment path, not a fabricated CI failure. Legacy receipt
+`retryable` flags do not override the controller's no-code-retry policy.
 
 Infrastructure/cancelled/unknown attempts never incriminate PRs. Eligible positive
 infrastructure evidence waits at least 60 seconds and for admission headroom

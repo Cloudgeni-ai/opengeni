@@ -307,16 +307,12 @@ describe("readiness and deterministic planning", () => {
     o.ledger.recovery = [{ batchId: digest("failed-parent"), pulls: [pull(2)] }];
     expect(plan(o, { ...cfg, maxInflight: 2 }).kind).toBe("wait");
   });
-  test("first trusted code failure bisects immediately without retry", () => {
+  test("first trusted code failure holds without retry or speculative bisection", () => {
     const c = candidate([pull(1), pull(2), pull(3)]);
     c.runs = [run(c, "code_failure")];
     const action = plan(observation(c.manifest.pulls, [c]), cfg);
-    expect(action.kind).toBe("record");
-    if (action.kind === "record")
-      expect(action.ledger.recovery.map((r) => r.pulls.map((p) => p.number))).toEqual([
-        [1, 2],
-        [3],
-      ]);
+    expect(action.kind).toBe("wait");
+    if (action.kind === "wait") expect(action.reason).toContain("base_batch_suite_unknown");
   });
   test.each(["cancelled", "infrastructure", "unknown"] as const)(
     "%s never incriminates PRs and backs off",
@@ -343,12 +339,13 @@ describe("readiness and deterministic planning", () => {
   });
   test("ejected exact head stays out after evidence edit; changed/re-ready heads return", () => {
     const c = candidate();
-    c.runs = [run(c, "code_failure"), run(c, "code_failure", 2)];
-    const o = observation([pull(1)], [c]);
-    const a = plan(o, cfg);
-    if (a.kind !== "record") throw new Error("expected ejection");
-    o.ledger = a.ledger;
-    o.ledger.ejected[0]!.announced = true;
+    const o = observation([pull(1)], []);
+    o.ledger.ejected.push({
+      pull: pull(1),
+      batchId: c.manifest.batchId,
+      reason: "merge-tree conflict against candidate predecessor",
+      announced: true,
+    });
     expect(plan(o, cfg).kind).toBe("wait");
     o.ready[0]!.binding.evidenceDigest = digest("new prose");
     expect(plan(o, cfg).kind).toBe("wait");
@@ -372,8 +369,8 @@ describe("readiness and deterministic planning", () => {
     const o = observation([pull(1)], [c]);
     o.ledger.codeFailures[c.manifest.batchId] = ["100/1"];
     const action = plan(o, cfg);
-    expect(action.kind).toBe("record");
-    if (action.kind === "record") expect(action.ledger.ejected).toHaveLength(1);
+    expect(action.kind).toBe("wait");
+    expect(o.ledger.ejected).toEqual([]);
   });
   test("landed tip reconstruction prevents duplicate landing after restart", () => {
     const c = candidate();
@@ -688,7 +685,7 @@ describe("controller isolation and fencing", () => {
     expect((await f.git.remoteRefs(f.origin.dir)).get("refs/heads/main")).toBe(m.tipSha);
     await expect(controller.step()).rejects.toThrow();
   });
-  test("end-to-end restart each tick: no code retry, bisect, land good exact tip, eject bad head and announce once", async () => {
+  test("end-to-end restart each tick: failed batch holds without retry, split, landing or blame", async () => {
     const f = await fixture();
     const ready = [pull(1, f.first), pull(2, f.second)];
     const histories = new Map<string, Run[]>();
@@ -778,14 +775,14 @@ describe("controller isolation and fencing", () => {
     }
     expect(last).toBe("wait");
     expect(retryCalls).toBe(0);
-    expect(comments).toBe(1);
+    expect(comments).toBe(0);
     const final = await reader.observe();
-    expect(final.ledger.ejected.map((e) => e.pull.number)).toEqual([2]);
-    expect(final.ledger.landed).toHaveLength(1);
-    const landed = final.candidates.find((c) => c.manifest.batchId === final.ledger.landed[0])!;
-    expect(final.baseSha).toBe(landed.manifest.tipSha);
-    expect(landed.manifest.pulls.map((p) => p.number)).toEqual([1]);
-    expect(await f.git.exec(["show", `${final.baseSha}:one.txt`])).toBe("one");
+    expect(final.ledger.ejected).toEqual([]);
+    expect(final.ledger.recovery).toEqual([]);
+    expect(final.ledger.landed).toEqual([]);
+    expect(final.baseSha).toBe(f.base);
+    expect(final.candidates).toHaveLength(1);
+    await expect(f.git.exec(["show", `${final.baseSha}:one.txt`])).rejects.toThrow();
     await expect(f.git.exec(["show", `${final.baseSha}:two.txt`])).rejects.toThrow();
   });
 });
@@ -847,9 +844,8 @@ describe("wire adapters and CLI", () => {
     const c = candidate();
     c.runs = [{ ...run(c, "code_failure"), retryable: false }];
     const action = plan(observation([pull(1)], [c]), cfg);
-    expect(action.kind).toBe("record");
-    if (action.kind === "record")
-      expect(action.ledger.ejected[0]!.reason).toContain("non-retryable");
+    expect(action.kind).toBe("wait");
+    if (action.kind === "wait") expect(action.reason).toContain("without retry");
   });
   test("numeric runId and untrusted task outcome are refused", () => {
     const c = candidate(),
@@ -1177,6 +1173,44 @@ describe("wire adapters and CLI", () => {
 
 describe("integration boundaries and queue-only shadow CI", () => {
   test.each(["red", "unknown"] as const)(
+    "%s full-main status cannot block build or authorize untrusted landing",
+    (status) => {
+      const o = observation();
+      o.baseCI!.status = status;
+      o.ledger.baseHold = { ...o.baseCI! };
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("build");
+      delete o.baseCI;
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("build");
+      const c = candidate();
+      o.candidates = [c];
+      for (const untrusted of [
+        run(c, "success", 1, false),
+        { ...run(c, "success"), status: "in_progress" as const },
+        { ...run(c, "success"), workflow: ".github/workflows/ci.yml" },
+      ]) {
+        c.runs = [untrusted];
+        expect(plan(o, { ...cfg, mode: "active" }).kind).not.toBe("land");
+      }
+      c.runs = [run(c, "success")];
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
+      o.mainBusy = true;
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+    },
+  );
+  test("old recovery groups and unannounced code blame cannot use full-main green as a proxy", () => {
+    const o = observation();
+    o.ledger.recovery.push({ batchId: digest("legacy"), pulls: o.ready });
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+    o.ledger.recovery = [];
+    o.ledger.ejected.push({
+      pull: o.ready[0]!,
+      batchId: digest("legacy"),
+      reason: "non-retryable exact-candidate code failure",
+      announced: false,
+    });
+    expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+  });
+  test.each(["red", "unknown", "green"] as const)(
     "#5243 inherited %s base never bisects or ejects multiple innocent members",
     (status) => {
       const c = candidate([pull(5436), pull(5439), pull(5440)]);
@@ -1184,19 +1218,12 @@ describe("integration boundaries and queue-only shadow CI", () => {
       const o = observation(c.manifest.pulls, [c]);
       o.baseCI!.status = status;
       const action = plan(o, { ...cfg, mode: "active" });
-      expect(action.kind).toBe("record");
-      if (action.kind !== "record") throw new Error("Expected durable hold");
-      expect(action.ledger.baseHold?.status).toBe(status);
-      expect(action.ledger.ejected).toEqual([]);
-      expect(action.ledger.recovery).toEqual([]);
-      o.ledger = action.ledger;
+      expect(action.kind).toBe("wait");
+      expect(o.ledger.ejected).toEqual([]);
+      expect(o.ledger.recovery).toEqual([]);
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
       c.runs = [run(c, "success")];
-      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
-      if (status === "red") {
-        o.baseCI!.status = "green";
-        expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
-      }
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
   test("infra retry eligibility rejects code, ambiguous, second-attempt, Version and unrelated runs", () => {

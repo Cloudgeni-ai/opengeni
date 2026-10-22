@@ -173,7 +173,8 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(this.config.mode === "active" ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // Do not make full-main-CI observation availability a hidden admission
+      // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
       ready: eligible,
       candidates,
