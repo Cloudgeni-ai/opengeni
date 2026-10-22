@@ -162,6 +162,41 @@ test("a GitHub owner-approval request reads as a calm waiting state, not an erro
   expect(html).not.toContain("Choose which tools to add");
 });
 
+test("a Microsoft organization that needs admin approval gets a link for its administrator", async () => {
+  const link =
+    "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=client-1&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite&state=microsoft_admin_consent";
+  const required = await render({ type: "none" }, "failed", {
+    providerId: "microsoft-outlook-mail",
+    error: {
+      code: "admin_consent_required",
+      message: `Your organization requires a Microsoft 365 administrator to approve this app first. Send your administrator this approval link: ${link} After they approve, connect again.`,
+      retryable: true,
+    },
+  });
+  expect(required).toContain("needs a Microsoft 365 admin to approve");
+  expect(required).toContain("Admin approval link");
+  expect(required).toContain(`href="${link.replaceAll("&", "&amp;")}"`);
+  expect(required).toContain("Copy admin approval link");
+  expect(required).not.toContain("Connection setup could not continue");
+  const declined = await render({ type: "none" }, "cancelled", {
+    providerId: "microsoft-outlook-mail",
+    error: {
+      code: "provider_denied",
+      message: `Microsoft did not grant access. If Microsoft said your organization needs an administrator to approve this app, send your administrator this approval link: ${link} After they approve, connect again.`,
+      retryable: true,
+    },
+  });
+  expect(declined).toContain("If it said your organization needs an admin");
+  const other = await render({ type: "none" }, "cancelled", {
+    error: {
+      code: "provider_denied",
+      message: "Authorization was not completed. Start a new connection attempt.",
+      retryable: false,
+    },
+  });
+  expect(other).not.toContain("Admin approval link");
+});
+
 test("GitHub account selection explains how a non-owner requests an organization install", async () => {
   const accounts = [
     {

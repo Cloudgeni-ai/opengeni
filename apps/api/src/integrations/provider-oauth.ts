@@ -45,6 +45,10 @@ import {
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import { requireConnectOwnerAuthority } from "./connect-authority";
+import {
+  microsoftAdminConsentUrl,
+  microsoftAuthorizationNotGranted,
+} from "./microsoft-admin-consent";
 
 import {
   assertConnectionOwnershipAllowedForPrincipal,
@@ -270,6 +274,7 @@ export async function completeApiIntegrationProviderOAuth(
     code?: string | undefined;
     state?: string | undefined;
     error?: string | undefined;
+    errorDescription?: string | undefined;
     requestUrl: string;
   },
 ): Promise<{ redirectTo: string; exactReturn?: boolean }> {
@@ -319,21 +324,33 @@ export async function completeApiIntegrationProviderOAuth(
     });
     if (!consumed) throw new ProviderOAuthCallbackError("state_replayed");
     if (connectOperation && (input.error || !input.code)) {
+      const denial = input.error
+        ? microsoftDenial(deps.settings, state, apiBaseUrl, input.error, input.errorDescription)
+        : null;
       await finishConnectOperation(deps.db, state, {
         ...connectOperation,
         authorize: (tx, _attempt, origin) =>
           requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-        commit: async (_tx, current) => ({
-          ...current,
-          revision: current.revision + 1,
-          state: input.error === "access_denied" ? "cancelled" : "failed",
-          nextAction: { type: "none" },
-          error: {
-            code: input.error ? "provider_denied" : "missing_code",
-            message: "Authorization was not completed. Start a new connection attempt.",
-            retryable: false,
-          },
-        }),
+        commit: async (_tx, current) =>
+          denial
+            ? {
+                ...current,
+                revision: current.revision + 1,
+                state: denial.state,
+                nextAction: { type: "none" },
+                error: denial.error,
+              }
+            : {
+                ...current,
+                revision: current.revision + 1,
+                state: input.error === "access_denied" ? "cancelled" : "failed",
+                nextAction: { type: "none" },
+                error: {
+                  code: input.error ? "provider_denied" : "missing_code",
+                  message: "Authorization was not completed. Start a new connection attempt.",
+                  retryable: false,
+                },
+              },
       });
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
@@ -612,6 +629,33 @@ export function isApiIntegrationProviderOAuthState(
   } catch {
     return false;
   }
+}
+
+/** Microsoft denial with an administrator approval link, or null for other providers. */
+function microsoftDenial(
+  settings: Settings,
+  state: ProviderOAuthState,
+  apiBaseUrl: string,
+  error: string,
+  description: string | undefined,
+): ReturnType<typeof microsoftAuthorizationNotGranted> | null {
+  const definition = integrationDefinitionById(state.definitionId);
+  if (!definition || definition.provider.id !== "microsoft") return null;
+  let clientId: string;
+  try {
+    clientId = providerClientForDefinition(settings, definition).clientId;
+  } catch {
+    return null;
+  }
+  return microsoftAuthorizationNotGranted({
+    error,
+    description,
+    adminConsentUrl: microsoftAdminConsentUrl({
+      clientId,
+      redirectUri: `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`,
+      definition,
+    }),
+  });
 }
 
 function providerOAuthCallbackPath(definition: IntegrationDefinition): string {
