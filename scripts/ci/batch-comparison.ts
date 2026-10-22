@@ -49,12 +49,56 @@ export const RECIPE_ENTRIES = [
 export const RECIPE_FILES = [
   ".github/workflows/batch-ci.yml",
   ".bun-version",
+  ".changeset/config.json",
+  ".oxfmtrc.json",
+  ".oxlintrc.json",
   "bun.lock",
   "bunfig.toml",
   "Cargo.lock",
   "rust-toolchain.toml",
   "scripts/ci/batch-comparison.json",
+  "tsconfig.base.json",
 ] as const;
+/**
+ * The harness tree. A script the harness executes, and its imports, are recipe
+ * only here: product code a guard imports to inspect (for example the API app
+ * the public-API check loads) is the code under comparison, never the recipe.
+ */
+const HARNESS_ROOT = "scripts/";
+const SCRIPT_PATH = String.raw`(?:\.\/)?([\w.@-]+(?:\/[\w.@-]+)*\.(?:ts|tsx|js|mjs))`;
+/** `["bun", "<script>"]` in a harness source: a subprocess, not an import. */
+const ARRAY_SCRIPT = new RegExp(String.raw`["']bun["']\s*,\s*["']${SCRIPT_PATH}["']`, "g");
+/** `["bun", "run", "<name>"]` in a harness source. */
+const ARRAY_RUN = /["']bun["']\s*,\s*["']run["']\s*,\s*["']([\w:.-]+)["']/g;
+/** Shell command text (package scripts, workflow steps): `bun <script>`, `bun run <name>`. */
+const SHELL_SCRIPT = new RegExp(String.raw`\bbun\s+(?:--[\w-]+(?:=\S+)?\s+)*${SCRIPT_PATH}`, "g");
+const SHELL_RUN = /\bbun\s+run\s+([\w:.-]+)/g;
+const SOURCE = /\.(?:ts|tsx|js|mjs)$/;
+
+/**
+ * Harness scripts reached by execution rather than import: subprocesses the
+ * text runs directly and root package scripts it runs by name, recursively
+ * through the commands of those package scripts. Source files are read in
+ * array (spawn) form only, so prose that merely names a command binds nothing.
+ */
+export function executedScripts(
+  text: string,
+  shell: boolean,
+  scripts: Readonly<Record<string, string>>,
+  seen: Set<string> = new Set(),
+): string[] {
+  const found: string[] = [];
+  for (const match of text.matchAll(shell ? SHELL_SCRIPT : ARRAY_SCRIPT))
+    found.push(posix.normalize(match[1]!));
+  for (const match of text.matchAll(shell ? SHELL_RUN : ARRAY_RUN)) {
+    const name = match[1]!;
+    const command = Object.hasOwn(scripts, name) ? scripts[name] : undefined;
+    if (typeof command !== "string" || seen.has(name)) continue;
+    seen.add(name);
+    found.push(...executedScripts(command, true, scripts, seen));
+  }
+  return found;
+}
 
 /** Exact tracked blobs of a commit: path -> object id. */
 export function trackedBlobs(listing: string): Map<string, string> {
@@ -83,14 +127,25 @@ function resolveLocalImport(from: string, specifier: string, blobs: Map<string, 
 
 /**
  * Recipe identity: the transitive local import closure of every harness entry,
- * the workflow, toolchain pins, lockfile and every package manifest. Package
- * imports resolve through the lockfile and manifests, which are bound here.
+ * every harness script those files execute (subprocesses and root package
+ * scripts, with their own imports and executions inside the harness tree), the
+ * workflow, tool configuration, toolchain pins, lockfile and every package
+ * manifest. Package imports resolve through the lockfile and manifests, which
+ * are bound here. An executed harness script that is not tracked is bound as
+ * absent (null), so adding it later changes the recipe.
  */
 export function recipePaths(
   blobs: Map<string, string>,
   read: (path: string) => string,
 ): [string, string | null][] {
   const transpiler = new Bun.Transpiler({ loader: "ts" });
+  // The transpiler rejects a leading shebang; it never carries imports.
+  const imports = (path: string) =>
+    transpiler
+      .scanImports(read(path).replace(/^#!.*/, ""))
+      .filter((item) => item.path.startsWith("."))
+      .map((item) => item.path);
+  // Phase 1: the import closure of the entries, unrestricted as before.
   const closure = new Set<string>();
   const pending: string[] = [...RECIPE_ENTRIES];
   while (pending.length) {
@@ -98,15 +153,46 @@ export function recipePaths(
     if (closure.has(path)) continue;
     if (!blobs.has(path)) throw new Error(`Batch harness entry ${path} is not tracked`);
     closure.add(path);
-    if (!/\.(?:ts|tsx|js)$/.test(path)) continue;
-    // The transpiler rejects a leading shebang; it never carries imports.
-    for (const item of transpiler.scanImports(read(path).replace(/^#!.*/, "")))
-      if (item.path.startsWith(".")) pending.push(resolveLocalImport(path, item.path, blobs));
+    if (SOURCE.test(path))
+      for (const specifier of imports(path))
+        pending.push(resolveLocalImport(path, specifier, blobs));
+  }
+  // Phase 2: what that closure and the workflow execute, with the executed
+  // scripts' own imports and executions, inside the harness tree only.
+  const manifest = blobs.has("package.json")
+    ? (JSON.parse(read("package.json")) as { scripts?: unknown }).scripts
+    : undefined;
+  const scripts =
+    manifest && typeof manifest === "object" ? (manifest as Record<string, string>) : {};
+  const absent = new Set<string>();
+  const executed: string[] = [];
+  const execute = (from: string, shell: boolean) => {
+    for (const path of executedScripts(read(from), shell, scripts))
+      if (path.startsWith(HARNESS_ROOT)) executed.push(path);
+  };
+  for (const path of RECIPE_FILES)
+    if (blobs.has(path) && /\.ya?ml$/.test(path)) execute(path, true);
+  for (const path of closure) if (SOURCE.test(path)) execute(path, false);
+  while (executed.length) {
+    const path = executed.pop()!;
+    if (closure.has(path) || absent.has(path)) continue;
+    if (!blobs.has(path)) {
+      absent.add(path);
+      continue;
+    }
+    closure.add(path);
+    if (!SOURCE.test(path)) continue;
+    for (const specifier of imports(path)) {
+      const target = posix.normalize(posix.join(posix.dirname(path), specifier));
+      if (target.startsWith(HARNESS_ROOT))
+        executed.push(resolveLocalImport(path, specifier, blobs));
+    }
+    execute(path, false);
   }
   const manifests = [...blobs.keys()].filter(
     (path) => path === "package.json" || path.endsWith("/package.json"),
   );
-  return [...new Set([...closure, ...RECIPE_FILES, ...manifests])]
+  return [...new Set([...closure, ...absent, ...RECIPE_FILES, ...manifests])]
     .sort()
     .map((path) => [path, blobs.get(path) ?? null]);
 }

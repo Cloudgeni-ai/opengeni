@@ -128,6 +128,31 @@ describe("base-comparison runs (batch-base-comparison/v1)", () => {
     expect(upload.with.path).toBe("${{ runner.temp }}/batch-comparison.json");
   });
 
+  test("role evidence travels as sidecars any base verifier's receipt glob ignores", () => {
+    const run = (job: string) =>
+      workflow.jobs[job].steps.find((step: any) => step.run?.includes("batch-result.ts run --job"))
+        .run;
+    const upload = (job: string) =>
+      workflow.jobs[job].steps.find((step: any) =>
+        step.with?.name?.startsWith("batch-receipt-${{ github.run_attempt }}-"),
+      ).with.path as string;
+    expect(run("source")).toContain('--evidence "$RUNNER_TEMP/comparison-source.json"');
+    expect(run("units")).toContain(
+      '--evidence "$RUNNER_TEMP/comparison-unit-${{ matrix.index }}.json"',
+    );
+    expect(upload("source").split("\n").filter(Boolean)).toEqual([
+      "${{ runner.temp }}/receipt-source.json",
+      "${{ runner.temp }}/comparison-source.json",
+    ]);
+    expect(upload("units")).toContain(
+      "${{ runner.temp }}/comparison-unit-${{ matrix.index }}.json",
+    );
+    // The ready verifier globs receipt-*.json; no sidecar name may match it.
+    for (const job of ["source", "units"])
+      for (const path of upload(job).split("\n").filter(Boolean))
+        expect(/receipt-[^/]*\.json$/.test(path)).toBe(path.includes("/receipt-"));
+  });
+
   test("the comparison contract marker is present for historical-base detection", () => {
     expect(JSON.parse(readFileSync("scripts/ci/batch-comparison.json", "utf8"))).toEqual({
       comparisonSchema: "batch-base-comparison/v1",

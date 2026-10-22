@@ -31,12 +31,23 @@ export type BatchTaskReceipt = BatchIdentity & {
   startedAt: string;
   finishedAt: string;
 };
-/** Comparison-only receipt fields; they never enter the aggregated verdict. */
+/** Comparison-only task fields; they never enter a receipt or the aggregated verdict. */
 export type ComparisonTaskFields = {
   environment?: Record<string, string | null>;
   units?: { category: string; files: string[]; exitCode: number | null }[];
   steps?: { step: string; exitCode: number | null }[];
 };
+/**
+ * One task's comparison evidence, written beside (never inside) its receipt as
+ * `comparison-<job>.json`. Receipts keep the exact verdict shape that every
+ * base's `receipt-*.json` aggregator copies into the bounded result artifact.
+ */
+export type ComparisonSidecar = BatchIdentity &
+  ComparisonTaskFields & {
+    schemaVersion: 1;
+    comparisonSchema: typeof COMPARISON_SCHEMA;
+    job: string;
+  };
 const TASK_FIELDS = [
   "schemaVersion",
   "batchId",
@@ -187,7 +198,7 @@ export function aggregateBatchResult(
 export function buildComparisonEvidence(input: {
   identity: BatchIdentity;
   unitShards: number;
-  receipts: readonly unknown[];
+  sidecars: readonly unknown[];
   verifiedJobs: readonly string[];
   batch: unknown;
   plan: unknown;
@@ -228,12 +239,15 @@ export function buildComparisonEvidence(input: {
   if (inventory.shards !== input.unitShards)
     reasons.push("unit shard count differs from inventory");
   const id = input.identity;
-  const rows = new Map<string, BatchTaskReceipt & ComparisonTaskFields>();
-  for (const item of input.receipts) {
-    const row = item as (BatchTaskReceipt & ComparisonTaskFields) | null;
+  // Evidence counts only for a task whose verdict receipt verified for this
+  // exact attempt; an unbound, stale or duplicate sidecar never completes it.
+  const rows = new Map<string, ComparisonSidecar>();
+  for (const item of input.sidecars) {
+    const row = item as ComparisonSidecar | null;
     if (
       !row ||
       row.schemaVersion !== 1 ||
+      row.comparisonSchema !== COMPARISON_SCHEMA ||
       row.batchId !== id.batchId ||
       row.headSha !== id.headSha ||
       row.runId !== id.runId ||
@@ -241,7 +255,7 @@ export function buildComparisonEvidence(input: {
       !input.verifiedJobs.includes(row.job)
     )
       continue;
-    if (rows.has(row.job)) reasons.push(`duplicate ${row.job} receipt`);
+    if (rows.has(row.job)) reasons.push(`duplicate ${row.job} comparison evidence`);
     rows.set(row.job, row);
   }
   const expected = (inventory.units as { category: string; files: string[] }[]).map((unit) => ({
@@ -423,8 +437,25 @@ if (import.meta.main) {
         exitCode,
         startedAt,
         finishedAt: new Date().toISOString(),
-        ...comparison,
       });
+      const evidence = argument("--evidence", true);
+      if (evidence) {
+        try {
+          const sidecar: ComparisonSidecar = {
+            schemaVersion: 1,
+            comparisonSchema: COMPARISON_SCHEMA,
+            ...identity,
+            job,
+            ...comparison,
+          };
+          save(evidence, sidecar);
+        } catch (error) {
+          console.error(
+            "Comparison evidence not recorded; attribution will hold:",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
     }
     process.exit(exitCode < 0 ? 1 : exitCode);
   } else if (mode === "aggregate") {
@@ -460,10 +491,13 @@ if (import.meta.main) {
       if (batch?.purpose === BASE_PURPOSE) output.purpose = BASE_PURPOSE;
       if (comparisonOutput) {
         try {
+          const sidecars: unknown[] = [];
+          for await (const path of new Bun.Glob("**/comparison-*.json").scan({ cwd: directory }))
+            sidecars.push(readJson(join(directory, path)));
           const evidence = buildComparisonEvidence({
             identity,
             unitShards: units,
-            receipts,
+            sidecars,
             verifiedJobs: result.tasks.map((task) => task.job),
             batch,
             plan: readJson(join(planDirectory, "execution-plan.json")),

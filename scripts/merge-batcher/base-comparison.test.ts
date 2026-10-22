@@ -101,7 +101,7 @@ function runDocuments(input: {
   const steps = { "site-runtime": 0, changeset: 0, typecheck: 0, guards: 0, ...input.steps };
   const unitExit = [exits.a, exits.b, exits.cd].find((code) => code !== 0 && code !== null) ?? 0;
   const sourceExit = Object.values(steps).find((code) => code !== 0 && code !== null) ?? 0;
-  const task = (job: string, exitCode: number, extra: object = {}) => ({
+  const task = (job: string, exitCode: number) => ({
     schemaVersion: 1 as const,
     ...identity,
     job,
@@ -109,15 +109,22 @@ function runDocuments(input: {
     ...classifyBatchExit(exitCode),
     startedAt: "2026-10-22T12:00:00Z",
     finishedAt: "2026-10-22T12:01:00Z",
-    ...extra,
   });
-  const receipts = [
-    task("plan", 0),
-    task("source", sourceExit, {
+  // Verdict receipts and their role-evidence sidecars, as the workflow writes them.
+  const sidecar = (job: string, fields: object) => ({
+    schemaVersion: 1 as const,
+    comparisonSchema: COMPARISON_SCHEMA,
+    ...identity,
+    job,
+    ...fields,
+  });
+  const receipts = [task("plan", 0), task("source", sourceExit), task("unit-0", unitExit)];
+  const sidecars = [
+    sidecar("source", {
       environment: SOURCE_ENV,
       steps: Object.entries(steps).map(([step, exitCode]) => ({ step, exitCode })),
     }),
-    task("unit-0", unitExit, {
+    sidecar("unit-0", {
       environment: input.unitEnv ?? UNIT_ENV,
       units: [
         { ...UNITS[0]!, exitCode: exits.a },
@@ -135,7 +142,7 @@ function runDocuments(input: {
   const evidence = buildComparisonEvidence({
     identity,
     unitShards: 1,
-    receipts,
+    sidecars,
     verifiedJobs: aggregated.tasks.map((item) => item.job),
     batch: { purpose: input.purpose, baseSha: BASE_SHA, planDigest: digest(plan) },
     plan,

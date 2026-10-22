@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { executionPlan } from "../merge-batcher/base-comparison";
 import { digest } from "../merge-batcher/model";
 import {
+  executedScripts,
   executionStatus,
   expectedUnits,
   RECIPE_ENTRIES,
@@ -86,6 +87,119 @@ describe("recipe identity", () => {
     const missing = new Map(blobs);
     missing.delete("scripts/ci/batch-setup.ts");
     expect(() => recipePaths(missing, read)).toThrow("not tracked");
+  });
+
+  test("harness scripts run as subprocesses or package scripts are recipe", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const before = recipePaths(blobs, read);
+    const names = before.map(([path]) => path);
+    for (const path of [
+      // Spawned by the source and guard runners, never imported by them.
+      "scripts/typecheck.ts",
+      "scripts/generate-site-browser-runtime.ts",
+      "scripts/check-migration-online-safety.ts",
+      "scripts/check-workspace-billing-static.ts",
+      // Imported by an executed script.
+      "scripts/migration-online-safety.ts",
+      // Tool configuration the source steps read.
+      ".oxlintrc.json",
+      ".oxfmtrc.json",
+      ".changeset/config.json",
+      "tsconfig.base.json",
+    ]) {
+      expect(names).toContain(path);
+      const changed = new Map(blobs).set(path, "0".repeat(40));
+      expect(digest(recipePaths(changed, read))).not.toBe(digest(before));
+    }
+    // Product code a guard loads to inspect (the public-API check imports the
+    // API app) is what is compared, never recipe; only the harness's own test
+    // database helper is imported from outside scripts/.
+    expect(names.filter((path) => !path.startsWith("scripts/") && /\.tsx?$/.test(path))).toEqual([
+      "packages/testing/src/shared-pg.ts",
+    ]);
+    expect(blobs.has("apps/api/src/app.ts")).toBe(true);
+    const product = new Map(blobs).set("apps/api/src/app.ts", "0".repeat(40));
+    expect(digest(recipePaths(product, read))).toBe(digest(before));
+  });
+
+  test("execution edges: spawned, run by name, nested, untracked and outside the harness", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const extra: Record<string, string> = {
+      // A new harness script spawned by the source runner, importing a helper
+      // that itself spawns a package script by name.
+      "scripts/ci/batch-source.ts": `${read("scripts/ci/batch-source.ts")}\nconst x = ["bun", "scripts/new-harness.ts"];\nconst y = ["bun", "apps/api/src/spawned-product.ts"];\n`,
+      "scripts/new-harness.ts": 'import "./new-helper";\n',
+      "scripts/new-helper.ts": 'const run = ["bun", "run", "new-script"];\n',
+      "package.json": JSON.stringify({
+        ...JSON.parse(read("package.json")),
+        scripts: {
+          ...JSON.parse(read("package.json")).scripts,
+          "new-script": "bun run new-nested && bun --silent scripts/new-leaf.ts",
+          "new-nested": "bun scripts/new-nested.ts",
+        },
+      }),
+      "scripts/new-leaf.ts": "",
+      "scripts/new-nested.ts": "",
+      // A workflow step that runs a harness script no entry imports or spawns.
+      ".github/workflows/batch-ci.yml": `${read(".github/workflows/batch-ci.yml")}\n# run: bun scripts/new-step.ts\n`,
+      "scripts/new-step.ts": "",
+    };
+    const overlay = (path: string) => extra[path] ?? read(path);
+    const tracked = new Map(blobs);
+    for (const path of [
+      "scripts/new-harness.ts",
+      "scripts/new-helper.ts",
+      "scripts/new-leaf.ts",
+      "scripts/new-nested.ts",
+      "scripts/new-step.ts",
+    ])
+      tracked.set(path, "1".repeat(40));
+    const bound = new Map(recipePaths(tracked, overlay));
+    for (const path of [
+      "scripts/new-harness.ts",
+      "scripts/new-helper.ts",
+      "scripts/new-leaf.ts",
+      "scripts/new-nested.ts",
+      "scripts/new-step.ts",
+    ])
+      expect(bound.get(path)).toBe("1".repeat(40));
+    // Product code is never recipe, even when a harness spawns it.
+    expect(bound.has("apps/api/src/spawned-product.ts")).toBe(false);
+    // An executed script that is not tracked is bound as absent, so adding it
+    // later changes the recipe instead of slipping in unbound.
+    const untracked = new Map(tracked);
+    untracked.delete("scripts/new-leaf.ts");
+    const absent = recipePaths(untracked, overlay);
+    expect(new Map(absent).get("scripts/new-leaf.ts")).toBeNull();
+    expect(digest(absent)).not.toBe(digest(recipePaths(tracked, overlay)));
+  });
+
+  test("executed scripts are read from spawn arrays in sources and commands in shell text", () => {
+    const scripts = {
+      check: "bun run inner && bun scripts/outer.ts",
+      inner: "bun --smol ./scripts/inner.ts --flag",
+      loop: "bun run loop",
+    };
+    expect(executedScripts('spawn(["bun", "scripts/a.ts", "--x"]);', false, scripts)).toEqual([
+      "scripts/a.ts",
+    ]);
+    expect(executedScripts("Bun.spawn(['bun', 'run', 'check'])", false, scripts)).toEqual([
+      "scripts/outer.ts",
+      "scripts/inner.ts",
+    ]);
+    // Prose in a source names a command without running it.
+    expect(executedScripts("// run `bun scripts/a.ts` or bun run check", false, scripts)).toEqual(
+      [],
+    );
+    expect(executedScripts("run: bun scripts/a.ts && bun run check", true, scripts)).toEqual([
+      "scripts/a.ts",
+      "scripts/outer.ts",
+      "scripts/inner.ts",
+    ]);
+    // Recursion terminates; unknown names bind nothing.
+    expect(executedScripts("bun run loop && bun run missing", true, scripts)).toEqual([]);
   });
 
   test("tree listings keep only blobs and reject unreadable entries", () => {

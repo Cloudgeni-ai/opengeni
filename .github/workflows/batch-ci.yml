@@ -114,14 +114,19 @@ jobs:
       - name: Run source contracts and record an exact code verdict
         run: >-
           bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json"
-          --role source --steps "$RUNNER_TEMP/source-steps.json" --
+          --role source --steps "$RUNNER_TEMP/source-steps.json"
+          --evidence "$RUNNER_TEMP/comparison-source.json" --
           bun scripts/ci/batch-source.ts "$RUNNER_TEMP/batch-plan/impact-plan.json"
           --steps "$RUNNER_TEMP/source-steps.json" $BATCH_CONTINUE
+      # Comparison evidence rides beside the receipt; any base's receipt-*.json
+      # verifier ignores it, so the bounded verdict shape never changes.
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
           name: batch-receipt-${{ github.run_attempt }}-source
-          path: ${{ runner.temp }}/receipt-source.json
+          path: |
+            ${{ runner.temp }}/receipt-source.json
+            ${{ runner.temp }}/comparison-source.json
           if-no-files-found: ignore
 
   units:
@@ -168,7 +173,8 @@ jobs:
         run: >-
           bun scripts/ci/batch-result.ts run --job unit-${{ matrix.index }} --output "$RUNNER_TEMP/receipt-unit-${{ matrix.index }}.json"
           --role unit --postgres-evidence "$RUNNER_TEMP/batch-postgres.json"
-          --units "$RUNNER_TEMP/unit-outcomes-${{ matrix.index }}.json" --
+          --units "$RUNNER_TEMP/unit-outcomes-${{ matrix.index }}.json"
+          --evidence "$RUNNER_TEMP/comparison-unit-${{ matrix.index }}.json" --
           bun scripts/ci/profile-command.ts --name batch-unit-${{ matrix.index }}
           --output "$RUNNER_TEMP/batch-unit-${{ matrix.index }}.json" --timeout-seconds 1200 --
           bun scripts/ci/run-unit-shard.ts --plan "$RUNNER_TEMP/batch-plan/impact-plan.json"
@@ -180,6 +186,7 @@ jobs:
           name: batch-receipt-${{ github.run_attempt }}-unit-${{ matrix.index }}
           path: |
             ${{ runner.temp }}/receipt-unit-${{ matrix.index }}.json
+            ${{ runner.temp }}/comparison-unit-${{ matrix.index }}.json
             ${{ runner.temp }}/batch-unit-${{ matrix.index }}.json
           if-no-files-found: ignore
 

@@ -331,14 +331,28 @@ cancels or lands, and no base-purpose run exists until the controller publishes 
   failures are `fail`. Coverage is complete only when every expected unit and all
   four source steps (`site-runtime`, `changeset`, `typecheck`, `guards`) are
   `pass` or `fail`, nothing is absent, all receipts agree and the recipe is known.
-  Aggregated `tasks` keep only verdict fields, so the result stays within its bound.
+- **Sidecars.** Receipts (`receipt-<job>.json`) keep exactly the verdict fields.
+  Each `source` and `unit-<n>` task writes its role evidence (environment, unit
+  exits, step exits) beside its receipt as `comparison-<job>.json`, bound to the
+  same schema, batch, tip, run, attempt and job. The ready job runs the verifier of
+  the candidate's base, and older verifiers copy every `receipt-*.json` row into
+  the result; folding evidence into receipts would push a full-inventory result
+  past the controller's 64 KiB result bound even when everything passed. A sidecar
+  counts only for a job whose receipt verified for this exact attempt; a missing,
+  stale or duplicate sidecar leaves coverage incomplete, never green.
 - **Recipe.** `recipeDigest` binds the blob IDs of the batch harness's transitive
-  local import closure, the workflow, `.bun-version`, `bun.lock`, every
+  local import closure, every harness script that closure or the workflow executes
+  (spawned as `["bun", "<script>"]`, run as `bun <script>` or by root package
+  script name, recursively, with their own imports and executions) inside
+  `scripts/`, the workflow, tool configuration (`.oxlintrc.json`, `.oxfmtrc.json`,
+  `.changeset/config.json`, `tsconfig.base.json`), `.bun-version`, `bun.lock`, every
   `package.json` and other toolchain pins, plus role-bound environment: runner
   OS/architecture, image OS/version, Bun and Node versions and concurrency settings
   for `source`, and the same plus PostgreSQL `version()` and files-per-process for
-  units. Plan and ready jobs are excluded. Missing or disagreeing evidence leaves
-  the recipe unknown and the run not comparable.
+  units. Product code a guard loads to inspect is compared, never recipe. An
+  executed script that is not tracked is bound as absent. Plan and ready jobs are
+  excluded. Missing or disagreeing evidence leaves the recipe unknown and the run
+  not comparable.
 - **Verification and verdict.** `verifyBaseRun` requires the batch workflow, the
   exact base branch and tip, the latest attempt, a completed run, a base-purpose
   result (`verifyRunResult`; `verifyResult` rejects every non-candidate purpose),
