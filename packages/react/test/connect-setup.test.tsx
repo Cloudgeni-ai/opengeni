@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConnectController, type ConnectAttempt, type ConnectTransport } from "@opengeni/connect";
 import { ConnectSetup } from "../src/connect";
+import { curatedAutoAdvance } from "../src/connect-setup";
 
 async function render(
   nextAction: ConnectAttempt["nextAction"],
@@ -185,4 +186,89 @@ test("GitHub account selection explains how a non-owner requests an organization
   expect(github).toContain("send its owners");
   const other = await render({ type: "select_account", accounts }, "account_selection");
   expect(other).not.toContain("Only its owners can connect it");
+});
+
+const curatedPreview: ConnectAttempt["nextAction"] = {
+  type: "preview",
+  previewId: "preview",
+  contentHash: "hash",
+  operations: [
+    { id: "read", label: "Read mail", kind: "read" },
+    { id: "send", label: "Send mail", kind: "mutation" },
+  ],
+};
+
+test("a built-in integration finishes by itself after sign-in instead of asking to choose tools", async () => {
+  const connected = await render({ type: "none" }, "connected_but_incomplete", {
+    completionRequirement: "integration",
+  });
+  expect(connected).toContain("Finishing setup");
+  expect(connected).not.toContain("Choose tools");
+  const preview = await render(curatedPreview, "preview", {
+    completionRequirement: "integration",
+    source: { kind: "definition", definitionId: "microsoft-outlook-mail" },
+  });
+  expect(preview).toContain("Finishing setup");
+  expect(preview).not.toContain("Add selected tools");
+});
+
+test("built-in integrations advance to the preview and install every reviewed tool", () => {
+  const base = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-outlook-mail",
+    ownership: "personal" as const,
+    revision: 2,
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "integration" as const,
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "connected_but_incomplete",
+      nextAction: { type: "none" },
+    }),
+  ).toEqual({ type: "retry" });
+  expect(curatedAutoAdvance({ ...base, state: "preview", nextAction: curatedPreview })).toEqual({
+    type: "install",
+    previewId: "preview",
+    contentHash: "hash",
+    operationIds: ["read", "send"],
+  });
+  // Errors, custom sources and connection-only providers stay with the person.
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "preview",
+      nextAction: curatedPreview,
+      error: { code: "source_changed", message: "changed", retryable: true },
+    }),
+  ).toBeNull();
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "preview",
+      nextAction: curatedPreview,
+      source: { kind: "openapi", url: "https://api.example.com/openapi.json" },
+    }),
+  ).toBeNull();
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      completionRequirement: "connection",
+      state: "connected_but_incomplete",
+      nextAction: { type: "none" },
+    }),
+  ).toBeNull();
+});
+
+test("a custom OpenAPI source keeps the explicit tool review", async () => {
+  const html = await render(curatedPreview, "preview", {
+    completionRequirement: "integration",
+    source: { kind: "openapi", url: "https://api.example.com/openapi.json" },
+  });
+  expect(html).toContain("Add selected tools");
+  expect(html).not.toContain("Finishing setup");
 });
