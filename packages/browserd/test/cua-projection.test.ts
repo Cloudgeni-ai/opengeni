@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { InteractionSemanticNode } from "@opengeni/contracts";
-import { projectElements, unindexedTextByElement } from "../src/cua/projection";
+import {
+  dateFields,
+  dateFieldTyping,
+  projectElements,
+  unindexedTextByElement,
+} from "../src/cua/projection";
 
 test("desktop elements with document-sized labels and values still form valid nodes", () => {
   const [node] = projectElements(
@@ -257,4 +262,108 @@ test("Chrome tabs are named without their live memory usage", () => {
     "Player - Audio playing",
     "Memory usage - 10 MB notes",
   ]);
+});
+
+/** Chrome's elements for a page with one web date or time field. */
+function webDateField(
+  role: "AXDateField" | "AXTimeField",
+  label: string,
+  parts: string[],
+  value?: string,
+) {
+  return [
+    { element_index: 0, role: "AXWindow", label: "Page", actions: [] },
+    { element_index: 1, parent_index: 0, role: "AXWebArea", label: "Page", actions: [] },
+    {
+      element_index: 2,
+      element_token: "s1:2",
+      parent_index: 1,
+      role,
+      label,
+      ...(value === undefined ? {} : { value }),
+      actions: ["AXPress"],
+    },
+    ...parts.flatMap((part, index) => [
+      {
+        element_index: 3 + index * 2,
+        element_token: `s1:${3 + index * 2}`,
+        parent_index: 2,
+        role: "AXIncrementor",
+        label: `${part} ${label}`,
+        value: "--",
+        actions: ["AXIncrement", "AXDecrement"],
+      },
+      {
+        element_index: 4 + index * 2,
+        element_token: `s1:${4 + index * 2}`,
+        parent_index: 2,
+        role: "AXStaticText",
+        value: "/",
+        actions: [],
+      },
+    ]),
+  ];
+}
+
+test("a web date or time field takes a value; its parts are known in the order shown", () => {
+  const elements = webDateField(
+    "AXDateField",
+    "Date of birth",
+    ["Day", "Month", "Year"],
+    "1976-07-15",
+  );
+  expect([...dateFields(elements).entries()]).toEqual([
+    [2, { segments: ["day", "month", "year"], parts: [3, 5, 7] }],
+  ]);
+  const field = projectElements(elements, "macos").find((node) => node.ref === "s1:2")!;
+  expect(field.actions).toEqual(["invoke", "set_value", "focus"]);
+  expect(field.value).toBe("1976-07-15");
+  // Outside web content, or with a part named in another language, the
+  // field is not one this knows how to fill.
+  const native = elements.filter((element) => element.role !== "AXWebArea");
+  expect(dateFields(native).size).toBe(0);
+  expect(dateFields(webDateField("AXDateField", "Fødselsdato", ["Dag", "Måned", "År"])).size).toBe(
+    0,
+  );
+  expect(projectElements(native, "macos").find((node) => node.ref === "s1:2")!.actions).toEqual([
+    "invoke",
+    "focus",
+  ]);
+});
+
+test("a date or time value becomes each part's digits in the field's own order", () => {
+  expect(dateFieldTyping(["day", "month", "year"], "1976-07-15")).toEqual({
+    texts: ["15", "07", "1976"],
+  });
+  expect(dateFieldTyping(["month", "day", "year"], "2027-3-7")).toEqual({
+    texts: ["03", "07", "2027"],
+  });
+  expect(dateFieldTyping(["hours", "minutes"], "09:30")).toEqual({ texts: ["09", "30"] });
+  expect(dateFieldTyping(["hours", "minutes", "seconds"], "09:30")).toEqual({
+    texts: ["09", "30", "00"],
+  });
+  expect(dateFieldTyping(["hours", "minutes", "meridiem"], "14:05")).toEqual({
+    texts: ["02", "05", "P"],
+  });
+  expect(dateFieldTyping(["hours", "minutes", "meridiem"], "00:15")).toEqual({
+    texts: ["12", "15", "A"],
+  });
+  expect(dateFieldTyping(["month", "year"], "2031-07")).toEqual({ texts: ["07", "2031"] });
+  expect(dateFieldTyping(["week", "year"], "2027-W09")).toEqual({ texts: ["09", "2027"] });
+  expect(dateFieldTyping(["day", "month", "year", "hours", "minutes"], "2027-03-07T14:05")).toEqual(
+    { texts: ["07", "03", "2027", "14", "05"] },
+  );
+  // A value that does not fit names the form the field takes.
+  for (const [segments, value, form] of [
+    [["day", "month", "year"], "07/15/1976", "YYYY-MM-DD"],
+    [["day", "month", "year"], "1976-07", "YYYY-MM-DD"],
+    [["day", "month", "year"], "1976-13-01", "YYYY-MM-DD"],
+    [["day", "month", "year"], "2027-03-07T14:05", "YYYY-MM-DD"],
+    [["day", "month", "year", "hours", "minutes"], "2027-03-07", "YYYY-MM-DDTHH:MM"],
+    [["week", "year"], "2027-03", "YYYY-Www"],
+    [["hours", "minutes", "seconds"], "9.30", "HH:MM:SS"],
+  ] as const)
+    expect(dateFieldTyping(segments, value)).toEqual({
+      error: `This date or time field takes its whole value in the form ${form}`,
+    });
 });

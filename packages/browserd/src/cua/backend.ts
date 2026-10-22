@@ -27,8 +27,19 @@ import {
   WindowState,
   type CuaDesktopRuntime,
   type ListedWindow,
+  type RunStepsOutcome,
 } from "./wire";
-import { locate, opensOnInvoke, projectElements, unindexedTextByElement } from "./projection";
+import {
+  dateFieldFormat,
+  dateFields,
+  dateFieldTyping,
+  locate,
+  opensOnInvoke,
+  parseDateValue,
+  projectElements,
+  unindexedTextByElement,
+  type DateSegment,
+} from "./projection";
 import type { MacWindowPresence, MacWindows } from "./macos-windows";
 
 type Target = {
@@ -54,6 +65,8 @@ type Frame = {
 type Operation = {
   name: "click" | "drag" | "scroll" | "set_value" | "type_text" | "press_key" | "hotkey";
   args: Record<string, unknown>;
+  /** The value a date field must read once this step's input has run. */
+  expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
@@ -84,6 +97,12 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Per window, the CUA tokens of its latest reading whose invoke opens the
    * element (AXOpen) instead of pressing it. */
   private readonly openingTokens = new Map<string, Set<string>>();
+  /** Per window, the web date and time fields of its latest reading: each
+   * field's parts by its CUA token, and the field each part belongs to. */
+  private readonly dateFieldTokens = new Map<
+    string,
+    { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
+  >();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -278,6 +297,16 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
+      // Filling a date field takes several steps: run them as one batch.
+      if (
+        operations.length > 1 &&
+        command.action.type === "semantic" &&
+        this.initialCapabilities.actionBatches
+      )
+        return await this.dispatchBatch(
+          { ...command, action: { type: "batch", actions: [command.action] } },
+          true,
+        );
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
       const acted = await this.target(command.targetId);
@@ -393,19 +422,23 @@ export class CuaComputerBackend implements ComputerBackend {
     );
   }
 
-  /** Each action of a batch as its CUA step. Every one is checked against the
-   * observation the batch names, the only state its refs come from, before
-   * any of them runs. */
-  private async batchSteps(command: ComputerBackendActionCommand): Promise<Operation[]> {
+  /** Each action of a batch as its CUA steps, and the action each step
+   * belongs to. Every one is checked against the observation the batch names,
+   * the only state its refs come from, before any of them runs. */
+  private async batchSteps(
+    command: ComputerBackendActionCommand,
+  ): Promise<{ steps: Operation[]; actionOf: number[] }> {
     if (command.action.type !== "batch") throw new Error("not a batch");
     const { actions } = command.action;
     const steps: Operation[] = [];
+    const actionOf: number[] = [];
     for (const [index, action] of actions.entries()) {
       try {
         const operations = await this.operations({ ...command, action }, index > 0);
-        if (operations.length !== 1)
-          throw unsupported("This action cannot run as one step of a batch");
-        steps.push(operations[0]!);
+        for (const operation of operations) {
+          steps.push(operation);
+          actionOf.push(index);
+        }
       } catch (error) {
         if (!(error instanceof ComputerBackendError) || actions.length === 1) throw error;
         const refused = new ComputerBackendError(
@@ -417,39 +450,70 @@ export class CuaComputerBackend implements ComputerBackend {
         throw refused;
       }
     }
-    return steps;
+    return { steps, actionOf };
   }
 
-  /** A batch runs as one CUA run_steps call: CUA paces the steps for a batch
-   * and the window is observed once, after the last one. A batch CUA stopped
-   * part way says how many actions completed, so the caller can report each. */
+  /** A batch runs as one CUA run_steps call (or a few, when its actions take
+   * more steps than one call runs): CUA paces the steps for a batch and the
+   * window is observed once, after the last one. A batch CUA stopped part way
+   * says how many actions completed, so the caller can report each. One
+   * action that takes several steps (filling a date field) runs the same way,
+   * and reports as that action alone. */
   private async dispatchBatch(
     command: ComputerBackendActionCommand,
+    single = false,
   ): Promise<ComputerBackendObservation | null> {
-    const steps = await this.batchSteps(command);
+    const { steps, actionOf } = await this.batchSteps(command);
     const observed = this.observations.get(command.targetId);
     this.observations.delete(command.targetId);
     const acted = await this.target(command.targetId);
     const known = new Set(this.targetsById.keys());
-    const outcome = await runSteps(this.runtime, {
-      ...this.args(acted),
-      // Each step was checked against the batch's observation. A token CUA
-      // finds stale names an element of a window that changed since: the
-      // batch stops there instead of acting on a lookalike CUA finds again.
-      refind_stale: false,
-      steps: steps.map((step) => ({ tool: step.name, args: step.args })),
-    });
-    if (outcome.kind === "completed")
-      return await this.observeAfter(
-        command.targetId,
-        acted,
-        known,
-        openedWindowsReport(outcome.windowChanges),
-      );
+    let report = "";
+    let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
+      null;
+    for (let start = 0; start < steps.length && !stopped; start += MAX_RUN_STEPS) {
+      const chunk = steps.slice(start, start + MAX_RUN_STEPS);
+      let outcome: RunStepsOutcome;
+      try {
+        outcome = await runSteps(this.runtime, {
+          ...this.args(acted),
+          // Each step was checked against the batch's observation. A token CUA
+          // finds stale names an element of a window that changed since: the
+          // batch stops there instead of acting on a lookalike CUA finds again.
+          refind_stale: false,
+          steps: chunk.map((step) => ({ tool: step.name, args: step.args })),
+        });
+      } catch (error) {
+        // A later call refused before it ran: the earlier calls still did.
+        if (start === 0 || !(error instanceof ComputerBackendError) || error.dispatched)
+          throw error;
+        outcome = {
+          kind: "stopped",
+          completed: 0,
+          definite: false,
+          code: null,
+          cuaCode: null,
+          message: error.message,
+        };
+      }
+      if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
+      else stopped = { step: start + outcome.completed, outcome };
+    }
+    if (!stopped) {
+      const after = await this.observeAfter(command.targetId, acted, known, report);
+      if (after?.target.id === command.targetId)
+        for (const step of steps)
+          if (step.expectDate) checkDateField(after, step.expectDate, single);
+      return after;
+    }
+    const { step, outcome } = stopped;
+    const action = actionOf[step]!;
+    // An action that stopped after its first step ran in part.
+    const definite = outcome.definite && actionOf.indexOf(action) === step;
     const stoppedAction =
-      command.action.type === "batch" ? command.action.actions[outcome.completed] : undefined;
+      command.action.type === "batch" ? command.action.actions[action] : undefined;
     const refusal =
-      outcome.definite && stoppedAction?.type === "keyboard"
+      definite && stoppedAction?.type === "keyboard"
         ? this.keyboardRefusal(
             command.targetId,
             outcome.cuaCode,
@@ -457,22 +521,24 @@ export class CuaComputerBackend implements ComputerBackend {
             observed,
           )
         : null;
-    const message = `CUA stopped the batch at action ${outcome.completed + 1}: ${
-      refusal?.message ?? outcome.message
-    }`;
-    if (outcome.completed === 0 && outcome.definite)
+    const reason = refusal?.message ?? outcome.message;
+    const message = single
+      ? `CUA stopped part way through the input: ${reason}`
+      : `CUA stopped the batch at action ${action + 1}: ${reason}`;
+    if (step === 0 && definite)
       throw new ComputerBackendError(outcome.code ?? "driver_failed", message, false, false);
-    const stopped = new ComputerBackendError(
-      outcome.definite ? (outcome.code ?? "driver_failed") : "outcome_unknown",
+    const failure = new ComputerBackendError(
+      definite ? (outcome.code ?? "driver_failed") : "outcome_unknown",
       message,
       false,
       true,
     );
-    stopped.details = {
-      batchActionsCompleted: outcome.completed,
-      batchStoppedActionState: outcome.definite ? "failed" : "outcome_unknown",
-    };
-    throw stopped;
+    if (!single)
+      failure.details = {
+        batchActionsCompleted: action,
+        batchStoppedActionState: definite ? "failed" : "outcome_unknown",
+      };
+    throw failure;
   }
 
   close(): Promise<void> {
@@ -898,6 +964,23 @@ export class CuaComputerBackend implements ComputerBackend {
     );
     while (this.openingTokens.size > 32)
       this.openingTokens.delete(this.openingTokens.keys().next().value!);
+    this.dateFieldTokens.delete(targetId);
+    if (this.identity.platform === "macos") {
+      const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
+      const fields = new Map<string, DateSegment[]>();
+      const owners = new Map<string, string>();
+      for (const [index, field] of dateFields(state.elements)) {
+        const token = byIndex.get(index)!.element_token!;
+        fields.set(token, field.segments);
+        for (const part of field.parts) {
+          const partToken = byIndex.get(part)?.element_token;
+          if (partToken) owners.set(partToken, token);
+        }
+      }
+      if (fields.size) this.dateFieldTokens.set(targetId, { fields, owners });
+      while (this.dateFieldTokens.size > 32)
+        this.dateFieldTokens.delete(this.dateFieldTokens.keys().next().value!);
+    }
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
@@ -988,6 +1071,58 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     return token;
+  }
+
+  /** The web date or time field a part (ref) belongs to, from the window's
+   * latest reading, or null when the ref is not such a part. */
+  private dateFieldOf(
+    targetId: string,
+    ref: string,
+  ): { ref: string; name: string | undefined; segments: DateSegment[] } | null {
+    const known = this.dateFieldTokens.get(targetId);
+    const token = this.tokens.get(targetId)?.get(ref);
+    const fieldToken = token === undefined ? undefined : known?.owners.get(token);
+    if (!known || fieldToken === undefined) return null;
+    const fieldRef = [...(this.tokens.get(targetId) ?? [])].find(
+      ([, candidate]) => candidate === fieldToken,
+    )?.[0];
+    if (!fieldRef) return null;
+    const name = this.observations.get(targetId)?.roots.find((node) => node.ref === fieldRef)?.name;
+    return { ref: fieldRef, name, segments: known.fields.get(fieldToken)! };
+  }
+
+  /**
+   * The input that fills a web date or time field: press the field, which
+   * focuses it, then for each part move to it and type its digits. A browser
+   * moves on to the next part by itself after some parts and not after
+   * others (a month part of a month field, a year that may take six digits),
+   * so each part is reached from the first one: Left as many times as there
+   * are parts stops at the first, then Right to the part. Typing over a part
+   * replaces what it held, so a filled field is changed the same way.
+   */
+  private dateFieldInput(
+    args: Record<string, unknown>,
+    token: string,
+    texts: readonly string[],
+  ): Operation[] {
+    const delivery_mode = this.inputDelivery();
+    const key = (name: "left" | "right"): Operation => ({
+      name: "press_key",
+      args: { ...args, key: name, modifiers: [], delivery_mode },
+    });
+    const input: Operation[] = [
+      {
+        name: "click",
+        args: { ...args, element_token: token, button: "left", delivery_mode: "background" },
+      },
+    ];
+    texts.forEach((text, index) => {
+      if (texts.length > 1)
+        for (let step = 0; step < texts.length - 1; step++) input.push(key("left"));
+      for (let step = 0; step < index; step++) input.push(key("right"));
+      input.push({ name: "type_text", args: { ...args, text, delivery_mode } });
+    });
+    return input;
   }
 
   private async captureTarget(
@@ -1249,7 +1384,14 @@ export class CuaComputerBackend implements ComputerBackend {
     }
     if (action.type === "semantic") {
       const node = this.locateObserved(command.targetId, observed, action.locator);
-      if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action))
+      if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action)) {
+        const field = this.dateFieldOf(command.targetId, node.ref);
+        if (field)
+          throw unsupported(
+            `This is one part of the date or time field ${field.ref}${
+              field.name ? ` ("${field.name}")` : ""
+            }, which is filled as a whole: set_value on ${field.ref} with its value in the form ${dateFieldFormat(field.segments)}`,
+          );
         throw unsupported(
           action.action === "focus"
             ? this.identity.platform === "macos"
@@ -1259,6 +1401,7 @@ export class CuaComputerBackend implements ComputerBackend {
               ? `This element does not offer ${action.action}; use one it offers: ${node.actions.join(", ")}`
               : "This element offers no actions; act on a nearby control or its window instead",
         );
+      }
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
@@ -1282,12 +1425,22 @@ export class CuaComputerBackend implements ComputerBackend {
             false,
             false,
           );
+        const token = this.elementToken(command.targetId, node.ref);
+        const segments = this.dateFieldTokens.get(command.targetId)?.fields.get(token);
+        if (segments) {
+          const typing = dateFieldTyping(segments, String(action.value));
+          if ("error" in typing)
+            throw new ComputerBackendError("invalid_action", typing.error, false, false);
+          const input = this.dateFieldInput(args, token, typing.texts);
+          input[0]!.expectDate = { ref: node.ref, value: String(action.value), segments };
+          return input;
+        }
         return [
           {
             name: "set_value",
             args: {
               ...args,
-              element_token: this.elementToken(command.targetId, node.ref),
+              element_token: token,
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
@@ -1551,6 +1704,9 @@ export class CuaComputerBackend implements ComputerBackend {
 
 const RECENT_OBSERVATIONS = 4;
 
+/** The most steps CUA runs in one run_steps call. */
+const MAX_RUN_STEPS = 64;
+
 /** Roles chosen by pressing them: a radio button or a tab. */
 const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
 
@@ -1722,6 +1878,41 @@ async function readPermissions(
         ? data.x11 === true
         : platform === "windows" || data.screen_recording === true,
   };
+}
+
+/** A date field filled by typing its parts reads the value it was given, or
+ * the failure says what it reads instead. The input ran either way, so the
+ * failure is not a refusal. A field the reading no longer shows is left to
+ * the caller's own look. */
+function checkDateField(
+  observation: ComputerBackendObservation,
+  expected: { ref: string; value: string; segments: readonly DateSegment[] },
+  single: boolean,
+): void {
+  const node = observation.roots.find((candidate) => candidate.ref === expected.ref);
+  if (!node || (node.value !== undefined && typeof node.value !== "string")) return;
+  const reads = typeof node.value === "string" ? node.value : "";
+  const want = parseDateValue(expected.value);
+  const got = parseDateValue(reads);
+  const zeroed = (segment: DateSegment) => segment === "seconds" || segment === "milliseconds";
+  const same =
+    want !== null &&
+    got !== null &&
+    expected.segments.every(
+      (segment) =>
+        segment === "meridiem" ||
+        (want[segment] ?? (zeroed(segment) ? 0 : undefined)) ===
+          (got[segment] ?? (zeroed(segment) ? 0 : undefined)),
+    );
+  if (same) return;
+  throw new ComputerBackendError(
+    "driver_failed",
+    `${single ? "The keys were typed" : "The batch ran"}, but the date field ${expected.ref} reads ${
+      reads ? `"${reads.slice(0, 64)}"` : "empty"
+    } instead of the value it was given; observe it and set its value again`,
+    false,
+    true,
+  );
 }
 
 function unsupported(message: string): ComputerBackendError {
