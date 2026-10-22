@@ -344,11 +344,20 @@ describe("compound composer framework", () => {
     mounted = await renderComponent(<Harness />);
     await act(async () => controller.setValue("hello"));
     expect(typed).toBe("hello");
-    expect(await controller.submit("queue")).toBe(true);
+    // Submitting updates the controller's state, so it runs inside act like the
+    // edits; the host's delivered draft stays empty either way.
+    let sent: boolean | undefined;
+    await act(async () => {
+      sent = await controller.submit("queue");
+    });
+    expect(sent).toBe(true);
     expect(sends).toBe(1);
     // A genuinely empty draft still does not send.
     await act(async () => controller.setValue(""));
-    expect(await controller.submit("queue")).toBe(false);
+    await act(async () => {
+      sent = await controller.submit("queue");
+    });
+    expect(sent).toBe(false);
     expect(sends).toBe(1);
   });
 
