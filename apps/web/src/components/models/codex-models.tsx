@@ -48,6 +48,7 @@ import { EmptyState } from "@opengeni/react/ui/empty-state";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { FieldStack } from "@opengeni/react/ui/field";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { AccountGroupRows, groupEntry } from "./account-fold";
 import { Notice } from "@opengeni/react/ui/notice";
 import { formatAbsoluteTime, RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
@@ -176,34 +177,38 @@ export function CodexAccountRows({
     organization && !organization.codex.loading && !organization.codex.loadError
       ? new Map(organization.codex.accounts.map((account) => [account.id, account]))
       : null;
+  // Every account here, in use first; ones turned off fold away once there
+  // are several, as on the organization's list.
+  const entries = codex.accounts.map((account) => {
+    const shared = account.source === "organization";
+    const listed = organizationAccounts?.get(account.id);
+    // Until the organization's list says who else an account reaches, its
+    // tag waits in place rather than changing under the reader.
+    const scopeLabel =
+      !shared || !organization ? undefined : listed?.reach ? (
+        accountReachLabel(places.scope, listed.reach, organization.workspaceName)
+      ) : organization.codex.loading ? (
+        <ModelSettingsPlaceholder />
+      ) : undefined;
+    return groupEntry(
+      account.id,
+      account,
+      <CodexRow
+        codex={codex}
+        account={account}
+        places={places}
+        scopeLabel={scopeLabel}
+        onOpen={() =>
+          shared && organization && listed
+            ? organization.openAccount(account.id)
+            : places.openAccount(account.id)
+        }
+      />,
+    );
+  });
   return (
     <>
-      {codex.accounts.map((account) => {
-        const shared = account.source === "organization";
-        const listed = organizationAccounts?.get(account.id);
-        // Until the organization's list says who else an account reaches, its
-        // tag waits in place rather than changing under the reader.
-        const scopeLabel =
-          !shared || !organization ? undefined : listed?.reach ? (
-            accountReachLabel(places.scope, listed.reach, organization.workspaceName)
-          ) : organization.codex.loading ? (
-            <ModelSettingsPlaceholder />
-          ) : undefined;
-        return (
-          <CodexRow
-            key={account.id}
-            codex={codex}
-            account={account}
-            places={places}
-            scopeLabel={scopeLabel}
-            onOpen={() =>
-              shared && organization && listed
-                ? organization.openAccount(account.id)
-                : places.openAccount(account.id)
-            }
-          />
-        );
-      })}
+      <AccountGroupRows title="Codex" entries={entries} />
       {codex.pending ? (
         <ListRow
           leading={<ProviderTile provider="codex" size="lg" />}

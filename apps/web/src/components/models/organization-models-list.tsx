@@ -1,4 +1,5 @@
 import { possessive } from "./possessive";
+import { AccountGroupRows, groupEntry, type GroupEntry } from "./account-fold";
 import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
 import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
 import {
@@ -1021,27 +1022,6 @@ function cachedCodexUsage(account: CodexAccount): ReactNode {
 
 type AccountGroupId = "codex" | "claude" | "supergrok";
 
-/** One account row in a provider group, with what the group's heading counts. */
-interface GroupEntry {
-  key: string;
-  node: ReactNode;
-  /** Turned on and working. */
-  on: boolean;
-  /** Signed out or failing: needs reconnecting. */
-  attention: boolean;
-}
-
-function groupEntry(
-  key: string,
-  account: { allocatorEnabled?: boolean; status: string },
-  node: ReactNode,
-  /** Not in use where it's listed, whatever the account says. */
-  off = false,
-): GroupEntry {
-  const attention = account.status !== "active";
-  return { key, node, on: !off && !attention && account.allocatorEnabled !== false, attention };
-}
-
 /** "12 accounts", "9 on", "1 needs reconnecting". */
 function groupFacts(entries: readonly GroupEntry[]): (string | null)[] {
   const on = entries.filter((entry) => entry.on).length;
@@ -1055,44 +1035,6 @@ function groupFacts(entries: readonly GroupEntry[]): (string | null)[] {
         ? "1 needs reconnecting"
         : `${attention} need reconnecting`,
   ];
-}
-
-/** A group shows its accounts in use first; ones turned off fold away once there are several. */
-const FOLD_OFF_AFTER = 4;
-
-function AccountGroupRows({
-  title,
-  entries,
-  showOff,
-  onShowOff,
-}: {
-  title: string;
-  entries: readonly GroupEntry[];
-  showOff: boolean;
-  onShowOff: (value: boolean) => void;
-}) {
-  const first = entries.filter((entry) => entry.on || entry.attention);
-  const off = entries.filter((entry) => !entry.on && !entry.attention);
-  const fold = entries.length > FOLD_OFF_AFTER && off.length > 0;
-  const shown = fold && !showOff ? first : [...first, ...off];
-  return (
-    <>
-      {shown.map((entry) => (
-        <Fragment key={entry.key}>{entry.node}</Fragment>
-      ))}
-      {fold ? (
-        <li className="col-span-full list-none px-3 py-2">
-          <RowButton
-            aria-expanded={showOff}
-            aria-label={`${showOff ? "Hide" : "Show"} ${off.length} ${title} ${off.length === 1 ? "account" : "accounts"} turned off`}
-            onClick={() => onShowOff(!showOff)}
-          >
-            {showOff ? "Hide turned off" : `Show ${off.length} turned off`}
-          </RowButton>
-        </li>
-      ) : null}
-    </>
-  );
 }
 
 /**
