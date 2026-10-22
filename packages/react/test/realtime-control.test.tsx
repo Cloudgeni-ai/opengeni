@@ -1120,6 +1120,120 @@ describe("ordinary session Codex realtime control", () => {
     }
   });
 
+  test("keeps a running call's model when the catalog with a different default arrives later", async () => {
+    const codex = "gpt-live-1-boulder-alpha";
+    const max = "workspace-elevenlabs/eleven_realtime_v1_max";
+    const mini = "workspace-elevenlabs/eleven_realtime_v1_mini";
+    const model = (id: typeof codex | typeof max | typeof mini, workspaceDefault = false) => ({
+      id,
+      label: id,
+      provider: id === codex ? "Connected Codex" : "Your ElevenLabs",
+      description: "Voice",
+      available: true,
+      unavailableReason: null,
+      recommended: false,
+      ...(workspaceDefault ? { workspaceDefault: true } : {}),
+    });
+    const lateCatalog = () => {
+      let resolve!: (value: { models: unknown[] }) => void;
+      const promise = new Promise<{ models: unknown[] }>((settle) => (resolve = settle));
+      const client = {
+        getWorkspaceRealtimeModelCatalog: () => promise,
+      } as unknown as OpenGeniClient;
+      return {
+        client,
+        arrive: () => resolve({ models: [model(codex), model(max), model(mini, true)] }),
+      };
+    };
+    const settle = async () => {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      }
+    };
+
+    // The selection keeps the running call's model.
+    const selectionCatalog = lateCatalog();
+    function Selection() {
+      const selection = useRealtimeModelSelection({
+        client: selectionCatalog.client,
+        workspaceId: "81818181-8181-4181-8181-818181818181",
+        codexConnected: true,
+        activeModel: max,
+      });
+      return <output>{selection.selectedModel.id}</output>;
+    }
+    await act(async () => root.render(<Selection />));
+    await settle();
+    selectionCatalog.arrive();
+    await settle();
+    expect(container.querySelector("output")?.textContent).toBe(max);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+
+    // The packaged control does not replace the running call's controller.
+    const workspaceId = "82828282-8282-4282-8282-828282828282";
+    const sessionId = "83838383-8383-4383-8383-838383838383";
+    const started: SessionEvent = {
+      id: "84848484-8484-4484-8484-848484848484",
+      workspaceId,
+      sessionId,
+      sequence: 10,
+      type: "session.realtime.started",
+      payload: {
+        realtimeId: "85858585-8585-4585-8585-858585858585",
+        operationId: "86868686-8686-4686-8686-868686868686",
+        model: max,
+        version: 1,
+        connectionEpoch: 1,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      occurredAt: new Date().toISOString(),
+    };
+    const created: string[] = [];
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      created.push(options.model);
+      return {
+        snapshot: () => idle,
+        subscribe(listener) {
+          listener(idle);
+          return () => undefined;
+        },
+        start: async () => undefined,
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => undefined,
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    };
+    const controlCatalog = lateCatalog();
+    await act(async () =>
+      root.render(
+        <SessionRealtimeControl
+          client={controlCatalog.client}
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          sessionStatus="idle"
+          effectiveControl={effectiveControl}
+          events={[started]}
+          eventsReady={true}
+          codexConnected={true}
+          controllerFactory={factory}
+        />,
+      ),
+    );
+    await settle();
+    controlCatalog.arrive();
+    await settle();
+    expect(created.at(-1)).toBe(max);
+    expect(created).not.toContain(mini);
+  });
+
   test("deduplicates catalog loads and reuses the settled catalog across remounts", async () => {
     const workspaceId = "66666666-6666-4666-8666-666666666666";
     let requests = 0;
