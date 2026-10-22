@@ -783,6 +783,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Progressive discovery reads the authorized pool, never a changing
         // source directory in its first-request control schemas.
         codexConnectorNamespaces: preparedTools.codexConnectorNamespaces,
+        // Best-effort MCP servers whose tools are missing this turn, and why;
+        // tool discovery reports them in its results.
+        unavailableMcpServers: preparedTools.unavailableMcpServers,
         // Resolved-model routing + gating (legacy defaults when null). The model
         // is passed as the model *string* (agent.model = runSettings.openaiModel),
         // NOT a Model instance: an instance only survives the in-process

@@ -248,6 +248,8 @@ export class LazyToolRuntime {
      */
     private readonly firstRequestMcpToolNames: () => ReadonlySet<string> = () => new Set(),
     private readonly decisionModel?: ToolSelector,
+    /** Best-effort MCP servers whose tools are missing this attempt, and why. */
+    private readonly unavailableMcpServers: () => ReadonlyMap<string, string> = () => new Map(),
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -506,6 +508,20 @@ export class LazyToolRuntime {
     return tools.filter((tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name));
   }
 
+  /**
+   * Integrations selected for this turn whose tools could not be loaded, so a
+   * search that finds nothing is not read as "this integration has no such
+   * tool". Absent when every server loaded; read live, never recomputed for
+   * an earlier result.
+   */
+  private unavailableSources(): { unavailableSources?: { server: string; reason: string }[] } {
+    const unavailable = [...this.unavailableMcpServers()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, 20)
+      .map(([server, reason]) => ({ server, reason }));
+    return unavailable.length ? { unavailableSources: unavailable } : {};
+  }
+
   search(rawArguments: unknown): Tool[] {
     return searchToolPool(this.searchableTools(this.currentTools), rawArguments);
   }
@@ -542,6 +558,7 @@ export class LazyToolRuntime {
       tools: tools.map(toolDescriptor),
       schemasLoaded: names !== undefined && tools.length > 0,
       ...(names === undefined ? {} : { unavailable }),
+      ...this.unavailableSources(),
       ...(unavailable.length
         ? {
             suggestions: this.matches({ query: unavailable.join(" "), limit })
@@ -589,7 +606,11 @@ export class LazyToolRuntime {
     // Wider recall than the model-facing result page, not an execution quota.
     const candidates = this.searchIndex.rank(query, Math.max(40, limit));
     if (!candidates.length)
-      return { version: 2, output: JSON.stringify({ tools: [], schemasLoaded: false }), tools: [] };
+      return {
+        version: 2,
+        output: JSON.stringify({ tools: [], schemasLoaded: false, ...this.unavailableSources() }),
+        tools: [],
+      };
     signal?.throwIfAborted();
     let chosen: readonly string[];
     try {
@@ -646,6 +667,7 @@ export class LazyToolRuntime {
         tools: selected.map(toolDescriptor),
         schemasLoaded: selected.length > 0,
         unavailable: chosen.filter((name) => !selected.some((t) => t.name === name)),
+        ...this.unavailableSources(),
         ...(alternatives
           ? {
               suggestions: this.matches(rawArguments)
@@ -763,6 +785,7 @@ export class LazyToolRuntime {
             groups: page,
             total: groups.length,
             nextCursor: index < groups.length ? page.at(-1)!.group : null,
+            ...(cursor === undefined ? this.unavailableSources() : {}),
           });
         }
         const cursorIndex =
@@ -798,6 +821,7 @@ export class LazyToolRuntime {
           tools: descriptors,
           total: tools.length,
           nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
+          ...(cursor === undefined ? this.unavailableSources() : {}),
         };
         if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
 
@@ -944,6 +968,7 @@ export function installLazyToolRuntime(
   pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
   firstRequestMcpToolNames?: () => ReadonlySet<string>,
   decisionModel?: ToolSelector,
+  unavailableMcpServers?: () => ReadonlyMap<string, string>,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -958,6 +983,7 @@ export function installLazyToolRuntime(
     pendingMcpServerIds,
     firstRequestMcpToolNames,
     decisionModel,
+    unavailableMcpServers,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
