@@ -199,7 +199,21 @@ export function toProviderItemMeta(item: SdkItem): ProviderItemMeta {
   };
 }
 
-function toWebsites(urls: readonly string[], previous: readonly SdkWebsite[] = []): SdkWebsite[] {
+/** 1Password keeps websites (URL fields) only on these categories. */
+const WEBSITE_CATEGORIES = new Set(["Login", "Password", "ApiCredentials"]);
+
+function toWebsites(
+  category: string,
+  urls: readonly string[],
+  previous: readonly SdkWebsite[] = [],
+): SdkWebsite[] {
+  // 1Password refuses the whole item otherwise, so say so before sending it.
+  if (urls.length && !WEBSITE_CATEGORIES.has(category)) {
+    throw new VaultProviderError(
+      "provider_unavailable",
+      "1Password stores websites only on logins and API keys; save this item without websites, or as a login",
+    );
+  }
   return urls.map(
     (url) =>
       previous.find((website) => website.url === url) ?? {
@@ -292,7 +306,7 @@ export function buildCreateParams(
     title: write.name,
     fields: [],
     sections: [],
-    websites: toWebsites(write.websites),
+    websites: toWebsites(category, write.websites),
   };
   for (const field of write.fields) {
     if (field.remove) continue;
@@ -312,7 +326,7 @@ export function applyWrite(item: SdkItem, write: ProviderWriteItem): SdkItem {
     title: write.name,
     fields: item.fields.map((field) => ({ ...field })),
     sections: [...(item.sections ?? [])],
-    websites: toWebsites(write.websites, item.websites),
+    websites: toWebsites(item.category, write.websites, item.websites),
   };
   for (const field of write.fields) {
     const mapped = mapItemFields(next);

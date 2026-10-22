@@ -402,6 +402,18 @@ describe("1Password adapter", () => {
     await expect(
       provider.writeItem(ctx(), RW, { name: "pk", type: "passkey", websites: [], fields: [] }),
     ).rejects.toMatchObject({ code: "provider_unavailable" });
+    // 1Password keeps websites only on logins and API keys, and refuses a note with them.
+    await expect(
+      provider.writeItem(ctx(), RW, {
+        name: "recovery codes",
+        type: "note",
+        websites: ["https://example.com/"],
+        fields: [{ name: "codes", kind: "concealed", value: "x" }],
+      }),
+    ).rejects.toMatchObject({
+      code: "provider_unavailable",
+      message: expect.stringContaining("websites only on logins and API keys"),
+    });
     await expect(
       provider.writeItem(ctx(), RW, {
         externalItemId: "doc000000000000000000000000",
