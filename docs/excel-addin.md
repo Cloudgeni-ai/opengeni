@@ -10,7 +10,12 @@ Excel on the web, Windows and Mac.
   origin (`apps/web/src/office-manifest.ts`, built with the SDK's
   `officeAddinManifest`). The add-in id is derived from that origin, so two
   deployments never collide. It adds an Opengeni button to
-  the Home tab and needs ExcelApi 1.7 and `ReadWriteDocument`.
+  the Home tab and needs ExcelApi 1.7 and `ReadWriteDocument`. A deployment
+  that lists its add-in in Microsoft's add-in store sets
+  `OPENGENI_OFFICE_ADDIN_PROVIDER_NAME` to the store publisher's name (the
+  store requires them to match) and `OPENGENI_OFFICE_ADDIN_SUPPORT_URL` to a
+  public help page; the support URL otherwise defaults to `/excel`. The
+  user-facing help page is `docs-site/guides/excel-add-in.mdx`.
 - **Install page.** `/excel` in the web app (public, linked from the account
   menu as "Excel add-in") shows the steps for the person's platform, each
   starting from the downloaded manifest file: upload it in Excel on the web;
