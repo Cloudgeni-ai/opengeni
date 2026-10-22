@@ -352,14 +352,29 @@ describe("readable timeline browser regression", () => {
         await page.waitForTimeout(600);
         const result = await page.evaluate(() => {
           const driver = window.exchangeFoldHarness!;
+          const answerTop = () =>
+            [...document.querySelectorAll("[data-og-wide-table-message]")]
+              .at(-1)
+              ?.getBoundingClientRect().top ?? Number.NaN;
+          const before = answerTop();
           driver.show(driver.total, true);
           const animation = document.getAnimations().find((a) => a.id === "og-timeline-settlement");
           const started = !!animation;
+          const moved = Math.abs(answerTop() - before) >= 1;
           const oldScroller = document.querySelector("[data-og-timeline-scroller]")!;
           driver.switchSession();
-          return { started, state: animation?.playState, detached: !oldScroller.isConnected };
+          return {
+            started,
+            moved,
+            state: animation?.playState,
+            detached: !oldScroller.isConnected,
+          };
         });
-        expect(result).toEqual({ started: true, state: "idle", detached: true });
+        expect(result.detached).toBe(true);
+        // Settlement motion runs only when folding moved the answer; a session
+        // switch then cancels it. When nothing moved there is nothing to run.
+        if (result.started) expect(result.state).toBe("idle");
+        else expect(result.moved).toBe(false);
         await page.evaluate(() => window.exchangeFoldHarness!.show(3));
         await nextPaint(page);
         expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);

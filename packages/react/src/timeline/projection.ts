@@ -2769,13 +2769,16 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      // The work row leads the first visible reply of the turn.
+      // The work row leads the first visible reply of the turn. A live turn
+      // whose answer is already declared puts the row there too, so the answer
+      // being read stays put when the turn settles instead of hopping past it.
       const anchor = Math.min(
         ...[...responses].map((message) => positions.get(message) ?? groups.length),
       );
-      if (settledAt && anchor < (nextBoundary.get(group) ?? groups.length)) {
+      if (anchor < (nextBoundary.get(group) ?? groups.length)) {
         beforeRows.set(groups[anchor]!, group);
         movedRows.add(group);
+        continue;
       }
     }
     if (!settledAt) {
