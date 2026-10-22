@@ -191,6 +191,15 @@ export function FormFrame({
   const [internalPending, setInternalPending] = useState(false);
   const [thrown, setThrown] = useState<ReactNode>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  // A submit that finishes after the person left the form (a page they
+  // navigated away from) must not act on it: closing it would navigate back.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const reasonId = useId();
   const pending = pendingProp ?? internalPending;
   const shownError = error ?? thrown;
@@ -221,10 +230,11 @@ export function FormFrame({
       const result = await onSubmit(event);
       succeeded = result !== false;
     } catch (caught) {
-      setThrown(errorMessage(caught));
+      if (mountedRef.current) setThrown(errorMessage(caught));
     } finally {
-      setPending(false);
+      if (mountedRef.current) setPending(false);
     }
+    if (!mountedRef.current) return;
     if (succeeded) onSubmitted?.();
     else focusInvalid();
   };
