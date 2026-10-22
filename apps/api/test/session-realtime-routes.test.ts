@@ -766,13 +766,14 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
               type: "function",
               name: "delegate_to_session",
               description:
-                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+                "Relay execution work, actions, and session tasks to the underlying session agent, which decides how to do them.",
               parameters: {
                 type: "object",
                 properties: {
                   request: {
                     type: "string",
-                    description: "Complete standalone task for the session agent",
+                    description:
+                      "The user's request in their own words and language, plus only the conversational context needed to understand it. Do not add tools, methods, steps, or details the user did not say.",
                   },
                 },
                 required: ["request"],

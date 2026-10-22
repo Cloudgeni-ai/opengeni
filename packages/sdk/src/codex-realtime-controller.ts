@@ -9,6 +9,7 @@ import type {
   CodexRealtimeV3Bridge,
   CodexRealtimeV3BridgeFatal,
   CodexRealtimeV3BridgeSnapshot,
+  CodexRealtimeV3TranscriptEntry,
 } from "./codex-realtime-v3";
 import type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 import {
@@ -346,6 +347,8 @@ type OwnerRecord = {
   browserInstanceId: string;
   ownerKey: string;
   delegationReplay?: OwnerDelegationReplay | undefined;
+  /** What was said since the last delegation, so a reload keeps it for the next one. */
+  undelegatedTranscript?: CodexRealtimeV3TranscriptEntry[] | undefined;
 };
 
 type OwnerDelegationReplay = {
@@ -446,6 +449,24 @@ export function createCodexRealtimeController(
       entry.delegationItemId ? [[entry.delegationItemId, entry] as const] : [],
     ),
   );
+  // Shared by every provider connection of this call, like the delegation
+  // replay state: a reconnect must not drop what was said since the last
+  // delegation.
+  const undelegatedTranscript: CodexRealtimeV3TranscriptEntry[] = [
+    ...(owner?.undelegatedTranscript ?? []),
+  ];
+  const persistUndelegatedTranscript = (
+    entries: readonly CodexRealtimeV3TranscriptEntry[],
+  ): void => {
+    if (!owner || !storage) return;
+    const next: OwnerRecord = { ...owner, undelegatedTranscript: [...entries] };
+    try {
+      storage.setItem(storageKey, JSON.stringify(next));
+      owner = next;
+    } catch {
+      // Best effort: the live call keeps the transcript in memory.
+    }
+  };
 
   const invalidateStoredOwner = (): void => {
     try {
@@ -579,6 +600,7 @@ export function createCodexRealtimeController(
     storage?.removeItem(storageKey);
     acceptedDelegationItemIds.clear();
     pendingDelegations.clear();
+    undelegatedTranscript.length = 0;
   };
 
   const transitionEnded = (message = "Realtime mode ended"): void => {
@@ -1133,6 +1155,8 @@ export function createCodexRealtimeController(
         acceptedDelegationItemIds,
         pendingDelegations,
         onDelegationReplayStateChange: persistDelegationReplay,
+        undelegatedTranscript,
+        onUndelegatedTranscriptChange: persistUndelegatedTranscript,
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },
@@ -1348,6 +1372,7 @@ export function createCodexRealtimeController(
         operationId: randomUUID(),
       };
       owner = record;
+      undelegatedTranscript.length = 0;
       storage?.setItem(storageKey, JSON.stringify(record));
       publish({ status: "starting", error: null, diagnostic: null, refusal: null });
       const microphoneWarmup = new AbortController();
@@ -1717,14 +1742,39 @@ function readOwnerRecord(
       storage?.removeItem(key);
       return null;
     }
+    const undelegatedTranscript = readUndelegatedTranscript(parsed.undelegatedTranscript);
     return {
-      ...(parsed as Omit<OwnerRecord, "delegationReplay">),
+      ...(parsed as Omit<OwnerRecord, "delegationReplay" | "undelegatedTranscript">),
       ...(delegationReplay ? { delegationReplay } : {}),
+      ...(undelegatedTranscript ? { undelegatedTranscript } : {}),
     };
   } catch {
     storage?.removeItem(key);
     return null;
   }
+}
+
+/** A malformed transcript is dropped; it never invalidates the owner. */
+function readUndelegatedTranscript(value: unknown): CodexRealtimeV3TranscriptEntry[] | undefined {
+  if (!Array.isArray(value) || value.length > CODEX_REALTIME_V3_PENDING_MAX_ENTRIES)
+    return undefined;
+  const entries: CodexRealtimeV3TranscriptEntry[] = [];
+  for (const candidate of value) {
+    const record = recordValue(candidate);
+    if (
+      !record ||
+      (record.role !== "user" && record.role !== "assistant") ||
+      typeof record.text !== "string" ||
+      record.text.length > 65_536 ||
+      typeof record.turnId !== "string" ||
+      record.turnId.length < 1 ||
+      record.turnId.length > 1_024
+    ) {
+      return undefined;
+    }
+    entries.push({ role: record.role, text: record.text, turnId: record.turnId });
+  }
+  return entries;
 }
 
 function readOwnerDelegationReplay(value: unknown): OwnerDelegationReplay | undefined | null {
