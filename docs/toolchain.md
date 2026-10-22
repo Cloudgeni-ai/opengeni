@@ -4,7 +4,7 @@ The fast path for contributors: what runs typecheck, lint, and format, and why.
 
 ## Package manager & runtime
 
-**Bun 1.4.3** end to end — install, run, test, and script execution, including every native
+**Bun 1.4.4** end to end — install, run, test, and script execution, including every native
 `Bun.build` bundler and `bun test` runner. `.bun-version` is the
 canonical exact pin; `bun run check:bun-version` verifies every package, workflow, container,
 and native-builder mirror. There is no `npm`/`pnpm`/`yarn` lockfile in this repo; use

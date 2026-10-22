@@ -13,7 +13,7 @@ Harbor's, not Opengeni's. For a React product, mount `OpenGeniChat` from
 
 ## Install and run
 
-Requirements: pinned Bun 1.4.3, Node 22.12+ on `PATH` (the Vite, tsrs and Vue mapper
+Requirements: pinned Bun 1.4.4, Node 22.12+ on `PATH` (the Vite, tsrs and Vue mapper
 launchers use Node), a supported tsrs native host (Linux x64/arm64 or macOS arm64),
 and an existing managed Opengeni deployment with a
 server-held full-access organization API key.

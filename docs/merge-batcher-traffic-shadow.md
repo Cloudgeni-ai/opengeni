@@ -19,7 +19,7 @@ bun scripts/ci/batch-traffic-shadow.ts --once --lookback-hours 24 --max-prs 128 
   --cap 16 --output ./traffic-shadow --git-dir ./traffic-shadow/objects.git
 ```
 
-Use Bun 1.4.3 and Git 2.38+. Runtime dependencies are built-ins and Git only. The
+Use Bun 1.4.4 and Git 2.38+. Runtime dependencies are built-ins and Git only. The
 existing `GH_TOKEN`/`GITHUB_TOKEN` or GitHub App authentication works through
 `GitHubReader`/`GitHubAuth`; never put credentials in output, Git URLs or images.
 Default execution is read-only even when `BATCHER_MODE=active` is inherited. The

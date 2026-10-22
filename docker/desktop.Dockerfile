@@ -16,7 +16,7 @@
 # on EVERY apt layer — the full xfce4 tree pulls tzdata, whose interactive debconf
 # blocks the builder forever otherwise.
 
-ARG BUN_VERSION=1.4.3
+ARG BUN_VERSION=1.4.4
 
 # Official release BOM is the headless opengeni-sandbox image. This desktop
 # box is a sibling: `.github/workflows/publish-desktop-image.yml` on main, and
