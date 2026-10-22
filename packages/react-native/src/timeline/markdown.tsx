@@ -22,7 +22,7 @@ import {
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
 import { Icon } from "./icon";
-import { isStandaloneLinkGroup } from "./markdown-standalone-links";
+import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
 import {
@@ -474,10 +474,14 @@ function webRules(
     // Every run of text is selectable, as on the web: a long press selects
     // words (and, inside a timeline message, offers Add note). A standalone
     // link the host drew as a block sits in a view instead, since a block
-    // nested in text does not lay out.
+    // nested in text does not lay out. The view spans the message: a paragraph
+    // lays its children out in a wrapping row, where a plain view would size
+    // to its content.
     textgroup: (node, children, _parent, styles) =>
       BLOCK_LINK_GROUPS.has(node) ? (
-        <View key={node.key}>{children}</View>
+        <View key={node.key} style={{ width: "100%" }}>
+          {children}
+        </View>
       ) : (
         <Text key={node.key} selectable style={styles.textgroup}>
           {children}
@@ -505,6 +509,16 @@ function webRules(
     },
     // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
     list_item: (node, children, parent, styles, inheritedStyles = {}) => {
+      // A host-drawn block link is its own marker: the item drops the bullet or
+      // number and its indent, so it lines up with the same card on its own line.
+      const group = soleTextGroupOf(node);
+      if (group && BLOCK_LINK_GROUPS.has(group)) {
+        return (
+          <View key={node.key} style={{ marginBottom: 4 }}>
+            {children}
+          </View>
+        );
+      }
       if (parent.some((entry: { type: string }) => entry.type === "bullet_list")) {
         // A drawn disc: the text bullet glyph renders noticeably smaller than
         // the browser's list-disc marker at the same line height.
