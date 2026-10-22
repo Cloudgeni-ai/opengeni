@@ -3192,6 +3192,160 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("a browser handed off at shutdown whose session never returns is stopped by the successor once idle", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const stopped: { profileDirectory: string; pid: number | null }[] = [];
+      const contexts: BrowserSupervisorDriverContext[] = [];
+      const open = () =>
+        BrowserSupervisor.open({
+          rootDirectory,
+          idleReleaseMs: 60_000,
+          now: () => clock,
+          inspectOwnedProcess: async () => processState,
+          assertProfileUnused: async () => undefined,
+          stopEndedProcess: async (profileDirectory, recorded) => {
+            stopped.push({ profileDirectory, pid: recorded?.pid ?? null });
+            processState = "exited";
+          },
+          createDriver: async (context) => {
+            contexts.push(context);
+            return {
+              ...fakeDriver(context),
+              ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+              close: async () => {
+                closes++;
+                processState = "exited";
+              },
+              detach: async () => {
+                detaches++;
+              },
+            };
+          },
+        });
+      const first = await open();
+      await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      clock += 30_000;
+      await first.close();
+      // Used 30 s ago: handed off with its page state, and recorded.
+      expect({ closes, detaches }).toEqual({ closes: 0, detaches: 1 });
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      const record = JSON.parse(
+        await readFile(join(sessionDirectory, "detached-browser.json"), "utf8"),
+      );
+      expect(record).toMatchObject({
+        browserSessionId: options.browserSessionId,
+        lastUsedAt: 1_000_000,
+      });
+
+      const second = await open();
+      try {
+        // Still within its idle time: kept, and the controller is not empty.
+        expect(await second.releaseDetachedBrowsers()).toEqual([]);
+        expect(second.isEmpty()).toBe(false);
+        expect(stopped).toEqual([]);
+        clock += 31_000;
+        expect(await second.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+        expect(stopped).toEqual([
+          { profileDirectory: join(sessionDirectory, "profile"), pid: 2001 },
+        ]);
+        expect(second.isEmpty()).toBe(true);
+        await expect(readFile(join(sessionDirectory, "detached-browser.json"))).rejects.toThrow();
+        // The session can still come back: the same profile is relaunched.
+        const recovered = await second.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        expect(recovered.browserSessionId).toBe(options.browserSessionId);
+        expect(contexts.at(-1)!.profileDirectory).toBe(contexts[0]!.profileDirectory);
+        expect(contexts.at(-1)!.allowOwnedProcessLaunch).toBe(true);
+      } finally {
+        await second.close();
+      }
+    });
+  });
+
+  test("a handed-off browser its session uses again is adopted and not stopped", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      const stopped: string[] = [];
+      const contexts: BrowserSupervisorDriverContext[] = [];
+      const open = () =>
+        BrowserSupervisor.open({
+          rootDirectory,
+          idleReleaseMs: 60_000,
+          now: () => clock,
+          inspectOwnedProcess: async () => "live",
+          stopEndedProcess: async (profileDirectory) => {
+            stopped.push(profileDirectory);
+          },
+          createDriver: async (context) => {
+            contexts.push(context);
+            return {
+              ...fakeDriver(context),
+              ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+              close: async () => undefined,
+              detach: async () => undefined,
+            };
+          },
+        });
+      const first = await open();
+      await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      await first.close();
+      const second = await open();
+      try {
+        await second.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        // Reattached to the live browser rather than relaunching it.
+        expect(contexts[1]!.recoverOwnedProcess?.profileDirectory).toBe(
+          contexts[0]!.profileDirectory,
+        );
+        const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+        await expect(readFile(join(sessionDirectory, "detached-browser.json"))).rejects.toThrow();
+        clock += 10 * 60_000;
+        expect(await second.releaseDetachedBrowsers()).toEqual([]);
+        expect(stopped).toEqual([]);
+      } finally {
+        await second.close();
+      }
+    });
+  });
+
+  test("a browser already idle at shutdown is stopped rather than handed off", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 60_000,
+        now: () => clock,
+        inspectOwnedProcess: async () => processState,
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          close: async () => {
+            closes++;
+            processState = "exited";
+          },
+          detach: async () => {
+            detaches++;
+          },
+        }),
+      });
+      await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      clock += 61_000;
+      await supervisor.close();
+      expect({ closes, detaches }).toEqual({ closes: 1, detaches: 0 });
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      await expect(readFile(join(sessionDirectory, "detached-browser.json"))).rejects.toThrow();
+    });
+  });
+
   test("an idle browser still receiving a download keeps running until the download settles", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
       let closes = 0,

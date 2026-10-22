@@ -400,6 +400,89 @@ recoveryE2e(
 );
 
 recoveryE2e(
+  "a browser handed off at shutdown is stopped by the next controller once idle and relaunches with its tabs",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-detached-release-e2e-");
+    const rootDirectory = join(directory, "state");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) =>
+        new Response(
+          `<!doctype html><title>Handoff ${new URL(request.url).pathname}</title><h1>Handoff</h1>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+    });
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `http://127.0.0.1:${server.port}/first`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const first = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    let second: BrowserSupervisor | undefined;
+    let browserPid: number | undefined;
+    let relaunchedPid: number | undefined;
+    try {
+      await first.createSession(options);
+      await first.openTarget(options, `http://127.0.0.1:${server.port}/second`);
+      browserPid = await chromiumProfilePid(profile);
+      await first.close();
+      // Recently used, so the shutdown handed the live browser off.
+      expect(processRunning(browserPid)).toBe(true);
+
+      second = await openManagedRecoverySupervisor(rootDirectory, {
+        idleReleaseMs: 60_000,
+        now: () => clock,
+      });
+      expect(await second.releaseDetachedBrowsers()).toEqual([]);
+      expect(processRunning(browserPid)).toBe(true);
+      clock += 61_000;
+      expect(await second.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+
+      const { initialUrl, ...recoveryOptions } = options;
+      await second.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      expect(relaunchedPid).not.toBe(browserPid);
+      const urls = (await second.listTargets(options)).map((target) => target.url);
+      expect(urls).toEqual(
+        expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
+      );
+      await second.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      for (const pid of [browserPid, relaunchedPid]) {
+        if (!pid) continue;
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await first.close();
+      await second?.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
   "an idle browser still receiving a download keeps running and completes it",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-idle-download-e2e-");
@@ -668,6 +751,15 @@ function flatten(nodes: readonly InteractionSemanticNodeValue[]): InteractionSem
 async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function processRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
     return true;
   } catch {
     return false;
