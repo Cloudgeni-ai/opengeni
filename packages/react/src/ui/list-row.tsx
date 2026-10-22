@@ -550,6 +550,11 @@ export function ListRow({
   const hasColumns = gridded && columns.length > 0;
   const expandable = !table && expanded !== undefined;
 
+  // Resource and table rows keep one fixed height: the description, the meta
+  // facts and (on narrow lists) the status and indicator words share ONE
+  // secondary line that truncates. Catalog rows keep a two-line description
+  // with the facts under it.
+  const singleLine = !catalog;
   /* The meta line: quiet facts, then the fact columns folded in on narrow lists. */
   const presentFacts = columns.filter((column) => cells[column.id] != null);
   const facts = [
@@ -568,6 +573,7 @@ export function ListRow({
       key={column.id}
       order={order}
       keep={leads}
+      oneLine={singleLine}
       className={cn(
         hasColumns && "@[640px]/list:hidden",
         // A phone-width line has room for one folded fact (none next to a
@@ -586,8 +592,13 @@ export function ListRow({
     ...metaItems.map((item, index) => {
       const last = index === metaItems.length - 1;
       return (
-        // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
-        <MetaPart key={`meta-${index}`} order={leadingFacts + index} keep={!last}>
+        <MetaPart
+          // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
+          key={`meta-${index}`}
+          order={leadingFacts + index}
+          keep={!last}
+          oneLine={singleLine}
+        >
           {item}
         </MetaPart>
       );
@@ -598,11 +609,6 @@ export function ListRow({
         foldedFact(column, leadingFacts + index, leadingFacts + metaItems.length + index, false),
       ),
   ];
-  // Resource and table rows keep one fixed height: the description, the meta
-  // facts and (on narrow lists) the status and indicator words share ONE
-  // secondary line that truncates. Catalog rows keep a two-line description
-  // with the facts under it.
-  const singleLine = !catalog;
   const statusPart = status ? (
     <MetaPart key="status" keep className="@[480px]/list:hidden">
       {status}
@@ -840,13 +846,18 @@ export function ListRow({
               <span className="flex shrink-0 items-center">{keptLeadParts}</span>
             ) : null}
             {restLineParts.length > 0 ? (
+              // One line tall and wrapping: a part with no room for a few
+              // letters wraps onto the clipped second line and disappears
+              // whole, instead of staying behind as a lone dot. The empty
+              // first item lets even the first part wrap away.
               <span
                 className={cn(
-                  "flex min-w-0 shrink-[2] items-center overflow-hidden",
+                  "flex h-4.5 min-w-0 shrink-[2] flex-wrap content-start items-center overflow-hidden",
                   // No description: drop the first part's leading dot.
                   !(secondary && !(disabled && disabledReason)) && "-ml-4",
                 )}
               >
+                <span aria-hidden="true" className="h-4.5 w-0 shrink-0" />
                 {restLineParts}
               </span>
             ) : null}
@@ -1018,6 +1029,7 @@ function MetaPart({
   hidden = false,
   order = 0,
   keep = false,
+  oneLine = false,
 }: {
   className?: string | undefined;
   children: ReactNode;
@@ -1027,13 +1039,29 @@ function MetaPart({
   order?: number | undefined;
   /** Never shrinks (a status): it stays whole while the facts before it give way. */
   keep?: boolean | undefined;
+  /**
+   * On a one-line meta line (which wraps into a clipped second line): the part
+   * claims room for its dot and a few letters, then takes what is left in
+   * order. One without even that much wraps away whole.
+   */
+  oneLine?: boolean | undefined;
 }) {
+  const sizing: CSSProperties = keep
+    ? { flexShrink: 0 }
+    : oneLine
+      ? // Earlier parts fill to their full width before later ones grow past
+        // their few letters, so the line still gives way from the end.
+        { flexBasis: "3.5rem", flexGrow: 64 ** (4 - Math.min(order, 4)), flexShrink: 0 }
+      : { flexShrink: 64 ** Math.min(order, 4) };
   return (
     <span
       aria-hidden={hidden || undefined}
-      style={{ flexShrink: keep ? 0 : 64 ** Math.min(order, 4) }}
+      style={sizing}
       className={cn(
-        "flex max-w-full min-w-0 items-center overflow-hidden whitespace-nowrap",
+        "flex min-w-0 items-center overflow-hidden whitespace-nowrap",
+        // max-content caps the growth; the 3.5rem basis is the most a part
+        // asks for before it fits, so a short fact never gains empty space.
+        oneLine && !keep ? "max-w-max" : "max-w-full",
         className,
       )}
     >
