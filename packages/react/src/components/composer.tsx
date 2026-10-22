@@ -50,6 +50,10 @@ import {
 } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
 import {
+  ComposerFooterSignalProvider,
+  useComposerFooterSignalState,
+} from "../lib/composer-footer-signals";
+import {
   ComposerResponsiveContext,
   type ResponsiveBasis,
 } from "../lib/composer-responsive-context";
@@ -1076,12 +1080,14 @@ export function Confirmation() {
 export type ComposerFooterProps = ComponentPropsWithoutRef<"div">;
 
 export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function ComposerFooter(
-  { className, ...props },
+  { className, children, ...props },
   ref,
 ) {
+  const signals = useComposerFooterSignalState();
   return (
     <div
       {...props}
+      {...signals.attributes}
       ref={ref}
       className={cn(
         "og-composer-footer flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5",
@@ -1089,7 +1095,9 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
         "max-sm:flex-nowrap max-sm:items-center max-sm:gap-1",
         className,
       )}
-    />
+    >
+      <ComposerFooterSignalProvider value={signals.report}>{children}</ComposerFooterSignalProvider>
+    </div>
   );
 });
 

@@ -132,7 +132,10 @@ html[data-desktop="macos"] nav[data-collapsed="true"] [data-rail-header] {
   padding-top: 44px;
 }
 
-html[data-desktop="macos"]:has(nav[data-collapsed="true"]) [data-titlebar] {
+/* The shell carries the collapsed state itself. An `html:has(...)` selector
+   here made every DOM change anywhere in the page (each keystroke in the
+   composer, each streamed token) restyle the whole document. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-titlebar] {
   padding-left: 32px;
 }
 

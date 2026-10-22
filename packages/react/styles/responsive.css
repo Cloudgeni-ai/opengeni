@@ -177,29 +177,29 @@
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-transcription-capturing])
+    .og-composer-footer[data-footer-transcription-capturing]
     .og-composer-controls
     > :not([data-transcription-capturing]) {
     display: none;
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-transcription-capturing])
+    .og-composer-footer[data-footer-transcription-capturing]
     .og-composer-actions {
     display: none;
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-transcription-attention])
+    .og-composer-footer[data-footer-transcription-attention]
     .og-composer-controls
     > :not([data-transcription-attention]) {
     display: none;
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-transcription-attention])
+    .og-composer-footer[data-footer-transcription-attention]
     .og-composer-actions
-    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    > :not([data-analytics-action]) {
     display: none;
   }
 
@@ -215,26 +215,26 @@
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-footer[data-footer-realtime-attention]
     .og-composer-controls {
     display: none;
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-footer[data-footer-realtime-attention]
     .og-composer-actions,
   [data-og-responsive-basis="container"]
-    .og-composer-footer
-    .og-realtime-control:has([data-realtime-attention]),
+    .og-composer-footer[data-footer-realtime-attention]
+    .og-realtime-control,
   [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] {
     flex: 1 1 auto;
     min-width: 0;
   }
 
   [data-og-responsive-basis="container"]
-    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-footer[data-footer-realtime-attention]
     .og-composer-actions
-    > :not(:has([data-realtime-attention])) {
+    > :not(.og-realtime-control) {
     flex-shrink: 0;
   }
 
