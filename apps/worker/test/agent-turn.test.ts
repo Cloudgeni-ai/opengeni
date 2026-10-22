@@ -47,6 +47,7 @@ import {
   EmptyCompactionSummaryError,
   SandboxConfigError,
   SandboxExecReadinessError,
+  TurnSandboxCommandCancelledError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceArchiveIntegrityError,
@@ -4105,6 +4106,26 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(cancellation).toBeInstanceOf(CancelledFailure);
     expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
     expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+  });
+
+  test("a sandbox command cancelled by a worker shutdown recovers like the shutdown itself", () => {
+    // A shutdown during startup file downloads reaches settlement through the
+    // turn tool fence's command error. Its cause is the activity's own
+    // cancellation, so the turn recovers instead of failing as "WORKER_SHUTDOWN".
+    const shutdown = new CancelledFailure("WORKER_SHUTDOWN");
+    const commandCancelled = new TurnSandboxCommandCancelledError(shutdown);
+    expect(commandCancelled.message).toBe("WORKER_SHUTDOWN");
+    expect(turnOperationCancellationFailure(commandCancelled)).toBe(shutdown);
+    expect(isWorkerShutdownCancellation(turnOperationCancellationFailure(commandCancelled))).toBe(
+      true,
+    );
+    // Any other command cancellation keeps its existing settlement.
+    expect(
+      turnOperationCancellationFailure(new TurnSandboxCommandCancelledError(new Error("STEER"))),
+    ).toBeNull();
+    expect(
+      turnOperationCancellationFailure(new TurnSandboxCommandCancelledError("deadline")),
+    ).toBeNull();
   });
 
   test("a committed control outranks a same-checkpoint provider failure", async () => {
