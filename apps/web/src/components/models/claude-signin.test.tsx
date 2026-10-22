@@ -134,6 +134,33 @@ for (const scope of ["workspace", "organization"] as const) {
     expect(container.querySelector('button[type="submit"]')?.textContent).toBe("Sign in to Claude");
     expect(sessionStorage.getItem(key)).toBeNull();
   });
+  test(`${scope}: an API error keeps its reference behind Technical details`, async () => {
+    sessionStorage.setItem(key, JSON.stringify(attempt(scopeId)));
+    const failure = async () => {
+      throw new OpenGeniApiError(422, "", {
+        code: "validation_error",
+        correlationId: "ref-1234",
+        displayMessage: "Copy the full authorization code from the Claude page.",
+      });
+    };
+    await render(
+      stateFor(
+        {
+          completeWorkspaceClaudeSubscriptionOAuth: failure,
+          completeOrganizationClaudeSubscriptionOAuth: failure,
+        },
+        async () => true,
+      ),
+    );
+    await fill("Claude authorization code", "incorrect");
+    await submit();
+    const alert = container.querySelector('[role="alert"]')!;
+    expect(alert.querySelector("p")?.textContent).toContain(
+      "Copy the full authorization code from the Claude page.",
+    );
+    expect(alert.querySelector("p")?.textContent).not.toContain("ref-1234");
+    expect(alert.textContent).toContain("Technical details");
+  });
   test(`${scope}: late completion from an unmounted form preserves a newer attempt`, async () => {
     sessionStorage.setItem(key, JSON.stringify(attempt(scopeId)));
     let rejectComplete!: (error: unknown) => void;

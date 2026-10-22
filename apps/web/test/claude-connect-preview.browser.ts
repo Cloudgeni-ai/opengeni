@@ -30,6 +30,9 @@ try {
     [1100, "dark"],
     [390, "light"],
     [390, "dark"],
+    // Common phone widths, where copy wraps most.
+    [360, "light"],
+    [375, "dark"],
     // Either side of where the footer stacks: three actions must not wrap the primary.
     [430, "light"],
     [520, "dark"],
@@ -54,12 +57,22 @@ try {
       const tag = `${flow}-${width}-${theme}`;
       const primary = page.locator('button[type="submit"]');
       // Account for Playwright scrolling the page to reach a control.
+      // The primary action and the code field must both stay put. Measure at scroll 0:
+      // clicking a control scrolls the page's own scroll container, which isn't layout.
       const primaryPosition = () =>
-        primary.evaluate((el) => ({
-          top: el.getBoundingClientRect().top + scrollY,
-          left: el.getBoundingClientRect().left,
-          width: el.getBoundingClientRect().width,
-        }));
+        primary.evaluate((el) => {
+          scrollTo(0, 0);
+          for (const node of document.querySelectorAll("*")) if (node.scrollTop) node.scrollTop = 0;
+          return {
+            top: el.getBoundingClientRect().top,
+            left: el.getBoundingClientRect().left,
+            width: el.getBoundingClientRect().width,
+            codeTop:
+              document
+                .querySelector('input[aria-label="Claude authorization code"]')
+                ?.getBoundingClientRect().top ?? 0,
+          };
+        });
       const shot = async (name: string) => {
         n += 1;
         await page.waitForTimeout(250);

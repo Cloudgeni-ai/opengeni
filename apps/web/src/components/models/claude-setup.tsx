@@ -4,7 +4,7 @@ export function ClaudeTokenInstructions() {
   return (
     <div className="flex flex-col gap-3">
       <p className="m-0 text-sm leading-5 text-fg-muted">
-        Run this in Claude Code’s terminal, then paste the token below.
+        Run this in a terminal where you use Claude Code, then paste the token below.
       </p>
       <CopyField value="claude setup-token" label="Create a Claude setup token" variant="field" />
       <p className="m-0 text-xs leading-4.5 text-fg-muted">

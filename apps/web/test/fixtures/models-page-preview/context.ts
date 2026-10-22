@@ -144,6 +144,8 @@ const claudeComplete = async (scope: "organization" | "workspace", request: { co
   if (request.code !== "preview-code") {
     throw new OpenGeniApiError(422, "", {
       code: "validation_error",
+      // A real API error carries a request reference; it must fit without moving the footer.
+      correlationId: "3f2b9c1e-7a44-4d0b-9e61-5c8d2a7f1b30",
       displayMessage: "Copy the full authorization code from the Claude page.",
     });
   }

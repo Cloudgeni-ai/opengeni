@@ -9,14 +9,12 @@ import { useEffect, useId, useRef, useState } from "react";
 import { LoaderCircleIcon } from "lucide-react";
 import type { ProviderConnectionView } from "../ai-gateway-connection";
 import { Button } from "@opengeni/react/ui/button";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
+import { ErrorMessage, type ErrorDetail } from "@opengeni/react/ui/error-message";
 import { Field, FieldStack } from "@opengeni/react/ui/field";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { SecretInput } from "@/components/ui/secret-field";
-import {
-  errorText,
-  ModelsFormPage,
-  ProviderTile,
-} from "@opengeni/react/app/components/models/models-ui";
+import { ModelsFormPage, ProviderTile } from "@opengeni/react/app/components/models/models-ui";
 import { ClaudeTokenInstructions } from "./claude-setup";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
 
@@ -90,7 +88,12 @@ export function ClaudeSignInPage({
   const [token, setToken] = useState("");
   const [legacy, setLegacy] = useState(false);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // What to do next, with the request reference kept behind Technical details.
+  const [error, setError] = useState<{
+    title: string;
+    reference?: string | undefined;
+    details: ErrorDetail[];
+  } | null>(null);
   const statusId = useId();
   const active = useRef(true);
   const popup = useRef<{ close(): void } | null>(null);
@@ -293,7 +296,11 @@ export function ClaudeSignInPage({
           await afterSave?.(savedAccountId.current);
           return true;
         } catch (caught) {
-          if (active.current) setError(errorText(caught, "Couldn't connect Claude. Try again."));
+          if (active.current)
+            setError({
+              title: userErrorTextWithoutReference(caught, "Couldn't connect Claude. Try again."),
+              ...apiErrorDetails(caught),
+            });
           return false;
         }
       }}
@@ -313,7 +320,6 @@ export function ClaudeSignInPage({
         ) : null}
         <Field label="Sign-in method" group>
           <SegmentedControl
-            aria-label="Sign-in method"
             className="self-start"
             value={legacy ? "token" : "browser"}
             options={[
@@ -329,16 +335,14 @@ export function ClaudeSignInPage({
             }}
           />
         </Field>
-        {/* Reserve the code step, not the whole page. Only an explicit method
-            change reveals a differently sized form; auth and errors stay put. */}
-        <div className={legacy ? "min-h-60" : "min-h-44"}>
+        {/* Only an explicit method change resizes the form. Before and after
+            sign-in starts, the browser step keeps the same copy and rows. */}
+        <div className={legacy ? "min-h-60" : undefined}>
           <FieldStack className="gap-4">
             {!legacy ? (
               <>
                 <p className="m-0 text-sm leading-5 text-fg-muted">
-                  {attempt
-                    ? "Approve access on Claude’s page, then paste the authorization code here."
-                    : "Claude opens in a new window. Sign in and approve access, then return here with the authorization code."}
+                  Approve access on Claude’s page, then paste the authorization code here.
                 </p>
                 <Field
                   label="Authorization code"
@@ -354,7 +358,10 @@ export function ClaudeSignInPage({
                         </a>
                       </Button>
                     ) : (
-                      <span aria-hidden="true" className="inline-block h-8" />
+                      // The same link, hidden, so the label row keeps its size and baseline.
+                      <Button asChild variant="link" size="sm" className="invisible">
+                        <span aria-hidden="true">Open Claude sign-in</span>
+                      </Button>
                     )
                   }
                   hint={
@@ -398,19 +405,23 @@ export function ClaudeSignInPage({
             )}
           </FieldStack>
         </div>
-        <div id={statusId} className="min-h-12 text-sm leading-5">
+        {/* Room for a two-line error and its Technical details, so it never moves the footer. */}
+        <div id={statusId} className="min-h-18 text-sm leading-5">
           {error ? (
-            <p role="alert" className="m-0 text-danger">
-              {error}
-            </p>
-          ) : null}
-          {!error && blockedReason ? <p className="m-0 text-fg-muted">{blockedReason}</p> : null}
-          {!error && !state.canManageConnection ? (
+            <ErrorMessage
+              variant="inline"
+              announce
+              title={error.title}
+              reference={error.reference}
+              details={error.details}
+            />
+          ) : blockedReason ? (
+            <p className="m-0 text-fg-muted">{blockedReason}</p>
+          ) : !state.canManageConnection ? (
             <p className="m-0 text-fg-muted">
               Only people who can manage connections can connect Claude.
             </p>
-          ) : null}
-          {!error && !blockedReason && state.canManageConnection && footerStart !== false ? (
+          ) : footerStart !== false ? (
             <div className="text-xs text-fg-muted">
               {footerStart ??
                 (state.organization
