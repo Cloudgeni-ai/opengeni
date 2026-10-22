@@ -756,6 +756,9 @@ export function useRealtimeModelSelection(options: {
   } | null>(null);
   // A pick made here, for when browser storage can't keep it.
   const pickedRef = useRef<{ workspaceId: string; model: SessionRealtimeModel } | null>(null);
+  // The model of a call already running here: a catalog that arrives later must
+  // not swap it for a default.
+  const activeModelRef = useRef<SessionRealtimeModel | null>(activeModel ?? null);
   const [selectedModelId, setSelectedModelId] = useState<SessionRealtimeModel>(() => {
     const picked = readRealtimeModelPreference(workspaceId);
     if (!initialCachedCatalog) return picked ?? CODEX_LIVE_MODEL(t).id;
@@ -763,11 +766,19 @@ export function useRealtimeModelSelection(options: {
   });
 
   useEffect(() => {
+    activeModelRef.current = activeModel ?? null;
+  }, [activeModel]);
+
+  useEffect(() => {
     let disposed = false;
     const requestAbort = new AbortController();
     const applyCatalog = (models: RealtimeModelOption[]) => {
       catalogScopeRef.current = { client, workspaceId, source: "cache" };
       setCatalog(models);
+      if (activeModelRef.current) {
+        setSelectedModelId(activeModelRef.current);
+        return;
+      }
       const picked =
         readRealtimeModelPreference(workspaceId) ??
         (pickedRef.current?.workspaceId === workspaceId ? pickedRef.current.model : null);
