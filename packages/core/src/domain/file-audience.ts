@@ -91,6 +91,9 @@ export async function fileSourceVisibleToHost(
       authorizedSource.fileId !== fileId)
   )
     return false;
+  // This exact File has already passed the requested session's accepted
+  // attachment check; the grant cannot be reused for an ordinary File read.
+  if (authorizedSource?.acceptedSessionAttachment) return true;
   if (!deps.sessionAuthorization) return true;
   if (!source.sessionId || source.audienceExplicit) return true;
   const live = await getSessionAuthorityProjection(deps.db, fileWorkspaceId, source.sessionId);
@@ -110,6 +113,34 @@ export async function fileSourceVisibleToHost(
     if (error instanceof SessionAuthorizationDeniedError) return false;
     throw error;
   }
+}
+
+/** A durable workspace copy requires File access independent of a source chat. */
+export async function fileMayBeCopiedToWorkspace(
+  deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
+  grant: AccessGrant,
+  file: FileAsset,
+  fileRlsSubjectId = grant.subjectId,
+): Promise<boolean> {
+  const source = authorizedFileSourceReference(file);
+  if (
+    !source ||
+    source.accountId !== grant.accountId ||
+    source.workspaceId !== file.workspaceId ||
+    source.fileId !== file.id
+  )
+    return false;
+  if (file.scope !== "workspace") return false;
+  if ((source.sessionId || source.provenanceMissing) && !source.audienceExplicit) return false;
+  return fileSourceVisibleToHost(
+    deps,
+    grant,
+    file.id,
+    file.workspaceId,
+    true,
+    fileRlsSubjectId,
+    file,
+  );
 }
 
 /** The stored audience of a file, in Site vocabulary. */

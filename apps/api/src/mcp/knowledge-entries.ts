@@ -124,6 +124,7 @@ export function registerKnowledgeEntryTools(
         {
           subjectId: attempt.subjectId,
           initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
+          agentRootSessionId: attempt.callerRootSessionId,
         },
         () => fn(context),
       );

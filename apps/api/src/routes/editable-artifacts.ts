@@ -9,7 +9,7 @@ import {
   editableArtifactId,
   editableArtifactReplicaId,
   editableArtifactScope,
-  fileSourceVisibleToHost,
+  fileMayBeCopiedToWorkspace,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -423,15 +423,7 @@ export function registerEditableArtifactRoutes(
         fileId: body.sourceFileId,
         modality: body.modality,
         authorizeSourceFile: (file, subjectId) =>
-          fileSourceVisibleToHost(
-            deps,
-            grant,
-            file.id,
-            file.workspaceId,
-            true,
-            subjectId ?? grant.subjectId,
-            file,
-          ),
+          fileMayBeCopiedToWorkspace(deps, grant, file, subjectId ?? grant.subjectId),
         signal: context.req.raw.signal,
       });
       const artifact = await requireEditableArtifactApplication(deps).importArtifact({

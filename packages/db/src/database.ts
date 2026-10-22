@@ -752,6 +752,7 @@ async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<Applie
     sql`set_config('opengeni.session_variable_set_attachments_v1', '1', true)`,
     sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
     sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
+    sql`set_config('opengeni.file_provenance_writer_v1', '1', true)`,
     sql`set_config('jit', 'off', true)`,
     sql`set_config('opengeni.agent_root_session_id', ${actor?.agentRootSessionId ?? ""}::text, true)`,
     sql`set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}::text, true)`,

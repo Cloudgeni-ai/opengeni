@@ -26,6 +26,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import { seedSenderConnections } from "./sender-connection-fixture";
+import { sql } from "drizzle-orm";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -159,6 +160,83 @@ test("accepted session attachment is readable by another viewer without publishi
     sandboxBackend: "none",
   });
   expect(await f.read(viewer, other.id)).toEqual([]);
+});
+
+test("a pre-upgrade File writer cannot insert after the provenance cutover", async () => {
+  const f = await fixture();
+  const failure = await withWorkspaceRls(client.db, f.scope.workspaceId, async (tx) => {
+    await tx.execute(sql`select set_config('opengeni.file_provenance_writer_v1','',true)`);
+    await tx.execute(sql`insert into files(id,account_id,workspace_id,status,filename,
+        safe_filename,content_type,size_bytes,bucket,object_key)
+        values(${crypto.randomUUID()}::uuid,${f.scope.accountId}::uuid,
+          ${f.scope.workspaceId}::uuid,'ready','old.txt','old.txt','text/plain',1,
+          'test','old-writer-test')`);
+  }).then(
+    () => null,
+    (error: Error & { cause?: Error }) => error,
+  );
+  expect(failure?.cause?.message).toContain("File writer upgrade required");
+});
+
+test("a private source upload remains readable only through its accepted target chat", async () => {
+  const { fileSourceVisibleToHost, readSessionAttachmentFiles } = await import("@opengeni/core");
+  const f = await fixture(true);
+  const source = await createSession(client.db, {
+    ...f.scope,
+    initialMessage: "private source",
+    resources: [],
+    createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "low",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await transitionSessionVisibility(client.db, {
+    workspaceId: f.scope.workspaceId,
+    sessionId: source.id,
+    actorSubjectId: f.grant.subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: crypto.randomUUID(),
+  });
+  await shared.admin`update files set source_session_id=${source.id},
+    source_session_owner_subject_id=${f.grant.subjectId} where id=${f.file.id}`;
+  await withSessionRlsActorContext(f.owner, f.accept);
+  const viewer = { ...f.grant, workspaceId: f.scope.workspaceId, subjectId: "user:viewer" };
+  const deps = {
+    db: client.db,
+    sessionAuthorization: {
+      resolveListScope: async () => ({ kind: "all" as const }),
+      authorizeSession: async (input: { target: { sessionId: string } }) =>
+        input.target.sessionId === f.session.id
+          ? { allowed: true as const }
+          : { allowed: false as const, reason: "forbidden" as const },
+    },
+  } as Parameters<typeof readSessionAttachmentFiles>[0];
+  const [accepted] = await readSessionAttachmentFiles(deps, viewer, f.session.id, [f.file.id]);
+  expect(accepted?.id).toBe(f.file.id);
+  expect(
+    await fileSourceVisibleToHost(
+      deps,
+      viewer,
+      f.file.id,
+      f.scope.workspaceId,
+      false,
+      viewer.subjectId,
+      accepted,
+    ),
+  ).toBe(true);
+  expect(
+    await getFilesForSubject(client.db, {
+      ...f.scope,
+      subjectId: viewer.subjectId,
+      fileIds: [f.file.id],
+    }),
+  ).toEqual([]);
+  expect(
+    await readSessionAttachmentFiles(deps, viewer, f.session.id, [crypto.randomUUID()]),
+  ).toEqual([]);
 });
 
 test("an accepted app-shot reads back with its stored capture", async () => {

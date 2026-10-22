@@ -228,7 +228,7 @@ describe("chat file to retained source through the public API", () => {
       method: "POST",
       headers: { authorization: await f.authorization() },
     });
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(403);
     expect(f.calls).toEqual([]);
   });
   test("MCP preparation also stops before reading a host-denied original", async () => {
@@ -255,8 +255,6 @@ describe("chat file to retained source through the public API", () => {
   });
   test("Knowledge download denies a private source even when its entry remains shared", async () => {
     const f = await fixture();
-    await shared.admin`update files set source_session_id = ${f.session.id},
-      source_session_shared_unrestricted = true where id = ${f.fileId}`;
     const prepared = await f.app.request(f.url, {
       method: "POST",
       headers: { authorization: await f.authorization() },
@@ -281,6 +279,30 @@ describe("chat file to retained source through the public API", () => {
       });
     const before = await request();
     expect(before.status, await before.clone().text()).toBe(200);
+    const searchForSource = () =>
+      f.app.request(`http://test/v1/workspaces/${f.grant.workspaceId}/knowledge/entries/search`, {
+        method: "POST",
+        headers: { authorization: otherAuthorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          mode: "keyword",
+          query: "Acme",
+          fileId: f.fileId,
+          includeEvidence: true,
+        }),
+      });
+    const beforeSearch = await searchForSource();
+    expect(beforeSearch.status).toBe(200);
+    expect(JSON.stringify(await beforeSearch.json())).toContain(retained.receipt.entryId);
+    // An inherited source discovered after text retention must also hide the
+    // copied text, including from search and direct Knowledge reads.
+    await shared.admin`update files set source_session_id = ${f.session.id},
+      source_session_shared_unrestricted = true where id = ${f.fileId}`;
+    const entryUrl = `http://test/v1/workspaces/${f.grant.workspaceId}/knowledge/entries/${retained.receipt.entryId}`;
+    const entry = await f.app.request(entryUrl, { headers: { authorization: otherAuthorization } });
+    expect(entry.status).toBe(404);
+    const search = await searchForSource();
+    expect(search.status).toBe(200);
+    expect(JSON.stringify(await search.json())).not.toContain(retained.receipt.entryId);
     await shared.admin`update sessions set memory_scope = 'user',
       scope_subject_id = ${f.subjectId} where id = ${f.session.id}`;
     expect((await request()).status).toBe(404);

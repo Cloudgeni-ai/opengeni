@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
   fileSourceVisibleToHost,
+  fileMayBeCopiedToWorkspace,
   sourceSessionRequiresHumanShare,
   type ObjectStorageDependency,
   type SessionWorkflowClient,
@@ -413,6 +414,9 @@ test("a generated file follows its source chat when the chat becomes private", a
   const personalFileId = await f.readyFile(f.owner.subjectId);
   await shared.admin`update files set source_session_id = ${sessionId},
     source_session_shared_unrestricted = true where id = ${personalFileId}`;
+  const otherOwnedFileId = await f.readyFile(f.other.subjectId);
+  await shared.admin`update files set source_session_id = ${sessionId},
+    source_session_shared_unrestricted = true where id = ${otherOwnedFileId}`;
   const uploadedFileId = crypto.randomUUID();
   await createFileUpload(db.db, {
     accountId: f.workspace.accountId,
@@ -434,6 +438,21 @@ test("a generated file follows its source chat when the chat becomes private", a
   expect(uploadedSource).toMatchObject({ source: sessionId, explicit: false });
 
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
+  const ownerGrant: AccessGrant = {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: f.owner.subjectId,
+    principalKind: "human_session",
+    permissions: ["files:read"],
+  };
+  const [inheritedSource] = await getFilesForSubject(db.db, {
+    accountId: ownerGrant.accountId,
+    workspaceId: ownerGrant.workspaceId,
+    subjectId: ownerGrant.subjectId,
+    fileIds: [fileId],
+  });
+  expect(inheritedSource).toBeDefined();
+  expect(await fileMayBeCopiedToWorkspace({ db: db.db }, ownerGrant, inheritedSource!)).toBe(false);
   expect(
     (
       await updateFileVisibility(db.db, {
@@ -464,7 +483,7 @@ test("a generated file follows its source chat when the chat becomes private", a
         fileIds: [fileId],
       }),
   );
-  expect(unrelatedAgent).toHaveLength(0);
+  expect(unrelatedAgent).toHaveLength(1);
   await transitionSessionVisibility(db.db, {
     workspaceId: f.workspace.id,
     sessionId,
@@ -476,6 +495,11 @@ test("a generated file follows its source chat when the chat becomes private", a
   const [sourceSnapshot] = await shared.admin`
     select source_session_owner_subject_id as owner from files where id = ${unsharedFileId}`;
   expect(sourceSnapshot?.owner).toBe(f.owner.subjectId);
+  const [otherOwnedSnapshot] = await shared.admin`
+    select source_session_owner_subject_id as owner,
+      source_session_shared_unrestricted as shared
+    from files where id = ${otherOwnedFileId}`;
+  expect(otherOwnedSnapshot).toMatchObject({ owner: f.owner.subjectId, shared: false });
   const [legacySnapshot] = await shared.admin`
     select source_session_owner_subject_id as owner from files where id = ${legacyOwnerlessId}`;
   expect(legacySnapshot?.owner).toBe(f.owner.subjectId);
@@ -552,8 +576,17 @@ test("a generated file follows its source chat when the chat becomes private", a
     visibility: "workspace",
   });
   expect(sharedFile.status, await sharedFile.clone().text()).toBe(200);
+  const [explicitSource] = await getFilesForSubject(db.db, {
+    accountId: ownerGrant.accountId,
+    workspaceId: ownerGrant.workspaceId,
+    subjectId: ownerGrant.subjectId,
+    fileIds: [fileId],
+  });
+  expect(explicitSource).toBeDefined();
+  expect(await fileMayBeCopiedToWorkspace({ db: db.db }, ownerGrant, explicitSource!)).toBe(true);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
   await shared.admin`delete from sessions where id = ${sessionId}`;
+  expect((await f.call(f.other, "GET", `/files/${otherOwnedFileId}`)).status).toBe(404);
   expect((await f.call(f.owner, "GET", `/files/${unsharedFileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${unsharedFileId}`)).status).toBe(404);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);

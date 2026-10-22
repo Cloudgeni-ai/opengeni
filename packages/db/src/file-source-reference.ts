@@ -6,6 +6,8 @@ type FileSourceReference = {
   fileId: string;
   sessionId: string | null;
   audienceExplicit: boolean;
+  provenanceMissing: boolean;
+  acceptedSessionAttachment?: boolean;
 };
 
 // Internal provenance for a File object that has already passed an ordinary

@@ -31,17 +31,23 @@ export async function readSessionAttachmentFiles(
     subjectId: grant.subjectId,
     fileIds,
   });
-  const missing = fileIds.filter((id) => !ordinary.some((file) => file.id === id));
   const actor = authorization?.actor ?? { kind: "subject" as const, subjectId: grant.subjectId };
-  const read = () =>
-    readSessionFileAttachments(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      fileIds: missing,
-      access: { sessionId, authorityEpoch: authority.authorityEpoch, actor },
-    });
-  const shared = authorization
-    ? await withResolvedSessionAuthorization(authorization, read)
-    : await withSessionRlsActorContext({ subjectId: grant.subjectId }, read);
-  return [...ordinary, ...shared];
+  const shared: FileAsset[] = [];
+  const ids = [...new Set(fileIds)];
+  for (let offset = 0; offset < ids.length; offset += 1000) {
+    const read = () =>
+      readSessionFileAttachments(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        fileIds: ids.slice(offset, offset + 1000),
+        access: { sessionId, authorityEpoch: authority.authorityEpoch, actor },
+      });
+    shared.push(
+      ...(authorization
+        ? await withResolvedSessionAuthorization(authorization, read)
+        : await withSessionRlsActorContext({ subjectId: grant.subjectId }, read)),
+    );
+  }
+  const accepted = new Map(shared.map((file) => [file.id, file]));
+  return [...accepted.values(), ...ordinary.filter((file) => !accepted.has(file.id))];
 }

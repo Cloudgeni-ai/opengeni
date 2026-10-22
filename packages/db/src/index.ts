@@ -89100,6 +89100,7 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
       fileId: row.id,
       sessionId: row.sourceSessionId,
       audienceExplicit: row.sourceSessionAudienceExplicit,
+      provenanceMissing: row.sourceSessionProvenanceMissing,
     },
   );
 }

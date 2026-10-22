@@ -1,5 +1,6 @@
 -- deployment-mode: maintenance
 -- maintenance-justification: the new restrictive file read policy requires every producer to stamp source provenance before writes resume.
+-- online-safety-exception: maintenance-unbatched-data: Provenance reconciliation and restrictive policy activation must share one maintenance transaction.
 -- Session-produced files inherit the live source chat's read boundary unless
 -- their owner explicitly shares that file. Ambiguous historical shared upload
 -- originals require a private operator decision before activation.
@@ -348,10 +349,25 @@ ALTER TABLE video_generation_operations FORCE ROW LEVEL SECURITY;
 ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE files FORCE ROW LEVEL SECURITY;
 
+-- Maintenance cutover: a pre-upgrade process must fail closed if restarted
+-- after provenance enforcement, including for ordinary-looking originals.
+CREATE FUNCTION require_file_provenance_writer_0913() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND rolsuper)
+    AND current_setting('opengeni.file_provenance_writer_v1', true) IS DISTINCT FROM '1'
+  THEN
+    RAISE EXCEPTION 'File writer upgrade required' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $body$;
+CREATE TRIGGER require_file_provenance_writer_0913
+  BEFORE INSERT ON files FOR EACH ROW EXECUTE FUNCTION require_file_provenance_writer_0913();
+
 -- A shared chat can later become private (or vice versa). Keep the final
 -- owner snapshot for retained files when the source chat is deleted.
 CREATE FUNCTION sync_file_source_session_owner_0913() RETURNS trigger
-LANGUAGE plpgsql SET search_path = pg_catalog AS $body$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
 BEGIN
   UPDATE files SET source_session_owner_subject_id = file_source_owner_snapshot_0913(
     CASE WHEN NEW.visibility = 'user_private' THEN coalesce(NEW.owner_subject_id,'') END,
@@ -391,6 +407,7 @@ DO $search_path$
 BEGIN
   EXECUTE format('ALTER FUNCTION sync_file_source_session_owner_0913() SET search_path = pg_catalog, %I, pg_temp', current_schema());
 END $search_path$;
+REVOKE ALL ON FUNCTION sync_file_source_session_owner_0913() FROM PUBLIC;
 CREATE TRIGGER sync_file_source_session_owner_0913
   AFTER UPDATE OF visibility, owner_subject_id, memory_scope, scope_subject_id, site_access_root_id ON sessions
   FOR EACH ROW WHEN (OLD.visibility IS DISTINCT FROM NEW.visibility
@@ -446,15 +463,13 @@ BEGIN
 END $grant$;
 
 CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT USING (
-  (source_session_id IS NULL AND NOT source_session_provenance_missing)
+  opengeni_private.session_file_read_allowed(account_id,workspace_id,id)
+  OR (source_session_id IS NULL AND NOT source_session_provenance_missing)
   OR source_session_audience_explicit
   OR EXISTS (SELECT 1 FROM sessions source_session
     WHERE source_session.account_id = files.account_id
       AND source_session.workspace_id = files.workspace_id
       AND source_session.id = files.source_session_id
-      AND (nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
-        OR source_session.root_session_id::text =
-          nullif(current_setting('opengeni.agent_root_session_id', true), ''))
       AND (NOT EXISTS (SELECT 1 FROM slack_interactions slack
           WHERE slack.account_id = files.account_id AND slack.workspace_id = files.workspace_id
             AND slack.session_reservation_id = source_session.root_session_id
@@ -502,5 +517,30 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
     AND nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NULL
     AND NOT file_source_session_exists_0913(account_id, workspace_id, source_session_id))
 );
+
+-- Knowledge stores a durable text copy. A source-chat File may be retained
+-- there only after the File owner explicitly gives it independent access.
+CREATE OR REPLACE FUNCTION knowledge_source_visible(p_account uuid,p_body jsonb) RETURNS boolean
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $body$
+<<knowledge_source_visible>>
+DECLARE document_id uuid:=(p_body#>>'{source,documentId}')::uuid;
+  file_id uuid:=(p_body#>>'{source,fileId}')::uuid;
+BEGIN
+  IF document_id IS NOT NULL THEN
+    RETURN knowledge_document_visible(document_id) AND (file_id IS NULL OR EXISTS(
+      SELECT 1 FROM documents d WHERE d.account_id=p_account AND d.id=document_id
+        AND d.file_id=knowledge_source_visible.file_id));
+  END IF;
+  IF file_id IS NOT NULL THEN
+    RETURN EXISTS(SELECT 1 FROM files f WHERE f.account_id=p_account
+      AND f.id=knowledge_source_visible.file_id AND f.status='ready'
+      AND ((f.source_session_id IS NULL AND NOT f.source_session_provenance_missing)
+        OR f.source_session_audience_explicit))
+      AND google_drive_file_authorized(p_account,
+        nullif(current_setting('opengeni.workspace_id',true),'')::uuid,
+        nullif(current_setting('opengeni.subject_id',true),''),file_id);
+  END IF;
+  RETURN true;
+END $body$;
 RESET statement_timeout;
 RESET lock_timeout;

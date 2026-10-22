@@ -82,6 +82,7 @@ export async function readSessionFileAttachments(
         accountId: string;
         sourceSessionId: string | null;
         sourceSessionAudienceExplicit: boolean;
+        sourceSessionProvenanceMissing: boolean;
       }
     >(
       tx,
@@ -91,14 +92,22 @@ export async function readSessionFileAttachments(
       sha256,bucket,object_key as "objectKey",created_at::text as "createdAt",updated_at::text as "updatedAt",
       app_shot as "appShot",account_id as "accountId",
       source_session_id as "sourceSessionId",
-      source_session_audience_explicit as "sourceSessionAudienceExplicit"
+      source_session_audience_explicit as "sourceSessionAudienceExplicit",
+      source_session_provenance_missing as "sourceSessionProvenanceMissing"
     from opengeni_private.read_session_file_attachments(
       ${input.accountId}::uuid,${input.workspaceId}::uuid,${input.access.sessionId}::uuid,
       ${input.access.authorityEpoch},ARRAY(select jsonb_array_elements_text(${JSON.stringify([...new Set(input.fileIds)])}::jsonb))::uuid[],
       ${JSON.stringify(input.access.actor)}::jsonb)`,
     );
     return rows.map(
-      ({ appShot, accountId, sourceSessionId, sourceSessionAudienceExplicit, ...row }) => {
+      ({
+        appShot,
+        accountId,
+        sourceSessionId,
+        sourceSessionAudienceExplicit,
+        sourceSessionProvenanceMissing,
+        ...row
+      }) => {
         const capture = appShot == null ? null : AppShotCapture.safeParse(appShot);
         return attachFileSourceReference(
           {
@@ -113,6 +122,8 @@ export async function readSessionFileAttachments(
             fileId: row.id,
             sessionId: sourceSessionId,
             audienceExplicit: sourceSessionAudienceExplicit,
+            provenanceMissing: sourceSessionProvenanceMissing,
+            acceptedSessionAttachment: true,
           },
         );
       },

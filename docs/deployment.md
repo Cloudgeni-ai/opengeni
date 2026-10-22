@@ -22,6 +22,7 @@ contradictory or multiple private owners, unresolved original of either audience
 ownerless restricted File blocks 0914. Resolve these privately before
 retrying. Apply 0914, provision runtime roles, then start only matching API
 and worker images. Do not restart older writers after enforcement activates.
+The File insert guard rejects older runtime writers after the cutover.
 
 ## Database backup and recovery
 

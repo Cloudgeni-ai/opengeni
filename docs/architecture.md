@@ -1683,7 +1683,9 @@ Session-produced Files keep source-chat provenance. Ordinary File reads follow
 the chat's live visibility unless the File owner explicitly shares that File;
 after chat deletion, retained output keeps the chat's last audience. Historical
 output whose source chat cannot be recovered is restricted to its recorded owner.
-Migrations 0909–0910 stage private operator decisions for ambiguous historical
+Workspace Office imports and retained Knowledge text require a File audience
+that the owner explicitly shared independently of the source chat.
+Migrations 0913–0914 stage private operator decisions for ambiguous historical
 shared and private originals and legacy shares, then enforce source visibility.
 Verified ordinary uploads keep independent Document access; verified human
 shares keep their audience; attested session output stays owner-only. The
