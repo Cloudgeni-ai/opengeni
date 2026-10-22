@@ -546,8 +546,8 @@ async function ensureTemplateBuilt(withheld: readonly string[] = []): Promise<vo
  * Ensure the single shared container is up and the cluster-global opengeni_app
  * role exists, then register one exact holder. Lock-guarded so exactly one
  * parallel worker starts it. Returns null (and registers no holder) if Docker is
- * unavailable, so callers can skip gracefully — mirroring the old per-file
- * `available = false` behaviour. An explicit OPENGENI_TEST_PG_URL uses the
+ * unavailable and PostgreSQL is optional. Required database runs fail instead
+ * of reporting unexecuted assertions as passing. An explicit OPENGENI_TEST_PG_URL uses the
  * externally owned cluster instead and fails on unavailable/invalid fixtures.
  */
 async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
@@ -609,7 +609,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     if (!generation) {
       const probe = await probeContainer();
       if (!probe.available) {
-        return null;
+        return unavailableSharedTestDatabase();
       }
       generation = probe.id;
       if (generation && probe.status !== "running" && probe.status !== "restarting") {
@@ -645,7 +645,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
         replacedStaleContainer ? 5 : 1,
       );
       if (!generation) {
-        return null; // Docker unavailable or unable to start the fixture.
+        return unavailableSharedTestDatabase();
       }
     }
     if (!generation) {
@@ -781,6 +781,13 @@ async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): 
   await releaseContainer(handle);
 }
 
+function unavailableSharedTestDatabase(): null {
+  if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+    throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but disposable PostgreSQL is unavailable");
+  }
+  return null;
+}
+
 function uniqueDbName(label: string): string {
   return `og_${label
     .replace(/[^a-z0-9]/gi, "_")
@@ -791,7 +798,7 @@ function uniqueDbName(label: string): string {
 /**
  * Acquire a fresh, fully-migrated database in the shared container for the
  * calling test file. Returns `null` if docker is unavailable so the caller can
- * skip (the same graceful degradation the per-file harness had).
+ * skip, unless OPENGENI_REQUIRE_REAL_DB=1 makes missing PostgreSQL fatal.
  * OPENGENI_TEST_PG_URL opts into an existing PostgreSQL test cluster instead;
  * an unavailable native fixture throws rather than falling back to Docker.
  *
@@ -847,7 +854,8 @@ export async function acquireSharedTestDatabase(
  * shared container. For tests that drive the migration chain themselves (e.g.
  * applying individual .sql files to assert a single migration's behaviour). The
  * caller owns connecting to `databaseUrl` (as the superuser) and applying
- * whatever schema it wants. Returns `null` if docker is unavailable; an explicit
+ * whatever schema it wants. Returns `null` if docker is unavailable, unless
+ * OPENGENI_REQUIRE_REAL_DB=1 requires failure; an explicit
  * OPENGENI_TEST_PG_URL selects the native fixture and fails if unavailable.
  */
 export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTestDatabase | null> {
@@ -895,7 +903,8 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
  * The superuser pre-installs `pgcrypto` and `vector` (a non-superuser owner
  * cannot `CREATE EXTENSION`), exactly as a managed-Postgres operator does, and
  * grants the owner `CREATE, USAGE` on `public`. Returns `null` when docker is
- * unavailable so callers can skip. OPENGENI_TEST_PG_URL uses the same role and
+ * unavailable so callers can skip, unless OPENGENI_REQUIRE_REAL_DB=1 requires
+ * failure. OPENGENI_TEST_PG_URL uses the same role and
  * extension posture on an existing native test cluster without Docker.
  */
 export async function acquireOwnerMigratedTestDatabase(
