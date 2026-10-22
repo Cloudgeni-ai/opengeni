@@ -1702,6 +1702,17 @@ useful findings. Parsing and indexing remain mechanical services. Original bytes
 and search caches have separate storage jobs. Review controls
 publication, while action permissions remain independent.
 
+Knowledge reads evaluate evidence visibility for the complete matched candidate
+set through `knowledge_revisions_visible`; scalar readers use the same helper.
+Keyword nonmatches can be excluded first because their rank is per revision,
+but access filtering still precedes ranking, cursor selection and pagination.
+Dependency cycles terminate with recursive `UNION`, and shared identities are
+checked once within that read, never cached between statements. Existing
+VOLATILE document/source ACL helpers keep their fresh-snapshot behavior; this
+does not promise a single immutable snapshot across all nested ACL checks.
+Accepted-agent session/turn/attempt SHARE locks remain held until transaction
+completion, so reducing search work also shortens the event-writer lock queue.
+
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
 [`image-generation.md`](image-generation.md),

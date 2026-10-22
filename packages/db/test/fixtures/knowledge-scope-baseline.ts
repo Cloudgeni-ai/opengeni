@@ -15,6 +15,7 @@ export async function installScopeBaseline(admin: postgres.Sql, appUrl: string) 
   const appRole = decodeURIComponent(new URL(appUrl).username);
   const functions = [
     ["knowledge_scope_visible", `${schema}.knowledge_entries`],
+    ["knowledge_revisions_visible", "uuid,uuid[],uuid[],boolean"],
     ["knowledge_revision_visible", "uuid,uuid,uuid,boolean"],
     ["knowledge_entry_visible_body", "uuid,jsonb,boolean"],
     ["knowledge_entry_read", "uuid,uuid,jsonb,jsonb"],
