@@ -5,6 +5,7 @@
 // the CPUs, that startup slows enough to exceed the limit.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Tool } from "@openai/agents";
 import { JevClient, jevCostUsd, type JevFetch } from "../../packages/jev/src/client";
@@ -175,7 +176,7 @@ describe("Jev decision eval adapter", () => {
 
 describe("Jev eval command wiring (local mock endpoints, no paid calls)", () => {
   test("retrieval, offline replay, trajectories and resume use the same generic interface", async () => {
-    const directory = mkdtempSync(join(import.meta.dir, ".jev-test-"));
+    const directory = mkdtempSync(join(tmpdir(), "opengeni-jev-test-"));
     let decisionRequests = 0;
     let unavailable = false;
     const server = Bun.serve({
