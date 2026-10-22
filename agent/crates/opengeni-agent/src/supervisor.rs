@@ -2101,6 +2101,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             // A busy attempt reopens admission and tries again later.
             let mut reported_busy = None;
             let mut last_busy_report = tokio::time::Instant::now();
+            // The verified release, fetched once the host first proves idle.
+            let mut prepared: Option<crate::update::PreparedManagedUpdate> = None;
             loop {
                 if shutdown.is_requested() {
                     // The successor's Hello settles this update as replaced.
@@ -2139,6 +2141,60 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 // Controller fencing awaits external IO. Recheck the shared fence:
                 // an admitted control on any link may have arrived during that proof.
+                if busy_code.is_none() && prepared.is_none() {
+                    // Idle, but the release is not here yet. Download and verify
+                    // it with admission open: a large artifact takes tens of
+                    // seconds to fetch, and holding the fence for that long
+                    // would refuse every new request, open browsers and
+                    // computer sessions included. The next attempt fences
+                    // only for the swap and the handover.
+                    if let Some(backend) = browser_control.as_ref() {
+                        if backend.release_update(&update.operation_id).await.is_err() {
+                            warn!("browser controller update fence could not be released");
+                        }
+                    }
+                    update_drain.release_update(&update.operation_id);
+                    let base_url = update.release_base_url.clone();
+                    let channel = update.channel.clone();
+                    let target = update.target_version.clone();
+                    let operation_id = update.operation_id.clone();
+                    let fetched = tokio::task::spawn_blocking(move || {
+                        crate::update::prepare_managed(
+                            &operation_id,
+                            &base_url,
+                            &channel,
+                            &target,
+                            |_| {},
+                        )
+                    })
+                    .await;
+                    let failure = match fetched {
+                        Ok(Ok(release)) => {
+                            prepared = Some(release);
+                            continue;
+                        }
+                        Ok(Err(code)) => code,
+                        Err(error) => {
+                            warn!(%error, "self-update download worker failed");
+                            "update_worker_failed".to_string()
+                        }
+                    };
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::Failed,
+                        "",
+                        &failure,
+                        true,
+                        false,
+                        &[],
+                    )
+                    .await;
+                    update_drain.finish_update(&update.operation_id);
+                    return;
+                }
                 if busy_code.is_none() {
                     busy_code = update_busy_code(&update_drain, &engine, handing_over);
                     let sealed = if handing_over {
@@ -2227,12 +2283,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
 
             let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
-            let base_url = update.release_base_url.clone();
-            let channel = update.channel.clone();
-            let target = update.target_version.clone();
-            let operation_id = update.operation_id.clone();
+            let prepared = prepared.expect("the idle wait exits only with a prepared release");
             let apply = tokio::task::spawn_blocking(move || {
-                crate::update::apply_managed(&operation_id, &base_url, &channel, &target, |phase| {
+                crate::update::apply_prepared(prepared, |phase| {
                     let _ = phase_tx.send(phase);
                 })
             });
