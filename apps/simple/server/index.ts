@@ -339,10 +339,11 @@ async function proxyToApi(request: Request, url: URL) {
     // @ts-expect-error Bun streams request bodies with this flag.
     duplex: "half",
   });
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: upstream.headers,
-  });
+  // fetch has already decoded the body, so its encoding and length no longer apply.
+  const responseHeaders = new Headers(upstream.headers);
+  responseHeaders.delete("content-encoding");
+  responseHeaders.delete("content-length");
+  return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
 }
 
 function staticFile(pathname: string) {
