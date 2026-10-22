@@ -31,6 +31,7 @@ import { workspacesByOrganization } from "../org";
 import { hasWorkspacePermission } from "../permissions";
 import { readChatDirectory, recordChatVisit } from "./chat-directory";
 import {
+  extendChatSwitcher,
   isSwitcherKey,
   openChatSwitcher,
   stepChatSwitcher,
@@ -574,6 +575,16 @@ export function ActionsProvider(props: { children: ReactNode }) {
             onHover={(index) => {
               const current = switcherRef.current;
               if (current) setSwitcher({ ...current, index });
+            }}
+            onDirectoryChange={() => {
+              const current = switcherRef.current;
+              if (!current) return;
+              const next = extendChatSwitcher(
+                current,
+                readChatDirectory(subjectId, workspaceId),
+                reachableRef.current,
+              );
+              if (next !== current) setSwitcher(next);
             }}
             onPick={pickSwitcherChat}
             onDismiss={() => setSwitcher(null)}
