@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "cfec1c45d48c26d1e02cfa3a1a2b2b36fc5541c2986673d35fb68a81c84a5131"
+      "sha256": "ef99f65641b7829affca1b729928f0a10ed6798d446f447bd1125c0d750b2efd"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "d056a278c1d4c86600fd2929948ce1625fd61a5218769286f67f351265b14fe4"
+      "sha256": "87a9dd7d6fdcbec46702293ce5f2ba5ac0ef2d092c8ea3dc6a27f63106d2840a"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "cb8f9aa72be70cdf78a3ead50ead5e63c58cb8f9fe96442bc6c6fb4d56933da6"
+      "sha256": "358e19aaecabaa84e5c855cc92aff1254f7486336575247fae8fe2fc03e58fc8"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -305,7 +305,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "Prove embedded helper selection with synthetic payloads",
-      "sha256": "8ca64055cb10115c44586bfef4174a651e330e1c476b182725f45b233a005cc5"
+      "sha256": "e14c6ebdd17f2911c39e20957c04770eb211407641552ca915db928d55fdc7a5"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -341,25 +341,25 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
-      "sha256": "3ce8e33112a4e0898a1cd317fcce1ba59142d7279b7b7407103e99dfaf5b8ac1"
+      "sha256": "6bb244b0b2cb2d791b5f75a1a25f752f875d7cbfc8a5cd7faea807dcf5148d95"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (macOS universal)",
-      "sha256": "8381e61803ea185af6b8d3d691dcf9a3070561b78632eedfabd094086a3eed3e"
+      "sha256": "95f833ca8b72c51b3655194fbf9bc5d110f69979b78f0137bb37bf8edf49083e"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Windows x64)",
-      "sha256": "0b32db2db3c2185bf6e551f7ed973666a56d6a43c77dfa06643eef33fa865b79"
+      "sha256": "d4077dd9f417a3c5e755e0afd6c7804de4cc97a2784f7aa8077e61641b0a15c9"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Check the Windows binaries run on stock Windows",
-      "sha256": "5f1e0c6b46aba5d9d35ae4800ac3bb3a1045c50f101cf37b6d017b2281aeb8f7"
+      "sha256": "c15c2755fa4190b3f04e9e7e19441a82fd7627e93435e9a6b7661700401ec192"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -389,13 +389,13 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "List the Windows binaries to sign",
-      "sha256": "99d4d833e422dc4107dcb217861051c5c380173249d638a4ccaeade642493e33"
+      "sha256": "b2decbf5a71781a36b01ddae01c4c36c8f28f38119abc1d14aa37c722c55bb3c"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "macOS assemble + sign + notarize .app bundle (if creds present)",
-      "sha256": "705bdb6f90307d0a1c16ec635292fdc7d2b34956bc6f9ca8b4a9663f8591753a"
+      "sha256": "5d7997716534dc046b8f268009e68c514bff834f1169de17c48e8ccdf1226232"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -413,7 +413,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "minisign-sign + sha256 the artifact",
-      "sha256": "cb1fd351611f75e34b60f4bb824222f5e3db37a733d30675bcb14df9891af8fa"
+      "sha256": "09ab3ac90d9efcd5cc3cf991fbcef5fd3fa474f8acd193dd434998cf71bd192b"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -665,7 +665,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "api-image",
       "step": "Require complete exact-SHA canary agent bake",
-      "sha256": "6e8668a6cf11ed5eb0c37e2fbf8bb8fd472544f088de7ee599c036f1125b5484"
+      "sha256": "304658cc9fca82a63ac9dfc4e93ed82aa55f305ac93e0c578fb64fd46476759a"
     },
     {
       "workflow": ".github/workflows/ci.yml",
