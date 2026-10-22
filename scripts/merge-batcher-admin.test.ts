@@ -207,6 +207,40 @@ describe("offline batcher administration contract", () => {
       expect(section).toContain(required);
     expect(section).not.toMatch(/gh api[^\n]*(?:--method|-X)\s+(?:POST|PUT|DELETE|PATCH)/);
   });
+  test("ordinary-reader bypass omission preserves visible manual/queue policy decisions", async () => {
+    const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
+    const readback = await readFile(
+      new URL("../docs/merge-batcher-admin/README.md", import.meta.url),
+      "utf8",
+    );
+    expect(agents).toContain("that expected omission is");
+    expect(agents).toContain("not malformed policy and does not by itself force hold");
+    expect(agents).not.toContain("including inherited rules and bypass actors");
+    const rows = readback
+      .split("\n")
+      .filter(
+        (line) =>
+          line.startsWith("| Original squash") ||
+          line.startsWith("| Complete intended") ||
+          line.startsWith("| Mixed or inaccessible"),
+      );
+    const decisions = rows.map((row) =>
+      row
+        .split("|")
+        .slice(1, -1)
+        .map((cell) => cell.trim()),
+    );
+    expect(decisions).toHaveLength(5);
+    expect(decisions.map((row) => [row[1], row[2]])).toEqual([
+      ["omitted", "manual"],
+      ["visible and expected", "manual"],
+      ["omitted", "queue-only"],
+      ["visible and expected", "queue-only"],
+      ["omitted", "hold"],
+    ]);
+    expect(readback).toContain("Those exact identity/bypass checks are activation gates");
+    expect(readback).toContain("not prerequisites for an ordinary agent to choose queue-only");
+  });
   test("restore preserves exact original writable fields, not API metadata", () => {
     const before = fixture();
     const plan = prepare(before, 501, 999);

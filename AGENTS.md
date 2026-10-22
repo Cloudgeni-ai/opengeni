@@ -814,15 +814,20 @@ cleared and the rollout owner gives a separate explicit go.
 Merge mode follows **readable current GitHub rules**, not an owner-local receipt
 or whether a controller happens to be running. Read
 `gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
-inventory/details (including inherited rules and bypass actors), as described in
+inventory/details (including inherited rules), as described in
 the [agent readback procedure](docs/merge-batcher-admin/README.md#agent-readable-merge-mode).
+GitHub may omit `bypass_actors` for ordinary readers; that expected omission is
+not malformed policy and does not by itself force hold. Exact App/bypass checks
+belong to the activation operator, not ordinary agents selecting a merge path.
 Before activation or after a complete verified OFF restoration, the original
 squash-only PR admission plus non-FF/deletion protection, with no batcher writer
 restriction or partial guard transition, means normal reviewed squash after the
 same local-test and independent-review evidence. A private receipt is not a
 prerequisite for that read-only determination. A partial transition, inaccessible
-required readback or unknown mode is **hold**: do not merge. Once the complete
-exclusive-main rules are verified, the batcher
+effective-policy readback or unknown mode is **hold**: do not merge. Once the
+readable effective policy shows the complete intended main writer restriction
+alongside admission and immutable protection, choose queue-only (never direct
+merge) without requiring hidden bypass data. The batcher
 is the **only normal path to main**; this queue-only instruction takes effect with
 that activation without waiting for another source edit. Submit the documented
 ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and

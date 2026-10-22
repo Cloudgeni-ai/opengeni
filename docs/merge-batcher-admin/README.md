@@ -259,7 +259,11 @@ name. Follow pagination; an unsupported/inaccessible inherited source is unknown
 not absent. Check classic branch protections using the read-only GraphQL query
 in `read.sh` (including `hasNextPage`); effective rules alone do not establish
 classic protection or reveal every bypass. Read rule types, active enforcement,
-main/ref conditions, parameters and full bypass actors—not names alone.
+main/ref conditions and parameters—not names alone. GitHub may omit
+`bypass_actors` for callers without ruleset write access. This expected missing
+key is not malformed or inaccessible effective policy; do not require a stronger
+token just to choose the safe merge path. If bypass data is visible and unexpected,
+report the drift rather than ignore it.
 
 - **Manual:** original/restored main protection is squash-only PR admission plus
   non-fast-forward and deletion protection; repository squash merging is enabled,
@@ -268,20 +272,35 @@ main/ref conditions, parameters and full bypass actors—not names alone.
   activation, this original policy is sufficient: do not demand an owner-local
   OFF receipt that cannot yet exist. Respect all other required checks/protections
   and use normal head-pinned squash, never an admin bypass.
-- **Queue-only:** the complete intended split is present: PR-only admission with
-  the dedicated App's Integration bypass; a separate non-FF/deletion guard with
-  **no bypass actors**; and main/live-queue/state creation/update restriction with
-  only the same App bypass (`update_allows_fetch_and_merge=false`). Check the
-  assigned App identity against the rollout's readable exact-head PR/evidence,
-  including owner and actor ID, not a matching name. Full conditions/ref scope,
-  enforcement and unchanged other protections must agree with the reviewed plan.
+- **Queue-only:** the readable effective policy and complete inventory show the
+  intended main creation/update writer restriction
+  (`update_allows_fetch_and_merge=false`), PR admission and separate immutable
+  non-FF/deletion protection with the expected active scopes. Ordinary agents may
+  safely queue rather than directly merge even when `bypass_actors` is omitted.
+  This does not certify the App identity or hidden bypass scope, grant activation
+  authority, or permit signalling readiness before the owner's intake go.
 - **Hold:** mixed/partial rules, missing/inaccessible required readbacks, unknown
   sources, unexpected actors or configuration drift. Ask the rollout owner for
   the missing evidence; do not infer manual from a failed read or queue-only from
   the presence of a named ruleset. A stopped controller does not change this mode.
 
+The same visible-policy decision applies to both ordinary and administrative
+readers; the absence of hidden fields alone does not change it:
+
+| Complete visible policy | Reader bypass data | Agent merge mode |
+| --- | --- | --- |
+| Original squash PR + non-FF/deletion; no writer restriction/partial transition | omitted | manual |
+| Original squash PR + non-FF/deletion; no writer restriction/partial transition | visible and expected | manual |
+| Complete intended writer restriction + admission + immutable guard | omitted | queue-only |
+| Complete intended writer restriction + admission + immutable guard | visible and expected | queue-only |
+| Mixed or inaccessible effective policy | omitted | hold |
+
 The rollout owner still uses exact original snapshots and the full `verify`
-routine for mutations/OFF. This agent readback is observational and grants no
+routine for mutations/OFF, with administrative readbacks proving the assigned
+App Integration is the only admission/writer bypass and the immutable guard has
+**no bypass actors**. Those exact identity/bypass checks are activation gates,
+not prerequisites for an ordinary agent to choose queue-only rather than merge.
+This agent readback is observational and grants no
 ruleset, queue/state-ref, controller, rerun or cancellation authority. Recheck
 before a manual merge; a readback is not an atomic fence against a later policy
 transition, so normal GitHub enforcement remains authoritative.
