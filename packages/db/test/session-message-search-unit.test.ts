@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import {
-  SessionMessageSearchRequest,
-  SessionMessageSearchResponse,
-} from "@opengeni/contracts";
+import { SessionMessageSearchRequest, SessionMessageSearchResponse } from "@opengeni/contracts";
 import {
   sessionMessageCaseClasses,
   sessionMessageLiteralPattern,
@@ -12,12 +9,8 @@ import {
 
 test("literal metacharacters and wildcard characters are never interpreted", () => {
   for (const query of ["%", "_", "\\", ".*", "[abc]", "a+b?", "$^(){}|"]) {
-    expect(
-      sessionMessageLiteralPattern(query).exec(`prefix ${query} suffix`)?.[0],
-    ).toBe(query);
-    expect(sessionMessageLiteralPattern(query).test("unrelated text")).toBe(
-      false,
-    );
+    expect(sessionMessageLiteralPattern(query).exec(`prefix ${query} suffix`)?.[0]).toBe(query);
+    expect(sessionMessageLiteralPattern(query).test("unrelated text")).toBe(false);
   }
 });
 
@@ -26,17 +19,9 @@ test("Unicode simple folding preserves original UTF-16 offsets", () => {
   for (const query of ["i", "kelvin", "σ", "CAFÉ", "e\u0301", "🙂"]) {
     const match = sessionMessageLiteralPattern(query).exec(text)!;
     expect(match).not.toBeNull();
-    const snippet = sessionMessageSearchSnippet(
-      text,
-      match.index,
-      match[0].length,
-    );
-    expect(snippet.text.slice(snippet.matchStart, snippet.matchEnd)).toBe(
-      match[0],
-    );
-    expect(text.slice(match.index, match.index + match[0].length)).toBe(
-      match[0],
-    );
+    const snippet = sessionMessageSearchSnippet(text, match.index, match[0].length);
+    expect(snippet.text.slice(snippet.matchStart, snippet.matchEnd)).toBe(match[0]);
+    expect(text.slice(match.index, match.index + match[0].length)).toBe(match[0]);
   }
   expect(sessionMessageLiteralPattern("i").exec(text)?.index).toBe(3);
   expect(sessionMessageLiteralPattern("é").test("e\u0301")).toBe(false);
@@ -57,10 +42,7 @@ test("database case classes are exactly the JavaScript matcher's equivalences", 
   for (const [cp, members] of classes) {
     const found = [
       ...everything.matchAll(
-        new RegExp(
-          sessionMessageLiteralPattern(String.fromCodePoint(cp)),
-          "giu",
-        ),
+        new RegExp(sessionMessageLiteralPattern(String.fromCodePoint(cp)), "giu"),
       ),
     ].map((match) => match[0].codePointAt(0)!);
     expect(found).toEqual([...members]);
@@ -77,9 +59,7 @@ test("database case classes are exactly the JavaScript matcher's equivalences", 
 });
 
 test("database patterns escape every character and refuse unstorable ones", () => {
-  expect(sessionMessagePostgresPattern("k%")).toBe(
-    "[\\u004b\\u006b\\u212a]\\u0025",
-  );
+  expect(sessionMessagePostgresPattern("k%")).toBe("[\\u004b\\u006b\\u212a]\\u0025");
   expect(sessionMessagePostgresPattern("🙂")).toBe("\\U0001f642");
   expect(sessionMessagePostgresPattern("a\u0000")).toBeNull();
   expect(sessionMessagePostgresPattern("\ud800")).toBeNull();
@@ -88,12 +68,8 @@ test("database patterns escape every character and refuse unstorable ones", () =
 test("snippet boundaries do not split surrogate pairs", () => {
   const text = "🙂".repeat(200) + "MATCH" + "🙂".repeat(200);
   const snippet = sessionMessageSearchSnippet(text, 400, 5);
-  expect(snippet.text.slice(snippet.matchStart, snippet.matchEnd)).toBe(
-    "MATCH",
-  );
-  expect(new TextDecoder().decode(new TextEncoder().encode(snippet.text))).toBe(
-    snippet.text,
-  );
+  expect(snippet.text.slice(snippet.matchStart, snippet.matchEnd)).toBe("MATCH");
+  expect(new TextDecoder().decode(new TextEncoder().encode(snippet.text))).toBe(snippet.text);
   expect(snippet.text.length).toBeLessThanOrEqual(247);
 });
 
@@ -113,10 +89,9 @@ test("strict bounded request and explicit advancing empty response", () => {
     expect(SessionMessageSearchRequest.safeParse(request).success).toBe(false);
   }
   expect(SessionMessageSearchRequest.parse({ query: "  " }).query).toBe("  ");
-  expect(
-    SessionMessageSearchRequest.parse({ query: "x", groupBy: "session" })
-      .groupBy,
-  ).toBe("session");
+  expect(SessionMessageSearchRequest.parse({ query: "x", groupBy: "session" }).groupBy).toBe(
+    "session",
+  );
   expect(
     SessionMessageSearchResponse.parse({
       matches: [],
