@@ -83,8 +83,11 @@ Before planning, an administrator/deployment owner supplies and exports the assi
 numeric `APP_ID` and `INSTALLATION_ID`, an App JWT in `APP_JWT`, and a short-lived
 scoped installation token in `INSTALLATION_TOKEN` through the secret mechanism
 (do not echo them). The checked-in [read.sh](read.sh) makes both JWT identity GETs
-with an explicit `Authorization: Bearer` header, never the default `GH_TOKEN`
-`token` scheme. Installation-token minting, if performed separately by its owner,
+with an explicit `Authorization: Bearer` header via curl's `--header @file`, never
+the default `GH_TOKEN` `token` scheme. The temporary header file is mode 0600 and
+removed on success or failure; the JWT is not placed in process argv, and debug
+tracing is disabled. Use curl with header-file support (7.55 or newer).
+Installation-token minting, if performed separately by its owner,
 also requires Bearer for its App JWT. This bundle does not mint it.
 
 Create a new private task directory **once**, record its exact path in the
@@ -105,11 +108,18 @@ App deliberately has no Administration write. The repository must support active
 rulesets for this plan; inherited restrictions cannot be bypassed by changing a
 repository rule.
 
+Successful identity checks retain raw readbacks and an `identity-receipt.json`
+binding the actual App ID, installation ID, repository and permissions. Forward
+write stages require that receipt to match `plan.json`. Reverse restoration
+requires admin authority but not a still-working runtime App, so revoking an App
+does not strand rollback. Re-run identity after relevant identity/permission changes;
+a retained receipt is evidence of its observation, not continuous authorization.
+
 ## Capture exact prior configuration and generate offline payloads
 
 Use an administrator's authorized `gh` context for complete bypass readbacks, not
 the runtime App token. Keep snapshots/receipts private and retained outside Git.
-Run from the reviewed repository checkout; require `bun`, `gh`, `jq` and Bash.
+Run from the reviewed repository checkout; require `bun`, `gh`, `curl`, `jq` and Bash.
 The checked-in helper makes only repository/organization GET requests and a
 read-only GraphQL query. Each invocation retains a fresh raw inventory and every
 detail. Missing/inaccessible classic or inherited protection data fails; it is
@@ -164,7 +174,10 @@ read back the current stage. In particular, a rejected restore may leave
 `applied` in place: its no-bypass guard and ordinary manual squash path remain.
 Do not remove protective rules, omit the field or weaken policy to make recovery
 pass. Provider/admin resolution and a newly reviewed round-trip plan are required;
-exact-prior restoration is prepared but not proven accepted by GitHub.
+exact-prior restoration is prepared but not proven accepted by GitHub. If a
+provider-side issue is resolved without changing the payload, the explicit
+reverse-only reissue below may repeat that identical request. It never removes
+the undocumented field; changing policy still requires separate review.
 
 ## Prepared API changes — administrator runs only after explicit go
 
@@ -189,6 +202,11 @@ directory, issues exactly one API write, and verifies the resulting stage.
 `admission.json` to the snapshotted `admissionId`. See [stage.sh](stage.sh) for the
 exact calls. API responses/errors stay in unique per-action attempt directories;
 validated creation receipts are retained separately, never overwritten by errors.
+Before any write, the corresponding parallel payload must exactly match the
+verified `plan.json`; divergence aborts before a remote mutation. The actual body
+is generated from that plan into the attempt's retained `request.json`, with the
+method and exact endpoint in `request-meta.json`. A changed copy cannot weaken a
+guard before the later readback notices.
 Readback verification compares the **entire**
 ruleset inventory (production/tags/inherited rules included), unchanged repository
 merge settings and classic protections. Read the effective rules with
@@ -201,9 +219,9 @@ For a timeout or failed post-write readback, use these **read-only remote** stag
 ```sh
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reconcile-guard
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reconcile-namespace
-# Ambiguous admit PUT: check after, or before; neither match means stop for drift.
-bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check applied
-bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check namespace
+# Ambiguous admit PUT: reconcile a stable applied state; otherwise observe before.
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reconcile-admit
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check-stable namespace
 ```
 
 Choose the single relevant action, not all four blindly. Reconciliation uses a
@@ -216,6 +234,15 @@ provider outcome before a separately reviewed new attempt. Multiple matches or
 drift also block. All snapshots/failed raw responses are retained. Re-entry after
 confirmed success uses the next stage; the existing intent prevents accidentally
 replaying the previous write even if the process died before saving its receipt.
+
+For PUT/DELETE, `check-stable PHASE` requires two exact full-inventory readbacks
+separated by 30 seconds. `reconcile-admit` checks `applied` twice and records the
+forward admission intent as observed complete. If an ambiguous forward admission
+still reads `namespace`, **keep both protective rulesets**: two absent observations
+cannot prove an in-flight PUT will never land. Deletes are refused while that
+forward intent remains unresolved. Resolve its provider outcome with the admin/
+rollout owner; do not erase the intent or mark it verified manually. This is an
+explicit safe hold, not a claim that REST readbacks provide a transaction fence.
 
 ## Controller enable and one-step stop
 
@@ -274,7 +301,7 @@ admission before removing either protective ruleset; verify after every call:
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" restore-admission --apply-after-go
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-namespace --apply-after-go
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-guard --apply-after-go
-bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check restored
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check-stable restored
 ```
 
 Run each separately and stop on failure. These reverse steps use PUT `restore.json`
@@ -288,16 +315,43 @@ bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-namespace --apply-aft
 # If only guard remains (or guard was the only completed creation):
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check guard
 bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" delete-guard --apply-after-go
-bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check restored
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" check-stable restored
 ```
 
-After ambiguous restore PUT, `check namespace` means original admission is restored;
-`check applied` means it is not (including a possible 422). After ambiguous namespace
-DELETE, `check guard` confirms its absence; `check namespace` confirms it remains.
-After ambiguous guard DELETE, `check restored` confirms full restoration; `check
-guard` confirms it remains. Neither matching means drift: stop. No mutation is
-replayed by a check, and existing intents remain blocked rather than being erased
-to retry. Never restore over another administrator's changed policy or delete by
+After ambiguous restore PUT, use `check-stable namespace` for the restored
+admission state or `check-stable applied` for the unchanged state (including a
+possible 422). After ambiguous namespace DELETE, `check-stable guard` observes its
+absence; `check-stable namespace` observes it still present. After ambiguous guard
+DELETE, `check-stable restored` observes full restoration; `check-stable guard`
+observes it still present. Neither matching means drift: stop. A check never
+replays a mutation. Repeat `check-stable restored` at the end of rollback that
+began with an ambiguous write; final guard deletion also performs that delayed
+readback itself. These observations do not fence another administrator or prove
+provider finality, so the exclusive admin window and stopped writers still matter.
+
+**Transient reverse-stage failure with the exact pre-state still present:** use
+one of these separately named idempotent reissue actions, not the original stage:
+
+```sh
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reissue-restore-admission --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reissue-delete-namespace --apply-after-go
+bash docs/merge-batcher-admin/stage.sh "$ADMIN_DIR" reissue-delete-guard --apply-after-go
+```
+
+Choose only the failed reverse action. Each requires an existing retained attempt,
+two delayed exact pre-state readbacks, and byte-identical generated request body,
+method and endpoint. It archives the previous attempt under a unique
+`ACTION-archive.*/attempt` directory, retaining response/error/evidence, before
+issuing exactly one identical PUT or DELETE. A per-action local lock serializes
+reissues on that plan; it is not a remote administration fence. This is safe with
+respect to a late copy of that same idempotent reverse request, but not arbitrary
+concurrent policy edits. A changed readback or request aborts without another
+write. **POST/create and forward admission have no reissue action.** Existing
+intents are never erased. A crash-held local reissue lock needs owner inspection,
+not blind deletion or another writer. Unknown or legacy attempts lacking their
+exact request metadata require separately reviewed manual recovery.
+
+Never restore over another administrator's changed policy or delete by
 name alone. Exact original configuration restores its original administrator
 bypass as well; it is not a claim that the old policy had stronger guards. No App
 uninstallation, secret revocation, branch deletion or CI cancellation is implied.

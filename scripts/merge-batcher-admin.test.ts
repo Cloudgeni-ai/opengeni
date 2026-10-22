@@ -318,4 +318,48 @@ describe("offline batcher administration contract", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+  test("receipt validates source, full inventory and retained bytes before writing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "batcher-receipt-test-"));
+    try {
+      const snapshotPath = join(root, "snapshot.json");
+      const candidatePath = join(root, "candidate.json");
+      const before = fixture();
+      await Bun.write(snapshotPath, JSON.stringify(before));
+      const output = join(root, "plan");
+      await cli(["prepare", snapshotPath, "501", "999", output]);
+      const plan = prepare(before, 501, 999);
+      const { current, receipts } = staged(plan, "guard");
+      const candidate = {
+        ...receipts.guard,
+        source_type: "Repository",
+        source: "Cloudgeni-ai/opengeni",
+      };
+      await Bun.write(snapshotPath, JSON.stringify(current));
+      const command = ["receipt", output, snapshotPath, "guard", candidatePath];
+      await Bun.write(candidatePath, JSON.stringify({ ...candidate, source_type: "Organization" }));
+      await expect(cli(command)).rejects.toThrow("belong");
+      expect(await Bun.file(join(output, "guard-receipt.json")).exists()).toBe(false);
+      await Bun.write(candidatePath, JSON.stringify(candidate));
+      const drifted = structuredClone(current);
+      drifted.rulesets[1]!.rules = [];
+      await Bun.write(snapshotPath, JSON.stringify(drifted));
+      await expect(cli(command)).rejects.toThrow("drift");
+      expect(await Bun.file(join(output, "guard-receipt.json")).exists()).toBe(false);
+      await Bun.write(snapshotPath, JSON.stringify(current));
+      const different = JSON.stringify({ ...candidate, name: "different retained receipt" });
+      await Bun.write(join(output, "guard-receipt.json"), different);
+      await expect(cli(command)).rejects.toThrow("Retained receipt");
+      expect(await readFile(join(output, "guard-receipt.json"), "utf8")).toBe(different);
+      const retained = JSON.stringify(
+        { ...candidate, retained_evidence: "original timestamp" },
+        null,
+        4,
+      );
+      await Bun.write(join(output, "guard-receipt.json"), retained);
+      await cli(command);
+      expect(await readFile(join(output, "guard-receipt.json"), "utf8")).toBe(retained);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

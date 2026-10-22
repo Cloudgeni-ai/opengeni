@@ -10,7 +10,7 @@ batcher_snapshot() (
   jq '{full_name,default_branch,allow_squash_merge,allow_auto_merge,allow_merge_commit,allow_rebase_merge}' \
     "$capture/repository-raw.json" > "$capture/repository.json"
   gh api --paginate '/repos/Cloudgeni-ai/opengeni/rulesets?includes_parents=true&per_page=100' > "$capture/pages.json"
-  jq -se 'add | if type == "array" then . else error("Missing rules inventory") end' "$capture/pages.json" > "$capture/list.json"
+  jq -se 'if length > 0 and all(.[]; type == "array") then add | if length > 0 then . else error("Empty rules inventory") end else error("Missing rules inventory") end' "$capture/pages.json" > "$capture/list.json"
   jq -r '.[] | [.id,.source_type,.source] | @tsv' "$capture/list.json" > "$capture/details.tsv"
   while IFS=$'\t' read -r id source_type source; do
     case "$source_type" in
@@ -36,11 +36,18 @@ batcher_identity() (
   umask 077
   : "${APP_ID:?Assigned App ID required}" "${INSTALLATION_ID:?Assigned installation ID required}"
   : "${APP_JWT:?App JWT required}" "${INSTALLATION_TOKEN:?Installation token required}"
-  local capture
+  local capture header
   capture=$(mktemp -d "$ADMIN_DIR/identity.XXXXXX")
-  # JWTs require Bearer; GH_TOKEN alone makes gh send the token scheme.
-  gh api -H "Authorization: Bearer $APP_JWT" /app > "$capture/app.json"
-  gh api -H "Authorization: Bearer $APP_JWT" "/app/installations/$INSTALLATION_ID" > "$capture/installation.json"
+  # curl's @file header input keeps the JWT out of process argv. The private
+  # header is removed on success or failure; raw identity responses are retained.
+  header="$capture/authorization.header"
+  trap 'rm -f -- "$header"' EXIT
+  printf 'Authorization: Bearer %s\n' "$APP_JWT" > "$header"
+  unset APP_JWT
+  curl --disable --silent --show-error --fail --header "@$header" \
+    https://api.github.com/app > "$capture/app.json"
+  curl --disable --silent --show-error --fail --header "@$header" \
+    "https://api.github.com/app/installations/$INSTALLATION_ID" > "$capture/installation.json"
   GH_TOKEN="$INSTALLATION_TOKEN" gh api --paginate /installation/repositories > "$capture/repositories.json"
   jq -e --argjson app "$APP_ID" '.id == $app and .owner.login == "Cloudgeni-ai"' "$capture/app.json" >/dev/null
   jq -e --argjson app "$APP_ID" --argjson installation "$INSTALLATION_ID" \
@@ -48,5 +55,9 @@ batcher_identity() (
   jq -se '[.[].repositories[].full_name] == ["Cloudgeni-ai/opengeni"]' "$capture/repositories.json" >/dev/null
   jq -e --slurpfile manifest "$BATCHER_ADMIN_CODE/app-manifest.json" \
     '(.permissions | del(.metadata)) == $manifest[0].default_permissions and .permissions.metadata == "read"' "$capture/installation.json" >/dev/null
+  jq -n --slurpfile app "$capture/app.json" --slurpfile installation "$capture/installation.json" \
+    '{appId:$app[0].id,installationId:$installation[0].id,permissions:$installation[0].permissions,repository:"Cloudgeni-ai/opengeni"}' > "$capture/identity-receipt.json"
+  cp "$capture/identity-receipt.json" "$capture/identity-receipt.next"
+  mv "$capture/identity-receipt.next" "$ADMIN_DIR/identity-receipt.json"
   printf 'Verified identity readback: %s\n' "$capture"
 )
