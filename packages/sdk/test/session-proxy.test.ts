@@ -227,6 +227,9 @@ function upstreamServer() {
         },
       });
     }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/new-session-draft` && request.method === "GET") {
+      return Response.json(draftAt(6));
+    }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "POST") {
       return Response.json({ session: { id: SESSION_ID } });
     }
@@ -239,6 +242,25 @@ function upstreamServer() {
     return Response.json({ id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "idle" });
   };
   return { requests, fetch };
+}
+
+function draftAt(revision: number) {
+  return {
+    revision,
+    text: "Fill B2",
+    resources: [
+      { kind: "file", fileId: "f1" },
+      { kind: "repository", repository: "acme/app" },
+    ],
+    tools: [],
+    toolsProvided: false,
+    model: "codex/gpt",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+    options: { visibility: "private" },
+    selectionHistory: { projects: [] },
+    updatedAt: null,
+  };
 }
 
 function setup(overrides: Partial<SessionProxyHandlerOptions> = {}) {
@@ -2586,9 +2608,37 @@ describe("createSessionProxyHandler sessionApp", () => {
       reasoningEffort: "high",
       latencyMode: "standard",
       clientEventId: "event-1",
-      expectedNewSessionDraftRevision: 6,
       modelContext: "Server context.\n\nSelection: Sheet1!B2",
     });
+    // The hook decides the create request, so the proxy clears the sent draft
+    // itself once the chat exists: text-free, repositories kept, one revision on.
+    expect(upstream.requests.slice(1).map((r) => [r.method, r.url.pathname])).toEqual([
+      ["GET", `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+    ]);
+    expect(upstream.requests[2]!.body).toEqual({
+      text: "",
+      resources: [{ kind: "repository", repository: "acme/app" }],
+      tools: [],
+      toolsProvided: false,
+      model: "codex/gpt",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      options: { visibility: "private" },
+      expectedRevision: 6,
+    });
+  });
+
+  test("leaves a new-chat draft that changed after it was sent", async () => {
+    const { upstream, browser } = setup({
+      sessionApp: true,
+      createSession: (input) => ({ initialMessage: input.initialMessage }),
+    });
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Fill B2",
+      expectedNewSessionDraftRevision: 5,
+    });
+    expect(upstream.requests.map((r) => r.method)).toEqual(["POST", "GET"]);
   });
 
   test("refuses a connected-account choice and still refuses other configuration", async () => {

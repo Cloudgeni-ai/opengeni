@@ -1184,15 +1184,24 @@ export function createSessionProxyHandler(
           created.modelContext,
           browser.modelContext,
         );
-        return json(
-          await client.createSession(workspaceId, {
-            ...created,
-            visibility: created.visibility ?? defaults.visibility,
-            agentAccess: created.agentAccess ?? defaults.agentAccess,
-            memoryScope: created.memoryScope ?? defaults.memoryScope,
-            ...(modelContext ? { modelContext } : {}),
-          }),
-        );
+        const session = await client.createSession(workspaceId, {
+          ...created,
+          visibility: created.visibility ?? defaults.visibility,
+          agentAccess: created.agentAccess ?? defaults.agentAccess,
+          memoryScope: created.memoryScope ?? defaults.memoryScope,
+          ...(modelContext ? { modelContext } : {}),
+        });
+        if (
+          browser.expectedNewSessionDraftRevision !== undefined &&
+          input.startMode !== "realtime"
+        ) {
+          await clearSentNewSessionDraft(
+            client,
+            workspaceId,
+            browser.expectedNewSessionDraftRevision,
+          );
+        }
+        return json(session);
       }
 
       const [sessionId, ...op] = tail as [string, ...string[]];
@@ -2132,7 +2141,7 @@ type BrowserCreateFields = {
  * The browser's own context and the session app's create bookkeeping. Message
  * context is appended after the server's, as on follow-up messages. The session
  * app also sends the id of its first message event and the revision of the
- * new-chat draft it sent, so the API can clear that draft. It sends `visibility`
+ * new-chat draft it sent, which the proxy clears once the chat exists. It sends `visibility`
  * and an empty `connectionAccounts` too: the server chooses both, so those are
  * dropped, and any account selection is refused.
  */
@@ -2205,11 +2214,39 @@ function withBrowserCreateChoices(
     ...(created.clientEventId === undefined && browser.clientEventId
       ? { clientEventId: browser.clientEventId }
       : {}),
-    ...(created.expectedNewSessionDraftRevision === undefined &&
-    browser.expectedNewSessionDraftRevision !== undefined
-      ? { expectedNewSessionDraftRevision: browser.expectedNewSessionDraftRevision }
-      : {}),
   };
+}
+
+/**
+ * Clear the new-chat draft the session app just sent. The API can clear it
+ * during create only when the create request is that draft, and the
+ * `createSession` hook decides the request, so the proxy clears it after the
+ * chat exists: the same text-free next draft, one revision on. A draft that
+ * changed meanwhile is left alone, and a failure here never fails the create.
+ */
+async function clearSentNewSessionDraft(
+  client: ProxyClient,
+  workspaceId: string,
+  revision: number,
+): Promise<void> {
+  try {
+    const draft = await client.getNewSessionDraft(workspaceId);
+    if (draft.revision !== revision) return;
+    const {
+      revision: _revision,
+      selectionHistory: _history,
+      updatedAt: _updatedAt,
+      ...rest
+    } = draft;
+    await client.saveNewSessionDraft(workspaceId, {
+      ...rest,
+      text: "",
+      resources: draft.resources.filter((resource) => resource.kind === "repository"),
+      expectedRevision: revision,
+    });
+  } catch (error) {
+    if (!(error instanceof OpenGeniApiError)) throw error;
+  }
 }
 
 /** One multipart recording: only the audio, its MIME type, and its duration pass. */
