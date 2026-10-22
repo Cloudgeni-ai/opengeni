@@ -166,6 +166,7 @@ postgresTest(
         const asApp = (actor: string, run: (tx: postgres.TransactionSql) => Promise<unknown>) =>
           raw.begin(async (tx) => {
             await tx`SELECT set_config('opengeni.account_id',${scope.accountId},true),set_config('opengeni.workspace_id',${scope.workspaceId},true),set_config('opengeni.subject_id',${actor},true),set_config('opengeni.private_file_owner',${actor},true)`;
+            await tx`SELECT set_config('opengeni.file_provenance_reader_v1','1',true),set_config('opengeni.file_provenance_writer_v1','1',true)`;
             return await run(tx);
           });
         await expect(

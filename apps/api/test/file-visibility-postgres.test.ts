@@ -1685,6 +1685,42 @@ test("user-scoped chat files stay personal before and after source deletion", as
   expect(snapshot).toMatchObject({ owner: f.owner.subjectId, shared: false });
   expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
   expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
+  const caller = await createSession(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Another user-scoped request",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    createdByContext: {},
+  });
+  await shared.admin`update sessions set agent_access = 'user', memory_scope = 'user',
+    scope_subject_id = ${f.owner.subjectId} where id = ${caller.id}`;
+  const crossRootFiles = (initiatingHumanSubjectId: string) =>
+    withSessionRlsActorContext(
+      {
+        subjectId: "agent:example",
+        initiatingHumanSubjectId,
+        agentRootSessionId: caller.rootSessionId,
+        agentCallerSessionId: caller.id,
+      },
+      () =>
+        getFilesForSubject(db.db, {
+          accountId: f.workspace.accountId,
+          workspaceId: f.workspace.id,
+          subjectId: "agent:example",
+          fileIds: [fileId],
+        }),
+    );
+  expect(await crossRootFiles(f.owner.subjectId)).toHaveLength(1);
+  expect(await crossRootFiles(f.other.subjectId)).toHaveLength(0);
+  await shared.admin`update sessions set scope_subject_id = ${f.other.subjectId}
+    where id = ${caller.id}`;
+  expect(await crossRootFiles(f.owner.subjectId)).toHaveLength(0);
   await transitionSessionVisibility(db.db, {
     workspaceId: f.workspace.id,
     sessionId: session.id,

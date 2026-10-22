@@ -699,6 +699,10 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
           AND source_session.visibility = 'user_private'
           AND source_session.owner_subject_id =
             nullif(current_setting('opengeni.subject_id', true), ''))
+        OR (nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NOT NULL
+          AND nullif(current_setting('opengeni.agent_caller_session_id', true), '') IS NOT NULL
+          AND source_session.scope_subject_id =
+            nullif(current_setting('opengeni.initiating_human_subject_id', true), ''))
         OR source_session.root_session_id::text =
           nullif(current_setting('opengeni.agent_root_session_id', true), ''))
       -- A deleted Slack connection must not erase a private audience snapshot.
@@ -711,6 +715,10 @@ CREATE POLICY files_source_session_visible ON files AS RESTRICTIVE FOR SELECT US
             AND slack.visibility = 'private')
         OR files.source_session_owner_subject_id =
           nullif(current_setting('opengeni.subject_id', true), '')
+        OR (nullif(current_setting('opengeni.agent_root_session_id', true), '') IS NOT NULL
+          AND nullif(current_setting('opengeni.agent_caller_session_id', true), '') IS NOT NULL
+          AND files.source_session_owner_subject_id =
+            nullif(current_setting('opengeni.initiating_human_subject_id', true), ''))
         OR source_session.root_session_id::text =
           nullif(current_setting('opengeni.agent_root_session_id', true), '')))
   OR (
