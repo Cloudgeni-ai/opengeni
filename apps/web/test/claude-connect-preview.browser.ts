@@ -10,7 +10,7 @@ const assert = (value: unknown, message: string) => {
   if (!value) throw new Error(message);
 };
 await mkdir(output, { recursive: true });
-const browser = await chromium.launch({ args: ["--no-sandbox"] });
+let browser = await chromium.launch({ args: ["--no-sandbox"] });
 try {
   const log: string[] = [];
 
@@ -43,7 +43,10 @@ try {
       );
       const page = await ctx.newPage();
       const errors: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.message));
+      page.on("pageerror", (error) => {
+        errors.push(error.message);
+        console.error(`${flow}-${width}-${theme}: ${error.stack}`);
+      });
       let n = 0;
       const tag = `${flow}-${width}-${theme}`;
       const shot = async (name: string) => {
@@ -160,9 +163,23 @@ try {
       );
       assert(errors.length === 0, `${tag}: page errors ${errors.join("; ")}`);
       await ctx.close();
+      await browser.close();
+      browser = await chromium.launch({ args: ["--no-sandbox"] });
     }
   }
   console.log(log.join("\n"));
+} catch (error) {
+  for (const ctx of browser.contexts()) {
+    for (const page of ctx.pages()) {
+      console.error(
+        "Failed page",
+        page.url(),
+        (await page.locator("body").innerText()).slice(0, 1200),
+      );
+      await page.screenshot({ path: `${output}/failure.png`, fullPage: true });
+    }
+  }
+  throw error;
 } finally {
   await browser.close();
 }
