@@ -13,7 +13,8 @@ import {
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -123,7 +124,12 @@ function broadServerTools(tools: readonly FirstPartyMcpToolName[]): FirstPartyMc
 
 function deps(): ApiRouteDeps {
   return {
-    settings: testSettings({ sandboxSelfhostedEnabled: true }),
+    // A configured Site SQL gateway, so the complete default catalog registers.
+    settings: testSettings({
+      sandboxSelfhostedEnabled: true,
+      sitesGatewayInternalOrigin: "https://internal.sites.test",
+      sitesGatewaySecret: "site-sql-gateway-secret-0123456789abcdef",
+    }),
     db: {},
     bus: new MemoryEventBus(),
     workflowClient: {},
@@ -684,6 +690,23 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(disabled)).toEqual([]);
   });
 
+  test("Site SQL tools are offered only where a Site SQL gateway is configured", () => {
+    const selected: FirstPartyMcpToolName[] = ["site_sql_inspect", "site_sql_export"];
+    const configured = buildOpenGeniMcpServer(
+      deps(),
+      grant(["artifacts:read", "artifacts:publish"], selected),
+    );
+    expect(registeredToolNames(configured)).toEqual([...selected].sort());
+
+    const bare = deps();
+    bare.settings = testSettings({ sandboxSelfhostedEnabled: true });
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(bare, grant(["artifacts:read", "artifacts:publish"], selected)),
+      ),
+    ).toEqual([]);
+  });
+
   test("operator-disabled MCP relevance discovery fails before storage", async () => {
     let databaseTouches = 0;
     const routeDeps = deps();
@@ -1035,7 +1058,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "Opengeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1068,7 +1091,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "Opengeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1245,7 +1268,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(result.isError).toBe(true);
       expect(result.structuredContent?.error).toMatchObject({
         code: `${tool}_failed`,
-        message: "Opengeni could not complete the request.",
+        message: "The workspace could not complete the request.",
         diagnosticExport: "disabled",
         diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
       });

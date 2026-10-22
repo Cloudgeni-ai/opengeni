@@ -38,7 +38,7 @@ import {
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 
-import { siteSessionPath } from "@opengeni/contracts/site-session-http";
+import { siteHostWorkspacePath } from "@opengeni/contracts/site-session-http";
 import { materializeCodemodeImages } from "./images";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
@@ -516,11 +516,14 @@ export class CodemodeClient {
     });
   }
 
-  /** Server-side Site preview forwarding. The attempt bearer never enters the
-   * page. Validate tenant routing here; ordinary API handlers authorize the
-   * operation under the existing agent proxy permission ceiling. */
+  /** The agent's own SDK requests through the Codemode SDK proxy (and the
+   * transport a local Site preview forwards through). The attempt bearer never
+   * enters a page. Validate tenant routing here; ordinary API handlers
+   * authorize the operation under the existing agent proxy permission ceiling.
+   * Requests marked as Site frames are held to the Site operation allowlist
+   * by the preview handler and again by the API. */
   async sessionRequest(path: string, init: RequestInit): Promise<Response> {
-    siteSessionPath(path, "site-host", init.method ?? "GET");
+    siteHostWorkspacePath(path, "site-host");
     return this.request(`/sdk${path}`, init, false);
   }
 
@@ -688,11 +691,10 @@ export function createAttemptToolEnvironment(
       : {}),
     entries: [...prepared.entries],
   };
-  const catalog = AttemptToolCatalog.parse({
+  const catalog = immutableVerifiedCatalog({
     ...unsigned,
     digest: digestAttemptToolCatalog(unsigned),
   });
-  assertCatalogSize(catalog);
   return new AttemptToolEnvironment(
     catalog,
     prepared.create({
@@ -756,21 +758,69 @@ export function decodeCodemodeDispatchAck(input: Uint8Array): CodemodeDispatchAc
 }
 
 export function parseVerifiedAttemptToolCatalog(input: unknown): AttemptToolCatalogValue {
+  return verifyAttemptToolCatalog(input).catalog;
+}
+
+// Only snapshots constructed here enter this identity cache. A digest supplied
+// by a caller, a frozen object, or a JSON copy is not evidence of verification.
+// Weak keys retain no catalog beyond the lifetime of its ordinary consumers.
+const immutableCatalogVerifications = new WeakMap<
+  object,
+  { catalog: AttemptToolCatalogValue; byteLength: number }
+>();
+
+function immutableVerifiedCatalog(input: unknown): AttemptToolCatalogValue {
+  // JSON-schema records can retain caller-owned nested values after parsing.
+  // Detach before freezing so neither side can mutate the other's snapshot.
+  const verified = verifyAttemptToolCatalog(structuredClone(input));
+  if (isPlainCatalogValue(verified.catalog)) {
+    freezeCatalogValue(verified.catalog);
+    immutableCatalogVerifications.set(verified.catalog, verified);
+  }
+  return verified.catalog;
+}
+
+function isPlainCatalogValue(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return true;
+  // Freezing Date/Map/etc. does not freeze their internal mutable state.
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
+  for (const child of Object.values(value)) {
+    if (!isPlainCatalogValue(child)) return false;
+  }
+  return true;
+}
+
+function freezeCatalogValue(value: unknown): void {
+  if (value === null || typeof value !== "object") return;
+  for (const child of Object.values(value)) freezeCatalogValue(child);
+  Object.freeze(value);
+}
+
+/** Verifies a catalog and also reports its serialized UTF-8 size. */
+export function verifyAttemptToolCatalog(input: unknown): {
+  catalog: AttemptToolCatalogValue;
+  byteLength: number;
+} {
+  if (input !== null && typeof input === "object") {
+    const verified = immutableCatalogVerifications.get(input);
+    if (verified) return { ...verified };
+  }
   const catalog = AttemptToolCatalog.parse(input);
-  assertCatalogSize(catalog);
+  const byteLength = assertCatalogSize(catalog);
   const { digest, ...unsigned } = catalog;
   if (digestAttemptToolCatalog(unsigned) !== digest) {
     throw new AttemptToolCatalogIntegrityError();
   }
-  return catalog;
+  return { catalog, byteLength };
 }
 
-function assertCatalogSize(catalog: AttemptToolCatalogValue): void {
-  if (
-    new TextEncoder().encode(JSON.stringify(catalog)).byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES
-  ) {
+function assertCatalogSize(catalog: AttemptToolCatalogValue): number {
+  const byteLength = new TextEncoder().encode(JSON.stringify(catalog)).byteLength;
+  if (byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES) {
     throw new AttemptToolCatalogTooLargeError();
   }
+  return byteLength;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

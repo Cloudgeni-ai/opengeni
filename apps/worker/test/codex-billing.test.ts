@@ -1,9 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Database } from "@opengeni/db";
 import { ensureRunAllowed, recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
@@ -46,12 +49,12 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     }
   });
 
-  test("(c) a normal turn with 0 credits still throws insufficient Opengeni credits", async () => {
+  test("(c) a normal turn with 0 credits still throws insufficient workspace credits", async () => {
     const restore = mockZeroBalance();
     try {
       await expect(
         ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false),
-      ).rejects.toThrow("insufficient Opengeni credits");
+      ).rejects.toThrow("insufficient workspace credits");
     } finally {
       restore();
     }

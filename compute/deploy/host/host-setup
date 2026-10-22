@@ -1,0 +1,77 @@
+#!/bin/sh
+# Kernel settings a compute host needs, applied at every boot by
+# compute-host-setup.service before the guard and the agent start.
+# Configured by /etc/compute/host.env:
+#
+#   COMPUTE_HUGE_PAGES  2 MiB huge pages to reserve, for hosts that are
+#                       themselves VMs (the nested memory profile). Empty
+#                       or 0 reserves none (bare metal).
+#   COMPUTE_SWAP_SIZE   bare metal only: the swap file zswap needs to
+#                       compress paused VMs (ADR 5), at
+#                       /var/lib/compute/swapfile. Empty: as large as the
+#                       machine's memory, at most a quarter of the state
+#                       volume's free space. Nothing is written to it: each
+#                       VM's zswap writeback is off (ADR 14).
+set -eu
+
+if [ -n "${COMPUTE_HUGE_PAGES:-}" ] && [ "${COMPUTE_HUGE_PAGES}" != 0 ]; then
+  echo "$COMPUTE_HUGE_PAGES" >/proc/sys/vm/nr_hugepages
+  have=$(cat /proc/sys/vm/nr_hugepages)
+  # The kernel reserves only the 2 MiB runs it finds free. A host that has
+  # just unpacked its base image keeps most of its memory as page cache,
+  # and what is left is scattered: write back and drop the cache, compact
+  # what remains, and ask again. Each write of nr_hugepages takes what it
+  # can find; the host fails only if that still falls short.
+  tries=0
+  while [ "$have" -lt "$COMPUTE_HUGE_PAGES" ] && [ "$tries" -lt 3 ]; do
+    tries=$((tries + 1))
+    sync
+    echo 3 >/proc/sys/vm/drop_caches
+    if [ -e /proc/sys/vm/compact_memory ]; then
+      echo 1 >/proc/sys/vm/compact_memory
+    fi
+    echo "$COMPUTE_HUGE_PAGES" >/proc/sys/vm/nr_hugepages
+    have=$(cat /proc/sys/vm/nr_hugepages)
+  done
+  if [ "$have" -lt "$COMPUTE_HUGE_PAGES" ]; then
+    echo "host-setup: asked for $COMPUTE_HUGE_PAGES huge pages, the kernel reserved $have" >&2
+    exit 1
+  fi
+else
+  # Bare metal compresses paused VMs into memory with zswap, which works
+  # only in front of a swap device.
+  swapfile=/var/lib/compute/swapfile
+  if ! swapon --show=NAME --noheadings | grep -qx "$swapfile"; then
+    if [ ! -f "$swapfile" ]; then
+      size=${COMPUTE_SWAP_SIZE:-}
+      if [ -z "$size" ]; then
+        memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+        quarter_kib=$(($(df -Pk /var/lib/compute | awk 'NR == 2 { print $4 }') / 4))
+        size="$((memory_kib < quarter_kib ? memory_kib : quarter_kib))K"
+      fi
+      fallocate -l "$size" "$swapfile.part"
+      chmod 600 "$swapfile.part"
+      mkswap -q "$swapfile.part"
+      mv "$swapfile.part" "$swapfile"
+    fi
+    swapon "$swapfile"
+  fi
+  echo 1 >/sys/module/zswap/parameters/enabled
+  echo zstd >/sys/module/zswap/parameters/compressor || true
+  echo 40 >/sys/module/zswap/parameters/max_pool_percent
+fi
+# The agent decides what is in memory; the kernel does not merge pages
+# behind it.
+echo never >/sys/kernel/mm/transparent_hugepage/enabled
+
+# The guard feeds a watchdog that resets the machine 3 s after it stops
+# and that nothing can disarm. A machine without a hardware watchdog gets
+# the kernel's software one with those terms.
+if [ ! -e /dev/watchdog0 ]; then
+  modprobe softdog soft_margin=3 nowayout=1
+fi
+[ -e /dev/watchdog0 ] || { echo "host-setup: no watchdog device" >&2; exit 1; }
+
+# A machine that suspends could run its VMs again on resuming before the
+# guard fences them, so it never suspends.
+systemctl mask --now sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true

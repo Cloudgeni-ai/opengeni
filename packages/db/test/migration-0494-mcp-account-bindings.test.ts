@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { McpConnectionAccountBindings } from "@opengeni/contracts";
 import { personalDelegationsForAccountBindings } from "../../core/src/domain/mcp-account-bindings";

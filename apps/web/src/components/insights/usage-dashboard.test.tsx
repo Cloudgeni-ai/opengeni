@@ -20,8 +20,23 @@ const requestJson = mock(
     return nextUsage;
   },
 );
-const context = { client: { requestJson } };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+const context = {
+  client: {
+    requestJson,
+    getWorkspaceInsightsSiteUsage: async () => ({ rows: [] }),
+    getSitePlatformUsage: async () => ({
+      workspaceId: "ws",
+      periodStart: "2026-10-01",
+      billingMode: "usage_only",
+      meters: [],
+      estimatedMicros: 0,
+      chargedMicros: 0,
+      shadowMicros: 0,
+      brake: { engaged: false, engagedAt: null },
+    }),
+  },
+};
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
 beforeAll(() => {
   GlobalRegistrator.register();

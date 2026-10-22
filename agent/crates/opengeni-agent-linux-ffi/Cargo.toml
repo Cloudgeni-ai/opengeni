@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-linux-ffi"
-description = "Linux-only leaf FFI for the Opengeni agent's async-signal-safe pre-exec hardening."
+description = "Leaf FFI for the Opengeni agent's Linux pre-exec hardening and inherited-descriptor handover."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,5 +22,5 @@ doc_markdown = "allow"
 [dependencies]
 tokio = { workspace = true, features = ["process"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

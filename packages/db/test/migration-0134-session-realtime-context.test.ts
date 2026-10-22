@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 let shared: SharedTestDatabase;
 
@@ -68,14 +68,21 @@ describe("0134 session realtime context projection migration", () => {
       where namespace.nspname = current_schema()
         and relation.relname = 'session_realtime_context_projections'
       order by policy.polname`;
+    // Migration 0805 inlines the session_reference_visible probe; 0827 keeps it per-row.
+    const inlineSessionProbe = [
+      "((session_id IS NULL) OR (EXISTS ( SELECT 1",
+      "   FROM sessions session_row",
+      "  WHERE ((session_row.account_id = session_realtime_context_projections.account_id) AND (session_row.workspace_id = session_realtime_context_projections.workspace_id) AND (session_row.id = session_realtime_context_projections.session_id))",
+      " OFFSET 0)))",
+    ].join("\n");
     expect(Array.from(policies)).toEqual([
       {
         name: "session_visibility_isolation",
         permissive: false,
         command: "*",
         publicOnly: true,
-        usingExpression: "session_reference_visible(account_id, workspace_id, session_id)",
-        checkExpression: "session_reference_visible(account_id, workspace_id, session_id)",
+        usingExpression: inlineSessionProbe,
+        checkExpression: inlineSessionProbe,
       },
       {
         name: "workspace_isolation",

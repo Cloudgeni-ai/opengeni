@@ -566,6 +566,24 @@ impl RetentionLog {
         self.floor
     }
 
+    /// Continues a predecessor process's log: every frame up to `floor` was
+    /// already acknowledged, so the next append is assigned `floor + 1`. The
+    /// caller re-appends the predecessor's retained frames in order; their
+    /// sequence numbers then match the ones the consumer has already seen.
+    #[must_use]
+    pub fn resuming_after(
+        config: RetentionConfig,
+        spool_dir: PathBuf,
+        memory_budget: Arc<GlobalMemoryBudget>,
+        spool_budget: Arc<GlobalSpoolBudget>,
+        floor: u64,
+    ) -> Self {
+        let mut log = Self::with_budgets(config, spool_dir, memory_budget, spool_budget);
+        log.floor = floor;
+        log.next_seq = floor.saturating_add(1);
+        log
+    }
+
     /// The highest assigned sequence number (0 = nothing appended yet).
     #[must_use]
     pub fn high_seq(&self) -> u64 {

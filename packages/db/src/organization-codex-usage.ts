@@ -17,6 +17,7 @@ import { buildCodexTokenResolver, type CodexAuthDeps } from "./codex-token-resol
 import { readCodexCutoverDisposition } from "./subscription-core-codex-compat";
 import { organizationAdministeredConnection } from "./subscription-core/access";
 import { resolveSubscriptionConnectionId } from "./subscription-core-repository";
+import { recordSubscriptionUsageReading } from "./subscription-core/usage-reading";
 
 type AdministratorScope = <T>(db: Database, use: (tx: Database) => Promise<T>) => Promise<T>;
 
@@ -213,7 +214,7 @@ export async function readOrganizationCodexUsage(
           remainingCoreUsageBudget(deadline);
           if (!current) throw new CodexReloginRequired("Sign in to ChatGPT again");
           if (current.version !== expectedGeneration) return null;
-          return await fetchCoreUsageJoined(
+          const result = await fetchCoreUsageJoined(
             {
               accessToken: current.tokens.accessToken,
               chatgptAccountId: current.chatgptAccountId,
@@ -226,6 +227,27 @@ export async function readOrganizationCodexUsage(
               ...(input.signal ? { signal: input.signal } : {}),
             },
           );
+          const usage = normalizeCodexUsage(result.status, result.payload);
+          await recordSubscriptionUsageReading(tx, input.organizationId, credentialId, "codex", {
+            observedAt: Date.parse(usage.fetchedAt),
+            windows: [
+              ["primary", usage.fiveHour],
+              ["secondary", usage.weekly],
+            ].flatMap(([id, window]) => {
+              const reading = window as CodexUsagePayload["fiveHour"];
+              return reading
+                ? [
+                    {
+                      id: id as string,
+                      usedPercent: reading.percent,
+                      resetsAt: reading.resetAt ? Date.parse(reading.resetAt) : null,
+                      status: "ok" as const,
+                    },
+                  ]
+                : [];
+            }),
+          });
+          return result;
         });
       };
       let generation = (await resolver.getToken()).credentialVersion;

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
 import * as events from "@opengeni/events";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { withClaudeUsageObserver } from "../../../packages/runtime/src/claude-subscription-usage";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
@@ -257,6 +257,8 @@ describe("Claude capacity by provider route", () => {
       reasoningLevel: "medium",
     });
     spy(db, "getSessionGoal").mockResolvedValue(null);
+    // No Steer is waiting for this turn's next model step.
+    spy(db, "resolveWaitingSteer").mockResolvedValue(null);
     spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
     const resetAt = new Date(Date.now() + 3_600_000);
     const wait = {

@@ -56,12 +56,8 @@ import {
   type AccessGrant,
   type Permission,
 } from "@opengeni/contracts";
-import {
-  applyRawSql,
-  expectContiguousSequences,
-  startTestServices,
-  type TestServices,
-} from "@opengeni/testing";
+import { applyRawSql, startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { expectContiguousSequences } from "@opengeni/testing/assertions";
 
 describe("DB integration", () => {
   let services: TestServices;
@@ -1963,6 +1959,9 @@ async function createRlsAppRole(
   // and remain unavailable to PUBLIC. The session reference helper and provider
   // snapshot validators are invoker-rights; the latter evaluate immutable
   // snapshot CHECK constraints on ordinary session inserts.
+  await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON FUNCTION public.session_private_actor_visible_keys() TO "${role}"`),
+  );
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,

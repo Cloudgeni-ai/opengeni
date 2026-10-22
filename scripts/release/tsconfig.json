@@ -8,6 +8,7 @@
     "../release-review.ts",
     "../verify-release-packages.ts",
     "lockstep-version.ts",
+    "drop-ignored-changesets.ts",
     "deprecate-pre-1.0.ts"
   ]
 }

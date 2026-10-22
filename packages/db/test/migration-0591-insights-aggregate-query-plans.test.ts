@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import { createDb, createSession, ensureManagedAccessForUser } from "../src";
@@ -116,7 +116,7 @@ test("0591 retains write predicates and runs exact owner capability checks once 
           'session_visibility_delete_isolation')`;
     expect(writes).toHaveLength(6);
     for (const write of writes) {
-      expect(write.expression).toContain("session_reference_visible");
+      expect(write.expression).toMatch(/session_reference_visible|FROM sessions session_row/);
       expect(write.expression).not.toContain("policy_capability_active");
     }
     const [leftover] = await shared.admin<Array<{ count: number }>>`

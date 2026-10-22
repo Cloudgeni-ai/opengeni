@@ -36,6 +36,13 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
 import {
+  formatSessionUsageMicros,
+  parseSessionUsageLimitReachedRefusal,
+  SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON,
+  SESSION_USAGE_LIMIT_SEGMENT,
+  type ParsedSessionUsageLimitReachedRefusal,
+} from "@opengeni/contracts/session-usage-limit-refusal";
+import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   type Settings,
@@ -216,9 +223,10 @@ const MAX_SLACK_CHILD_DETAIL_CHARS = 240;
 const SLACK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 /**
  * Goal pause reasons the Slack thread announces. `user_pause`, `api`, `agent`,
- * and `no_progress` are deliberately absent.
+ * and `no_progress` are deliberately absent. A task usage limit pause needs a
+ * person to raise or remove the limit, so it posts too.
  *
- * A Map, not a plain object: this lookup is the sole gate of a two-reason
+ * A Map, not a plain object: this lookup is the sole gate of a fixed-reason
  * invariant, and a plain object indexed by a payload-derived string answers
  * `constructor` (and every other prototype key) with a truthy value that would
  * sail past the `if (!headline)` guard. No payload reaches it with such a
@@ -227,7 +235,36 @@ const SLACK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const SLACK_GOAL_PAUSED_HEADLINES = new Map<string, string>([
   ["limits", "Goal paused (budget)"],
   ["max_auto_continuations", "Goal paused (continuation cap)"],
+  [SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON, "Goal paused at the task's usage limit"],
 ]);
+
+/**
+ * The thread line when a task stops at its usage limit: the amounts when the
+ * stop marker carries them, what a person can do, and a link to the task.
+ * API-equivalent model usage, never credits, billing or a monthly reset.
+ */
+export function slackSessionUsageLimitStopText(input: {
+  mention: string;
+  refusal: Pick<ParsedSessionUsageLimitReachedRefusal, "limitMicros" | "usedMicros"> | null;
+  link: string | null;
+}): string {
+  const amounts = input.refusal
+    ? ` (${formatSessionUsageMicros(input.refusal.usedMicros)} of ${formatSessionUsageMicros(input.refusal.limitMicros)} API-equivalent model usage)`
+    : "";
+  const link = input.link ? ` <${input.link}|Open in Opengeni>` : "";
+  return `${input.mention}Opengeni paused at this task's usage limit${amounts}. A person can raise or remove the limit in Opengeni, then reply in this thread to continue.${link}`;
+}
+
+/** A Send or start refused because the task's usage limit is reached. */
+function slackSessionUsageLimitRefusal(
+  error: HTTPException,
+): ParsedSessionUsageLimitReachedRefusal | null {
+  return (
+    parseSessionUsageLimitReachedRefusal(error.cause) ??
+    parseSessionUsageLimitReachedRefusal(record(error.cause)?.error) ??
+    parseSessionUsageLimitReachedRefusal(error)
+  );
+}
 /**
  * Slack delivery restrictions are durable session-level authority, not
  * attacker-adjacent user-message context. Migration 0240 backfilled the original
@@ -3908,7 +3945,9 @@ async function withSlackAllowanceAdmissionNotice(
   } catch (error) {
     if (
       error instanceof HTTPException &&
-      (parseAllowanceExhaustedRefusal(error.cause) ?? parseAllowanceExhaustedRefusal(error))
+      (parseAllowanceExhaustedRefusal(error.cause) ??
+        parseAllowanceExhaustedRefusal(error) ??
+        slackSessionUsageLimitRefusal(error))
     ) {
       const client = await createOpenGeniSlackBotInteractionClient(deps, {
         accountId: entry.accountId,
@@ -5259,8 +5298,9 @@ async function slackChildRequiresActionCard(
 }
 
 /**
- * A goal that paused because it ran out of budget or hit the continuation cap
- * stops making progress with nobody watching, so the Slack thread gets one
+ * A goal that paused because it ran out of budget, hit the continuation cap
+ * or reached the task's usage limit stops making progress with nobody
+ * watching, so the Slack thread gets one
  * bounded line. A `user_pause` / `api` / `agent` pause is a decision the human
  * or their agent already made, and `no_progress` is not a stop the human must
  * act on, so none of them post. `goal.resumed` never posts.
@@ -5562,6 +5602,25 @@ async function deliverSlackSessionEvents(
     } else if (event.type === "turn.completed") {
       const payloadOutput = safePayloadText(event.payload, "output");
       const hasPublishableOutput = payloadOutput.trim().length > 0;
+      if (safePayloadText(event.payload, "segmentLimit") === SESSION_USAGE_LIMIT_SEGMENT) {
+        // A person's own limit, not a failure or a billing problem: say what
+        // stopped, who can change it, and where.
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          slackSessionUsageLimitStopText({
+            mention: requester.mention,
+            refusal: parseSessionUsageLimitReachedRefusal(event.payload),
+            link: interaction.sessionId
+              ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+              : null,
+          }),
+          "usage-limit",
+        );
+        terminal = "completed";
+        continue;
+      }
       if (safePayloadText(event.payload, "segmentLimit") === "budget_exhausted") {
         const allowance = parseAllowanceExhaustedRefusal(event.payload);
         await postDelivery(
@@ -6477,6 +6536,10 @@ function safeErrorCode(error: unknown) {
 }
 
 export function slackAdmissionFailureText(error: HTTPException) {
+  const usageLimit = slackSessionUsageLimitRefusal(error);
+  if (usageLimit) {
+    return `Opengeni could not continue this task because its usage limit is reached (${formatSessionUsageMicros(usageLimit.usedMicros)} of ${formatSessionUsageMicros(usageLimit.limitMicros)} API-equivalent model usage). A person can raise or remove the limit in Opengeni, then reply in this thread to continue.`;
+  }
   const allowance =
     parseAllowanceExhaustedRefusal(error.cause) ?? parseAllowanceExhaustedRefusal(error);
   if (allowance) {

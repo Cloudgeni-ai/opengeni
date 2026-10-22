@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   appendSessionEvents,
   createChannel,
   createDb,
   createSession,
+  ensureManagedAccessForUser,
   decodeSessionListCursor,
   getSessionForSubject,
   getWorkspaceGrant,
@@ -31,6 +32,7 @@ import {
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceRls,
+  withSessionRlsActorContext,
   withWorkspaceSubjectRls,
   type Database,
   type DbClient,
@@ -64,21 +66,48 @@ async function session(input: {
   channelId?: string | null;
   createdBy?: { kind: "subject" | "service"; subjectId: string; label?: string };
   metadata?: Record<string, unknown>;
+  privateOwnerSubjectId?: string;
 }) {
-  return await createSession(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    initialMessage: input.message,
-    resources: [],
-    metadata: input.metadata ?? {},
-    model: "test-model",
-    reasoningEffort: "medium" as const,
-    latencyMode: "standard" as const,
-    sandboxBackend: "none",
-    ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
-    ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
-    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+  const create = () =>
+    createSession(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.message,
+      resources: [],
+      metadata: input.metadata ?? {},
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+      ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.privateOwnerSubjectId
+        ? {
+            visibility: "user_private" as const,
+            subjectId: input.privateOwnerSubjectId,
+          }
+        : {}),
+    });
+  return input.privateOwnerSubjectId
+    ? withSessionRlsActorContext({ subjectId: input.privateOwnerSubjectId }, create)
+    : create();
+}
+
+async function siteViewerWorkspace() {
+  const userId = crypto.randomUUID();
+  const access = await ensureManagedAccessForUser(db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Site list owner",
   });
+  const grant = access.workspaceGrants.find(
+    (item) => item.workspaceId === access.defaultWorkspaceId,
+  )!;
+  return {
+    workspace: { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    subjectId: grant.subjectId,
+  };
 }
 
 /** Removal now requires an explicit administering actor (migration 0278). */
@@ -186,6 +215,79 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("totals materialization preserves private, workspace and exact-target boundaries", async () => {
+    if (!available) return;
+    const { workspace, subjectId: owner } = await siteViewerWorkspace();
+    const viewer = `user:totals-viewer-${crypto.randomUUID()}`;
+    await grantMember(workspace, viewer);
+    const root = await session({ ...workspace, message: "shared totals root" });
+    const child = await session({
+      ...workspace,
+      message: "shared attention",
+      parentSessionId: root.id,
+    });
+    const privateRoot = await session({
+      ...workspace,
+      message: "private totals root",
+      privateOwnerSubjectId: owner,
+      createdBy: { kind: "subject", subjectId: owner },
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      update sessions set status='requires_action' where id in (${child.id}, ${privateRoot.id})`,
+    );
+    const foreign = await freshWorkspace();
+    const foreignRoot = await session({ ...foreign, message: "foreign totals root" });
+    const foreignChild = await session({
+      ...foreign,
+      message: "foreign attention",
+      parentSessionId: foreignRoot.id,
+    });
+    await executeSessionActivity(
+      foreign.workspaceId,
+      sql`
+      update sessions set status='requires_action' where id=${foreignChild.id}`,
+    );
+    const options = {
+      subjectId: viewer,
+      parentSessionId: null,
+      includeTotals: true,
+      includePinned: false,
+      limit: 1,
+    };
+    const visible = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    expect(visible.sessions.map((row) => row.id)).toEqual([root.id]);
+    expect(visible.totals?.needsYouCount).toBe(1);
+    expect(visible.totals?.groups).toHaveLength(1);
+    expect(visible.totals?.groups[0]).toMatchObject({ total: 2, attention: 1 });
+    const owned = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      subjectId: owner,
+    });
+    expect(owned.totals?.needsYouCount).toBe(2);
+    expect(owned.totals?.groups[0]).toMatchObject({ total: 3, attention: 2 });
+    const exact = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+    });
+    expect(exact.totals?.needsYouCount).toBe(0);
+    expect(exact.totals?.groups[0]).toMatchObject({ total: 1, attention: 0 });
+    const tree = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      authorizationScope: { kind: "scoped", rootSessionIds: [root.id], sessionIds: [] },
+    });
+    expect(tree.totals).toEqual(visible.totals);
+    for (const rootSessionIds of [[], [privateRoot.id], [foreignRoot.id]]) {
+      const denied = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+        ...options,
+        authorizationScope: { kind: "scoped", rootSessionIds, sessionIds: [] },
+      });
+      expect(denied.sessions).toEqual([]);
+      expect(denied.totals).toEqual({ needsYouCount: 0, groups: [] });
+    }
+  });
+
   test("complete totals and attention discovery survive small pages, pins and target grants", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -377,12 +479,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(pinnedAttention.totals?.needsYouCount).toBe(1);
     expect(pinnedAttention.pinned[0]?.treeStats?.totalDescendants).toBe(1000);
     expect(pinnedAttention.pinned[0]?.treeStats?.attentionDescendants).toBe(0);
-  });
+  }, 60_000);
 
   test("compact pages retain authority and display state while excluding large configuration", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
-    const subjectId = "user:compact-list";
+    const { workspace, subjectId } = await siteViewerWorkspace();
     await grantWorkspaceAccess(db, {
       ...workspace,
       subjectId,
@@ -399,6 +500,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         large: "x".repeat(65_536),
       },
       createdBy: { kind: "subject", subjectId, label: "Example member" },
+      privateOwnerSubjectId: subjectId,
     });
     await setSessionPin(db, {
       workspaceId: workspace.workspaceId,
@@ -406,7 +508,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sessionId: root.id,
       pinned: true,
     });
-    const options = { subjectId, pinsOnly: true };
+    const options = { subjectId, pinsOnly: true, originSiteId: siteId };
+    expect(
+      (await listSessionEntriesForSubject(db, workspace.workspaceId, { subjectId, pinsOnly: true }))
+        .pinned,
+    ).toEqual([]);
     const full = await listSessionsForSubject(db, workspace.workspaceId, options);
     const compact = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
     const row = compact.pinned[0]!;
@@ -426,6 +532,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const target = await listSessionEntriesForSubject(db, workspace.workspaceId, {
       subjectId,
       pinsOnly: true,
+      originSiteId: siteId,
       authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
     });
     expect(target.pinned[0]?.treeStats?.totalDescendants).toBe(0);
@@ -456,7 +563,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
                   const query = proxiedQuery.toSQL().sql;
                   if (
                     !changed &&
-                    query.includes('order by "sessions"."updated_at"') &&
+                    query.includes('order by "sessions"."activity_xid"') &&
                     query.includes(" limit ")
                   ) {
                     changed = true;
@@ -510,7 +617,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       channelId: channel.id,
     });
     const [before] =
-      await admin`select activity_revision::text as revision from sessions where id = ${target.id}`;
+      await admin`select activity_xid::text as revision from sessions where id = ${target.id}`;
     // The channel FK runs the same UPDATE channel_id = NULL for a row attached
     // after deleteChannel's preliminary scan. Only the FK statement sees it.
     await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
@@ -519,12 +626,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       );
     });
     const [after] =
-      await admin`select activity_revision::text as revision, channel_id from sessions where id = ${target.id}`;
+      await admin`select activity_xid::text as revision, channel_id from sessions where id = ${target.id}`;
     expect(after!.channel_id).toBeNull();
     expect(BigInt(after!.revision)).toBeGreaterThan(BigInt(before!.revision));
   }, 60_000);
 
-  test("rejects an old ungated channel delete after activity trigger activation", async () => {
+  test("ungated channel deletion stamps activity through FK detachment", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const channel = await createChannel(db, { ...workspace, name: "Old caller rollback" });
@@ -533,17 +640,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       message: "retained filing",
       channelId: channel.id,
     });
-    let failure: unknown;
-    try {
-      await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
-        await tx.execute(sql`delete from channels where id = ${channel.id}`);
-      });
-    } catch (error) {
-      failure = error;
-    }
-    expect(failure).toBeDefined();
-    const [row] = await admin`select channel_id from sessions where id = ${target.id}`;
-    expect(row!.channel_id).toBe(channel.id);
+    const [before] = await admin`select activity_xid::text xid from sessions where id=${target.id}`;
+    await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
+      await tx.execute(sql`delete from channels where id = ${channel.id}`);
+    });
+    const [row] =
+      await admin`select channel_id,activity_xid::text xid from sessions where id = ${target.id}`;
+    expect(row!.channel_id).toBeNull();
+    expect(BigInt(row!.xid)).toBeGreaterThan(BigInt(before!.xid));
   }, 60_000);
 
   test("uses a bounded creator-prefix index for sparse creator pages", async () => {
@@ -817,6 +921,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         update sessions
         set
           status = case
+            when id = ${root.id} then 'queued'
             when id = ${pausedChild.id} then 'queued'
             when id = ${inheritedGrandchild.id} then 'running'
             when id = ${resumedGreatGrandchild.id} then 'queued'
@@ -841,6 +946,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           end,
           updated_at = now()
         where id in (
+          ${root.id},
           ${pausedChild.id},
           ${inheritedGrandchild.id},
           ${resumedGreatGrandchild.id}
@@ -1068,6 +1174,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("does not double-count cyclic legacy parent graphs", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    const subjectId = `user:cycle-totals-${crypto.randomUUID()}`;
+    await grantMember(workspace, subjectId);
     const root = await session({ ...workspace, message: "cycle root" });
     const child = await session({
       ...workspace,
@@ -1079,6 +1187,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       message: "cycle grandchild",
       parentSessionId: child.id,
     });
+    // Creation reserves idle shells (#4330); these legacy sessions had queued work.
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set status = 'queued' where id in (${root.id}, ${child.id}, ${grandchild.id})`,
+    );
     // This is a legacy graph from before 0114 made lineage snapshots immutable.
     // Model that historical write only inside one admin transaction; the named
     // production trigger is re-enabled before the transaction can commit.
@@ -1112,6 +1225,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionSince: null,
       truncated: true,
     });
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includePinned: false,
+      includeTotals: true,
+    });
+    expect(page.sessions).toEqual([]);
+    expect(page.totals).toEqual({ needsYouCount: 0, groups: [] });
   }, 60_000);
 
   test("reaps expired list snapshots outside request transactions", async () => {
@@ -1457,21 +1578,29 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
   test("Site origin filters before pagination, survives project moves and binds cursors", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
-    const subjectId = `user:site-${crypto.randomUUID()}`;
-    await grantMember(workspace, subjectId);
+    const { workspace, subjectId } = await siteViewerWorkspace();
     const siteId = crypto.randomUUID();
     const otherSiteId = crypto.randomUUID();
     const metadata = { _opengeniSiteOrigin: { siteId, title: "Analytics" } };
-    const a = await session({ ...workspace, message: "Site A", metadata });
-    const b = await session({ ...workspace, message: "Site B", metadata });
+    const siteSession = (message: string) =>
+      session({
+        ...workspace,
+        message,
+        metadata,
+        privateOwnerSubjectId: subjectId,
+        createdBy: { kind: "subject", subjectId },
+      });
+    const a = await siteSession("Site A");
+    const b = await siteSession("Site B");
     await session({ ...workspace, message: "Newest unrelated" });
     const project = await createChannel(db, { ...workspace, name: "Explicit project" });
-    await setSessionChannel(db, {
-      workspaceId: workspace.workspaceId,
-      sessionId: a.id,
-      channelId: project.id,
-    });
+    await withSessionRlsActorContext({ subjectId }, () =>
+      setSessionChannel(db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: a.id,
+        channelId: project.id,
+      }),
+    );
     const page = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       originSiteId: siteId,
@@ -1606,8 +1735,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const projectCursor = decodeSessionListCursor(firstProjectPage.nextCursor!);
     expect(projectCursor).toMatchObject({ kind: "keyset" });
     const [beforeMove] = await admin<
-      { updated_at: Date; activity_revision: string }[]
-    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+      { updated_at: Date; activity_xid: string }[]
+    >`select updated_at, activity_xid::text from sessions where id = ${projectBRow.id}`;
     expect(
       await setSessionChannel(db, {
         workspaceId: workspace.workspaceId,
@@ -1616,12 +1745,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       }),
     ).toBe(true);
     const [afterMove] = await admin<
-      { updated_at: Date; activity_revision: string }[]
-    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+      { updated_at: Date; activity_xid: string }[]
+    >`select updated_at, activity_xid::text from sessions where id = ${projectBRow.id}`;
     expect(afterMove!.updated_at.getTime()).toBe(beforeMove!.updated_at.getTime());
-    expect(BigInt(afterMove!.activity_revision)).toBeGreaterThan(
-      BigInt(projectCursor!.kind === "keyset" ? projectCursor!.snapshotRevision : "0"),
-    );
+    expect(BigInt(afterMove!.activity_xid)).toBeGreaterThan(BigInt(beforeMove!.activity_xid));
     const secondProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       channelId: projectA.id,
@@ -1689,7 +1816,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       limit: 1,
     });
     expect(page.pinned).toEqual([]);
-    expect(page.sessions.map((row) => row.id)).toEqual([second.id]);
+    // The explicit backdated write is still the newest transaction activity.
+    expect(page.sessions.map((row) => row.id)).toEqual([first.id]);
     expect(page.sessions[0]!.pinned).toBe(false);
     expect(page.nextCursor).toBeTruthy();
 
@@ -1700,7 +1828,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       limit: 1,
       cursor: decoded!,
     });
-    expect(continuation.sessions.map((row) => row.id)).toEqual([first.id]);
+    expect(continuation.sessions.map((row) => row.id)).toEqual([second.id]);
 
     // People are still authorized exclusively through memberships: a user
     // subject with no membership row stays denied.
@@ -2694,11 +2822,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const workspace = await freshWorkspace();
     const subjectId = "user:sort-modes";
     await grantMember(workspace, subjectId);
-    const roots = [];
+    const roots: Awaited<ReturnType<typeof session>>[] = [];
     for (const message of ["sort z", "sort alpha", "sort Alpha", "sort blank"]) {
       roots.push(await session({ ...workspace, message }));
     }
-    const children = [];
+    const children: Awaited<ReturnType<typeof session>>[] = [];
     for (const message of ["sort child z", "sort child a", "sort child A"]) {
       children.push(await session({ ...workspace, message, parentSessionId: roots[0]!.id }));
     }
@@ -2709,11 +2837,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       title: string,
       createdAt: string,
       updatedAt: string,
+      writer = db,
     ) => {
       // These are explicit fixture titles, not automatic title candidates. The
       // automatic-title policy cancels the whole UPDATE for an unfenced agent title.
       const persisted = await withWorkspaceSessionActivityRls(
-        db,
+        writer,
         workspace.workspaceId,
         async (scoped) =>
           await scoped.execute<{
@@ -2805,20 +2934,30 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         channelId: null,
       }),
     ).toEqual(nameIds([1, 2]));
+    const activityOrder = await admin<{ id: string }[]>`select id from sessions
+      where workspace_id=${workspace.workspaceId} order by activity_xid desc,updated_at desc,id desc`;
     for (const sortBy of ["createdAt", "updatedAt"] as const) {
       expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy })).toEqual(
-        roots
-          .map((row) => row.id)
-          .sort()
-          .reverse(),
+        sortBy === "updatedAt"
+          ? activityOrder
+              .filter((row) => roots.some((root) => root.id === row.id))
+              .map((row) => row.id)
+          : roots
+              .map((row) => row.id)
+              .sort()
+              .reverse(),
       );
       expect(
         await walk({ parentSessionId: roots[0]!.id, archiveStatus: "archived", sortBy }),
       ).toEqual(
-        children
-          .map((row) => row.id)
-          .sort()
-          .reverse(),
+        sortBy === "updatedAt"
+          ? activityOrder
+              .filter((row) => children.some((child) => child.id === row.id))
+              .map((row) => row.id)
+          : children
+              .map((row) => row.id)
+              .sort()
+              .reverse(),
       );
     }
     const first = await listSessionsForSubject(db, workspace.workspaceId, {
@@ -2856,22 +2995,30 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).toEqual([roots[1]!.id, ...otherRoots]);
     expect(
       await walk({ parentSessionId: null, archiveStatus: "all", sortBy: "updatedAt" }),
-    ).toEqual([...otherRoots, roots[1]!.id]);
+    ).toEqual([
+      roots[1]!.id,
+      ...activityOrder.filter((row) => otherRoots.includes(row.id)).map((row) => row.id),
+    ]);
     // Oppose id ordering with timestamps inside the same millisecond. Both the
     // cursor and public selected date field must retain all six fractional digits.
     const orderedIds = roots.map((row) => row.id).sort();
     const timestamps = [456, 455, 454, 453].map(
       (fraction) => `2026-03-01T00:00:00.123${fraction}Z`,
     );
-    for (let index = 0; index < orderedIds.length; index++) {
-      const id = orderedIds[index]!;
-      await setSortFixture(
-        id,
-        titles[rows.findIndex((row) => row.id === id)]!,
-        timestamps[index]!,
-        timestamps[index]!,
-      );
-    }
+    // A shared transaction makes xid equal so this specifically probes the
+    // exact timestamp tie-break rather than transaction allocation order.
+    await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (writer) => {
+      for (let index = 0; index < orderedIds.length; index++) {
+        const id = orderedIds[index]!;
+        await setSortFixture(
+          id,
+          titles[rows.findIndex((row) => row.id === id)]!,
+          timestamps[index]!,
+          timestamps[index]!,
+          writer,
+        );
+      }
+    });
     for (const sortBy of ["createdAt", "updatedAt"] as const) {
       expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy })).toEqual(
         orderedIds,

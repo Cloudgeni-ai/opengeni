@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { requireAccessKey } from "../src/http/auth";
 

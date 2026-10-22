@@ -265,6 +265,11 @@ OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
 # Prefer unset: `bun run dev` sets OPENGENI_DOCKER_NETWORK=${COMPOSE_PROJECT_NAME}_default
 ```
 
+For private remote browser access, set the public endpoint to the reachable
+HTTPS storage origin and keep `OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT` on
+loopback. The local artifact materializer validates the internal endpoint used
+for server-side storage requests (falling back to the public endpoint if unset).
+
 The public endpoint is embedded in browser-facing signed URLs. The internal
 endpoint is used by API and worker storage requests, while the sandbox endpoint
 is supplied to Docker agent containers. The two private endpoints may share the
@@ -306,6 +311,10 @@ registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 image identity for every Sandbox Environment. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
 `OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
 memory for every new box and remain stable through resume and replacement.
+Optional `OPENGENI_MODAL_REGIONS` (comma-separated, for example `eu`) pins every
+new box, including snapshot restores, to Modal regions near the workers. Every
+setup step and tool call is a worker-to-box round trip, so distance shows up in
+every command; Modal bills region selection as a compute multiplier.
 A verified Sandbox Environment provider image may accelerate physical cold create,
 but never replaces that logical lease identity. Explicit Sandbox Environment image overrides
 are disabled. The registry
@@ -349,13 +358,38 @@ Document indexing depends on:
 - `OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS`
 
 Typical uploads include PDF, Word, PowerPoint, Excel, OpenDocument,
-plain-text/structured-text, email, and common image formats. The stock API and
-worker images include headless LibreOffice for Office conversion and local
-English OCR data; native source runs use the parser's built-in image conversion
-but require LibreOffice on the host to index Office formats. If parser
-dependencies are missing locally, documents can fail indexing and later be
+plain-text/structured-text, email, and common image formats. The standalone API
+queues parsing to the existing control worker through Temporal. Only the worker
+image includes LiteParse's native parser, headless LibreOffice for Office
+conversion and local English OCR data. The API keeps FFmpeg for voice transcription
+and fonts for native artifact rendering; artifact import/export does not use
+LibreOffice. Desktop recording runs FFmpeg inside the desktop sandbox, while
+worker-side video validation uses
+FFprobe from the worker's FFmpeg package.
+
+Native source runs and embedded API compositions using the inline indexing
+fallback require LibreOffice and OCR data on the host that parses documents.
+The parser uses built-in image conversion and native Tesseract OCR, not the
+Tesseract CLI. Missing converters or OCR data persist an explicit indexing
+failure rather than a ready document with empty text. Failed documents can be
 retried from the UI after the dependency issue is fixed. See
 [`knowledge.md`](knowledge.md) for how indexed content is retrieved.
+
+After changing workload converter ownership, build the API and worker targets
+and run the Linux Docker image integration gate:
+
+```bash
+OPENGENI_CONVERTER_API_IMAGE=opengeni-api:local \
+OPENGENI_CONVERTER_WORKER_IMAGE=opengeni-worker:local \
+bun test ./test/integration/workload-converters.integration.ts
+```
+
+It starts isolated PostgreSQL, NATS, object storage and Temporal fixtures; uploads
+DOCX, XLSX, PPTX, image-only PDF and PNG through the built API; verifies text
+prepared by the worker and retrieved by vector search; and checks missing-converter
+errors and voice decoding. Embeddings use the built-in deterministic test provider
+and remote transcription uses a local stub; FFmpeg and document converters run
+from the actual workload images.
 
 ## Using the web app
 
@@ -435,3 +469,14 @@ request needs.
 - The console uses finite event batches until HTTP/2 or HTTP/3 is observed. Cross-origin APIs can hide the protocol from ResourceTiming, so missing timing information retains the bounded fallback and prevents several local tabs from exhausting HTTP/1 connections needed by browser controls.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model, tool, and sandbox boundary has been made idempotent.
 - Read [`../AGENTS.md`](../AGENTS.md) before changing the session workflow, the agent turn activity, or memory; [`run-lifecycle.md`](run-lifecycle.md) is the canonical lifecycle reference.
+
+## Deployment environment instructions
+
+`OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS` adds operator context to every agent
+session execution instruction build, including child agents and custom workspace/session identities.
+It is additive to persona templates, workspace governance and session instructions;
+blank/unset preserves existing prompts. Set it before starting API and workers.
+It contains plain text, not a filename to load, and must not contain secrets.
+Use a short environment description and explicit instructions to read canonical
+operator files. Existing accepted attempts retain their captured instructions;
+new attempts receive the configured context.

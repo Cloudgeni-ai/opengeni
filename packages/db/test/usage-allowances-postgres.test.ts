@@ -3,7 +3,7 @@ import {
   acquireOwnerMigratedTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
@@ -212,11 +212,33 @@ describe("usage allowance DB lifecycle", () => {
       expect(evaluateRuntimeDatabasePosture(columnGrant, options)).toContain(
         "usage allowance private table workspace_usage_allowances is missing or unsafe",
       );
+      await owner.admin`grant select(due_at) on opengeni_private.usage_maintenance_due to opengeni_app`;
+      await owner.admin`grant update(revision) on opengeni_private.usage_allowance_membership_changes to opengeni_app`;
+      await owner.admin`grant execute on function opengeni_private.sync_usage_maintenance_due() to opengeni_app`;
+      const drift = evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(currentApp.db, options),
+        options,
+      );
+      expect(drift).toContain(
+        "usage maintenance index usage_maintenance_due has unsafe owner or direct runtime privileges",
+      );
+      expect(drift).toContain(
+        "usage maintenance index usage_allowance_membership_changes has unsafe owner or direct runtime privileges",
+      );
+      expect(drift).toContain(
+        "usage maintenance helper sync_usage_maintenance_due() has unsafe posture",
+      );
       await provisionRoles(owner.adminUrl, {
         appRole: "opengeni_app",
         appPassword: owner.appPassword,
         rlsStrategy: "force",
       });
+      expect(
+        evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(currentApp.db, options),
+          options,
+        ),
+      ).toEqual([]);
     } finally {
       await currentApp?.close();
       await owner.release();

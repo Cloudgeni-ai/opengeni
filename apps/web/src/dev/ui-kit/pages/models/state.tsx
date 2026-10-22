@@ -39,7 +39,7 @@ export interface Questions {
   q12: "page" | "inline";
   /** Q13: "Organization | This workspace", or the four-option select. */
   q13: "segmented" | "select";
-  /** Q14: "Spread work | Primary only" and a Primary chip, or radio + Auto-rotate. */
+  /** Q14: "Spread work | Primary first" and a Primary chip, or radio + Auto-rotate. */
   q14: "modes" | "legacy";
   /** Q15: per-account model lists only at organization scope, or everywhere. */
   q15: "org_only" | "everywhere";

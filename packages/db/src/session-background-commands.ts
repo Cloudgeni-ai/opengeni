@@ -3,7 +3,7 @@ import type {
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandReconciliation,
 } from "@opengeni/contracts";
-import { SessionCommandFailure } from "@opengeni/contracts";
+import { SessionCommandFailure, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gte, inArray, sql, type SQL } from "drizzle-orm";
 
@@ -12,16 +12,26 @@ import { withRlsContext, withSessionActivityRlsContext } from "./database";
 import * as schema from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
 import { fromPostgresLosslessJson } from "./lossless-json";
+import { commandOutputClientEventIdPrefix } from "./session-command-output";
 
 export type ConnectedMachineBackgroundCommandProof = {
   outcome: "exited" | "lost";
   exitCode: number | null;
   reason: string;
   failure?: SessionCommandFailure;
+  backgroundChildrenStopped?: boolean;
   observedAt: Date;
 };
 
 export const SESSION_BACKGROUND_COMMAND_REASON_MAX_BYTES = 512;
+
+/** Existing reconciler policy, shared by initial push collection failures. */
+export function connectedCommandReconciliationRetryMs(attempts: number, periodMs = 30_000): number {
+  return Math.min(
+    5 * 60_000,
+    Math.max(periodMs, 30_000) * 2 ** Math.min(4, Math.max(0, attempts - 1)),
+  );
+}
 
 export function boundedSessionBackgroundCommandReason(value: string, label: string): string {
   const normalized = value.trim();
@@ -103,6 +113,11 @@ function connectedOutputIdentityWhere(input: ConnectedCommandOutputIdentity) {
     eq(command.opId, input.opId),
   );
 }
+
+/** How long a claim on a command's reconciliation lasts before another owner
+ * may take it over: the reconciler's, and the collection claim of an
+ * inventory answer that stores a command's output. */
+export const CONNECTED_COMMAND_CLAIM_TTL_MS = 5 * 60_000;
 
 /** Record full output custody only after the caller's verified, awaited capture.
  * Terminal observation is insufficient. The persisted receipt is the retry
@@ -211,6 +226,101 @@ export async function claimConnectedCommandOutputReleases(
   );
 }
 
+/** Claim an exited command's output that was never stored, so exactly one
+ * owner collects it: the answer to its runner's operation inventory, which
+ * collects it while the runner is talking. Only an open, unconsumed output
+ * nobody holds (or whose claim expired) is taken. Returns whether this caller
+ * now holds it. */
+export async function claimConnectedCommandOutputCollection(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { claimId: string },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    const rows = await tx
+      .update(command)
+      .set({
+        reconcileClaimId: input.claimId,
+        reconcileClaimedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input),
+          sql`${command.outputConsumedAt} is null and ${command.outputExitSeq} is null`,
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+          sql`(${command.reconcileClaimId} is null or ${command.reconcileClaimedAt} <= now() - make_interval(secs => ${CONNECTED_COMMAND_CLAIM_TTL_MS / 1000}))`,
+        ),
+      )
+      .returning({ id: command.id });
+    return rows.length === 1;
+  });
+}
+
+/** Give up a collection claim that did not finish: the output stays open for
+ * the runner's next inventory. */
+export async function returnConnectedCommandOutputCollection(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { claimId: string },
+): Promise<void> {
+  await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    await tx
+      .update(command)
+      .set({ reconcileClaimId: null, reconcileClaimedAt: null, updatedAt: new Date() })
+      .where(and(connectedOutputIdentityWhere(input), eq(command.reconcileClaimId, input.claimId)));
+  });
+}
+
+/** Record a release of exactly the stored exit frontier: one the runner
+ * confirmed in its answer (`OpRelease`), or one its operation inventory
+ * answer told it to make. It settles the release obligation, whoever holds
+ * its claim, and drops that claim. Returns whether this call recorded it;
+ * false when it was already recorded, or the row is not that exact consumed
+ * output. */
+export async function recordConnectedCommandOutputRelease(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { exitSeq: string },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    const rows = await tx
+      .update(command)
+      .set({
+        outputReleaseObservedAt: new Date(),
+        lastReconcileOutcome: "output_released",
+        reconcileClaimId: null,
+        reconcileClaimedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input),
+          eq(command.outputExitSeq, input.exitSeq),
+          sql`${command.outputConsumedAt} is not null`,
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+        ),
+      )
+      .returning({ id: command.id });
+    return rows.length === 1;
+  });
+}
+
 /** Publish success is only a retry milestone. Stop retrying only after an exact
  * native absence observation, or record pre-capture loss explicitly as missing
  * output. Neither outcome is a model-completion acknowledgement. */
@@ -224,6 +334,7 @@ export async function settleConnectedCommandOutputReleaseClaim(
 ): Promise<boolean> {
   if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0)
     throw new Error("Connected command output retry delay is invalid");
+  const released = input.outcome === "not_retained";
   return await withSessionActivityRlsContext(db, input.claim, async (tx) => {
     await lockSessionEventWriteRows(tx, {
       workspaceId: input.claim.workspaceId,
@@ -234,19 +345,18 @@ export async function settleConnectedCommandOutputReleaseClaim(
     const rows = await tx
       .update(command)
       .set({
-        ...(input.outcome === "not_retained" ? { outputReleaseObservedAt: new Date() } : {}),
+        ...(released ? { outputReleaseObservedAt: new Date() } : {}),
         ...(input.outcome === "unavailable" ? { outputUnavailableAt: new Date() } : {}),
         reconcileAfter: new Date(Date.now() + input.retryAfterMs),
         reconcileClaimId: null,
         reconcileClaimedAt: null,
-        lastReconcileOutcome:
-          input.outcome === "not_retained"
-            ? "output_released"
-            : input.outcome === "published"
-              ? "output_ack_published"
-              : input.outcome === "unavailable"
-                ? "output_unavailable"
-                : "output_retry",
+        lastReconcileOutcome: released
+          ? "output_released"
+          : input.outcome === "published"
+            ? "output_ack_published"
+            : input.outcome === "unavailable"
+              ? "output_unavailable"
+              : "output_retry",
         updatedAt: new Date(),
       })
       .where(
@@ -382,6 +492,9 @@ function mapCommand(
     exitCode: row.exitCode ?? null,
     settlementReason: row.settlementReason ?? null,
     ...(failure ? { failure } : {}),
+    ...(row.provider === "connected_machine" && row.backgroundChildrenStopped
+      ? { backgroundChildrenStopped: true as const }
+      : {}),
     startedAt: row.startedAt.toISOString(),
     settledAt: row.settledAt?.toISOString() ?? null,
     completionObservedAt: row.completionObservedAt?.toISOString() ?? null,
@@ -458,6 +571,66 @@ export async function listSessionBackgroundCommands(
       return rows.map(mapCommand);
     },
   );
+}
+
+export type WorkspaceBackgroundCommand = SessionBackgroundCommand & {
+  sessionTitle: string | null;
+  machineName: string | null;
+};
+
+/** Caller supplies the ordinary session-list audience inside subject RLS. */
+export async function listWorkspaceBackgroundCommandsInScope(
+  db: Database,
+  workspaceId: string,
+  filters: SQL[],
+  afterId?: string,
+): Promise<{ commands: WorkspaceBackgroundCommand[]; nextCursor: string | null }> {
+  const command = schema.sessionBackgroundCommands;
+  const rows = await db
+    .select({
+      ...commandReadColumns,
+      sessionTitle: schema.sessions.title,
+      // Resolve the immutable launch target, never the session's current pointer.
+      // A removed or no-longer-visible machine has no name in this projection.
+      machineName: sql<string | null>`(select machine.name from ${schema.sandboxes} machine
+        where machine.account_id = ${command.accountId} and (
+          (${command.provider} = 'connected_machine'
+            and machine.workspace_id = ${command.controlWorkspaceId}
+            and machine.enrollment_id = ${command.enrollmentId})
+          or (${command.provider} = 'managed' and machine.id = (
+            select process.route_target_id from ${schema.sandboxRetainedProcesses} process
+            where process.id = ${command.retainedProcessId}
+              and process.workspace_id = ${command.workspaceId}
+              and process.session_id = ${command.sessionId})))
+        order by machine.id limit 1)`,
+    })
+    .from(command)
+    .innerJoin(
+      schema.sessions,
+      and(
+        eq(schema.sessions.workspaceId, command.workspaceId),
+        eq(schema.sessions.id, command.sessionId),
+      ),
+    )
+    .where(
+      and(
+        eq(command.workspaceId, workspaceId),
+        inArray(command.state, ["running", "stopping"]),
+        ...(afterId ? [sql`${command.id} > ${afterId}::uuid`] : []),
+        ...filters,
+      ),
+    )
+    .orderBy(asc(command.id))
+    .limit(101);
+  const page = rows.slice(0, 100);
+  return {
+    commands: page.map((row) => ({
+      ...mapCommand(row),
+      sessionTitle: row.sessionTitle,
+      machineName: row.machineName,
+    })),
+    nextCursor: rows.length > 100 ? page.at(-1)!.id : null,
+  };
 }
 
 /** @internal Caller must already hold the canonical session/control fence. */
@@ -548,7 +721,11 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
   return mapCommand(row);
 }
 
-/** @internal Caller must already hold the canonical exact-attempt fence. */
+/** Stop requester recorded for an operation abandoned on an unreachable machine. */
+export const UNREACHABLE_MACHINE_STOP_REQUESTER = "system:connected-machine-unreachable";
+
+/** @internal Caller must already hold the canonical exact-attempt fence, or for
+ * an abandoned operation, proof that the exact attempt launched it. */
 export async function insertConnectedMachineSessionBackgroundCommandInTransaction(
   db: Database,
   input: {
@@ -564,8 +741,13 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
+    /** The turn already reported this operation as failed because its machine
+     * stopped answering. The row starts with a stop request, so the reconciler
+     * stops it when the machine returns; its settlement adds no model input. */
+    abandoned?: boolean;
   },
 ): Promise<SessionBackgroundCommand> {
+  const now = new Date();
   const [row] = await db
     .insert(schema.sessionBackgroundCommands)
     .values({
@@ -574,7 +756,14 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       provider: "connected_machine",
-      state: "running",
+      state: input.abandoned ? "stopping" : "running",
+      ...(input.abandoned
+        ? {
+            cancelRequestedAt: now,
+            cancelRequestedBy: UNREACHABLE_MACHINE_STOP_REQUESTER,
+            reconcileAfter: now,
+          }
+        : {}),
       controlWorkspaceId: input.controlWorkspaceId,
       enrollmentId: input.enrollmentId,
       connectionInstanceId: input.connectionInstanceId,
@@ -711,6 +900,67 @@ function connectedClaimIdentityWhere(claim: ConnectedMachineBackgroundCommandCla
   );
 }
 
+/** Only the first exit notification bypasses polling backoff. Delivery retries
+ * cannot erase a failed collector's backoff or steal another active claim. */
+export async function claimPushedConnectedCommandCompletion(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { claimTtlMs: number },
+): Promise<ConnectedMachineBackgroundCommandClaim | null> {
+  if (!Number.isSafeInteger(input.claimTtlMs) || input.claimTtlMs <= 0)
+    throw new Error("Connected command completion claim TTL is invalid");
+  return withRlsContext(db, input, async (tx) => {
+    const table = schema.sessionBackgroundCommands;
+    const identity = and(
+      eq(table.id, input.commandId),
+      eq(table.accountId, input.accountId),
+      eq(table.workspaceId, input.workspaceId),
+      eq(table.sessionId, input.sessionId),
+      eq(table.provider, "connected_machine"),
+      eq(table.controlWorkspaceId, input.controlWorkspaceId),
+      eq(table.enrollmentId, input.enrollmentId),
+      eq(table.connectionInstanceId, input.connectionInstanceId),
+      eq(table.opId, input.opId),
+      inArray(table.state, ["running", "stopping"]),
+    );
+    const [row] = await tx.select().from(table).where(identity).for("update").limit(1);
+    if (!row) return null;
+    const now = new Date();
+    const firstNotification = row.completionNotifiedAt === null;
+    if (firstNotification)
+      await tx
+        .update(table)
+        .set({ reconcileAfter: now, completionNotifiedAt: now })
+        .where(identity);
+    if (
+      (!firstNotification && row.reconcileAfter.getTime() > now.getTime()) ||
+      row.reconcileProofOutcome !== null ||
+      (row.reconcileClaimId !== null &&
+        row.reconcileClaimedAt !== null &&
+        row.reconcileClaimedAt.getTime() > now.getTime() - input.claimTtlMs)
+    )
+      return null;
+    const claimId = crypto.randomUUID();
+    await tx
+      .update(table)
+      .set({
+        reconcileClaimId: claimId,
+        reconcileClaimedAt: now,
+        reconcileAfter: new Date(now.getTime() + input.claimTtlMs),
+        reconcileAttempts: row.reconcileAttempts + 1,
+        lastReconcileOutcome: "claimed",
+        updatedAt: now,
+      })
+      .where(identity);
+    return {
+      ...input,
+      claimId,
+      state: row.state as "running" | "stopping",
+      reconcileAttempts: row.reconcileAttempts + 1,
+      proof: null,
+    };
+  });
+}
+
 /** Checkpoint one exact terminal provider observation before lifecycle settlement.
  * A retry may reuse an identical proof; a divergent proof is a hard identity fault. */
 export async function recordConnectedMachineBackgroundCommandProof(
@@ -764,6 +1014,7 @@ export async function recordConnectedMachineBackgroundCommandProof(
           reconcileProofExitCode: input.proof.exitCode,
           reconcileProofReason: reason,
           runnerFailure: failure,
+          backgroundChildrenStopped: sql`${schema.sessionBackgroundCommands.backgroundChildrenStopped} OR ${input.proof.backgroundChildrenStopped === true}`,
           reconcileProofObservedAt: input.proof.observedAt,
           lastReconcileOutcome: `proof_${input.proof.outcome}`,
           updatedAt: new Date(),
@@ -783,6 +1034,12 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
     claim: ConnectedMachineBackgroundCommandClaim;
     outcome: string;
     retryAfterMs: number;
+    /** Its runner reports its own operation inventory and did not answer a
+     * recovery request: forget the completion notice that made it due, so the
+     * running command (outcome provider_unanswered, on any enrollment kind) is
+     * claimed again only once the runner reports it again (or it is stopped,
+     * proven or retired). */
+    leaveToRunner?: boolean;
   },
 ): Promise<boolean> {
   if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0) {
@@ -797,10 +1054,13 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
       const rows = await scopedDb
         .update(schema.sessionBackgroundCommands)
         .set({
-          reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+          reconcileAfter: sql`case when ${outcome} = 'provider_running'
+            and ${schema.sessionBackgroundCommands.completionNotifiedAt} > ${schema.sessionBackgroundCommands.reconcileClaimedAt}
+            then now() else ${new Date(Date.now() + input.retryAfterMs).toISOString()}::timestamptz end`,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
           lastReconcileOutcome: outcome,
+          ...(input.leaveToRunner ? { completionNotifiedAt: null } : {}),
           updatedAt: new Date(),
         })
         .where(connectedClaimIdentityWhere(input.claim))
@@ -863,6 +1123,20 @@ export async function settleClaimedConnectedMachineBackgroundCommandWithMutation
   );
 }
 
+/** The frozen physical locator of an adopted command on a machine runner (a
+ * Connected Machine or a compute sandbox). Cancellation goes only here. */
+export type ConnectedCommandStopTarget = {
+  controlWorkspaceId: string;
+  enrollmentId: string;
+  connectionInstanceId: string;
+  opId: string;
+};
+
+/**
+ * Move one running command to `stopping`. The reconciler owns delivery and
+ * settlement; `stopTarget` lets the caller deliver the cancellation at once,
+ * best effort, so a stop does not wait for the next reconciliation pass.
+ */
 export async function requestSessionBackgroundCommandCancellation(
   db: Database,
   input: {
@@ -872,7 +1146,11 @@ export async function requestSessionBackgroundCommandCancellation(
     commandId: string;
     subjectId: string;
   },
-): Promise<{ command: SessionBackgroundCommand | null; accepted: boolean }> {
+): Promise<{
+  command: SessionBackgroundCommand | null;
+  accepted: boolean;
+  stopTarget?: ConnectedCommandStopTarget;
+}> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -919,7 +1197,24 @@ export async function requestSessionBackgroundCommandCancellation(
               ),
             );
         }
-        return { command: mapCommand(updated!), accepted: true };
+        const stopTarget =
+          updated!.provider === "connected_machine" &&
+          updated!.controlWorkspaceId &&
+          updated!.enrollmentId &&
+          updated!.connectionInstanceId &&
+          updated!.opId
+            ? {
+                controlWorkspaceId: updated!.controlWorkspaceId,
+                enrollmentId: updated!.enrollmentId,
+                connectionInstanceId: updated!.connectionInstanceId,
+                opId: updated!.opId,
+              }
+            : undefined;
+        return {
+          command: mapCommand(updated!),
+          accepted: true,
+          ...(stopTarget ? { stopTarget } : {}),
+        };
       }),
   );
 }
@@ -1124,6 +1419,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
     exitCode: number | null;
     reason: string;
     failure?: SessionCommandFailure | undefined;
+    backgroundChildrenStopped?: boolean | undefined;
   },
   mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<SessionBackgroundCommand | null> {
@@ -1153,6 +1449,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           exitCode: input.outcome === "exited" ? input.exitCode : null,
           settlementReason: reason,
           runnerFailure: failure,
+          backgroundChildrenStopped: sql`${schema.sessionBackgroundCommands.backgroundChildrenStopped} OR ${input.backgroundChildrenStopped === true}`,
           settledAt,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
@@ -1161,6 +1458,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           reconcileProofReason: reason,
           reconcileProofObservedAt: settledAt,
           lastReconcileOutcome: `settled_${input.outcome}`,
+          reconcileAfter: settledAt,
           updatedAt: new Date(),
         })
         .where(
@@ -1219,6 +1517,90 @@ export type SessionCommandIdentity = {
   sessionId: string;
   commandId: string;
 };
+
+/** Internal exact-identity discovery for an authenticated machine event. This
+ * returns only a locator; settlement must revalidate it under the session fence. */
+export async function locateConnectedCommandCompletion(
+  db: Database,
+  input: {
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+  },
+): Promise<(SessionCommandIdentity & { terminal: boolean }) | null> {
+  const rows = await db.execute<SessionCommandIdentity & { terminal: boolean }>(sql`
+    select account_id as "accountId", workspace_id as "workspaceId",
+      session_id as "sessionId", command_id as "commandId", terminal
+    from opengeni_private.locate_connected_command_completion(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text, ${input.opId}::text
+    )`);
+  return rows[0] ?? null;
+}
+
+/** The most operations one inventory classification reads. */
+export const CONNECTED_COMMAND_CLASSIFY_LIMIT = 1_000;
+
+/** A command row of an operation a runner reports, with its output custody. */
+export type ConnectedCommandInventoryRow = ConnectedCommandOutputIdentity & {
+  state: "running" | "stopping" | "exited" | "lost";
+  outputExitSeq: string | null;
+  /** Opengeni stored all of its output (`output_consumed_at`). */
+  outputConsumed: boolean;
+  outputReleased: boolean;
+  outputUnavailable: boolean;
+};
+
+/**
+ * For the operations a runner process reports it still runs or retains, the
+ * command rows of that exact enrollment and connection instance, with their
+ * state and output custody. Operations without a row (foreground work, or
+ * commands deleted with their chat) are absent. Read-only.
+ */
+export async function classifyConnectedCommandOps(
+  db: Database,
+  input: {
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opIds: readonly string[];
+  },
+): Promise<Map<string, ConnectedCommandInventoryRow[]>> {
+  if (input.opIds.length > CONNECTED_COMMAND_CLASSIFY_LIMIT) {
+    throw new Error(
+      `At most ${CONNECTED_COMMAND_CLASSIFY_LIMIT} operations are classified at once`,
+    );
+  }
+  const classified = new Map<string, ConnectedCommandInventoryRow[]>();
+  if (input.opIds.length === 0) return classified;
+  type Row = Omit<
+    ConnectedCommandInventoryRow,
+    "controlWorkspaceId" | "enrollmentId" | "connectionInstanceId"
+  >;
+  const rows = await db.execute<Row>(sql`
+    select op_id as "opId", account_id as "accountId", workspace_id as "workspaceId",
+      session_id as "sessionId", command_id as "commandId", state,
+      output_exit_seq as "outputExitSeq", output_consumed as "outputConsumed",
+      output_released as "outputReleased", output_unavailable as "outputUnavailable"
+    from opengeni_private.classify_connected_command_ops(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text,
+      array(select jsonb_array_elements_text(${JSON.stringify(input.opIds)}::jsonb))
+    )`);
+  for (const row of rows as Row[]) {
+    if (!["running", "stopping", "exited", "lost"].includes(row.state))
+      throw new Error("Connected command inventory row has an unknown state");
+    const entry: ConnectedCommandInventoryRow = {
+      ...row,
+      controlWorkspaceId: input.controlWorkspaceId,
+      enrollmentId: input.enrollmentId,
+      connectionInstanceId: input.connectionInstanceId,
+    };
+    classified.set(row.opId, [...(classified.get(row.opId) ?? []), entry]);
+  }
+  return classified;
+}
 
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
@@ -1386,6 +1768,47 @@ export function projectCommandOutputPage(input: {
   };
 }
 
+/** One page of a command's retained output rows, from the cursor sequence on. */
+export function commandOutputPageQuery(
+  tx: Database,
+  input: SessionCommandIdentity,
+  fromSequence: number,
+) {
+  // Bound the scan by the command's client event id prefix in byte order: under
+  // row-level security only leakproof comparisons narrow an index scan, and the
+  // JSON `commandId` key is not one, so filtering on it alone walked every
+  // output chunk of the whole session on each read. ";" is the byte after ":".
+  // The type stays a literal so cached generic plans can still prove the
+  // partial index predicate.
+  const clientIdFrom = commandOutputClientEventIdPrefix(input.commandId);
+  const clientIdBefore = `${clientIdFrom.slice(0, -1)};`;
+  return tx
+    .select({
+      sequence: schema.sessionEvents.sequence,
+      // Bound legacy payloads in SQL too: LIMIT alone cannot bound one old event.
+      // Oversized historical rows carry explicit loss rather than allocating an
+      // unbounded JSON value in the API process.
+      payload: sql<unknown>`case when octet_length(${schema.sessionEvents.payload}::text) <= 262144
+      then ${schema.sessionEvents.payload}
+      else jsonb_build_object('commandReadProjectionGap', true) end`,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        sql`${schema.sessionEvents.type} = 'sandbox.command.output.delta'`,
+        sql`${schema.sessionEvents.clientEventId} collate "C" >= ${clientIdFrom}`,
+        sql`${schema.sessionEvents.clientEventId} collate "C" < ${clientIdBefore}`,
+        sql`${schema.sessionEvents.payload} ->> 'commandId' = ${input.commandId}`,
+        gte(schema.sessionEvents.sequence, fromSequence),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence))
+    .limit(COMMAND_OUTPUT_PAGE_ROWS + 1);
+}
+
 export async function readSessionBackgroundCommandOutput(
   db: Database,
   input: SessionCommandIdentity & {
@@ -1401,30 +1824,7 @@ export async function readSessionBackgroundCommandOutput(
   const rows = await withRlsContext(
     db,
     input,
-    async (tx) =>
-      await tx
-        .select({
-          sequence: schema.sessionEvents.sequence,
-          // Bound legacy payloads in SQL too: LIMIT alone cannot bound one old event.
-          // Oversized historical rows carry explicit loss rather than allocating an
-          // unbounded JSON value in the API process.
-          payload: sql<unknown>`case when octet_length(${schema.sessionEvents.payload}::text) <= 262144
-      then ${schema.sessionEvents.payload}
-      else jsonb_build_object('commandReadProjectionGap', true) end`,
-          payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
-        })
-        .from(schema.sessionEvents)
-        .where(
-          and(
-            eq(schema.sessionEvents.workspaceId, input.workspaceId),
-            eq(schema.sessionEvents.sessionId, input.sessionId),
-            eq(schema.sessionEvents.type, "sandbox.command.output.delta"),
-            sql`${schema.sessionEvents.payload} ->> 'commandId' = ${input.commandId}`,
-            gte(schema.sessionEvents.sequence, cursor.sequence),
-          ),
-        )
-        .orderBy(asc(schema.sessionEvents.sequence))
-        .limit(COMMAND_OUTPUT_PAGE_ROWS + 1),
+    async (tx) => await commandOutputPageQuery(tx, input, cursor.sequence),
   );
   const page = projectCommandOutputPage({ ...input, rows });
   // Only observe the terminal state actually used by this read. A finish racing
@@ -1446,5 +1846,8 @@ export async function readSessionBackgroundCommandOutput(
     terminal,
     completionObservedAt: observed?.completionObservedAt ?? null,
     ...page,
+    ...(terminal && command.backgroundChildrenStopped
+      ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+      : {}),
   };
 }

@@ -18,7 +18,10 @@ import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
-import type { OnePasswordVaultProviderFactory } from "@opengeni/core";
+import type {
+  ExternalVaultProviderFactories,
+  OnePasswordVaultProviderFactory,
+} from "@opengeni/core";
 
 // Signal (start-if-needed) a session's Temporal workflow so a queued turn it
 // cannot otherwise observe gets claimed. Used to wake a PARENT session's
@@ -58,6 +61,9 @@ export type StartVideoGenerationWorkflow = (input: {
   workspaceId: string;
   operationId: string;
 }) => Promise<"started" | "already_running">;
+
+/** A separately owned display-metadata operation, never a conversation turn. */
+export type StartSessionTitleWorkflow = StartVideoGenerationWorkflow;
 
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
@@ -106,6 +112,7 @@ export type SharedActivityServices = {
    * deliberately retains the composite implementation for embedded/test hosts. */
   startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
+  startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -141,6 +148,7 @@ export type SharedActivityServices = {
    * `@opengeni/vaults-onepassword`); null leaves 1Password vaults unavailable.
    */
   onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
   /** Standalone, default-off personal GitHub smart-HTTP broker consumer. */
   personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"] | null;
 };
@@ -336,6 +344,20 @@ export type PostClaimDatabaseRecoveryDetail = {
   sandboxSetupOutcomeUnknown?: true;
   /** Preserve the exhausted budget for a command proven not dispatched. */
   sandboxSetupRecoveryExhausted?: true;
+  /** Content-free task usage receipts whose write failed after their
+   * provider responses were received. The DB-only control lane writes them
+   * with their original identities before any replacement attempt, so known
+   * usage is neither lost nor re-requested. Bounded; omitted when none. */
+  sessionUsageReceipts?: PostClaimSessionUsageReceipt[];
+};
+
+export type PostClaimSessionUsageReceipt = {
+  sessionId: string;
+  sourceId: string;
+  turnId: string | null;
+  amountMicros: number | null;
+  pricingSource: "configured_list_price" | "gateway_reported" | null;
+  model: string | null;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
@@ -393,6 +415,8 @@ export type PeekSessionWorkInput = {
   includeAdmissionFence?: boolean;
   /** Versioned workflow observer opt-in, never a caller authorization grant. */
   observerAccountId?: string;
+  /** Patch-gated: old workflow histories only understand unavailable. */
+  includeDeletion?: boolean;
 };
 
 export type SettleSessionInputWaitInput = {
@@ -498,6 +522,7 @@ export type DispatchScheduledTaskRunResult =
         | "allowance_exhausted"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
+        | "session_usage_limit"
         | "malformed_manual_trigger"
         | "scheduled_task_paused"
         | "scheduled_authority_exhausted"

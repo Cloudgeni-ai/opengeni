@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { checkLimit, requireLimit } from "../src/billing/limits";
 import {
@@ -9,6 +9,9 @@ import {
   retryFailedSession,
 } from "../src/domain/sessions";
 import type { ApiRouteDeps } from "../src/dependencies";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";
@@ -148,11 +151,10 @@ describe("core usage allowance admission", () => {
         opengeniDb,
         "withWorkspaceSubjectSessionActivityRls",
       ).mockImplementation(async (db, _workspaceId, _subjectId, fn) => await fn(db as never));
-      const slack = spyOn(
-        opengeniDb,
-        "getSlackInteractionSessionAccessForSession",
-      ).mockResolvedValue(null);
-      const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue(null);
+      const authorization = spyOn(opengeniDb, "getSessionAuthorizationFacts").mockResolvedValue({
+        target: null,
+        caller: null,
+      });
       const replay = spyOn(opengeniDb, "getSessionRetryReceiptInTransaction").mockResolvedValue(
         null,
       );
@@ -208,8 +210,7 @@ describe("core usage allowance admission", () => {
         });
       } finally {
         workspaceRls.mockRestore();
-        slack.mockRestore();
-        authority.mockRestore();
+        authorization.mockRestore();
         replay.mockRestore();
         session.mockRestore();
         failure.mockRestore();

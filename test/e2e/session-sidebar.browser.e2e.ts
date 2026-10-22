@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import type { SessionSidebarEvidence } from "../../apps/web/test/session-sidebar-context";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -124,6 +125,53 @@ async function selectView(label: "Status" | "Group by" | "Sort by", value: strin
 async function listCalls(): Promise<SessionSidebarEvidence["listCalls"]> {
   return page.evaluate(() => window.sessionSidebarQa.listCalls);
 }
+
+test("session titles fade before icons without ellipsis across themes and widths", async () => {
+  for (const theme of ["dark", "light"]) {
+    for (const width of [1160, 390]) {
+      await page.setViewportSize({ width, height: 850 });
+      await page.goto(`${url}?scenario=hover&theme=${theme}`);
+      const link = page
+        .locator("a[data-session-row]")
+        .filter({ hasText: "Astra strategy takeover" })
+        .first();
+      await link.waitFor();
+      const title = link.locator("[data-session-row-title]");
+      const metadata = link.locator("[data-session-row-metadata]");
+      const computed = await title.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          mask: style.maskImage,
+          overflow: style.textOverflow,
+          clipped: element.scrollWidth > element.clientWidth,
+        };
+      });
+      expect(computed.mask).toContain("linear-gradient");
+      expect(computed.overflow).toBe("clip");
+      expect(computed.clipped).toBe(true);
+      const titleBox = (await title.boundingBox())!;
+      const metadataBox = (await metadata.boundingBox())!;
+      expect(titleBox.x + titleBox.width).toBeCloseTo(metadataBox.x - 4, 0);
+      const sidebar = page.getByRole("complementary", { name: "Workspace sidebar" });
+      expect(await sidebar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+        true,
+      );
+      await capture(`title-fade-${theme}-${width}`);
+      if (screenshots) {
+        await sidebar.screenshot({
+          path: `${screenshots}/title-fade-${theme}-${width}-sidebar.png`,
+          animations: "disabled",
+        });
+      }
+      await link.hover();
+      expect(await title.boundingBox()).toEqual(titleBox);
+      expect(await metadata.boundingBox()).toEqual(metadataBox);
+      await link.focus();
+      expect(await title.boundingBox()).toEqual(titleBox);
+      expect(await metadata.boundingBox()).toEqual(metadataBox);
+    }
+  }
+}, 30_000);
 
 test("projects start at four roots and fetch the next displayed step independently", async () => {
   await openActive();
@@ -369,6 +417,128 @@ test("an off-page project's first-read error exposes retry and recovers only fou
   expect(calls.map((call) => call.outcome)).toEqual(["error", "success", "success"]);
   expect(calls.every((call) => call.options.limit === 4)).toBe(true);
   expect(calls.map((call) => call.options.cursor)).toEqual([undefined, undefined, "4"]);
+}, 30_000);
+
+test("a commit hint while Retry is shown rereads the loaded window once Retry succeeds", async () => {
+  await openActive("?hints=1");
+  const bugfixes = group("Bugfixes");
+  await showMore("Bugfixes").click();
+  await waitForRows("Bugfixes", 8);
+  // Bugfix conversation 6 arrived with the second page.
+  const archivedId = "00000000-0000-4000-9000-000000000206";
+  const archived = bugfixes.locator(`a[data-session-row="${archivedId}"]`);
+  await archived.waitFor();
+  await page.evaluate((channelId) => {
+    window.sessionSidebarQa.failChannelId = channelId;
+    window.sessionSidebarQa.failCursor = "8";
+  }, bugfixesId);
+  await showMore("Bugfixes").click();
+  const retry = bugfixes.getByRole("button", { name: "Retry sessions in Bugfixes", exact: true });
+  await retry.waitFor();
+
+  // Another device archives an already loaded row. Its commit hint reaches
+  // the sidebar while the explicit page failure owns this group.
+  const beforeHint = (await listCalls()).length;
+  await page.evaluate((id) => window.sessionSidebarQa.archiveRemotely(id), archivedId);
+  await page.waitForFunction((count) => {
+    const reads = window.sessionSidebarQa.listCalls.slice(count);
+    return (
+      reads.some((call) => call.options.pinsOnly) &&
+      reads.some((call) => !call.options.pinsOnly && call.options.channelId === undefined)
+    );
+  }, beforeHint);
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  const bugfixReads = async () =>
+    (await listCalls()).slice(beforeHint).filter((call) => call.options.channelId === bugfixesId);
+  // The quiet reconciliation does not consume the explicit retry: the cached
+  // rows and the Retry control stay, and nothing rereads the group yet.
+  expect(await retry.count()).toBe(1);
+  expect(await archived.count()).toBe(1);
+  expect(await bugfixReads()).toEqual([]);
+
+  await retry.click();
+  await showMore("Bugfixes").waitFor();
+  // The hint stayed dirty, so the settled retry rereads the loaded window once.
+  await archived.waitFor({ state: "detached" });
+  const reads = await bugfixReads();
+  expect(reads.map((call) => [call.options.cursor ?? null, call.outcome])).toEqual([
+    ["8", "success"],
+    [null, "success"],
+  ]);
+  expect(reads[1]!.options.limit).toBe(12);
+  expect(reads[1]!.returnedIds).not.toContain(archivedId);
+  // The retry keeps its visible window: the next loaded row fills the gap.
+  await waitForRows("Bugfixes", 8);
+  expect(
+    await rows(bugfixes).evaluateAll((links) =>
+      links.map((link) => link.getAttribute("data-session-row")!.slice(-3)),
+    ),
+  ).toEqual(["201", "202", "203", "204", "205", "207", "208", "209"]);
+  expect(await retry.count()).toBe(0);
+}, 30_000);
+
+test("a failed quiet refresh retried during an explicit read rereads the window once that read settles", async () => {
+  // Only the quiet-refresh retry cadence is advanced; every other timer runs normally.
+  await page.clock.install();
+  await openActive("?hints=1");
+  const bugfixes = group("Bugfixes");
+  await showMore("Bugfixes").click();
+  await waitForRows("Bugfixes", 8);
+  const archivedId = "00000000-0000-4000-9000-000000000206";
+  const archived = bugfixes.locator(`a[data-session-row="${archivedId}"]`);
+  await archived.waitFor();
+
+  // Another device archives a loaded row; the quiet window refresh for its hint fails.
+  const beforeHint = (await listCalls()).length;
+  const bugfixReads = async () =>
+    (await listCalls()).slice(beforeHint).filter((call) => call.options.channelId === bugfixesId);
+  await page.evaluate((channelId) => {
+    window.sessionSidebarQa.failChannelId = channelId;
+    window.sessionSidebarQa.failCursor = null;
+  }, bugfixesId);
+  await page.evaluate((id) => window.sessionSidebarQa.archiveRemotely(id), archivedId);
+  await page.waitForFunction(
+    ({ count, channelId }) =>
+      window.sessionSidebarQa.listCalls
+        .slice(count)
+        .some((call) => call.options.channelId === channelId && call.outcome === "error"),
+    { count: beforeHint, channelId: bugfixesId },
+  );
+  // A failed background refresh keeps the rows and the ordinary disclosure.
+  await showMore("Bugfixes").waitFor();
+  expect(await archived.count()).toBe(1);
+
+  // Its retry falls due while an explicit read owns the group.
+  await page.evaluate((channelId) => {
+    window.sessionSidebarQa.holdChannelId = channelId;
+    window.sessionSidebarQa.holdChannelCursor = "8";
+    window.sessionSidebarQa.heldPageStarted = false;
+  }, bugfixesId);
+  await showMore("Bugfixes").click();
+  await page.waitForFunction(() => window.sessionSidebarQa.heldPageStarted);
+  await page.clock.fastForward(15_000);
+  expect((await bugfixReads()).map((call) => call.options.cursor ?? null)).toEqual([null, "8"]);
+  await page.evaluate(() => window.sessionSidebarQa.releaseHeldPage());
+
+  // The skipped retry left the window dirty: it is reread once the explicit read settles.
+  await archived.waitFor({ state: "detached" });
+  const reads = await bugfixReads();
+  expect(reads.map((call) => [call.options.cursor ?? null, call.outcome])).toEqual([
+    [null, "error"],
+    ["8", "success"],
+    [null, "success"],
+  ]);
+  expect(reads[2]!.options.limit).toBe(12);
+  expect(reads[2]!.returnedIds).not.toContain(archivedId);
+  // The settled disclosure keeps its four new rows; the next row fills the gap.
+  await waitForRows("Bugfixes", 12);
+  expect(
+    await rows(bugfixes).evaluateAll((links) =>
+      links.map((link) => link.getAttribute("data-session-row")!.slice(-3)),
+    ),
+  ).toEqual(["201", "202", "203", "204", "205", "207", "208", "209", "210", "211", "212", "213"]);
 }, 30_000);
 
 test("mobile width preserves four-row disclosure and the actual view menu without overflow", async () => {

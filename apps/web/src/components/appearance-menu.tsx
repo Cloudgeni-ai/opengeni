@@ -11,8 +11,8 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-} from "@/components/ui/dropdown-menu";
-import { parseAppearance, useAppearance } from "@/lib/appearance";
+} from "@opengeni/react/ui/dropdown-menu";
+import { parseAppearance, useAppearance } from "@opengeni/react/app/lib/appearance";
 
 const options = [
   { value: "light", label: "Light", icon: SunIcon },

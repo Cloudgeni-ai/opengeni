@@ -5,7 +5,7 @@ import { ArrowLeftIcon, ArrowRightIcon, MoonIcon, SunIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { ADD_AGENT_DEFAULT_PROMPT } from "@/components/new-session-starters";
+import { ADD_AGENT_DEFAULT_PROMPT } from "@opengeni/react/app/components/new-session-starters";
 import { AcmeProduct } from "@/components/playground/acme-product";
 import { DEMO_AUTHORIZATION_URL, QUESTIONS } from "@/components/playground/acme-script";
 import { Callout, type CalloutSide } from "@/components/playground/callout";
@@ -18,14 +18,14 @@ import {
   defaultChatStyle,
   type ChatStyle,
 } from "@/components/playground/style-knobs";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { useAppContext } from "@/context";
-import { captureAnalyticsEvent } from "@/lib/analytics-observer";
-import { userErrorText } from "@/lib/api-error";
-import { readyNewChat } from "@/lib/ready-new-chat";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { captureAnalyticsEvent } from "@opengeni/react/app/lib/analytics-observer";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { readyNewChat } from "@opengeni/react/app/lib/ready-new-chat";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /** The callouts, in order. Each moves on only when the person acts. */
 export type Tip = "chat" | "color" | "code" | "tool" | "ship";

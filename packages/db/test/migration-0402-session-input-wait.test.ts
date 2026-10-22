@@ -12,7 +12,7 @@ import {
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

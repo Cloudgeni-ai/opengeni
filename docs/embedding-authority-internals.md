@@ -102,6 +102,16 @@ dedicated verified-owning-user proof. Explicit linked-native admission uses the
 separate link proof; no external request is stamped as a managed-cookie login.
 Workspace gateway admission distinguishes verified external-user and
 organization-service-key provenance from native-human and attempt claims.
+Published Site member dispatch reuses native delegated owning-human admission.
+Its backend-only `stampSiteViewerSessionAuthorization` binds an exact Request
+to the gateway-verified identity and one workspace; external-member proofs
+reload existing active membership and intersect the Site permission ceiling,
+without provisioning an identity or fabricating managed-cookie authentication.
+Native users retain their actual profile and subscription authority. The request
+also retains a live Site/viewer reauthorization callback for streamed delivery.
+Guest/outsider service execution carries a separate request-local Site principal
+context; immutable session columns bind that audience across all native surfaces.
+Neither an origin label nor hidden navigation is an ownership proof.
 These new request-time lanes recheck live authority before provider invocation
 and approval issuance; existing catalog filtering and approval rules remain
 authoritative. This does not supply durable scheduled/binding delegation.
@@ -216,8 +226,8 @@ Inline visualizations receive the shared visualization stylesheet and helper scr
 with frame-scoped resize messages and theme updates; ordinary Sites are unchanged.
 The CSS/helpers under packages/react are canonical. generate-visualization-assets.ts
 generates both the renderer constants and the visualization skill’s preview/export
-assets from them. The default opengeni-visualize skill owns detailed inline design
-guidance; the main operational prompt only routes to it and to opengeni-sites.
+assets from them. The default visualize skill owns detailed inline design
+guidance; the main operational prompt only routes to it and to sites.
 Markdown image references use artifact:<uuid>. The native chat resolves metadata
 through the current workspace API and reuses the retained-artifact image loader
 (object URL cleanup, unavailable states, and current viewer authentication).

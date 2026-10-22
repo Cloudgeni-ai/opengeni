@@ -1,0 +1,79 @@
+name: Publish browser extension
+
+# Builds the browser extension store ZIP from main and submits the version in
+# apps/browser-extension/package.json to the Chrome Web Store for review.
+# Authentication is keyless: the job's OIDC token is exchanged through Google
+# Workload Identity Federation for a service account that is a member of the
+# Web Store publisher. Rerunning for an already submitted or published version
+# is a no-op.
+on:
+  workflow_dispatch:
+    inputs:
+      publish_type:
+        description: "DEFAULT_PUBLISH goes live after review; STAGED_PUBLISH waits for a manual publish."
+        required: true
+        type: choice
+        default: DEFAULT_PUBLISH
+        options:
+          - DEFAULT_PUBLISH
+          - STAGED_PUBLISH
+      cancel_pending:
+        description: "Cancel a different version that is still pending review and submit this one instead."
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-browser-extension
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Submit to the Chrome Web Store
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Admit protected main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test publisher
+        working-directory: apps/browser-extension
+        run: bun test test/publish-store.test.ts test/manifest.test.ts
+
+      - name: Build store ZIP
+        working-directory: apps/browser-extension
+        run: bun run build:store
+
+      - name: Upload and submit
+        working-directory: apps/browser-extension
+        env:
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
+          CWS_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CWS_WORKLOAD_IDENTITY_PROVIDER }}
+          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          CWS_PUBLISH_TYPE: ${{ inputs.publish_type }}
+          CWS_CANCEL_PENDING: ${{ inputs.cancel_pending }}
+        run: bun scripts/publish-store.ts

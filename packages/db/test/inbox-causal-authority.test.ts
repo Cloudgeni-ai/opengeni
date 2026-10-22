@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import { HostMcpAcceptedAuthority } from "@opengeni/contracts/host-mcp-bindings";
 import type { ExternalLinkWorkSnapshot } from "@opengeni/contracts/external-identities";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,

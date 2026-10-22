@@ -12,9 +12,12 @@ const workspaceRouteContracts = {
   workspaceRetiredAgentsRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
-    source: "routes/sessions-index.tsx",
+    source: "../../../packages/react/src/app/routes/sessions-index.tsx",
   },
-  workspaceSessionRoute: { kind: "self-managed", source: "routes/session.tsx" },
+  workspaceSessionRoute: {
+    kind: "self-managed",
+    source: "../../../packages/react/src/app/routes/session.tsx",
+  },
   workspacePlaygroundRoute: { kind: "self-managed", source: "routes/playground.tsx" },
   // Secrets: the list, each vault and each item only match the URL; the
   // parent's single Secrets component renders them inside one ContentPage.
@@ -48,12 +51,18 @@ const workspaceRouteContracts = {
     source: "routes/workspace-state.tsx",
     scrollSource: "components/knowledge/knowledge-page.tsx",
   },
-  workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
+  workspaceArtifactsRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/artifacts.tsx",
+  },
   workspaceArtifactDetailRoute: {
     kind: "page",
-    source: "routes/artifacts.tsx",
+    source: "../../../packages/react/src/app/routes/artifacts.tsx",
   },
-  workspaceRetainedArtifactRoute: { kind: "page", source: "routes/retained-artifact.tsx" },
+  workspaceRetainedArtifactRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/retained-artifact.tsx",
+  },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",

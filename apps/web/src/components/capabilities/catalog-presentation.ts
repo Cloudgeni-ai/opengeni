@@ -1,5 +1,5 @@
-import { capabilityCuration } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import { capabilityCuration } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 /**
  * Product presentation order for the connector browser. The server catalog is

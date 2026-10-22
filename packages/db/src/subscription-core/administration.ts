@@ -25,6 +25,8 @@ import {
   readSubscriptionEffectiveSettings,
   readSubscriptionProviderCutoverState,
   resolveSubscriptionConnectionId,
+  subscriptionConnectionEffectiveLastError,
+  subscriptionConnectionEffectiveStatus,
 } from "../subscription-core-repository";
 import {
   organizationAdministeredConnection,
@@ -94,7 +96,11 @@ export function subscriptionCoreWakeReason(
   return `core_${subscriptionCoreProviderId(provider)}_${event}`;
 }
 
-/** One subscription connection as the administration projections read it. */
+/**
+ * One subscription connection as the administration projections read it.
+ * `status` and `last_error` are effective: a quarantine that ended reads
+ * `active` with no error (`subscriptionConnectionEffectiveStatus`).
+ */
 export type SubscriptionCoreConnectionRow = {
   id: string;
   label: string | null;
@@ -129,7 +135,9 @@ export type SubscriptionCoreConnectionRow = {
 
 const CONNECTION_COLUMNS = sql`connection.id::text as id, connection.label,
   connection.account_email, connection.plan_type, connection.provider_account_id,
-  connection.status, connection.last_error, connection.version, connection.allocator_enabled,
+  ${subscriptionConnectionEffectiveStatus("connection")} as status,
+  ${subscriptionConnectionEffectiveLastError("connection")} as last_error,
+  connection.version, connection.allocator_enabled,
   connection.extra_credits_enabled, connection.extra_credits_version, connection.extra_credits_updated_at,
   connection.allocator_version, connection.allowed_model_ids,
   connection.connected_by_subject_id, connection.expires_at, connection.last_refresh_at,
@@ -266,6 +274,8 @@ export async function readSubscriptionCoreWorkspacePool(
     workspaceId: string;
     /** Session picker only: include shared accounts assigned to the scoped caller. */
     includeOwnPeopleScope?: boolean;
+    /** Limits overview only: include every available source, not just the selected inference source. */
+    includeAllAvailableConnections?: boolean;
   },
 ): Promise<SubscriptionCoreWorkspacePool> {
   const providerId = subscriptionCoreProviderId(provider);
@@ -376,22 +386,24 @@ export async function readSubscriptionCoreWorkspacePool(
           : entry.entries.length > 0
             ? entry.entries.some((policy) => policy.pool === "organization")
             : !entry.local;
-  const connections = pools.filter(inEffectiveSource).map(({ row, entries, local }) => {
-    // The switch placement reads: under the automatic source any enabled
-    // copy in this workspace serves (both pools are admitted), otherwise the
-    // effective pool's copy.
-    const shown =
-      settings.inferenceSource === "automatic"
-        ? entries
-        : entries.filter((entry) => entry.pool === effectiveSource);
-    return {
-      row,
-      source: local ? ("workspace" as const) : ("organization" as const),
-      poolAllocatorEnabled:
-        entries.length === 0 ||
-        (shown.length > 0 ? shown : entries).some((entry) => entry.allocator),
-    };
-  });
+  const connections = pools
+    .filter((entry) => input.includeAllAvailableConnections || inEffectiveSource(entry))
+    .map(({ row, entries, local }) => {
+      // The switch placement reads: under the automatic source any enabled
+      // copy in this workspace serves (both pools are admitted), otherwise the
+      // effective pool's copy.
+      const shown =
+        settings.inferenceSource === "automatic"
+          ? entries
+          : entries.filter((entry) => entry.pool === effectiveSource);
+      return {
+        row,
+        source: local ? ("workspace" as const) : ("organization" as const),
+        poolAllocatorEnabled:
+          entries.length === 0 ||
+          (shown.length > 0 ? shown : entries).some((entry) => entry.allocator),
+      };
+    });
   return {
     connections,
     primaryConnectionId,
@@ -610,7 +622,13 @@ export type SubscriptionCoreWorkspaceView = {
 export async function readSubscriptionCoreWorkspaceView(
   db: Database,
   provider: SubscriptionCoreProvider,
-  input: { accountId: string; workspaceId: string; viewerSubjectId?: string | null },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    viewerSubjectId?: string | null;
+    /** Limits overview only; availability and canonical row visibility still apply. */
+    includeAllAvailableConnections?: boolean;
+  },
 ): Promise<SubscriptionCoreWorkspaceView> {
   return await withRlsContext(
     db,

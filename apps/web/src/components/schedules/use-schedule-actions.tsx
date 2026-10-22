@@ -8,9 +8,12 @@ import { useCallback, useState, type ReactNode } from "react";
 import { PauseIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { DestructiveConfirm, showUndoToast } from "@/components/ui/destructive-confirm";
-import { useAppContext } from "@/context";
-import type { ScheduledTask } from "@/types";
+import {
+  DestructiveConfirm,
+  showUndoToast,
+} from "@opengeni/react/app/components/ui/destructive-confirm";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import type { ScheduledTask } from "@opengeni/react/app/types";
 
 import { isKnowledgeSync, nextRunOf, runTimeLabel, scheduleErrorText } from "./schedule-model";
 

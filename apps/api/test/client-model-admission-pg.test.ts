@@ -17,12 +17,9 @@ import {
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const SECRET = "client-model-admission-parity-test-secret";
@@ -587,7 +584,9 @@ test("PG: turning Opengeni credits off blocks every credit model but keeps subsc
     tools: [],
   });
   expect(refused.status).toBe(422);
-  expect((await refused.json()).message).toContain("Opengeni credits");
+  const refusal = (await refused.json()).message;
+  expect(refusal).toContain("uses credits, which are turned off in this workspace");
+  expect(refusal).not.toMatch(/opengeni/i);
 
   // An omitted model never falls back to a credit model.
   const implicit = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {

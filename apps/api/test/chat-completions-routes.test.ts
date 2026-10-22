@@ -6,7 +6,7 @@ import {
   type ModelCallOutput,
   type ModelCallService,
 } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const SECRET = "chat-completions-route-secret";
@@ -264,14 +264,14 @@ describe("chat completions route", () => {
         status: 402,
         type: "insufficient_quota",
         code: "insufficient_credits",
-        message: "Insufficient Opengeni credits.",
+        message: "Insufficient workspace credits.",
       });
     });
     const response = await post(service, { model: "m", messages: MESSAGES });
     expect(response.status).toBe(402);
     expect(await response.json()).toEqual({
       error: {
-        message: "Insufficient Opengeni credits.",
+        message: "Insufficient workspace credits.",
         type: "insufficient_quota",
         param: null,
         code: "insufficient_credits",

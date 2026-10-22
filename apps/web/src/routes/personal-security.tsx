@@ -1,7 +1,12 @@
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ProblemPanel } from "@/components/common";
+import { apiBaseUrl } from "@/api";
+import {
+  SIGN_IN_METHOD_ORIGIN_MESSAGE,
+  signInMethodsHaveSameOrigin,
+} from "@/lib/sign-in-method-origin";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { PersonalSettingsShell } from "@/components/settings/personal-settings-shell";
 import {
   SecurityPageBody,
@@ -10,11 +15,11 @@ import {
   SignInMethodsView,
   providerLabel,
 } from "@/components/sign-in-methods";
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { SettingRowSkeleton } from "@/components/ui/setting-row";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { usePersonalSecurityContext } from "@/lib/personal-security-context";
 import {
@@ -41,6 +46,19 @@ export function PersonalSecurityRoute() {
         title="Sign-in methods unavailable"
         description="Personal sign-in methods are managed by Opengeni only on deployments with managed browser sign-in."
       />
+    );
+  }
+  if (!signInMethodsHaveSameOrigin(apiBaseUrl, window.location.href)) {
+    return (
+      <PersonalSettingsShell email={context.authSession.user.email}>
+        <SecurityPageHeader />
+        <SecurityPageBody>
+          <Notice tone="failed">
+            <p>Account security configuration required</p>
+            <p>{SIGN_IN_METHOD_ORIGIN_MESSAGE}</p>
+          </Notice>
+        </SecurityPageBody>
+      </PersonalSettingsShell>
     );
   }
   const mode = context.clientConfig.managedAuthSessionSetMode ?? "dual";

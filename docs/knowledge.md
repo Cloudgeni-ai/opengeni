@@ -173,7 +173,22 @@ and other programmatic callers receive the exact bytes. Only a model tool call
 receives a compact copy, projected in the worker at the per-caller seam
 (`projectAttemptToolResultForCaller` with
 `packages/runtime/src/knowledge-model-projection.ts`), never in the API tool.
-It is the same JSON without bookkeeping or repeated text:
+Search returns discovery cards: entry `id`, title, kind, scope, revision outcome,
+and at most 200 Unicode code points of the best content excerpt (or preview when
+there is no excerpt). Nondefault archive/change state is preserved. Search mode,
+fallback reason and a non-null pagination cursor remain visible. Use
+`knowledge_get` to read full text, revision IDs for citations, and the current
+version before updating. A snippet is a relevance hint, not the complete finding.
+Pending results remain explicitly `outcome: "pending"`.
+
+Both MCP search tools default to five results; callers can request up to 50 or
+paginate. This default also applies to Codemode's MCP calls, although their
+result shape stays complete. HTTP/SDK list defaults remain 20. The MCP input
+schema uses UUID/date format annotations without long regex patterns; server
+validation remains the same. Advanced scope, group, date, kind and mode filters
+remain available.
+
+Save preparation retains its existing lossless projection:
 
 - kept: entry and collection IDs, `version` (the `expectedVersion` for an
   update), `revision.id` (for evidence pins), scope, `revision.outcome` and
@@ -200,10 +215,28 @@ contract passes through unchanged. The model call's history item and timeline
 event record the compact copy the model received; past tool outputs are never
 re-rendered. MCP transport bounds the exact result to 1 MiB before this
 projection, so compaction only shrinks results that already fit; a result that
-is still over 1 MiB for the model spills its exact bytes like any tool. On contract-valid fixtures sized to staging medians
-(`packages/runtime/test/knowledge-model-projection.test.ts`), an eight-entry
-search result shrinks from 17.9 KB to 10.0 KB (44%) and a save preparation
-from 21.7 KB to 14.1 KB (35%).
+is still over 1 MiB for the model spills its exact bytes like any tool. Tests in
+`packages/runtime/test/knowledge-model-projection.test.ts` cover exact Codemode
+results, non-mutating model projection, and the unchanged save-preparation shape.
+
+### Search availability and existing sessions
+
+New configured sessions with Knowledge enabled mark only `knowledge_search`
+eager on their already-selected first-party server (or Docs server when that is
+the available search). Creation saves the normal `ToolRef.eager` selection;
+scheduled occurrences freeze it with their accepted execution. No server,
+permission or disabled capability is added. Other Knowledge tools stay deferred.
+This uses the existing first-request preparation barrier in native OpenAI,
+native Codex and generic-dispatch transports, not a second discovery mechanism.
+
+Existing sessions' selections and accepted scheduled executions are not updated.
+They stay deferred unless already explicitly eager. The compact search schema is
+an ordinary schema update: deferred sessions see it on their next disclosure;
+sessions that already explicitly exposed search eagerly may incur a one-time
+tool-prefix cache miss on their next prepared attempt. New result projections
+apply only at execution; previously stored model inputs and tool outputs are
+never rewritten. No adoption marker, catalog version or compaction rewrite is
+introduced.
 
 ## Personal and shared Knowledge
 
@@ -332,6 +365,35 @@ enforcement authority.
 Scheduled work resolves against its accepted
 run time. Child work and recovery preserve their accepted producer policy; changing
 settings affects subsequent accepted work, not an already running turn.
+
+Sharing a private chat preserves the accepted turn's Personal destination for
+that same verified initiating human, including tool operations, provider failover
+and human Retry. It does not promote Personal writes into the workspace or rewrite
+the snapshot or earlier model context. Newly accepted turns use the shared chat's
+current destination. A genuinely incompatible retained scope fails at startup
+with an explanation to send a new message; Retry cannot reopen that same turn.
+
+A personal workspace makes Personal the default destination only for work with a
+verified initiating person. Work with no such person, such as a published Site's
+guest chat or other service-started work, uses the Workspace destination with no
+person, as it does in a shared workspace. Because a personal workspace's
+Workspace layer is not shown in its settings, that work saves no Knowledge,
+Skills or instructions there: all three learning modes are frozen as Off. A
+private chat, or a chat that chose user memory, still requires its verified
+owner.
+
+An agent saves to the destination it explicitly chooses, beyond its chat's
+default. From a chat that learns for its person, saving a workspace instruction,
+changing an existing workspace Skill or Knowledge entry by its id, or creating a
+Skill or entry with scope `workspace` reaches the workspace. From a shared chat,
+changing the initiating person's own personal Skill by its id, or creating a
+Skill with scope `user`, reaches that person. Such a change is governed by the
+stricter of the chat's own mode and the destination owner's mode (the workspace's
+or the person's) for that category, as of acceptance: Off refuses it, and Review
+first leaves a pending proposal in that owner's review. Work with no verified
+initiating person cannot choose a personal destination, nobody else's personal
+Skill is reachable, permanent Skill deletion stays within the chat's own scope,
+and shared Knowledge still cannot point at private evidence.
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,

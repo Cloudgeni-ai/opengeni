@@ -1,11 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import {
-  testSettings,
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   createDb,
   createRig,

@@ -27,8 +27,6 @@ import {
   UpdateMachineAgentResponse,
 } from "@opengeni/contracts";
 import {
-  advanceEnrollmentAgentUpdate,
-  beginEnrollmentAgentUpdate,
   changeMachineAudience,
   getLiveEnrollmentConnection,
   listEnrollments,
@@ -38,6 +36,7 @@ import {
   updateEnrollmentOperationPolicy,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
@@ -56,7 +55,8 @@ import {
   MachineNotActiveError,
   openMachinePrivacySettings,
 } from "../sandbox/screen-control";
-import { listMachines, machineUpdateBlockedReason, metricRowToSample } from "../sandbox/machines";
+import { listMachines, metricRowToSample } from "../sandbox/machines";
+import { requestAgentUpdate } from "../sandbox/agent-update";
 import {
   machineAudienceChangeResponse,
   machineAudiencePreview,
@@ -64,9 +64,8 @@ import {
   machineAudienceRequestFor,
 } from "../sandbox/machine-audience";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
-import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
-import { NatsControlRpc, subjectFor } from "@opengeni/runtime/sandbox";
 import { parseRequestJson } from "../http/request-body";
+import { requireFullAccessIfAgent } from "../http/acting-person";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -113,6 +112,30 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // sessionId is OPTIONAL: present → an in-session view (synthetic group box +
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
+    if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(400, { message: "sessionId must be a UUID" });
+    }
+    if (sessionId) {
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: "session.read",
+          surface: "http",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found", cause: error });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    }
     const response = await listMachines(
       { db, settings },
       {
@@ -207,7 +230,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // caller's choices applied; PUT .../audience applies it in one transaction at
   // the previewed generation. The enrollment, sandbox ID, credentials and live
   // connection stay, so chats, schedules and the installed agent keep working.
-  // People decide this, not agents: an agent attempt is refused.
+  // A person decides this: in the app, through the API, or through an agent
+  // they gave their full access (admin access, a full-access connected agent),
+  // which acts as them. An agent acting as itself, or one with less than the
+  // person's full access, is refused: the change decides who else can use the
+  // machine.
   async function requireAudienceCaller(c: Context, workspaceId: string) {
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -219,9 +246,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertSelfhostedEnabled();
     if (grantHasAgentAttemptAuthority(grant)) {
       throw new HTTPException(403, {
-        message: "only a person can change who can use a machine",
+        message:
+          "only a person, or an agent they gave admin access acting as them, can change who can use a machine",
       });
     }
+    requireFullAccessIfAgent(c, "Changing who can use a machine");
     return grant;
   }
 
@@ -318,7 +347,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/privacy-settings ───────────
   // Open one macOS Privacy & Security pane on the connected Mac, so the person
-  // only flips the switch for OpenGeni. Opening a pane grants nothing.
+  // only flips the switch for Opengeni. Opening a pane grants nothing.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -382,147 +411,22 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       visibleEnrollment.scope === "user" ? grant : originWorkspaceId,
       enrollmentId,
     );
-    if (!live?.connectionInstanceId || !live.agentVersion) {
+    if (!live || live.id !== enrollmentId || live.workspaceId !== originWorkspaceId) {
       throw new HTTPException(409, {
         message: "machine has no authoritative live agent build",
       });
     }
-    const blockedReason = machineUpdateBlockedReason(live.os, live.agentVersion);
-    if (blockedReason) {
-      throw new HTTPException(422, { message: blockedReason });
-    }
-    const channel = live.agentUpdateChannel ?? "stable";
-    const targetVersion =
-      channel === "beta"
-        ? (settings.agentBetaVersion ?? settings.agentStableVersion)
-        : settings.agentStableVersion;
-    const reusableRequest =
-      live.agentUpdate?.status === "requested" &&
-      live.agentUpdate.targetVersion === targetVersion &&
-      live.agentUpdate.connectionInstanceId === live.connectionInstanceId &&
-      live.agentUpdate.connectionGeneration === live.connectionGeneration
-        ? live.agentUpdate
-        : null;
-    if (
-      !reusableRequest &&
-      live.agentVersion === targetVersion &&
-      live.agentUpdate?.status !== "failed"
-    ) {
-      throw new HTTPException(409, {
-        message: "machine already runs the promoted version",
-      });
-    }
-    const operationId = reusableRequest?.operationId ?? crypto.randomUUID();
-    if (!reusableRequest) {
-      const reserved = await beginEnrollmentAgentUpdate(db, {
-        accountId: grant.accountId,
-        workspaceId: originWorkspaceId,
-        enrollmentId,
-        connectionInstanceId: live.connectionInstanceId,
-        connectionGeneration: live.connectionGeneration,
-        operationId,
-        targetVersion,
-      });
-      if (!reserved) {
-        throw new HTTPException(409, {
-          message: "machine update state changed; refresh and retry",
-        });
-      }
-    }
-
-    const rpc = new NatsControlRpc(async () => bus?.getRequestConnection() ?? null);
-    const request: ControlRequest = {
-      requestId: operationId,
-      // The subject already selects the exact authoritative process instance.
-      // `epoch` is the sandbox lease epoch, not the enrollment connection
-      // generation, so this process-scoped operation intentionally leaves it 0.
-      epoch: 0,
-      resourcePolicy: undefined,
-      op: {
-        $case: "agentUpdateApply",
-        agentUpdateApply: {
-          operationId,
-          targetVersion,
-          channel,
-          expectedCurrentVersion: live.agentVersion,
-          expectedCurrentSha256: live.agentBinarySha256 ?? "",
-          releaseBaseUrl: (settings.publicBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, ""),
-        },
-      },
-    };
-    let response = await rpc.request(
-      subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
-      request,
-      { timeoutMs: 10_000 },
-    );
-    // The operation id is idempotent. One retry heals an ambiguous lost reply;
-    // the agent returns the same acceptance and never starts a second update.
-    if (response.error?.code === ErrorCode.ERROR_CODE_TIMEOUT) {
-      response = await rpc.request(
-        subjectFor(originWorkspaceId, enrollmentId, live.connectionInstanceId),
-        request,
-        { timeoutMs: 10_000 },
-      );
-    }
-    if (response.error) {
-      // A second timeout remains ambiguous: progress/Hello may still prove the
-      // operation. Keep it requested rather than racing a false terminal failure.
-      if (response.error.code !== ErrorCode.ERROR_CODE_TIMEOUT) {
-        await advanceEnrollmentAgentUpdate(db, {
-          accountId: grant.accountId,
-          workspaceId: originWorkspaceId,
-          enrollmentId,
-          connectionInstanceId: live.connectionInstanceId,
-          connectionGeneration: live.connectionGeneration,
-          operationId,
-          status: "failed",
-          errorCode:
-            response.error.detail.failure_code ??
-            (response.error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE
-              ? "agent_offline"
-              : "update_dispatch_rejected"),
-          retryable: response.error.retryable,
-          rolledBack: false,
-        });
-        throw new HTTPException(response.error.retryable ? 409 : 422, {
-          message: response.error.message,
-        });
-      }
-    } else if (
-      response.result?.$case !== "agentUpdateApply" ||
-      !response.result.agentUpdateApply.accepted
-    ) {
-      await advanceEnrollmentAgentUpdate(db, {
-        accountId: grant.accountId,
-        workspaceId: originWorkspaceId,
-        enrollmentId,
-        connectionInstanceId: live.connectionInstanceId,
-        connectionGeneration: live.connectionGeneration,
-        operationId,
-        status: "failed",
-        errorCode: "invalid_agent_response",
-        retryable: true,
-        rolledBack: false,
-      });
-      throw new HTTPException(502, {
-        message: "agent returned an invalid update response",
-      });
-    } else {
-      await advanceEnrollmentAgentUpdate(db, {
-        accountId: grant.accountId,
-        workspaceId: originWorkspaceId,
-        enrollmentId,
-        connectionInstanceId: live.connectionInstanceId,
-        connectionGeneration: live.connectionGeneration,
-        operationId,
-        status: "accepted",
-      });
+    const result = await requestAgentUpdate({ db, bus, settings }, live, {
+      releaseBaseUrl: settings.publicBaseUrl ?? new URL(c.req.url).origin,
+    });
+    if (result.kind === "refused") {
+      throw new HTTPException(result.status, { message: result.message });
     }
     return c.json(
       UpdateMachineAgentResponse.parse({
-        operationId,
+        operationId: result.operationId,
         accepted: true,
-        targetVersion,
+        targetVersion: result.targetVersion,
       }),
       202,
     );
@@ -570,6 +474,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       subjectId: grant.subjectId,
     });
+    ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {
         db,

@@ -1,10 +1,16 @@
-import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+import type {
+  DraftTimelineAnnotation,
+  SessionEvent,
+  SessionStatus,
+  TimelineAnnotationSource,
+} from "@opengeni/sdk";
 import {
   buildTimeline,
   groupTimeline,
   type AgentMessageItem,
   type HumanInputItem,
   type TimelineGroup,
+  type TimelineAnnotationSourceDescriptor,
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
@@ -35,10 +41,12 @@ import {
   useRef,
   useState,
   type ComponentRef,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   Pressable,
   ScrollView,
   Text,
@@ -66,8 +74,20 @@ import {
   type NativeTurnStatus,
   type PreparingProps,
 } from "./turn";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { TurnStepsLoader } from "./turn-steps";
 import { useNativeTimelineMessages } from "./messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
+import {
+  AnnotationSourcesContext,
+  AnnotationSourceView,
+  SentAnnotationCards,
+  draftMarkersBySource,
+  type AnnotationFlash,
+  type AnnotationReveal,
+  type AnnotationSourceNode,
+} from "./annotations";
+import { measureQuoteAnchors, useNativeTextAnnotation } from "./text-selection";
 
 /* ----------------------------------------------------------------------------
    Native MessageTimeline: the web MessageTimeline (components/message-timeline)
@@ -123,17 +143,50 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   contentInsetBottom?: number | undefined;
   /** Height of host chrome floating over the timeline's bottom edge (a floating composer). */
   overlayInsetBottom?: number | undefined;
+  /**
+   * Changes whenever the reader sends: the timeline resumes following the
+   * latest row, so a message sent while reading (or annotating) older
+   * history comes into view.
+   */
+  followLatestSignal?: number | undefined;
+  /**
+   * Add note on selected message text (iOS): receives the quote as a draft
+   * annotation, as the web timeline's selection popover does.
+   */
+  onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /** The draft's annotations, marked on the messages they quote. */
+  draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
+  /** A draft marker was tapped: review that annotation. */
+  onDraftAnnotationSelect?: ((id: string) => void) | undefined;
+  /** Receives a function that scrolls a quoted message into view and highlights it. */
+  annotationRevealRef?: MutableRefObject<AnnotationReveal | null> | undefined;
   style?: StyleProp<ViewStyle>;
+}
+
+/** Each message's annotation source, by source key (its durable event id). */
+function annotationSources(
+  items: readonly TimelineItem[],
+): Map<string, TimelineAnnotationSourceDescriptor> {
+  const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
+  for (const item of items) {
+    if (item.kind !== "user-message" && item.kind !== "agent-message") continue;
+    const source = item.annotationSource;
+    if (source) sources.set(source.eventId, source);
+  }
+  return sources;
 }
 
 export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const items = useMemo(
-    () => props.items ?? buildTimeline(props.events ?? []),
-    [props.items, props.events],
+    () => props.items ?? buildTimeline(t, props.events ?? []),
+    [t, props.items, props.events],
   );
-  const groups = useMemo(() => groupTimeline(items, { readableTurns: true }), [items]);
+  const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
+  const sources = useMemo(() => annotationSources(items), [items]);
+  useNativeTextAnnotation(sources, props.onAnnotate);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   // Opening on a moment starts away from the tip; the landing decides where.
@@ -148,6 +201,86 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   // Expanded outer turn headers, for the pinned copy (web: sticky in its section).
   const stickyHeaders = useRef(new Map<string, StickyWorkHeader>()).current;
   const scrollY = useRef(0);
+  const sourceNodes = useRef(new Map<string, AnnotationSourceNode>()).current;
+  const [flash, setFlash] = useState<AnnotationFlash | null>(null);
+  // Read when a reveal lands, after the keyboard has gone and the composer settled.
+  const overlayInsetBottom = useRef(0);
+  overlayInsetBottom.current = props.overlayInsetBottom ?? 0;
+  const registerSource = useCallback(
+    (sourceKey: string, node: AnnotationSourceNode | null) => {
+      if (node) sourceNodes.set(sourceKey, node);
+      else sourceNodes.delete(sourceKey);
+    },
+    [sourceNodes],
+  );
+  const revealSource = useCallback<AnnotationReveal>(
+    (source: TimelineAnnotationSource, quote) => {
+      const node = sourceNodes.get(source.eventId);
+      const scroller = scrollRef.current?.getNativeScrollRef?.();
+      if (!node || !scroller) return false;
+      following.current = false;
+      // Reading the source, not writing: the keyboard would hide it.
+      const keyboardGone = Keyboard.isVisible()
+        ? new Promise<void>((resolve) => {
+            const done = () => {
+              subscription.remove();
+              clearTimeout(timer);
+              // The composer re-measures as it drops back down.
+              setTimeout(resolve, 60);
+            };
+            const subscription = Keyboard.addListener("keyboardDidHide", done);
+            const timer = setTimeout(done, 600);
+            Keyboard.dismiss();
+          })
+        : Promise.resolve();
+      const located = quote
+        ? measureQuoteAnchors(source.eventId, [quote]).then(([anchor]) => anchor ?? null)
+        : Promise.resolve(null);
+      void Promise.all([located, keyboardGone]).then(([anchor]) => {
+        scroller.measureInWindow((_scrollX, scrollTop) => {
+          node.measureInWindow((_x, top, _width, height) => {
+            // Center the message in the space the composer leaves; a message
+            // taller than that centers the quote instead, or shows its top.
+            const y = scrollY.current + top - scrollTop;
+            const visible = (viewportHeight.current || 600) - overlayInsetBottom.current;
+            const first = anchor?.boxes[0];
+            const last = anchor?.boxes[anchor.boxes.length - 1];
+            const span =
+              height < visible - 32 || !first || !last
+                ? { top: y, height }
+                : { top: y + first.y, height: last.y + last.height - first.y };
+            const target =
+              span.height < visible - 32 ? span.top - (visible - span.height) / 2 : span.top - 16;
+            const end = Math.max(0, contentHeight.current - (viewportHeight.current || 0));
+            scrollY.current = Math.min(Math.max(0, target), end || Number.POSITIVE_INFINITY);
+            scrollRef.current?.scrollTo({ y: scrollY.current, animated: true });
+            // Flash once the scroll is under way, so the reader sees it land.
+            setFlash((current) => ({
+              sourceKey: source.eventId,
+              token: (current?.token ?? 0) + 1,
+              ...(quote ? { quote } : {}),
+            }));
+          });
+        });
+      });
+      return true;
+    },
+    [sourceNodes],
+  );
+  if (props.annotationRevealRef) props.annotationRevealRef.current = revealSource;
+  const draftMarkers = useMemo(
+    () => draftMarkersBySource(props.draftAnnotations),
+    [props.draftAnnotations],
+  );
+  const annotationSourcesValue = useMemo(
+    () => ({
+      register: registerSource,
+      flash,
+      drafts: draftMarkers,
+      onSelectDraft: props.onDraftAnnotationSelect,
+    }),
+    [draftMarkers, flash, props.onDraftAnnotationSelect, registerSource],
+  );
   const [pinned, setPinned] = useState<{ key: string; offset: number; height: number } | null>(
     null,
   );
@@ -315,6 +448,13 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     },
     [requestOlder],
   );
+  const followLatestSignal = props.followLatestSignal ?? 0;
+  useEffect(() => {
+    if (!followLatestSignal) return;
+    following.current = true;
+    setShowJump(false);
+    scrollRef.current?.scrollToEnd({ animated: true });
+  }, [followLatestSignal]);
   // Landing on a moment: each group's offset, read as it lays out.
   const groupTops = useRef(new Map<string, number>()).current;
   const landed = useRef<number | null>(null);
@@ -368,155 +508,161 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     renderUserAttachments: props.renderUserAttachments,
     onCopy: props.onCopy,
     reportLiveFold,
+    onRevealAnnotation: revealSource,
   };
   return (
-    <NativeActivityOptionsProvider value={activityOptions}>
-      <FoldMemoryProvider value={foldMemory}>
-        <StickyWorkHeaderProvider value={registerSticky}>
-          <ReleaseFollowProvider value={releaseFollow}>
-            <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
-              <ScrollView
-                ref={scrollRef}
-                onScroll={onScroll}
-                onScrollBeginDrag={() => {
-                  readerScrolling.current = true;
-                  // The reader takes over: a live turn re-lays out the content many
-                  // times a second, and snapping to the end on each pass would undo
-                  // the drag before it got far. Follow is re-decided when it ends.
-                  following.current = false;
-                }}
-                onScrollEndDrag={onScrollEnd}
-                onMomentumScrollEnd={onScrollEnd}
-                onLayout={(event: LayoutChangeEvent) => {
-                  viewportHeight.current = event.nativeEvent.layout.height;
-                  if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
-                }}
-                scrollEventThrottle={32}
-                onContentSizeChange={onContentSizeChange}
-                keyboardDismissMode="interactive"
-                keyboardShouldPersistTaps="handled"
-                contentContainerStyle={{
-                  paddingTop: props.contentInsetTop ?? 16,
-                  paddingHorizontal: 16,
-                  paddingBottom: props.contentInsetBottom ?? 24,
-                  gap: ROW_GAP_PX,
-                  flexGrow: 1,
-                }}
-              >
-                <View>
-                  {props.hasOlder ? (
-                    <OlderHistoryRow loading={props.loadingOlder === true} onPress={requestOlder} />
-                  ) : null}
-                  {props.header}
-                </View>
-                {groups.length === 0 && props.emptyState ? props.emptyState : null}
-                {groups.map((group, index) => {
-                  const key = groupKey(group);
-                  const prompt = group.kind === "item" && group.item.kind === "user-message";
-                  // Agent messages keep one wrapper so a progress note can fold
-                  // (stay mounted, out of layout) without remounting.
-                  const noteId =
-                    group.kind === "item" && group.item.kind === "agent-message"
-                      ? group.item.id
-                      : null;
-                  const liveNote = noteId !== null && liveNotes.notes.has(noteId);
-                  const folded = noteId !== null && foldedNotes.has(noteId);
-                  // The landing row keeps one wrapper for its life, so landing never remounts it.
-                  const landing = focusSequence !== null && index === focusIndex;
-                  return prompt || landing || noteId !== null ? (
-                    <View
-                      key={key}
-                      style={folded ? { display: "none" } : undefined}
-                      onLayout={(event) => {
-                        const { y, height } = event.nativeEvent.layout;
-                        if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
-                        if (liveNote && !folded && height > 0) {
-                          liveNoteHeights.set(noteId, height);
-                        }
-                        if (landing && landed.current !== focusSequence) {
-                          groupTops.set(key, y);
-                          setLayoutPass((pass) => pass + 1);
-                        }
-                      }}
-                    >
-                      <TimelineGroupView group={group} context={context} />
-                    </View>
-                  ) : (
-                    <TimelineGroupView key={key} group={group} context={context} />
-                  );
-                })}
-                {props.trailing}
-              </ScrollView>
-              {pinned && stickyHeaders.get(pinned.key) ? (
-                <View
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    right: 0,
+    <AnnotationSourcesContext.Provider value={annotationSourcesValue}>
+      <NativeActivityOptionsProvider value={activityOptions}>
+        <FoldMemoryProvider value={foldMemory}>
+          <StickyWorkHeaderProvider value={registerSticky}>
+            <ReleaseFollowProvider value={releaseFollow}>
+              <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
+                <ScrollView
+                  ref={scrollRef}
+                  onScroll={onScroll}
+                  onScrollBeginDrag={() => {
+                    readerScrolling.current = true;
+                    // The reader takes over: a live turn re-lays out the content many
+                    // times a second, and snapping to the end on each pass would undo
+                    // the drag before it got far. Follow is re-decided when it ends.
+                    following.current = false;
+                  }}
+                  onScrollEndDrag={onScrollEnd}
+                  onMomentumScrollEnd={onScrollEnd}
+                  onLayout={(event: LayoutChangeEvent) => {
+                    viewportHeight.current = event.nativeEvent.layout.height;
+                    if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+                  }}
+                  scrollEventThrottle={32}
+                  onContentSizeChange={onContentSizeChange}
+                  keyboardDismissMode="interactive"
+                  keyboardShouldPersistTaps="handled"
+                  contentContainerStyle={{
+                    paddingTop: props.contentInsetTop ?? 16,
                     paddingHorizontal: 16,
-                    backgroundColor: theme.colors.bg,
-                    transform: [{ translateY: pinned.offset }],
+                    paddingBottom: props.contentInsetBottom ?? 24,
+                    gap: ROW_GAP_PX,
+                    flexGrow: 1,
                   }}
                 >
-                  {stickyHeaders.get(pinned.key)!.render()}
-                </View>
-              ) : null}
-              {/* Web timeline navigation: two identical small round arrow buttons at
+                  <View>
+                    {props.hasOlder ? (
+                      <OlderHistoryRow
+                        loading={props.loadingOlder === true}
+                        onPress={requestOlder}
+                      />
+                    ) : null}
+                    {props.header}
+                  </View>
+                  {groups.length === 0 && props.emptyState ? props.emptyState : null}
+                  {groups.map((group, index) => {
+                    const key = groupKey(group);
+                    const prompt = group.kind === "item" && group.item.kind === "user-message";
+                    // Agent messages keep one wrapper so a progress note can fold
+                    // (stay mounted, out of layout) without remounting.
+                    const noteId =
+                      group.kind === "item" && group.item.kind === "agent-message"
+                        ? group.item.id
+                        : null;
+                    const liveNote = noteId !== null && liveNotes.notes.has(noteId);
+                    const folded = noteId !== null && foldedNotes.has(noteId);
+                    // The landing row keeps one wrapper for its life, so landing never remounts it.
+                    const landing = focusSequence !== null && index === focusIndex;
+                    return prompt || landing || noteId !== null ? (
+                      <View
+                        key={key}
+                        style={folded ? { display: "none" } : undefined}
+                        onLayout={(event) => {
+                          const { y, height } = event.nativeEvent.layout;
+                          if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
+                          if (liveNote && !folded && height > 0) {
+                            liveNoteHeights.set(noteId, height);
+                          }
+                          if (landing && landed.current !== focusSequence) {
+                            groupTops.set(key, y);
+                            setLayoutPass((pass) => pass + 1);
+                          }
+                        }}
+                      >
+                        <TimelineGroupView group={group} context={context} />
+                      </View>
+                    ) : (
+                      <TimelineGroupView key={key} group={group} context={context} />
+                    );
+                  })}
+                  {props.trailing}
+                </ScrollView>
+                {pinned && stickyHeaders.get(pinned.key) ? (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      paddingHorizontal: 16,
+                      backgroundColor: theme.colors.bg,
+                      transform: [{ translateY: pinned.offset }],
+                    }}
+                  >
+                    {stickyHeaders.get(pinned.key)!.render()}
+                  </View>
+                ) : null}
+                {/* Web timeline navigation: two identical small round arrow buttons at
               fixed, centered spots that never dodge the content beneath them. */}
-              {questionNav ? (
-                <View
-                  pointerEvents="box-none"
-                  style={{
-                    position: "absolute",
-                    // Below a pinned work header so that strip stays a full-width target.
-                    top: pinned ? pinned.height + pinned.offset + 8 : 12,
-                    left: 0,
-                    right: 0,
-                    alignItems: "center",
-                  }}
-                >
-                  <NavButton
-                    icon="arrow-up"
-                    label={m.backToYourMessage}
-                    onPress={() => {
-                      const frame = promptFrames.get(questionNav);
-                      if (!frame) return;
-                      following.current = false;
-                      scrollRef.current?.scrollTo({
-                        y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
-                        animated: true,
-                      });
+                {questionNav ? (
+                  <View
+                    pointerEvents="box-none"
+                    style={{
+                      position: "absolute",
+                      // Below a pinned work header so that strip stays a full-width target.
+                      top: pinned ? pinned.height + pinned.offset + 8 : 12,
+                      left: 0,
+                      right: 0,
+                      alignItems: "center",
                     }}
-                  />
-                </View>
-              ) : null}
-              {showJump ? (
-                <View
-                  pointerEvents="box-none"
-                  style={{
-                    position: "absolute",
-                    bottom: (props.overlayInsetBottom ?? 0) + 12,
-                    left: 0,
-                    right: 0,
-                    alignItems: "center",
-                  }}
-                >
-                  <NavButton
-                    icon="arrow-down"
-                    label={m.jumpToLatest}
-                    onPress={() => {
-                      following.current = true;
-                      scrollRef.current?.scrollToEnd({ animated: true });
+                  >
+                    <NavButton
+                      icon="arrow-up"
+                      label={m.backToYourMessage}
+                      onPress={() => {
+                        const frame = promptFrames.get(questionNav);
+                        if (!frame) return;
+                        following.current = false;
+                        scrollRef.current?.scrollTo({
+                          y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
+                          animated: true,
+                        });
+                      }}
+                    />
+                  </View>
+                ) : null}
+                {showJump ? (
+                  <View
+                    pointerEvents="box-none"
+                    style={{
+                      position: "absolute",
+                      bottom: (props.overlayInsetBottom ?? 0) + 12,
+                      left: 0,
+                      right: 0,
+                      alignItems: "center",
                     }}
-                  />
-                </View>
-              ) : null}
-            </View>
-          </ReleaseFollowProvider>
-        </StickyWorkHeaderProvider>
-      </FoldMemoryProvider>
-    </NativeActivityOptionsProvider>
+                  >
+                    <NavButton
+                      icon="arrow-down"
+                      label={m.jumpToLatest}
+                      onPress={() => {
+                        following.current = true;
+                        scrollRef.current?.scrollToEnd({ animated: true });
+                      }}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            </ReleaseFollowProvider>
+          </StickyWorkHeaderProvider>
+        </FoldMemoryProvider>
+      </NativeActivityOptionsProvider>
+    </AnnotationSourcesContext.Provider>
   );
 }
 
@@ -567,6 +713,7 @@ type GroupContext = {
   onCopy?: ((text: string) => void) | undefined;
   /** A live work row reports its open state, so its progress notes above fold. */
   reportLiveFold?: ((workId: string, open: boolean) => void) | undefined;
+  onRevealAnnotation?: AnnotationReveal | undefined;
 };
 
 /** A wait's one quiet secondary line under its work row. */
@@ -602,6 +749,7 @@ function TimelineGroupView({
   context: GroupContext;
   insideTurn?: boolean;
 }) {
+  const t = useOpenGeniText();
   switch (group.kind) {
     case "activity": {
       if (group.work) {
@@ -614,7 +762,7 @@ function TimelineGroupView({
             />
           );
         }
-        const base = readableWorkStatus({ ...group, work: group.work });
+        const base = readableWorkStatus(t, { ...group, work: group.work });
         const status: NativeTurnStatus =
           base.kind === "working"
             ? {
@@ -641,6 +789,7 @@ function TimelineGroupView({
             failureText={group.failureText}
             foldKey={group.id}
             defaultOpen={readableWorkDefaultOpen(group)}
+            unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
             facets={context.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
             onOpenStateChange={
@@ -652,6 +801,12 @@ function TimelineGroupView({
             }
           >
             <TurnRailFrame compact>
+              {group.work.steps ? (
+                <TurnStepsLoader
+                  steps={group.work.steps}
+                  autoLoad={!readableWorkDefaultOpen(group)}
+                />
+              ) : null}
               <FoldedGroups groups={group.work.details} context={context} />
             </TurnRailFrame>
           </TurnSummary>
@@ -748,6 +903,7 @@ function FoldedGroups({
 
 function TimelineRow({ item, context }: { item: TimelineItem; context: GroupContext }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} context={context} />;
@@ -756,11 +912,11 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "human-input":
       return <HumanInputRow item={item} onCopy={context.onCopy} />;
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION[item.blocked ? "blocked" : item.status];
+      const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}
-          text={`${item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} · ${formatRelativeTime(item.resolvedAt ?? item.occurredAt)}`}
+          text={`${item.resolvedAt ? t("messageTimeline.workResumed") : meta.label.toLowerCase()} · ${formatRelativeTime(t, item.resolvedAt ?? item.occurredAt)}`}
         />
       );
     }
@@ -787,7 +943,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
           <Text
             style={{ ...fontStyle(theme, 500), fontSize: theme.size.base, color: theme.colors.fg }}
           >
-            Worker reported back
+            {t("native.timeline.messageTimeline.workerReportedBack")}
           </Text>
           <Text
             numberOfLines={3}
@@ -816,7 +972,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
           <Text
             style={{ ...fontStyle(theme, 500), fontSize: theme.size.md, color: theme.colors.fg }}
           >
-            Connection needed
+            {t("native.timeline.messageTimeline.connectionNeeded")}
           </Text>
           <Text
             style={{
@@ -826,7 +982,9 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
               color: theme.colors["fg-muted"],
             }}
           >
-            {item.providerDomain} needs to be reconnected before the agent can continue.
+            {t("native.timeline.messageTimeline.providerdomainNeedsToBeReconnected", {
+              providerDomain: item.providerDomain,
+            })}
           </Text>
         </View>
       );
@@ -839,12 +997,13 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
  * The web footer stamp. Hermes/iOS ICU joins date and time with " at " where the
  * browser's ICU uses ", "; normalize to the web form.
  */
-function nativeClockTime(iso: string): string {
-  return formatClockTime(iso).replace(" at ", ", ");
+function nativeClockTime(t: OpenGeniText, iso: string): string {
+  return formatClockTime(t, iso).replace(" at ", ", ");
 }
 
 function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
@@ -862,7 +1021,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-            {recordedWaitSummaryText(item).replace(" at ", ", ")}
+            {recordedWaitSummaryText(t, item).replace(" at ", ", ")}
           </Text>
         </View>
         {open ? (
@@ -908,7 +1067,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
         <Icon name="triangle-alert" size={16} color={accent} />
       </View>
       <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
-        {noticeDisplayText(item)}
+        {noticeDisplayText(t, item)}
       </Text>
     </View>
   );
@@ -956,6 +1115,7 @@ function MessageFooter({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const [copied, setCopied] = useState(false);
   return (
     <View
@@ -996,7 +1156,7 @@ function MessageFooter({
           fontVariant: ["tabular-nums"],
         }}
       >
-        {nativeClockTime(occurredAt)}
+        {nativeClockTime(t, occurredAt)}
       </Text>
     </View>
   );
@@ -1063,6 +1223,7 @@ function CollapsibleUserText({ children }: { children: ReactNode }) {
 
 /** Top of the loaded window: a spinner while older history loads, else a manual control. */
 function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () => void }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   return (
@@ -1078,7 +1239,7 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
               color: theme.colors["fg-muted"],
             }}
           >
-            Load earlier messages
+            {t("native.timeline.messageTimeline.loadEarlierMessages")}
           </Text>
         </Pressable>
       )}
@@ -1087,16 +1248,19 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
 }
 
 function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const failed = item.delivery?.state === "failed";
+  const annotations = item.annotations ?? [];
+  const sourceKey = item.annotationSource?.eventId;
   return (
     <Animated.View entering={FadeIn.duration(180)} style={{ alignItems: "flex-end" }}>
       <View style={{ maxWidth: "85%", alignItems: "flex-end", gap: 6 }}>
         {item.resources.some((resource) => resource.kind === "file")
           ? context.renderUserAttachments?.(item)
           : null}
-        {item.text ? (
+        {item.text || annotations.length > 0 ? (
           <View
             style={{
               backgroundColor: theme.colors["surface-2"],
@@ -1110,23 +1274,38 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
               paddingVertical: 10,
             }}
           >
-            <CollapsibleUserText>
-              {context.renderMarkdown ? (
-                context.renderMarkdown(item.text, { tone: "body" })
-              ) : (
-                <Text
-                  selectable
-                  style={{
-                    ...fontStyle(theme),
-                    fontSize: theme.size.md,
-                    lineHeight: 28,
-                    color: theme.colors.fg,
-                  }}
+            {item.text ? (
+              <CollapsibleUserText>
+                <AnnotationSourceView
+                  sourceKey={sourceKey}
+                  style={{ marginHorizontal: -6, paddingHorizontal: 6 }}
                 >
-                  {item.text}
-                </Text>
-              )}
-            </CollapsibleUserText>
+                  {context.renderMarkdown ? (
+                    context.renderMarkdown(item.text, { tone: "body" })
+                  ) : (
+                    <Text
+                      selectable
+                      style={{
+                        ...fontStyle(theme),
+                        fontSize: theme.size.md,
+                        lineHeight: 28,
+                        color: theme.colors.fg,
+                      }}
+                    >
+                      {item.text}
+                    </Text>
+                  )}
+                </AnnotationSourceView>
+              </CollapsibleUserText>
+            ) : null}
+            {annotations.length > 0 ? (
+              <View style={item.text ? { marginTop: 10, marginBottom: 2 } : { paddingVertical: 2 }}>
+                <SentAnnotationCards
+                  annotations={annotations}
+                  onReveal={context.onRevealAnnotation}
+                />
+              </View>
+            ) : null}
           </View>
         ) : null}
         <MessageFooter
@@ -1160,7 +1339,7 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
                     textDecorationLine: "underline",
                   }}
                 >
-                  Retry
+                  {t("native.timeline.messageTimeline.retry")}
                 </Text>
               </Pressable>
             ) : null}
@@ -1175,21 +1354,26 @@ function AgentMessageRow({ item, context }: { item: AgentMessageItem; context: G
   const theme = useNativeTimelineTheme();
   return (
     <Animated.View entering={FadeIn.duration(180)} style={{ minWidth: 0 }}>
-      {context.renderMarkdown ? (
-        context.renderMarkdown(item.text, { tone: "body", streaming: item.streaming })
-      ) : (
-        <Text
-          selectable
-          style={{
-            ...fontStyle(theme),
-            fontSize: theme.size.md,
-            lineHeight: 28,
-            color: theme.colors.fg,
-          }}
-        >
-          {item.text}
-        </Text>
-      )}
+      <AnnotationSourceView
+        sourceKey={item.annotationSource?.eventId}
+        style={{ marginHorizontal: -8, paddingHorizontal: 8 }}
+      >
+        {context.renderMarkdown ? (
+          context.renderMarkdown(item.text, { tone: "body", streaming: item.streaming })
+        ) : (
+          <Text
+            selectable
+            style={{
+              ...fontStyle(theme),
+              fontSize: theme.size.md,
+              lineHeight: 28,
+              color: theme.colors.fg,
+            }}
+          >
+            {item.text}
+          </Text>
+        )}
+      </AnnotationSourceView>
       {item.streaming ? null : (
         <MessageFooter
           text={item.text}
@@ -1210,6 +1394,7 @@ function HumanInputRow({
   item: HumanInputItem;
   onCopy?: ((text: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
@@ -1273,7 +1458,7 @@ function HumanInputRow({
               color: theme.colors["fg-subtle"],
             }}
           >
-            Agent asked
+            {t("native.timeline.messageTimeline.agentAsked")}
           </Text>
           <View style={{ marginTop: 6, gap: 12 }}>
             {item.questions.map((question, index) => (

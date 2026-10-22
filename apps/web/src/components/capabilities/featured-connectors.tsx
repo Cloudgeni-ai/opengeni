@@ -1,6 +1,10 @@
 import { CapabilityTile } from "./capability-tile";
-import { capabilityCuration, sortFeaturedFirst, type ConnectionHealth } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import {
+  capabilityCuration,
+  sortFeaturedFirst,
+  type ConnectionHealth,
+} from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 export function isBuiltByOpenGeni(item: Pick<CapabilityCatalogItem, "surfaceType">): boolean {
   return item.surfaceType?.startsWith("first_party_") === true;

@@ -1,19 +1,21 @@
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
 import {
-  AccountRulesOverviewSection,
+  AccountRuleLocksPage,
   OrganizationAccountRulesSection,
   WorkspaceAccountRulesSection,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
 } from "../../../src/components/models/model-account-settings";
-import { SectionStack } from "../../../src/components/ui/section";
+import { SectionStack } from "@opengeni/react/ui/section";
 import { PersonalFallbackPreference } from "../../../src/components/models/model-account-policy-controls";
 import "../../../src/styles.css";
 
 const params = new URLSearchParams(window.location.search);
 document.documentElement.dataset.ogTheme = params.get("theme") === "dark" ? "dark" : "light";
 const view = params.get("view") ?? "organization";
+const NAMES: Record<string, string> = { design: "Design", platform: "Platform", research: "Research" };
 const LABELS: Record<string, string> = {
   "claude-sub/opus": "Claude Opus 5.5",
   "claude-sub/sonnet": "Claude Sonnet 5.5",
@@ -22,30 +24,33 @@ const LABELS: Record<string, string> = {
 
 function Organization() {
   const state = useModelAccountSettingsOverview("acme", true);
+  const [locks, setLocks] = useState(false);
+  if (locks)
+    return (
+      <AccountRuleLocksPage organizationName="Acme" state={state} onClose={() => setLocks(false)} />
+    );
   return (
     <SectionStack>
       <OrganizationAccountRulesSection
         organizationName="Acme"
         state={state}
         modelLabel={(id) => LABELS[id] ?? id}
-      />
-      <AccountRulesOverviewSection
-        organizationName="Acme"
-        state={state}
-        modelLabel={(id) => LABELS[id] ?? id}
-        onOpenWorkspace={(id) => {
-          document.body.dataset.opened = id;
-        }}
+        onEditLocks={() => setLocks(true)}
       />
     </SectionStack>
   );
 }
 
 function Workspace() {
-  const state = useWorkspaceModelAccountSettings(params.get("workspace") ?? "design", true);
+  const workspaceId = params.get("workspace") ?? "design";
+  const state = useWorkspaceModelAccountSettings(workspaceId, true);
   return (
     <SectionStack>
-      <WorkspaceAccountRulesSection organizationName="Acme" state={state} />
+      <WorkspaceAccountRulesSection
+        organizationName="Acme"
+        workspaceName={NAMES[workspaceId] ?? workspaceId}
+        state={state}
+      />
       <PersonalFallbackPreference organizationId="acme" allowed={state.settings?.values.personalConnectionsAllowed === true && state.settings.values.personalFallbackAllowed} />
     </SectionStack>
   );

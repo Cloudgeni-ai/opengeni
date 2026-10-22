@@ -45,6 +45,13 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "git smart-HTTP passthrough and plain-text broker errors",
   },
+  "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
+  "site-runtime.ts": {
+    count: 1,
+    userContent: true,
+    why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin)",
+  },
+  "site-sql.ts": { count: 1, userContent: true, why: "Site SQL export download (sql, csv, json)" },
   "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },
   "workspace-state.ts": { count: 1, userContent: true, why: "workspace state export" },
 };
@@ -56,8 +63,9 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
  */
 const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: number }> = {
   "mcp/files.ts": { calls: 1, withUserContentOptions: 1 },
-  // Browser-controller upload/download authorities and encrypted profile archives.
-  "routes/browser-sessions.ts": { calls: 3, withUserContentOptions: 0 },
+  // Browser-controller upload/download authorities, encrypted profile archives
+  // and the sandbox import of a saved browser recording.
+  "routes/browser-sessions.ts": { calls: 4, withUserContentOptions: 0 },
   "routes/documents.ts": { calls: 1, withUserContentOptions: 1 },
   "routes/files.ts": { calls: 2, withUserContentOptions: 2 },
   "routes/knowledge.ts": { calls: 1, withUserContentOptions: 1 },
@@ -65,6 +73,8 @@ const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: n
   "routes/workspace-capture.ts": { calls: 2, withUserContentOptions: 0 },
   // Site HTML downloads; the JSON source bundle is never active markup.
   "site-uploads.ts": { calls: 2, withUserContentOptions: 1 },
+  // Site Data file downloads.
+  "site-data/operations.ts": { calls: 1, withUserContentOptions: 1 },
 };
 
 async function sourceFiles(directory: URL, prefix = ""): Promise<string[]> {
@@ -247,6 +257,9 @@ describe("user-content response headers", () => {
       "routes/workspace-state.ts",
       "routes/computer-sessions.ts",
       "routes/browser-sessions.ts",
+      "routes/site-data.ts",
+      "routes/site-runtime.ts",
+      "routes/site-sql.ts",
     ]) {
       expect({
         path,

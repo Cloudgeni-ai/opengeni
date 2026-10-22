@@ -25,6 +25,7 @@ import {
   resetChunkLoadFailureState,
   routePatternFromMatches,
   routePatternFromRoutes,
+  type ClientErrorDetail,
   type ClientErrorKind,
 } from "@/lib/client-error-reporting";
 import { installVitePreloadRecovery } from "@/lib/vite-preload-recovery";
@@ -57,6 +58,7 @@ async function renderAt(
   } = {},
 ) {
   const reports: Reports = [];
+  const details: Array<ClientErrorDetail | undefined> = [];
   const rootRoute = createRootRoute({
     component: Outlet,
     errorComponent: RootRouteErrorPanel,
@@ -92,8 +94,9 @@ async function renderAt(
     ...ROUTER_PENDING_OPTIONS,
     ...routerErrorOptions(
       (): string => routePatternFromMatches(router.state.matches),
-      (kind, route) => {
+      (kind, route, detail) => {
         reports.push([kind, route]);
+        details.push(detail);
       },
     ),
   });
@@ -121,6 +124,7 @@ async function renderAt(
   return {
     container,
     reports,
+    details,
     router,
     cleanup: async () => {
       await act(async () => root.unmount());
@@ -130,6 +134,27 @@ async function renderAt(
 }
 
 describe("route error boundaries", () => {
+  test("a render failure is reported with its error and component stack", async () => {
+    function ArtifactsDockPanel(): never {
+      throw new TypeError("Element type is invalid: expected a string but got: undefined");
+    }
+    const view = await renderAt("/workspaces/w-1/sessions/s-1", undefined, {
+      sessionComponent: ArtifactsDockPanel,
+    });
+    try {
+      expect(view.reports).toEqual([
+        ["route_error", "/workspaces/$workspaceId/sessions/$sessionId"],
+      ]);
+      const [detail] = view.details;
+      expect(detail?.name).toBe("TypeError");
+      expect(detail?.message).toBe("Element type is invalid: expected a string but got: undefined");
+      expect(detail?.stack).toContain("ArtifactsDockPanel");
+      expect(detail?.componentStack).toContain("ArtifactsDockPanel");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   test("a failing page keeps the workspace chrome and never shows raw error text", async () => {
     const view = await renderAt(
       "/workspaces/7c9e6679-7425-40de-944b-e07fc1f90ae7/sessions/s-1",

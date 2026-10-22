@@ -196,6 +196,28 @@ describe("native app sign-in helpers", () => {
     expect(nativeAppRedirectAllowed("https://auth/callback", ["opengeni"])).toBe(false);
   });
 
+  test("the Office add-in's callback is allowed only on this deployment's web origins", () => {
+    const origins = ["https://app.example.com"];
+    expect(
+      nativeAppRedirectAllowed(
+        "https://app.example.com/office/auth-callback.html",
+        ["opengeni"],
+        origins,
+      ),
+    ).toBe(true);
+    for (const other of [
+      "https://evil.example.com/office/auth-callback.html",
+      "https://app.example.com/office/auth-callback.html?x=1",
+      "https://app.example.com/office/other.html",
+      "http://app.example.com/office/auth-callback.html",
+    ]) {
+      expect(nativeAppRedirectAllowed(other, ["opengeni"], origins)).toBe(false);
+    }
+    expect(
+      nativeAppRedirectAllowed("https://app.example.com/office/auth-callback.html", ["opengeni"]),
+    ).toBe(false);
+  });
+
   test("PKCE S256 matches RFC 7636 appendix B", () => {
     expect(pkceS256Challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")).toBe(
       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",

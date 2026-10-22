@@ -1,4 +1,12 @@
-import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
+import {
+  SITE_FRAME_HEADER,
+  SITE_FRAME_ID_HEADER,
+  SITE_PREVIEW_FRAME,
+  SiteDataUnsupportedError,
+  SiteSessionPathError,
+  siteRequestHeaders,
+  siteSessionPath,
+} from "@opengeni/contracts/site-session-http";
 import { randomUUID } from "node:crypto";
 import { generateToolDeclarations, digestToolGatewayDefinition } from "@opengeni/tool-gateway";
 import { ToolGatewayResolveRequest, ToolGatewayInvokeRequest } from "@opengeni/contracts";
@@ -14,11 +22,16 @@ export type CodemodeSiteRequestHandler = (request: Request) => Promise<Response>
 /**
  * Same-origin local Site preview adapter. The Bun host retains the exact
  * attempt bearer; browser code receives only the ordinary Site tool protocol.
+ * Page SDK requests are Site code: only the `SITE_OPERATIONS` allowlist is
+ * forwarded, marked as a preview frame, so the API records the preview as
+ * their origin and keeps the page to the sessions it started.
  */
 export function createCodemodeSiteRequestHandler(
   client: CodemodeClient | CodemodeClientProvider = () => environmentCodemodeClient(),
 ): CodemodeSiteRequestHandler {
   const provide = typeof client === "function" ? client : () => client;
+  // One preview handler serves one preview page: its sessions share this frame id.
+  const frameId = randomUUID();
   return async (request) => {
     try {
       const pathname = new URL(request.url).pathname;
@@ -87,10 +100,21 @@ export function createCodemodeSiteRequestHandler(
       if (pathname.startsWith(`${CODEMODE_SITE_LOCAL_PATH}/sdk/`)) {
         const path =
           pathname.slice(`${CODEMODE_SITE_LOCAL_PATH}/sdk`.length) + new URL(request.url).search;
+        try {
+          // Route as an unpinned host would: a preview has no published Site, so no Site Data.
+          siteSessionPath(path, "preview", request.method);
+        } catch (error) {
+          if (error instanceof SiteSessionPathError || error instanceof SiteDataUnsupportedError)
+            return siteError(404, error.code, error.message);
+          throw error;
+        }
+        const forwardedHeaders = siteRequestHeaders(request.headers);
+        forwardedHeaders.set(SITE_FRAME_HEADER, SITE_PREVIEW_FRAME);
+        forwardedHeaders.set(SITE_FRAME_ID_HEADER, frameId);
         const response = await active.sessionRequest(path, {
           method: request.method,
           signal: request.signal,
-          headers: siteRequestHeaders(request.headers),
+          headers: forwardedHeaders,
           ...(request.body ? { body: await request.text() } : {}),
         });
         // Fetch decodes compressed upstream bodies. Forward decoded bytes with

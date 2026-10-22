@@ -4,7 +4,7 @@ import {
   goalContinuationModelDecision,
   goalContinuationPrompt,
 } from "../src/activities/goals";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 describe("goalContinuationPrompt", () => {
   test("audits durable report delivery without classifying every answer or file as a report", () => {
@@ -14,9 +14,7 @@ describe("goalContinuationPrompt", () => {
       null,
     );
     expect(prompt).not.toContain("including reports produced during another task");
-    expect(prompt).toContain(
-      "a document the user asked for, or a large report meant to be kept or shared",
-    );
+    expect(prompt).toContain("a document the user asked for, or a report too long for chat");
     expect(prompt).toContain("create the durable native document first");
     expect(prompt).toContain("inspect its relevant final head after the last edit");
     expect(prompt).toContain("satisfy every persisted report requirement");

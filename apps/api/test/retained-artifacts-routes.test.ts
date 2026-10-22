@@ -32,11 +32,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { OBJECT_VISIBILITY_RETRY_DELAYS_MS, type ObjectStorage } from "@opengeni/storage";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   USER_CONTENT_SECURITY_POLICY,

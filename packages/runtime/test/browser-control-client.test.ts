@@ -35,7 +35,17 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
-  test.each(["exact", "session", "controller", "target", "extra", "legacy", "unknown"] as const)(
+  test.each([
+    "exact",
+    "session",
+    "controller",
+    "target",
+    "extra",
+    "legacy",
+    "legacy-foreign",
+    "legacy-lost",
+    "unknown",
+  ] as const)(
     "metadata-only tab opening validates binding and never replays (%s)",
     async (scenario) => {
       const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
@@ -44,21 +54,39 @@ describe("BrowserControlClient", () => {
       const server = Bun.serve({
         port: 0,
         async fetch(request) {
-          routes.push(`${request.method} ${new URL(request.url).pathname}`);
+          const route = `${request.method} ${new URL(request.url).pathname}`;
+          routes.push(route);
+          const sessionPath = `/v1/browser-sessions/${reference.browserSessionId}`;
+          const legacy =
+            scenario === "legacy" || scenario === "legacy-foreign" || scenario === "legacy-lost";
+          if (route === `GET ${sessionPath}/targets`) {
+            expect(request.headers.get("authorization")).toBe(`Bearer ${viewToken}`);
+            return scenario === "legacy"
+              ? success([target])
+              : failure(404, "resource_not_found", "browser session not found");
+          }
           expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
           expect(await request.json()).toEqual({ url: "https://new.example.test/" });
-          if (scenario === "legacy" || scenario === "unknown")
+          if (legacy && route === `POST ${sessionPath}/targets`)
+            return success(
+              browserObservation(
+                scenario === "legacy-foreign"
+                  ? { ...target, controllerGeneration: "other-controller" }
+                  : target,
+              ),
+            );
+          if (legacy || scenario === "unknown")
             return Response.json(
               {
                 protocolVersion: 1,
                 ok: false,
                 error: {
-                  code: scenario === "legacy" ? "resource_not_found" : "outcome_unknown",
-                  message: scenario === "legacy" ? "route not found" : "synthetic uncertain open",
+                  code: legacy ? "resource_not_found" : "outcome_unknown",
+                  message: legacy ? "route not found" : "synthetic uncertain open",
                   retryable: false,
                 },
               },
-              { status: scenario === "legacy" ? 404 : 409 },
+              { status: legacy ? 404 : 409 },
             );
           return success({
             browserSessionId: scenario === "session" ? randomUUID() : reference.browserSessionId,
@@ -83,21 +111,24 @@ describe("BrowserControlClient", () => {
         });
         const browser = client.sessionClient({ reference, controlToken, viewToken });
         const pending = browser.openTargetWithInventory("https://new.example.test/");
-        if (scenario === "exact")
+        if (scenario === "exact" || scenario === "legacy")
           expect(await pending).toEqual({ ...reference, targets: [target] });
-        else if (scenario === "legacy")
-          await expect(pending).rejects.toMatchObject({
-            status: 409,
-            error: { code: "unsupported", retryable: false },
-          });
-        else if (scenario === "unknown")
+        else if (scenario === "unknown" || scenario === "legacy-lost")
           await expect(pending).rejects.toMatchObject({
             status: 409,
             error: { code: "outcome_unknown", retryable: false },
           });
         else await expect(pending).rejects.toThrow();
+        const sessionPath = `/v1/browser-sessions/${reference.browserSessionId}`;
         expect(routes).toEqual([
-          `POST /v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+          `POST ${sessionPath}/targets/open-with-inventory`,
+          // An older controller image rejects the route before dispatch, so the
+          // original open route runs once; nothing else is ever re-sent.
+          ...(scenario === "legacy" || scenario === "legacy-lost"
+            ? [`POST ${sessionPath}/targets`, `GET ${sessionPath}/targets`]
+            : scenario === "legacy-foreign"
+              ? [`POST ${sessionPath}/targets`]
+              : []),
         ]);
       } finally {
         await server.stop(true);
@@ -616,7 +647,16 @@ describe("BrowserControlClient", () => {
         status: 400,
         error: { code: rejected.code, message: rejected.message },
       });
-      expect(requests).toHaveLength(6);
+      rejected = { status: 404, code: "resource_not_found", message: "route not found" };
+      await expect(browser.startRecording(command.targetId)).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message: expect.stringContaining("browser recording"),
+        },
+      });
+      expect(requests).toHaveLength(7);
     } finally {
       server.stop(true);
     }
@@ -1290,6 +1330,17 @@ describe("BrowserControlClient", () => {
         if (url.pathname === "/v1/failure") {
           return failure(409, "controller_stale", "controller moved");
         }
+        if (url.pathname === "/v1/driver-failure") {
+          return Response.json(
+            {
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: false,
+              error: { code: "driver_failed", message: "driver broke", retryable: false },
+              diagnostic: { errorClass: "TypeError", frame: "Backend.observe", extra: "x" },
+            },
+            { status: 500 },
+          );
+        }
         if (url.pathname === "/v1/malformed") {
           return Response.json({ nope: true });
         }
@@ -1497,6 +1548,19 @@ describe("BrowserControlClient", () => {
           message: "controller moved",
           retryable: false,
         },
+        diagnostic: null,
+      });
+      // A driver failure's operator diagnostic is kept beside the unchanged error.
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/driver-failure",
+          token: controlToken,
+        }),
+      ).rejects.toMatchObject<Partial<BrowserControlRequestError>>({
+        status: 500,
+        error: { code: "driver_failed", message: "driver broke", retryable: false },
+        diagnostic: { errorClass: "TypeError", frame: "Backend.observe" },
       });
       await expect(
         client.requestForSession({
@@ -2366,6 +2430,511 @@ test("serializes only explicit internal directory recovery and refuses navigatio
       ).rejects.toBeInstanceOf(BrowserControlProtocolError);
     }
     expect(requests.length).toBe(2);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("keeps a create's tab inventory only when it validates for the same binding", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-launch" };
+  const target = browserTarget(reference.browserSessionId, reference.controllerGeneration);
+  const foreign = browserTarget(randomUUID(), reference.controllerGeneration);
+  let targets: unknown;
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      success({
+        ...reference,
+        observation: browserObservation(target),
+        ...(targets === undefined ? {} : { targets }),
+      }),
+  });
+  const placement = await localPlacement();
+  const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+  const input = { ...reference, tokenGeneration: 1, controlToken, viewToken, headed: false };
+  try {
+    targets = [target];
+    expect((await client.createSession(input)).targets).toEqual([target]);
+    // An older controller sends none; a malformed or foreign inventory is
+    // dropped without failing the browser that did launch.
+    for (const value of [undefined, [{ id: "x" }], [target, foreign], "not-a-list"]) {
+      targets = value;
+      const created = await client.createSession(input);
+      expect(created.observation.target.id).toBe(target.id);
+      expect(created).not.toHaveProperty("targets");
+    }
+  } finally {
+    await server.stop(true);
+  }
+});
+
+describe("agent-native controller transport", () => {
+  type NativeCall = Parameters<
+    NonNullable<BrowserControlPlacementSession["browserControlHttp"]>
+  >[0];
+
+  function nativeSession(
+    port: () => number,
+    behavior: (call: NativeCall, attempt: number) => "forward" | "absent" | "unsupported" | "throw",
+  ) {
+    const calls: NativeCall[] = [];
+    const ensures: unknown[] = [];
+    let execs = 0;
+    const session: BrowserControlPlacementSession = {
+      async exec() {
+        execs += 1;
+        throw new Error("the native transport must not start a process");
+      },
+      async execWithInput() {
+        execs += 1;
+        throw new Error("the native transport must not start a process");
+      },
+      async ensureBrowserControl(request) {
+        ensures.push(request);
+        return { port: port(), sidecarGeneration: `sidecar-${ensures.length}` };
+      },
+      async browserControlHttp(call) {
+        calls.push(call);
+        const action = behavior(call, calls.length);
+        if (action === "unsupported") return { kind: "unsupported" };
+        if (action === "absent") return { kind: "controller_absent" };
+        if (action === "throw") throw new Error("synthetic transport loss");
+        const response = await fetch(`http://127.0.0.1:${port()}${call.path}`, {
+          method: call.method,
+          headers: {
+            authorization: `Bearer ${call.bearerToken}`,
+            ...(call.body ? { "content-type": "application/json" } : {}),
+          },
+          ...(call.body ? { body: call.body } : {}),
+        });
+        const headers = new Map<string, string>();
+        response.headers.forEach((value, name) => headers.set(name.toLowerCase(), value));
+        return {
+          kind: "response",
+          status: response.status,
+          headers,
+          body: new Uint8Array(await response.arrayBuffer()),
+        };
+      },
+    };
+    return { session, calls, ensures, execs: () => execs };
+  }
+
+  const authority = () => ({ scopeId: randomUUID(), scopeGeneration: "connection-1" });
+
+  test("sends JSON and image requests in-process, addressed by scope, without exec", async () => {
+    const browserSessionId = randomUUID();
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const metadata = {
+      frameId: "frame-1",
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      targetId: "tab-1",
+      targetGeneration: "target-1",
+      documentGeneration: "document-1",
+      sequence: 0,
+      mediaType: "image/jpeg",
+      width: 1,
+      height: 1,
+      deviceScaleFactor: 1,
+      scrollX: 0,
+      scrollY: 0,
+      capturedAt: "2026-09-23T12:00:00.000Z",
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (request.method === "GET") {
+          return new Response(image.slice().buffer, {
+            headers: {
+              "content-type": "image/jpeg",
+              "x-opengeni-browser-frame": Buffer.from(JSON.stringify(metadata)).toString(
+                "base64url",
+              ),
+            },
+          });
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const native = nativeSession(
+      () => server.port,
+      () => "forward",
+    );
+    const scope = authority();
+    try {
+      const client = new BrowserControlClient(native.session, {
+        adminToken,
+        nativeAuthority: scope,
+      });
+      expect(await client.addAllowedOrigins(["https://example.test"])).toEqual([
+        "https://example.test",
+      ]);
+      const browser = client.sessionClient({
+        reference: { browserSessionId, controllerGeneration: "controller-1" },
+        controlToken,
+        viewToken,
+      });
+      expect((await browser.capture("tab-1")).data).toEqual(image);
+      expect(native.execs()).toBe(0);
+      expect(native.calls).toHaveLength(2);
+      expect(native.calls[0]).toMatchObject({
+        ...scope,
+        method: "PUT",
+        bearerToken: adminToken,
+      });
+      expect(JSON.parse(new TextDecoder().decode(native.calls[0]!.body))).toEqual({
+        origins: ["https://example.test"],
+      });
+      expect(native.calls[1]).toMatchObject({ ...scope, method: "GET", bearerToken: viewToken });
+      expect(native.calls[1]!.body).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("keeps the command transport when the runner does not serve it", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement();
+    let nativeCalls = 0;
+    placement.session.ensureBrowserControl = async () => ({
+      port: server.port,
+      sidecarGeneration: "sidecar-1",
+    });
+    placement.session.browserControlHttp = async () => {
+      nativeCalls += 1;
+      return { kind: "unsupported" };
+    };
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        nativeAuthority: authority(),
+      });
+      expect(await client.addAllowedOrigins(["https://example.test"])).toEqual([
+        "https://example.test",
+      ]);
+      expect(nativeCalls).toBe(1);
+      expect(placement.commands.length).toBeGreaterThan(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an absent controller is ensured again and the undelivered request sent once more", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const native = nativeSession(
+      () => server.port,
+      (_call, attempt) => (attempt === 1 ? "absent" : "forward"),
+    );
+    try {
+      const client = new BrowserControlClient(native.session, {
+        adminToken,
+        nativeAuthority: authority(),
+      });
+      expect(await client.addAllowedOrigins(["https://example.test"])).toEqual([
+        "https://example.test",
+      ]);
+      expect(native.calls).toHaveLength(2);
+      expect(native.ensures).toHaveLength(1);
+
+      const stillAbsent = nativeSession(
+        () => server.port,
+        () => "absent",
+      );
+      const absent = new BrowserControlClient(stillAbsent.session, {
+        adminToken,
+        nativeAuthority: authority(),
+      });
+      await expect(absent.addAllowedOrigins(["https://example.test"])).rejects.toBeInstanceOf(
+        BrowserControlTransportError,
+      );
+      expect(stillAbsent.calls).toHaveLength(2);
+      expect(stillAbsent.execs()).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an uncertain transport loss retries reads once and never replays a mutation", async () => {
+    const browserSessionId = randomUUID();
+    const native = nativeSession(
+      () => 1,
+      () => "throw",
+    );
+    const client = new BrowserControlClient(native.session, {
+      adminToken,
+      nativeAuthority: authority(),
+    });
+    await expect(client.addAllowedOrigins(["https://example.test"])).rejects.toBeInstanceOf(
+      BrowserControlTransportError,
+    );
+    expect(native.calls).toHaveLength(1);
+    const browser = client.sessionClient({
+      reference: { browserSessionId, controllerGeneration: "controller-1" },
+      controlToken,
+      viewToken,
+    });
+    await expect(browser.listTargets()).rejects.toBeInstanceOf(BrowserControlTransportError);
+    expect(native.calls).toHaveLength(3);
+    expect(native.calls.slice(1).every((call) => call.method === "GET")).toBe(true);
+    expect(native.execs()).toBe(0);
+  });
+});
+
+test("inspects and adopts a preserved working copy with its exact authority, never replaying", async () => {
+  const browserSessionId = randomUUID();
+  const controllerGeneration = "synthetic-adoption";
+  const operationId = randomUUID();
+  const digest = "d".repeat(64);
+  const requests: Array<{ method: string; path: string; body: unknown }> = [];
+  let refuse = false;
+  const adoption = {
+    operationId,
+    browserSessionId,
+    controllerGeneration,
+    manifestDigest: digest,
+    phase: "adopted",
+    failureCode: null,
+    retainedDirectories: [`${browserSessionId}.preserved-${operationId}`],
+    createdAt: "2026-10-16T10:00:00.000Z",
+    updatedAt: "2026-10-16T10:00:01.000Z",
+  };
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      requests.push({
+        method: request.method,
+        path,
+        body: request.method === "POST" ? await request.json() : null,
+      });
+      if (path.endsWith("/working-copy/inspection")) {
+        return success({
+          browserSessionId,
+          controllerGeneration,
+          platformSupported: true,
+          manifest: { digest, entries: 12, bytes: 4096, excluded: ["chrome-launch"] },
+          currentProfile: { device: 1, inode: 2 },
+          receipt: {
+            operationId: randomUUID(),
+            intent: "launch",
+            state: "completed",
+            recordedProfile: { device: 1, inode: 3 },
+            restoreAuthorityDigest: "e".repeat(64),
+            directoryLaunchAllowed: true,
+            authorityMatches: true,
+            adoption: null,
+          },
+          profileIdentityMatches: false,
+          profileInUse: false,
+          activeAdoption: null,
+          refusal: null,
+        });
+      }
+      if (path.endsWith("/working-copy/adoptions") && refuse) {
+        return Response.json(
+          {
+            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+            ok: false,
+            error: {
+              code: "resource_unavailable",
+              message: "the copy changed after it was inspected",
+              retryable: false,
+              details: { reason: "digest_mismatch" },
+            },
+          },
+          { status: 409 },
+        );
+      }
+      if (path.endsWith("/working-copy/adoptions")) return success(adoption);
+      if (path.endsWith("/revert"))
+        return success({ inFlight: false, adoption: { ...adoption, phase: "reverted" } });
+      return success({ inFlight: false, adoption: null });
+    },
+  });
+  try {
+    const client = hostFetchClient(server.port);
+    const authority = {
+      browserSessionId,
+      controllerGeneration,
+      tokenGeneration: 3,
+      controlToken,
+      viewToken,
+    };
+    const inspection = await client.inspectWorkingCopy(authority);
+    expect(inspection).toEqual({
+      browserSessionId,
+      controllerGeneration,
+      platformSupported: true,
+      refusal: null,
+      manifest: { digest, entries: 12, bytes: 4096, excluded: ["chrome-launch"] },
+      profileIdentityMatches: false,
+      profileInUse: false,
+      receipt: expect.objectContaining({ launchedFromCheckpoint: true, adoption: null }),
+      activeAdoption: null,
+    });
+    // Device and inode numbers stay inside the controller.
+    expect(JSON.stringify(inspection)).not.toContain("inode");
+    expect(requests[0]).toEqual({
+      method: "POST",
+      path: `/v1/browser-sessions/${browserSessionId}/working-copy/inspection`,
+      body: { controllerGeneration, tokenGeneration: 3, controlToken, viewToken },
+    });
+
+    expect(
+      await client.adoptWorkingCopy({ ...authority, operationId, manifestDigest: digest }),
+    ).toEqual(adoption);
+    expect(requests[1]!.body).toEqual({
+      controllerGeneration,
+      tokenGeneration: 3,
+      controlToken,
+      viewToken,
+      operationId,
+      manifestDigest: digest,
+    });
+    // A refusal keeps its typed reason; it is sent once and not retried.
+    refuse = true;
+    const before = requests.length;
+    await expect(
+      client.adoptWorkingCopy({ ...authority, operationId: randomUUID(), manifestDigest: digest }),
+    ).rejects.toMatchObject({
+      name: "BrowserControlRequestError",
+      status: 409,
+      error: { details: { reason: "digest_mismatch" } },
+    });
+    expect(requests.length - before).toBe(1);
+    // Another operation's record is never accepted as this one.
+    refuse = false;
+    await expect(
+      client.adoptWorkingCopy({ ...authority, operationId: randomUUID(), manifestDigest: digest }),
+    ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+
+    expect(await client.workingCopyAdoption(authority, operationId)).toEqual({
+      inFlight: false,
+      adoption: null,
+    });
+    expect(requests.at(-1)).toMatchObject({
+      method: "GET",
+      path: `/v1/browser-sessions/${browserSessionId}/working-copy/adoptions/${operationId}`,
+    });
+
+    // A revert carries only the current authority, never a digest.
+    expect(await client.revertWorkingCopyAdoption({ ...authority, operationId })).toEqual({
+      inFlight: false,
+      adoption: { ...adoption, phase: "reverted" },
+    });
+    expect(requests.at(-1)).toEqual({
+      method: "POST",
+      path: `/v1/browser-sessions/${browserSessionId}/working-copy/adoptions/${operationId}/revert`,
+      body: { controllerGeneration, tokenGeneration: 3, controlToken, viewToken },
+    });
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("reads and reverts an adoption recorded by an earlier controller generation", async () => {
+  const browserSessionId = randomUUID();
+  const operationId = randomUUID();
+  const current = "synthetic-adoption-restarted";
+  const recorded = {
+    operationId,
+    browserSessionId,
+    controllerGeneration: "synthetic-adoption-before-restart",
+    manifestDigest: "d".repeat(64),
+    phase: "receipt",
+    failureCode: null,
+    retainedDirectories: [],
+    createdAt: "2026-10-16T10:00:00.000Z",
+    updatedAt: "2026-10-16T10:00:01.000Z",
+  };
+  let served: Record<string, unknown> = recorded;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith("/revert")) {
+        return success({ inFlight: false, adoption: { ...served, phase: "reverted" } });
+      }
+      if (path.endsWith("/working-copy/adoptions")) return success(served);
+      if (path.endsWith("/working-copy/inspection")) {
+        return success({
+          browserSessionId,
+          controllerGeneration: current,
+          platformSupported: true,
+          manifest: null,
+          currentProfile: { device: 1, inode: 2 },
+          receipt: null,
+          profileIdentityMatches: true,
+          profileInUse: false,
+          activeAdoption: served,
+          refusal: "adoption_unresolved",
+        });
+      }
+      return success({ inFlight: false, adoption: served });
+    },
+  });
+  try {
+    const client = hostFetchClient(server.port);
+    const authority = {
+      browserSessionId,
+      controllerGeneration: current,
+      tokenGeneration: 4,
+      controlToken,
+      viewToken,
+    };
+    // Recovery after a restart reads the record as it was recorded.
+    expect(await client.workingCopyAdoption(authority, operationId)).toEqual({
+      inFlight: false,
+      adoption: recorded,
+    });
+    expect((await client.inspectWorkingCopy(authority)).activeAdoption).toEqual(recorded);
+    expect(await client.revertWorkingCopyAdoption({ ...authority, operationId })).toEqual({
+      inFlight: false,
+      adoption: { ...recorded, phase: "reverted" },
+    });
+    // A new adoption must still be this generation's own.
+    await expect(
+      client.adoptWorkingCopy({
+        ...authority,
+        operationId,
+        manifestDigest: recorded.manifestDigest,
+      }),
+    ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+    // Another browser's or another operation's record is never accepted.
+    served = { ...recorded, browserSessionId: randomUUID() };
+    await expect(client.workingCopyAdoption(authority, operationId)).rejects.toBeInstanceOf(
+      BrowserControlProtocolError,
+    );
+    await expect(
+      client.revertWorkingCopyAdoption({ ...authority, operationId }),
+    ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+    served = { ...recorded, operationId: randomUUID() };
+    await expect(client.workingCopyAdoption(authority, operationId)).rejects.toBeInstanceOf(
+      BrowserControlProtocolError,
+    );
+    served = { ...recorded, controllerGeneration: "not a generation" };
+    await expect(client.workingCopyAdoption(authority, operationId)).rejects.toBeInstanceOf(
+      BrowserControlProtocolError,
+    );
   } finally {
     await server.stop(true);
   }

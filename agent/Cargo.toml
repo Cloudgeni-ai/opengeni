@@ -8,7 +8,9 @@ members = [
     "crates/opengeni-agent-platform",
     "crates/opengeni-agent-files-ffi",
     "crates/opengeni-agent-linux-ffi",
+    "crates/opengeni-agent-pipewire-ffi",
     "crates/opengeni-agent-macos-ffi",
+    "crates/opengeni-agent-windows-ffi",
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
     "crates/opengeni-relay",
@@ -21,7 +23,7 @@ members = [
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
-version = "0.1.57"
+version = "0.1.115"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -42,12 +44,6 @@ thiserror = "2"
 # methods on the `Platform` trait.
 tokio = { version = "1", default-features = false }
 async-trait = "0.1"
-# Cross-platform exec containment: POSIX process groups on Unix and Job Objects
-# on Windows. Unix keeps an unreaped private group anchor until it has terminated
-# ordinary descendants; Windows uses the Job Object kernel handle. A timed-out
-# shell must not leave descendants consuming the machine after its caller is gone.
-command-group = { version = "5.0.1", features = ["with-tokio"] }
-
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
 # claims and subscribes to `agent.<ws>.<id>.connection.<instance>.rpc`, then
 # answers ControlRequests. 0.47+ requires
@@ -79,7 +75,7 @@ hostname = "0.4"
 # SAFE statvfs binding for the M10 disk metric — no FFI of our own, so the
 # workspace `unsafe_code = forbid` holds. Only the `fs` feature (statvfs) is
 # pulled; unix-only (cfg-gated at the call site).
-nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
+nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal", "user"] }
 # Safe extended-attribute access. On Linux the supervisor cgroup itself must carry
 # systemd-oomd's `user.oomd_avoid=1`; the unit-level attribute does not inherit
 # into the delegated child cgroup the agent moves into.
@@ -166,3 +162,9 @@ doc_markdown = "allow"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# The agent hashes its own executable at startup. Unoptimized, SHA-256 over a
+# Linux debug test binary (hundreds of MB with its debug info) takes longer
+# than the tests that start agents wait for one to come online.
+[profile.dev.package.sha2]
+opt-level = 3

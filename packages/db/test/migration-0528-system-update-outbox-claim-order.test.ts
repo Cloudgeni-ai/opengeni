@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   claimPendingSessionSystemUpdateOutbox,
@@ -11,11 +14,14 @@ import {
 
 // The outbox claim is deployment-global. This file owns its database, so every
 // claim below sees exactly the rows these tests created.
-let shared: SharedTestDatabase;
+let shared: RestrictedRuntimeTestDatabase;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("migration-0528-outbox-claim-order");
+  const acquired = await acquireRestrictedRuntimeTestDatabase(
+    "migration-0528-outbox-claim-order",
+    "public",
+  );
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);

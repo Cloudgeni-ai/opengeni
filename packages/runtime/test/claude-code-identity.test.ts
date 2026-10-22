@@ -80,11 +80,13 @@ test("subscription wire identity matches the pinned client while request identif
   expect(b.body.system[0].text).toContain("cc_prev_req=req_1;");
   expect(a.body.system[1].text).toBe("Opengeni instructions");
   expect(a.body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-  expect(a.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+  // Opus 5.5 writes progress updates: only display "updates" tells them apart.
+  expect(a.body.thinking).toEqual({ type: "adaptive", display: "updates" });
   expect(a.body.output_config.effort).toBe("high");
   expect(a.body.max_tokens).toBe(32000);
   const betas = a.headers.get("anthropic-beta")!.split(",");
   expect(betas).toContain("claude-code-20250219");
+  expect(betas).toContain("thinking-display-updates-2026-08-18");
   expect(betas).toContain("context-1m-2025-08-07");
   expect(betas).toContain("extended-cache-ttl-2025-04-11");
   expect(betas).not.toContain("message-threads-2026-08-12");
@@ -127,7 +129,7 @@ test("missing subscription account identity fails before any network call", asyn
 
 test("run-scoped native routing preserves prompt lineage but never shares it across runners", async () => {
   const { MultiProviderModelProvider } = await import("../src/model-provider-routing");
-  const { testSettings } = await import("@opengeni/testing");
+  const { testSettings } = await import("@opengeni/testing/settings");
   const settings = testSettings({
     modelProvidersJson: JSON.stringify([
       {

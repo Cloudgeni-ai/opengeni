@@ -1,5 +1,6 @@
-import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
-import { SettingRow } from "@/components/ui/setting-row";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
 import type { WorkspaceModelCatalogModel, ReasoningEffort, LatencyMode } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -7,8 +8,8 @@ import { directModelConnectionSpec, type CreateConnectionRequest } from "@openge
 import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { CreditRequiredPromptView } from "@/components/credit-required-prompt";
+import { Button } from "@opengeni/react/ui/button";
+import { CreditRequiredPromptView } from "@opengeni/react/app/components/credit-required-prompt";
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
@@ -17,9 +18,9 @@ import { OrganizationSwitcherLine } from "@/components/rail/switcher-block";
 import { SetupAccountRoute } from "@/routes/setup-account";
 import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { CouponRedeem } from "@/components/credits/coupon-redeem";
+import { CouponRedeem } from "@opengeni/react/app/components/credits/coupon-redeem";
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
-import { CreditsCelebrationDialog } from "@/components/credits/checkout-credits-celebration";
+import { CreditsCelebrationDialog } from "@opengeni/react/app/components/credits/checkout-credits-celebration";
 
 // Local-only fixtures. No provider credentials or real payments are used.
 let previewModel: Record<string, unknown> | null = null;
@@ -251,26 +252,38 @@ function previewIncludedModel() {
   return null;
 }
 
-/** `?credits=trial` previews the step when the organization already holds Opengeni credits. */
+/** `?credits=monthly` previews scoped Free monthly funding; trial remains a legacy alias. */
 function previewStartingCredits() {
-  if (new URLSearchParams(window.location.search).get("credits") !== "trial") return null;
+  if (
+    !["monthly", "trial"].includes(new URLSearchParams(window.location.search).get("credits") ?? "")
+  )
+    return null;
   return {
     balance: {
       balanceMicros: 10_000_000,
       currency: "usd",
-      ...(scopedCreditPreview()
-        ? {
-            generalBalanceMicros: 0,
-            promotionalCredits: [
-              {
-                ...previewCreditScope,
-                label: "Signup credits",
-                grantId: "00000000-0000-4000-8000-000000000001",
-                remainingMicros: 10_000_000,
-              },
-            ],
-          }
-        : {}),
+      plan: {
+        key: "free",
+        label: "Free",
+        status: "active",
+        creditGrantedMicros: 10_000_000,
+        creditRemainingMicros: 10_000_000,
+        creditScoped: true,
+        periodResetAt: "2026-11-19T00:00:00Z",
+        seatLimit: 5,
+        seatsUsed: 1,
+        cancelAtPeriodEnd: false,
+      },
+      generalBalanceMicros: 0,
+      promotionalCredits: [
+        {
+          ...previewCreditScope,
+          label: "Monthly plan credit",
+          planCredit: true,
+          grantId: "00000000-0000-4000-8000-000000000001",
+          remainingMicros: 10_000_000,
+        },
+      ],
     },
     model: {
       id: scopedCreditPreview() ? "gpt-6-luna" : "preview-credits",
@@ -287,6 +300,7 @@ function CreditBalancePreview() {
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
   const [latency, setLatency] = useState<LatencyMode>("standard");
   const rows = projectPickerRows(
+    t,
     ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map(
       (id): WorkspaceModelCatalogModel => ({
         id,

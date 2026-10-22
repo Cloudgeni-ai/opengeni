@@ -19,6 +19,7 @@ import {
   type EmbeddedComputerInteractionClientOverride,
   useEmbeddedComputerInteraction,
 } from "../session-context";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type ComputerFrameConnectionState =
   | "idle"
@@ -73,6 +74,7 @@ export type UseComputerFrameStreamResult = {
 export function useComputerFrameStream(
   options: UseComputerFrameStreamOptions,
 ): UseComputerFrameStreamResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedComputerInteraction(options);
   const enabled = options.enabled ?? true;
   const [nonce, setNonce] = useState(0);
@@ -306,12 +308,12 @@ export function useComputerFrameStream(
 
     const onError = (source: ComputerFrameWebSocket) => {
       if (source !== socket) return;
-      fail(new Error("Desktop view lost connection."));
+      fail(new Error(t("hooks.useComputerFrameStream.desktopViewLostConnection")));
     };
 
     const onClose = (source: ComputerFrameWebSocket) => {
       if (disposed || source !== socket) return;
-      fail(new Error("Desktop view lost connection."));
+      fail(new Error(t("hooks.useComputerFrameStream.desktopViewLostConnection")));
     };
 
     const connectSocket = () => {
@@ -428,7 +430,7 @@ export function useComputerFrameStream(
       clearRecoveryTimers();
       clearSocket(true);
     };
-  }, [client, enabled, nonce, options.computerSessionId, options.targetId, workspaceId]);
+  }, [client, enabled, nonce, options.computerSessionId, options.targetId, workspaceId, t]);
 
   return { ...result, reconnect };
 }

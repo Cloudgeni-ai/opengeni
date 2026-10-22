@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ModalClient } from "modal";
 import { decodeNativeSnapshotRef, type SandboxProviderCommand } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxClient } from "../src/sandbox";
 import type { ChannelASession } from "../src/sandbox/channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../src/sandbox/exec-banner";

@@ -1,7 +1,7 @@
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 import { request as apiRequest } from "@/api";
 import {
@@ -10,7 +10,7 @@ import {
   googleDriveDestinationOptionDisabled,
   saveGoogleDriveSources,
 } from "@/components/capabilities/google-drive-sources";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -18,9 +18,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Select } from "@opengeni/react/ui/select";
 import { GOOGLE_DRIVE_SYNC_BEHAVIOR } from "@/lib/google-drive-connection";
 import type {
   ConnectorDocumentDestinationAuthority,
@@ -30,7 +30,7 @@ import type {
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type FolderCrumb = { id: string; name: string };
 const ROOT_CRUMB: FolderCrumb = { id: "root", name: "My Drive" };

@@ -10,12 +10,9 @@ import {
   nestedPostgresSqlState,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";

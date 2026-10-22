@@ -48,8 +48,8 @@ const modelCatalog = {
   refresh: async () => undefined,
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
-mock.module("@/lib/use-workspace-model-catalog", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/lib/use-workspace-model-catalog", () => ({
   useWorkspaceModelCatalog: () => modelCatalog,
 }));
 

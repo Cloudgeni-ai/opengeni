@@ -1,4 +1,12 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
+export type {
+  SessionUsageLimit,
+  SessionUsageLimitHistory,
+  SessionUsageLimitReachedRefusal,
+  SessionUsageLimitStatus,
+  SetSessionUsageLimitRequest,
+} from "@opengeni/contracts/session-usage-limits";
 export type {
   InsightsUsageRange,
   InsightsUsageGroupBy,
@@ -37,8 +45,23 @@ export type {
 export type BundledSkillId =
   | "builtin:opengeni-help"
   | "builtin:opengeni-client"
-  | "builtin:opengeni-visualize"
+  | "builtin:visualize"
   | "builtin:document-parsing"
+  | "builtin:skill-management"
+  | "builtin:projects"
+  | "builtin:schedules"
+  | "builtin:documents"
+  | "builtin:spreadsheets"
+  | "builtin:presentations"
+  | "builtin:sites"
+  | "builtin:video-generation"
+  | "builtin:secrets"
+  | LegacyBundledSkillId;
+/**
+ * @deprecated Renamed to the neutral ids above; still accepted and resolved to them.
+ */
+export type LegacyBundledSkillId =
+  | "builtin:opengeni-visualize"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
   | "builtin:opengeni-schedules"
@@ -92,7 +115,7 @@ export type CodexRealtimeWebrtcResponse = {
   replay: boolean;
 };
 
-export type GatewayRealtimeConnectRequest = {
+export type SessionRealtimeWebsocketRequest = {
   realtimeId: string;
   operationId: string;
   browserInstanceId: string;
@@ -100,14 +123,41 @@ export type GatewayRealtimeConnectRequest = {
   expectedVersion: number;
   expectedConnectionEpoch: number;
   rotate: boolean;
+  /**
+   * BCP 47 tag of the language the person speaks, for example `nb-NO`.
+   * Providers that need a fixed conversation language use it; the others
+   * detect the spoken language themselves.
+   */
+  language?: string | undefined;
+  /**
+   * Voice settings for this connection. Each set field overrides the
+   * workspace's saved settings for the model; `voiceSettings.language` also
+   * overrides `language`.
+   */
+  voiceSettings?: RealtimeVoiceSettings | undefined;
 };
+/** @deprecated Use SessionRealtimeWebsocketRequest. */
+export type GatewayRealtimeConnectRequest = SessionRealtimeWebsocketRequest;
 
-export type GatewayRealtimeInitialItem = {
+export type SessionRealtimeWebsocketInitialItem = {
   role: "user" | "developer" | "assistant";
   text: string;
 };
+/** @deprecated Use SessionRealtimeWebsocketInitialItem. */
+export type GatewayRealtimeInitialItem = SessionRealtimeWebsocketInitialItem;
 
-export type GatewayRealtimeConnectResponse = {
+/**
+ * Wire protocol of a realtime WebSocket provider: the OpenAI Realtime protocol
+ * (also spoken by xAI and ElevenLabs) or the AI Gateway's normalized protocol.
+ */
+export type RealtimeWebsocketProtocol = "openai" | "ai-gateway";
+
+export type SessionRealtimeWebsocketResponse = {
+  protocol: RealtimeWebsocketProtocol;
+  /** WebSocket subprotocols to open the socket with; one carries the client secret. */
+  protocols: string[];
+  /** First client event to send once the socket opens; null when the mint configured it. */
+  sessionUpdate: Record<string, unknown> | null;
   token: string;
   url: string;
   upstreamModelId: string;
@@ -116,10 +166,17 @@ export type GatewayRealtimeConnectResponse = {
   connectionEpoch: number;
   startupFenceSequence: number;
   modeVersion: number;
-  initialItems: GatewayRealtimeInitialItem[];
+  initialItems: SessionRealtimeWebsocketInitialItem[];
   instructions: string;
+  /**
+   * Assistant transcripts carry inline delivery tags such as `[calm]`, which
+   * are spoken as tone, not words; clients drop them from transcripts.
+   */
+  transcriptAudioTags?: boolean | undefined;
   replay: false;
 };
+/** @deprecated Use SessionRealtimeWebsocketResponse. */
+export type GatewayRealtimeConnectResponse = SessionRealtimeWebsocketResponse;
 
 export type ToolGatewayIdentity = {
   serverId: string;
@@ -328,18 +385,63 @@ export type SessionRealtimeModel =
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
   | "workspace-gateway/openai/gpt-realtime-2.1"
   | "workspace-gateway/openai/gpt-realtime-mini"
-  | "workspace-gateway/xai/grok-voice-think-fast-2.0";
+  | "workspace-gateway/xai/grok-voice-think-fast-2.0"
+  | "workspace-elevenlabs/eleven_realtime_v1_max"
+  | "workspace-elevenlabs/eleven_realtime_v1_mini";
 
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
+  provider:
+    | "OpenGeni"
+    | "Connected Codex"
+    | "Connected SuperGrok"
+    | "Your Gateway"
+    | "Your ElevenLabs";
   description: string;
   available: boolean;
   unavailableReason: string | null;
   /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
   unavailableCode?: string | null | undefined;
   recommended: boolean;
+  /**
+   * Languages a conversation with this model can be set to, as the provider's
+   * language codes. Absent when the model detects the spoken language itself.
+   */
+  languages?: string[] | undefined;
+  /** Voices this model can speak with. Absent when the voice cannot be chosen. */
+  voices?: { id: string; label: string }[] | undefined;
+  /** Whether any provider voice id is accepted as `voice`, beyond the listed `voices`. */
+  customVoice?: boolean | undefined;
+  /** Turn eagerness values this model accepts. Absent when it cannot be chosen. */
+  turnEagerness?: RealtimeTurnEagerness[] | undefined;
+  /** The provider's defaults for the settings it offers, other than language. */
+  voiceDefaults?: RealtimeVoiceSettings | undefined;
+  /** The workspace's saved voice settings for this model. */
+  workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** The organization's default voice settings for this model, used while the workspace has none. */
+  organizationVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** True on the model this workspace chose to start voice conversations with. */
+  workspaceDefault?: boolean | undefined;
+  /** True on the model the organization chose to start voice conversations with; a workspace's own choice wins. */
+  organizationDefault?: boolean | undefined;
+};
+
+/** How readily a realtime voice model decides the speaker is done and answers. */
+export type RealtimeTurnEagerness = "low" | "medium" | "high";
+
+/**
+ * Voice settings for a realtime voice model. Unset fields keep the provider's
+ * default. A model offers only the settings its catalog entry lists
+ * (`voices`/`customVoice`, `languages`, `turnEagerness`); a value it does not
+ * offer is ignored rather than failing the call.
+ */
+export type RealtimeVoiceSettings = {
+  /** A listed voice id, or any provider voice id where `customVoice` is offered. */
+  voice?: string | undefined;
+  /** Conversation language (a catalog `languages` code or a BCP 47 tag), for models that need one. */
+  language?: string | undefined;
+  turnEagerness?: RealtimeTurnEagerness | undefined;
 };
 
 export type WorkspaceRealtimeModelCatalogResponse = {
@@ -408,7 +510,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (13 values; every member is
 // additive at the end). 3-way enum parity is pinned by
 // `test/contract-parity.test.ts`.
 export type SandboxBackend =
@@ -423,7 +525,8 @@ export type SandboxBackend =
   | "cloudflare"
   | "vercel"
   | "selfhosted"
-  | "opensandbox";
+  | "opensandbox"
+  | "compute";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -629,7 +732,7 @@ export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type LatencyMode = "standard" | "priority" | "fast";
+export type LatencyMode = "standard" | "priority" | "fast" | "ultrafast";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
 export type GitCredentialBindingId = string;
 export type GitRepositoryAccess = "read" | "write";
@@ -681,13 +784,18 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  /** Narrow this connection's authorized tool names; an empty list allows none. */
+  allowedTools?: string[] | undefined;
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**
-   * Put this server's tool schemas on the first model request instead of behind
-   * `tool_search` progressive discovery. A startup choice only; grants nothing.
+   * Put tool schemas on the first model request instead of behind `tool_search`
+   * progressive discovery: `true` for every tool of this server, or the exact
+   * unprefixed names of its everyday tools (its other tools stay searchable).
+   * A startup choice only; grants nothing, and names the server does not
+   * authorize are ignored.
    */
-  eager?: boolean | undefined;
+  eager?: boolean | string[] | undefined;
 };
 
 export type SessionToolPolicy = {
@@ -753,6 +861,13 @@ export type SessionMcpServerInput = {
   name?: string | undefined;
   url: string;
   allowedTools?: string[] | undefined;
+  /**
+   * Tools the agent has from the first model request: `true` for every tool,
+   * or exact unprefixed tool names (the rest stay searchable). Same as listing
+   * this server in `tools` with `eager`, without turning an omitted `tools`
+   * list into an explicit allow-list.
+   */
+  eager?: boolean | string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
   /** Require human approval for every tool, or only the listed unprefixed tool names. */
@@ -1074,8 +1189,15 @@ export type AvailableOpenGeniSlackBots = {
   connections: ConnectionMetadata[];
   organizationSharedConnectionIds: string[];
 };
-export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
-export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
+export type UpdateOpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  workspaceIds?: string[] | null;
+};
+export type OpenGeniSlackBotOrganizationAccess = {
+  enabled: boolean;
+  generation: number;
+  workspaceIds?: string[] | null;
+};
 
 export type FikenInstallRequest = {
   apiToken: string;
@@ -1456,7 +1578,7 @@ export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
 
 export type TurnInitiatorContext = Record<string, unknown>;
 
-/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+/** Bounded host provenance; Opengeni-owned lineage keys are reserved. */
 export type ServiceTurnInitiatorContext = TurnInitiatorContext;
 
 export type IntegrationClientMetadata = {
@@ -1618,6 +1740,16 @@ export type SessionBackgroundCommandListResponse = {
   commands: SessionBackgroundCommand[];
 };
 
+export type WorkspaceBackgroundCommand = SessionBackgroundCommand & {
+  sessionTitle: string | null;
+  machineName: string | null;
+};
+
+export type WorkspaceBackgroundCommandListResponse = {
+  commands: WorkspaceBackgroundCommand[];
+  nextCursor: string | null;
+};
+
 export type CancelSessionBackgroundCommandResult = {
   command: SessionBackgroundCommand;
   accepted: boolean;
@@ -1719,6 +1851,12 @@ export type Session = {
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
   rootSessionId: string;
+  /**
+   * The task root's usage limit and recorded API-equivalent model usage, on
+   * detail reads and create responses. Omitted by older servers and list
+   * reads: omission never means "no limit".
+   */
+  usageLimit?: SessionUsageLimit | undefined;
   nestedAgentDepth: number;
   maxNestedAgentDepthOverride: number | null;
   effectiveMaxNestedAgentDepth: number;
@@ -1900,6 +2038,8 @@ export type SessionListTotals = {
     queued: number;
     unread: number;
     activeWork: number;
+    /** Idle sessions parked on their own wake-up; already included in `active`. */
+    waiting?: number;
   }>;
 };
 
@@ -1908,6 +2048,8 @@ export type SessionListResponse = {
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
   contentArchivedOnly?: true;
+  /** Receipt for the started-or-messaged-by-you filter. */
+  mineOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -1919,6 +2061,8 @@ export type SessionListResponse = {
   archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
+  /** Server-resolved Site access filter, when requested. */
+  siteAccessId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -2367,6 +2511,7 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "sandbox.recovery.selected",
   "session.command.backgrounded",
   "session.command.finished",
   "session.wait.started",
@@ -2429,6 +2574,8 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.model_settings.updated",
+  // An authorized person or host changed the task root's usage limit.
+  "session.usage_limit.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "subscription.account.selected",
@@ -2521,6 +2668,35 @@ type SessionEventListCommonOptions = {
   direction?: SessionEventReadDirection;
   payloadMode?: SessionEventPayloadMode;
   resultMode?: "events";
+  /**
+   * With `excludeTypes` containing `agent.toolCall.created`, keep the created
+   * rows of presented tools (images, published files, Skill changes). Servers
+   * that predate this option ignore it and apply the plain type filter; a
+   * server that applies it reports `SessionEventPage.conversationFilter`.
+   */
+  presentedToolCalls?: "include";
+  /**
+   * With `payloadMode: "full"`, return large `agent.toolCall.output` payloads
+   * as bounded previews carrying an `outputPreview` fact (see
+   * {@link SessionEventToolOutputPreview}). Read one row's exact output with
+   * an ordinary full read around its sequence. Servers that predate this
+   * option ignore it and return exact outputs.
+   */
+  toolOutputs?: "preview";
+};
+
+/**
+ * The fact a previewed `agent.toolCall.output` payload carries in
+ * `payload.outputPreview`. `structured` keeps the output's shape with long
+ * strings shortened to their head and tail around an omission marker; `text`
+ * replaces the output with the head and tail of its text.
+ */
+export type SessionEventToolOutputPreview = {
+  truncated: true;
+  reason: "tool_output_preview";
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &
@@ -2612,6 +2788,13 @@ export type SessionEventPage = {
   nextAfter: number | null;
   nextBefore: number | null;
   forensicExact: boolean;
+  /**
+   * The conversation-filter version the server applied to a
+   * `presentedToolCalls: "include"` read (see
+   * `SESSION_EVENT_CONVERSATION_FILTER_VERSION`), or null when it announced
+   * none: an older server may have ignored `presentedToolCalls`.
+   */
+  conversationFilter?: number | null;
 };
 
 export type ToolAuthNeededPayload = {
@@ -2922,13 +3105,19 @@ export type FsReadResponse = {
   isBinary: boolean;
   revision: number;
 };
-export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
-export type PublishSandboxFileArtifactRequest = { path: string };
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
+export type PublishSandboxFileArtifactRequest = {
+  path: string;
+  /** Who can open the file. Omitted: the chat's own audience. */
+  visibility?: "private" | "workspace";
+};
 export type SandboxFileArtifactReceipt = {
   type: "sandbox_file";
   sandboxPath: string;
   filename: string;
   artifact: RetainedArtifactReference;
+  /** Who can open the file; absent from receipts made before files had audiences. */
+  access?: FileAccess | undefined;
 };
 export type FsWriteRequest = {
   path: string;
@@ -3340,6 +3529,8 @@ export type ScheduledTaskAgentConfig = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  /** Follow the workspace machine when creating each new run chat. */
+  executionTarget?: "workspace_default" | undefined;
   machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
@@ -3427,6 +3618,24 @@ export type ScheduledTask = {
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
   /** Read-only: which accounts a run would use if it started now, for a viewer who can act on it. */
   accountPlan?: ScheduledTaskAccountPlan | undefined;
+  /** Read-only: why it paused itself, or why its owner was told its runs keep failing. */
+  blocker?: ScheduledTaskBlocker | undefined;
+};
+
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so it paused itself; resume it once the cause is fixed. `notified`:
+ * its scheduled runs kept failing or being skipped and its owner was told
+ * once; it keeps running. `message` says what would unblock it.
+ */
+export type ScheduledTaskBlocker = {
+  state: "paused" | "notified";
+  /** Stable machine reason, such as `scheduled_session_paused`; tolerate new ones. */
+  reason: string;
+  message: string;
+  /** The run that showed the blocker (the first of a failing streak). */
+  runId: string;
+  since: string;
 };
 
 /**
@@ -3528,12 +3737,27 @@ export type CreateSessionRequest = {
   // projection before Opengeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
+  /**
+   * Optional usage limit for a new root task in USD micros of API-equivalent
+   * model usage (null/omitted: no limit; 0: stop before the first model
+   * request). Person or trusted host only. `OpenGeniClient.createSession`
+   * sends a limited create with `startMode: "standard"`, which servers that
+   * predate usage limits reject before creating or starting anything; it then
+   * throws `OpenGeniSessionUsageLimitUnsupportedError`, as it does for a
+   * response that does not echo the requested limit.
+   */
+  usageLimitMicros?: number | null | undefined;
   visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
-  /** Create an idle session shell so realtime voice can be the first interaction. */
-  startMode?: "realtime" | undefined;
+  /**
+   * `realtime` creates an idle session shell so realtime voice can be the
+   * first interaction. `standard` is the explicit default; `createSession`
+   * sends it with a usage limit so servers that predate limits reject the
+   * create instead of starting uncapped work.
+   */
+  startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
@@ -3778,6 +4002,7 @@ export type FirstPartyMcpToolName =
   | "browser_debug"
   | "browser_downloads"
   | "browser_download_save"
+  | "browser_record"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"
@@ -3789,6 +4014,7 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "excel_run"
   | "secret_search"
   | "secret_save"
   | "secret_get"
@@ -3868,6 +4094,30 @@ export type FirstPartyMcpToolName =
   | "artifacts_rollback"
   | "artifacts_archive"
   | "artifacts_restore"
+  | "site_data_describe"
+  | "site_data_define_collection"
+  | "site_data_query"
+  | "site_data_write"
+  | "site_data_import"
+  | "site_data_export"
+  | "site_data_reset"
+  | "site_files_list"
+  | "site_files_upload"
+  | "site_files_delete"
+  | "site_publication_get"
+  | "site_publication_update"
+  | "site_publication_apply_fix"
+  | "site_hostname_check"
+  | "site_sql_inspect"
+  | "site_sql_enable"
+  | "site_sql_migrate"
+  | "site_sql_define_query"
+  | "site_sql_query"
+  | "site_sql_run"
+  | "site_sql_execute"
+  | "site_sql_export"
+  | "site_sql_import"
+  | "site_sql_reset"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -3913,7 +4163,7 @@ export type ModelCapabilitiesV1 = {
       })
     | undefined;
   latencyModes: Array<{
-    id: "standard" | "priority" | "fast";
+    id: "standard" | "priority" | "fast" | "ultrafast";
     upstream: ModelCapabilitySupportV1;
     runnable: boolean;
     billingMultiplierBps?: number | undefined;
@@ -4121,14 +4371,26 @@ export type ModelConnectionAccessKind =
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  | "openai"
+  | "azure_openai";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  /** The organization's ElevenLabs key, for Eleven Realtime voices. */
+  | "elevenlabs"
+  | "openai"
+  | "azure_openai";
+
+/** Organization providers whose key runs models, with custom models to choose. */
+export type OrganizationModelCatalogProviderKind = Exclude<
+  OrganizationModelProviderKind,
+  "elevenlabs"
+>;
 
 export type ClaudeUsageWindow = {
   id:
@@ -4154,6 +4416,8 @@ export type ClaudeUsageRequestStatus = {
   observedAt: string;
   source?: "response_headers" | "provider" | undefined;
 };
+export type { SubscriptionUsagePool, SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
+
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
   credentialVersion: number | null;
@@ -4170,6 +4434,8 @@ export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
   version: number;
+  /** Azure OpenAI only: the non-secret `https://<resource>.openai.azure.com/openai/v1` endpoint. */
+  endpoint?: string | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -4178,6 +4444,8 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  /** Required for `azure_openai` (its resource endpoint); refused for every other kind. */
+  endpoint?: string | undefined;
   claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 
@@ -4224,10 +4492,21 @@ export type OrganizationModelDefaults = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
   modelCompactionThresholds: Record<string, number>;
+  /** Voice settings by realtime model id, for workspaces without their own. */
+  realtimeVoice: Record<string, RealtimeVoiceSettings>;
+  /**
+   * The voice model new voice conversations start with in workspaces without
+   * their own choice, until the person picks one; null leaves it automatic.
+   */
+  realtimeDefaultModel: string | null;
   updatedAt: string | null;
 };
 
-/** Field-by-field update; compaction merges by model id and null resets one model. */
+/**
+ * Field-by-field update; compaction and voice settings merge by model id and
+ * null resets one model. `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
+ */
 export type UpdateOrganizationModelDefaultsRequest = {
   sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
   modelPolicy?:
@@ -4235,6 +4514,8 @@ export type UpdateOrganizationModelDefaultsRequest = {
     | null
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
+  realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
 };
 
 /** A model-account setting an organization sets, and may lock for every workspace. */
@@ -4973,6 +5254,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Whether people can connect their own computers; absent on older servers. */
+  connectedMachines?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -5048,6 +5331,12 @@ export type ClientConfig = {
    * without activity a session (unless kept live) becomes read-only.
    */
   sessionArchive?: { enabled: true; idleDays: number } | undefined;
+  /**
+   * Present when the server records and enforces per-task usage limits.
+   * `enabled: false` refuses new limits but still enforces and clears existing
+   * ones. Omitted by older servers, which ignore `usageLimitMicros`.
+   */
+  sessionUsageLimits?: { enabled: boolean } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
@@ -5729,6 +6018,10 @@ export type Workspace = {
   updatedAt: string;
 };
 
+export type WorkspaceDefaultExecutionTarget =
+  | { kind: "managed" }
+  | { kind: "machine"; targetSandboxId: string };
+
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
   modelCompactionThresholds?: unknown;
@@ -5741,6 +6034,8 @@ export type WorkspaceSettings = {
   sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   /** Allowlisted sandbox image for new managed boxes; absent uses the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Placement for new chats; null follows the deployment default. */
+  defaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -5748,8 +6043,21 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /**
+   * What an ordinary Send does in the console composer while the agent is
+   * working: `queue` (absent) runs it after the current turn, `steer` has the
+   * agent read it at its next model step.
+   */
+  busySend?: "queue" | "steer" | undefined;
   /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
   codeSearchEnabled?: boolean | null | undefined;
+  /**
+   * Realtime voice settings by realtime model id. Read one model's settings
+   * from the realtime model catalog's `workspaceVoiceSettings`.
+   */
+  realtimeVoice?: Record<string, unknown> | undefined;
+  /** The workspace's default realtime voice model; null or absent follows the organization. */
+  realtimeDefaultModel?: string | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -5847,11 +6155,26 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  busySend?: "queue" | "steer" | undefined;
   codeSearchEnabled?: boolean | null | undefined;
+  /**
+   * Voice settings by realtime model id, for example
+   * `{ "workspace-elevenlabs/eleven_realtime_v1_max": { voice: "<voice id>", language: "no" } }`.
+   * Each listed model's settings are replaced; null removes that model's
+   * settings; models not listed keep theirs.
+   */
+  realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  /**
+   * The voice model new voice conversations in this workspace start with
+   * until the person picks one; null follows the organization again.
+   */
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
   defaultSandboxImage?: string | null | undefined;
+  /** Placement for new chats; null follows the deployment default. */
+  defaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   /** Agent defaults for new sessions; null clears. Requires the admission switch. */
   sessionAgentDefaults?: WorkspaceAgentDefaults | null | undefined;
   /**
@@ -6245,12 +6568,41 @@ export type MemberNotificationsSetting = {
   allowOthers: boolean;
 };
 
+// --- Excel workbooks connected by an Office add-in -------------------------------------------
+
+/** A short-lived ticket that lets one add-in socket connect a workbook to a workspace. */
+export type OfficeWorkbookTicket = {
+  ticket: string;
+  expiresAt: string;
+  /** The socket's path on the Opengeni API, such as "/v1/office/workbooks/live". */
+  path: string;
+  /** The socket's full URL on the deployment's public API, when it has one. */
+  url?: string;
+  /** The WebSocket subprotocol the socket must offer. */
+  protocol: string;
+};
+
+/** An open workbook the caller's agents in a workspace can reach with `excel_run`. */
+export type OfficeWorkbook = {
+  id: string;
+  name: string;
+  /** "Excel on the web", "Excel for Mac", "Excel for Windows"... */
+  app: string;
+  version: string | null;
+  excelApi: string | null;
+  connectedAt: string;
+};
+
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android";
+/** `office`: the Opengeni add-in for Excel, signed in from its task pane. */
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux" | "office";
 
 export type NativeAppAuthorizeInput = {
-  /** Exactly `<registered scheme>://auth/callback`. */
+  /**
+   * Exactly `<registered scheme>://auth/callback`, or for the Office add-in the
+   * deployment's own `<web origin>/office/auth-callback.html`.
+   */
   redirectUri: string;
   /** Base64url SHA-256 of the app's code verifier. */
   codeChallenge: string;
@@ -6789,25 +7141,60 @@ export type SandboxRecoverySelection = {
   revision: string;
   capturedAt: string;
 };
+/** The checkpoint automatic recovery restores, native or portable.
+ * `artifactId` is null for a portable archive. */
+export type SandboxCheckpointSelection = Omit<SandboxRecoverySelection, "artifactId"> & {
+  artifactId: string | null;
+};
+export type SandboxRecoveryTarget = {
+  sessionId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  routeEpoch: number;
+  authorityEpoch: number;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  archiveGeneration: number | null;
+  revision: string | null;
+  restoreStatus: string;
+  restoreCompletedAt: string | null;
+};
 export type SandboxRecoveryProjection = {
   version: 1;
   status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
   reason: string | null;
+  /** The registered native checkpoint a person can consent to restore, and for
+   * an automatic Retry its checkpoint when that one is native. */
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
+  target?: SandboxRecoveryTarget;
+  retryAvailable?: boolean;
+  freshWorkspaceAvailable?: boolean;
+  groupSessionCount?: number;
   automaticAvailable?: boolean;
-  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
-   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  /** What an automatic Retry does: restore `automaticCheckpoint`, or continue
+   * on a new empty workspace because no usable checkpoint survived the loss. */
   automaticLane?: "checkpoint" | "fresh_workspace";
+  /** The checkpoint an automatic Retry restores (lane `checkpoint`), native or
+   * portable. `checkpoint` is set as well only when it is native. */
+  automaticCheckpoint?: SandboxCheckpointSelection;
   /** For a timed recovery wait: the earliest time a Retry or a new message can
    * let Opengeni decide again. Nothing proceeds by itself before then. */
   availableAt?: string;
 };
-export type SandboxRecoveryRequest = {
-  operationId: string;
-  acceptHistoricalCheckpoint: true;
-  selection: SandboxRecoverySelection;
-};
+export type SandboxRecoveryRequest =
+  | {
+      operationId: string;
+      acceptHistoricalCheckpoint: true;
+      selection: SandboxRecoverySelection;
+    }
+  | { operationId: string; action: "retry"; target: SandboxRecoveryTarget }
+  | {
+      operationId: string;
+      action: "continue_fresh";
+      acceptEmptyWorkspace: true;
+      target: SandboxRecoveryTarget;
+    };
 export type SandboxRecoveryResponse = {
   outcome: "accepted" | "replayed";
   operationId: string;
@@ -6910,6 +7297,11 @@ export type SteerSessionQueueItemRequest = {
   clientEventId: string;
   expectedTurnVersion: number;
   controlEtag?: string;
+  /**
+   * Interrupt the running turn now instead of at its next model step. Also
+   * turns an already-waiting Steer into an immediate one.
+   */
+  interrupt?: boolean;
 };
 
 export type DeleteSessionQueueItemRequest = {
@@ -6978,6 +7370,8 @@ export type ScheduledTaskAgentConfigInput = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  /** Follow the workspace machine when creating each new run chat. */
+  executionTarget?: "workspace_default" | undefined;
   machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
@@ -7471,8 +7865,56 @@ export type FileListRequest = {
 };
 export type FileListResponse = { files: FileAsset[]; nextCursor: string | null };
 
+/**
+ * Who can open a file: only its owner ("private", Only me) or everyone in the
+ * workspace, with one plain sentence saying so.
+ */
+export type FileAccess = {
+  visibility: "private" | "workspace";
+  whoCanOpen: string;
+};
+
+/**
+ * An app-shot: a screenshot of another app's window, sent from a desktop app,
+ * with the window it shows and the text the window exposed. Stored with the
+ * file once and never changed.
+ */
+export type AppShotCapture = {
+  /** The app's name as the system shows it. */
+  app: string;
+  /** The app's stable identifier, where the system has one (macOS bundle id). */
+  bundleId?: string | undefined;
+  /** The window title; empty when the window has none. */
+  title: string;
+  /** ISO timestamp. */
+  capturedAt: string;
+  platform: "macos" | "windows" | "linux";
+  /** Text read through accessibility, at most 32,000 characters. */
+  text?: string | undefined;
+  /** The window had more text than was kept. */
+  textTruncated?: boolean | undefined;
+  /** The window as the system identifies it. */
+  window?: { processId: number; windowId: number } | undefined;
+  /** The computer the window is on, when connected to this workspace. */
+  computer?: { name: string; sandboxId?: string | undefined } | undefined;
+  /**
+   * A web browser window's page address (http or https) and, when the computer
+   * is connected, the browser profiles connected from it (at most 10) by the
+   * attached browser device id browser tools use.
+   */
+  browser?:
+    | {
+        url: string;
+        profiles?: { deviceId: string; name: string }[] | undefined;
+      }
+    | undefined;
+};
+
 export type FileAsset = {
+  /** "personal" is Only me: only its owner can open it. */
   scope?: "workspace" | "personal" | undefined;
+  /** The person who alone can share the file or limit it to themselves. */
+  ownerSubjectId?: string | null | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -7485,7 +7927,14 @@ export type FileAsset = {
   objectKey: string;
   createdAt: string;
   updatedAt: string;
+  /** Present on upload, publish and sharing results: who can open the file. */
+  access?: FileAccess | undefined;
+  /** A screenshot sent as an app-shot: the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
+
+export type UpdateFileVisibilityRequest = { visibility: "private" | "workspace" };
+export type UpdateFileVisibilityResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
@@ -7516,7 +7965,9 @@ export type RetainedOutputUnavailableReason =
   | "quota_exceeded"
   | "invalid_content"
   | "oversized"
-  | "unsupported";
+  | "unsupported"
+  /** The file exists but is Only me for someone else. */
+  | "private";
 
 export type RetainedArtifactReference = {
   available: true;
@@ -7740,6 +8191,8 @@ export type CreateFileUploadRequest = {
   contentType: string;
   sizeBytes: number;
   sha256?: string | undefined;
+  /** The upload is an app-shot (images only). */
+  appShot?: AppShotCapture | undefined;
 };
 
 export type CreateFileUploadResponse = {
@@ -7751,6 +8204,8 @@ export type CreateFileUploadResponse = {
   requiredHeaders: Record<string, string>;
   expiresAt: string;
   maxSizeBytes: number;
+  /** Who will be able to open the file once uploaded. */
+  access?: FileAccess | undefined;
 };
 
 export type CompleteFileUploadResponse = {
@@ -7773,6 +8228,8 @@ export type UploadFileInput = {
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** The upload is an app-shot (images only): the window it shows and what it said. */
+  appShot?: AppShotCapture | undefined;
 };
 
 // --- Documents -------------------------------------------------------------------
@@ -9024,7 +9481,7 @@ export type GitHubInstallationBinding = {
   lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
-  /** OpenGeni-owned entry point for changing the installation's repository allowlist. */
+  /** Opengeni-owned entry point for changing the installation's repository allowlist. */
   configureUrl: string | null;
   createdAt: string;
   updatedAt: string;
@@ -9138,7 +9595,22 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   remainingMicros: number;
   /** Also pays for dictation and live voice, like general credits (signup credits). */
   coversVoice?: boolean | undefined;
+  /** Monthly scoped allowance; allocated before other promotions. */
+  planCredit?: boolean | undefined;
 };
+
+export type {
+  BillingPlanBalance,
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "@opengeni/contracts";
+import type { BillingPlanBalance } from "@opengeni/contracts";
 
 export type BillingBalance = {
   accountId: string;
@@ -9147,6 +9619,7 @@ export type BillingBalance = {
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
+  plan?: BillingPlanBalance | null | undefined;
 };
 
 export const KNOWN_USAGE_EVENT_TYPES = [
@@ -9631,7 +10104,8 @@ export type MachineKind =
   | "cloudflare"
   | "vercel"
   | "selfhosted"
-  | "opensandbox";
+  | "opensandbox"
+  | "compute";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";
@@ -9640,6 +10114,7 @@ export type MachineConnectionAuthority = {
   leaseExpiresAt: string | null;
   duplicateRunnerDeniedCount: number;
   duplicateRunnerDeniedAt: string | null;
+  authenticationError?: "credentials_expired" | null | undefined;
 };
 
 export type MachineRuntimeCapabilities = {
@@ -9683,6 +10158,7 @@ export type MachineUpdateState = {
   targetVersion: string;
   expectedBinarySha256: string | null;
   errorCode: string | null;
+  blockers?: Array<{ kind: string; count: number }> | undefined;
   retryable: boolean;
   rolledBack: boolean;
   requestedAt: string;
@@ -9867,10 +10343,19 @@ export type MachineView = {
 
 /** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox
  *  pointer (null activeSandboxId == the session's own group box is active). */
+export type SessionMachineAccess = {
+  sandboxId: string;
+  machineName: string;
+  ownerName: string | null;
+  isOwner: boolean;
+  queuedTurnBlocked: boolean;
+};
+
 export type MachinesResponse = {
   activeSandboxId: string | null;
   activeEpoch: number;
   machines: MachineView[];
+  sessionMachineAccess?: SessionMachineAccess | null | undefined;
 };
 
 /** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled
@@ -9930,6 +10415,8 @@ export type SwapActiveSandboxResponse = {
     | "unsupported_backend_context"
     | "transient_establishment"
     | "concurrent_swap"
+    | "personal_machine_permission_required"
+    | "personal_machine_not_permitted"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

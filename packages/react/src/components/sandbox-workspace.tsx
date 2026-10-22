@@ -62,6 +62,7 @@ import type { SandboxFilesProps } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
+import { useOpenGeniText } from "../messages/runtime";
 
 const LazySandboxFiles = lazy(() =>
   import("./sandbox-files")
@@ -72,12 +73,15 @@ const LazySandboxFiles = lazy(() =>
 );
 
 function FilesLoadFailed() {
+  const t = useOpenGeniText();
   return (
     <CenteredState tone="danger" icon={<TriangleAlertIcon className="size-5" aria-hidden />}>
-      <p className="text-og-sm font-medium text-og-fg">Files could not be loaded.</p>
+      <p className="text-og-sm font-medium text-og-fg">
+        {t("sandboxWorkspace.filesCouldNotBeLoaded")}
+      </p>
       <DockActionButton onClick={() => window.location.reload()}>
         <RefreshCwIcon className="size-3" aria-hidden />
-        Reload
+        {t("sandboxWorkspace.reload")}
       </DockActionButton>
     </CenteredState>
   );
@@ -148,13 +152,16 @@ function sourceDrivenDefaultTab(
 }
 
 function WorkbenchSurfaceLoading({ name }: { name: "Files" | "Browser" | "Desktop" }) {
+  const t = useOpenGeniText();
   return (
     <CenteredState
       icon={
         <LoaderCircleIcon className="size-5 animate-spin motion-reduce:animate-none" aria-hidden />
       }
     >
-      <p className="text-og-sm font-medium text-og-fg">Opening {name}</p>
+      <p className="text-og-sm font-medium text-og-fg">
+        {t("sandboxWorkspace.openingName", { name })}
+      </p>
     </CenteredState>
   );
 }
@@ -378,6 +385,7 @@ function emptyWarmIntents(sessionId: string): SessionWarmIntents {
 export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
 ): UseSandboxWorkspaceTabsResult {
+  const t = useOpenGeniText();
   const { client, workspaceId, workspaceInteractionEvent } = useOpenGeni(options);
   const {
     sessionId,
@@ -421,14 +429,16 @@ export function useSandboxWorkspaceTabs(
         ...(placement ? { placement } : {}),
       });
       if (response.operation.state !== "completed" || response.session.lifecycle !== "active") {
-        throw new Error(response.operation.error?.message ?? "The desktop could not be opened.");
+        throw new Error(
+          response.operation.error?.message ?? t("sandboxWorkspace.theDesktopCouldNotBe"),
+        );
       }
       return {
         id: response.session.id,
         placement: response.session.placement,
       };
     },
-    [client, sessionId, workspaceId],
+    [client, sessionId, workspaceId, t],
   );
   const workspaceDataEnabled = changesEnabled || filesEnabled;
   const machineSurfaceEnabled = workspaceDataEnabled || terminalEnabled || desktopEnabled;
@@ -522,10 +532,19 @@ export function useSandboxWorkspaceTabs(
     (capabilities?.Terminal.ptyCapable ?? false) &&
     capabilities?.Terminal.transport === "sse-events" &&
     capabilities?.Terminal.reason === null;
+  // The terminal reads its own history (PTY and agent command output) the
+  // first time its tab shows in a visible dock, and keeps it for the session.
+  const terminalShown =
+    terminalOn && workspaceVisible && resolvedActiveTab === WORKBENCH_TAB_TERMINAL;
+  const [terminalOpenedSession, setTerminalOpenedSession] = useState<string | null>(null);
+  useEffect(() => {
+    if (terminalShown) setTerminalOpenedSession(sessionId);
+  }, [terminalShown, sessionId]);
   const terminal = useSandboxTerminal(sessionId, {
     events: terminalEnabled ? events : [],
     interactive: terminalEnabled && ptyCapable,
     liveness,
+    history: terminalShown || terminalOpenedSession === sessionId,
   });
   // Lazy provisioning (#315) creates the box mid-turn on the first sandbox tool
   // call, emitting sandbox.provision started→completed/failed on the live stream.
@@ -602,7 +621,7 @@ export function useSandboxWorkspaceTabs(
     onMutationError: (error, op) =>
       onNotify?.({
         kind: "error",
-        message: `Could not ${op}: ${error.message}`,
+        message: t("sandboxWorkspace.couldNotOpMessage", { op, message: error.message }),
       }),
   });
   const [storedChangesComparison, setStoredChangesComparison] = useState<{
@@ -740,7 +759,7 @@ export function useSandboxWorkspaceTabs(
     if (changesEnabled)
       list.push({
         id: WORKBENCH_TAB_CHANGES,
-        label: "Changes",
+        label: t("sandboxWorkspace.changes"),
         icon: <GitCompareArrowsIcon />,
         badge: dirtyCount > 0 ? <DirtyBadge count={dirtyCount} /> : undefined,
         content: (
@@ -774,7 +793,7 @@ export function useSandboxWorkspaceTabs(
     if (filesEnabled)
       list.push({
         id: WORKBENCH_TAB_FILES,
-        label: "Files",
+        label: t("sandboxWorkspace.files"),
         icon: <FileCode2Icon />,
         content: (
           <FilesTabBody
@@ -798,11 +817,9 @@ export function useSandboxWorkspaceTabs(
             workspaceError={
               caps.error ??
               (caps.viewerCapReached
-                ? new Error(
-                    "The live workspace viewer limit has been reached. Close another viewer and retry.",
-                  )
+                ? new Error(t("sandboxWorkspace.theLiveWorkspaceViewerLimit"))
                 : filesWarmRequested && caps.state === "on-demand" && !fileSystemOn
-                  ? new Error("This machine does not currently expose a live file system.")
+                  ? new Error(t("sandboxWorkspace.thisMachineDoesNotCurrently"))
                   : null)
             }
             onWakeWorkspace={() => {
@@ -835,7 +852,7 @@ export function useSandboxWorkspaceTabs(
     if (terminalOn) {
       list.push({
         id: WORKBENCH_TAB_TERMINAL,
-        label: "Terminal",
+        label: t("sandboxWorkspace.terminal"),
         icon: <SquareTerminalIcon />,
         content: (
           <div className="h-full bg-og-bg p-1">
@@ -861,7 +878,7 @@ export function useSandboxWorkspaceTabs(
     if (browserEnabled) {
       list.push({
         id: WORKBENCH_TAB_BROWSER,
-        label: "Browser",
+        label: t("sandboxWorkspace.browser"),
         icon: <Globe2Icon />,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
@@ -899,7 +916,7 @@ export function useSandboxWorkspaceTabs(
     if (desktopEnabled) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
-        label: "Desktop",
+        label: t("sandboxWorkspace.desktop"),
         icon: <MonitorIcon />,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Desktop" />}>
@@ -976,6 +993,7 @@ export function useSandboxWorkspaceTabs(
     filesWarmRequested,
     requestWarmIntent,
     createLinkedComputer,
+    t,
   ]);
 
   return {
@@ -1030,7 +1048,7 @@ export type SandboxWorkspaceProps = ClientOverride & {
   openFileRequest?:
     | {
         path: string;
-        line?: number | null;
+        line?: number | null | undefined;
         requestId: number;
       }
     | null
@@ -1297,10 +1315,12 @@ function chipDotClass(state: MachineChip["state"]): string {
  * not belong in a transient popover above the workspace tabs.
  */
 function MachineStateChip({ chip }: { chip: MachineChip }) {
+  const t = useOpenGeniText();
   return (
     <div
       role="status"
-      aria-label={`Machine: ${chip.label}`}
+      aria-label={t("sandboxWorkspace.machineLabel", { label: chip.label })}
+      title={chip.label}
       className="inline-flex min-h-7 min-w-0 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       <span
@@ -1339,14 +1359,15 @@ function ChangesTabBody({
   comparison: SandboxGitComparison;
   onComparisonChange: (comparison: SandboxGitComparison) => void;
 } & Parameters<typeof ChangesTabContent>[0]) {
+  const t = useOpenGeniText();
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-1 border-b border-og-border bg-og-surface-1 px-2 py-1.5">
         {(
           [
-            ["branch", "Branch"],
-            ["working", "Uncommitted"],
-            ["staged", "Staged"],
+            ["branch", t("sandboxWorkspace.branch")],
+            ["working", t("sandboxWorkspace.uncommitted")],
+            ["staged", t("sandboxWorkspace.staged")],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -1401,6 +1422,7 @@ function ChangesTabContent({
   onWake: () => void;
   onOpenFile?: ((path: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const diff = git.diff;
 
   if (diff.length > 0) {
@@ -1416,8 +1438,8 @@ function ChangesTabContent({
             <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
             <span className="min-w-0 flex-1">
               {git.source === "capture"
-                ? "Live changes are temporarily unavailable. Showing the latest captured revision."
-                : "Live refresh failed. Showing the last loaded changes."}
+                ? t("sandboxWorkspace.liveChangesAreTemporarilyUnavailable")
+                : t("sandboxWorkspace.liveRefreshFailedShowingThe")}
             </span>
             <button
               type="button"
@@ -1429,7 +1451,7 @@ function ChangesTabContent({
                 className={cn("size-3", git.loading && "animate-spin motion-reduce:animate-none")}
                 aria-hidden
               />
-              Retry
+              {t("sandboxWorkspace.retry")}
             </button>
           </div>
         ) : null}
@@ -1449,13 +1471,15 @@ function ChangesTabContent({
   if (capabilitiesError && !captureAvailable) {
     return (
       <CenteredState icon={<TriangleAlertIcon className="size-5" aria-hidden />} tone="danger">
-        <p className="text-og-sm font-medium text-og-fg">Sandbox unavailable</p>
+        <p className="text-og-sm font-medium text-og-fg">
+          {t("sandboxWorkspace.sandboxUnavailable")}
+        </p>
         <p data-contrast-audited className="text-og-sm leading-5 text-og-fg-muted">
-          {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
+          {capabilitiesError.message || t("sandboxWorkspace.couldnTReachTheSandbox")}
         </p>
         <DockActionButton onClick={onRetry}>
           <RefreshCwIcon className="size-3" />
-          Retry
+          {t("sandboxWorkspace.retry")}
         </DockActionButton>
       </CenteredState>
     );
@@ -1475,9 +1499,11 @@ function ChangesTabContent({
           />
         }
       >
-        <p className="text-og-sm font-medium text-og-fg">Connecting workspace</p>
+        <p className="text-og-sm font-medium text-og-fg">
+          {t("sandboxWorkspace.connectingWorkspace")}
+        </p>
         <p className="text-og-sm leading-5 text-og-fg-subtle">
-          Looking for the latest files and changes…
+          {t("sandboxWorkspace.lookingForTheLatestFiles")}
         </p>
       </CenteredState>
     );
@@ -1503,26 +1529,26 @@ function ChangesTabContent({
       >
         <p className="text-og-sm font-medium text-og-fg">
           {workspaceWaking
-            ? "Waking workspace"
+            ? t("sandboxWorkspace.wakingWorkspace")
             : previewUnavailable
-              ? "Saved changes preview is unavailable"
-              : "Workspace is resting"}
+              ? t("sandboxWorkspace.savedChangesPreviewIsUnavailable")
+              : t("sandboxWorkspace.workspaceIsResting")}
         </p>
         <p className="text-og-sm leading-5 text-og-fg-subtle">
           {workspaceWaking
-            ? "Connecting to the live working tree…"
+            ? t("sandboxWorkspace.connectingToTheLiveWorking")
             : previewUnavailable
-              ? "Open the live workspace to view current changes."
+              ? t("sandboxWorkspace.openTheLiveWorkspaceTo")
               : comparison === "branch"
-                ? "Wake the sandbox to compare this branch with the remote default branch."
+                ? t("sandboxWorkspace.wakeTheSandboxToCompare")
                 : comparison === "staged"
-                  ? "Wake the sandbox to inspect staged changes."
-                  : "No captured revision is available yet. Wake the sandbox to inspect uncommitted changes."}
+                  ? t("sandboxWorkspace.wakeTheSandboxToInspect")
+                  : t("sandboxWorkspace.noCapturedRevisionIsAvailable")}
         </p>
         {!workspaceWaking ? (
           <DockActionButton onClick={onWake}>
             <CpuIcon className="size-3" />
-            Open live workspace
+            {t("sandboxWorkspace.openLiveWorkspace")}
           </DockActionButton>
         ) : null}
       </CenteredState>
@@ -1539,8 +1565,12 @@ function ChangesTabContent({
           />
         }
       >
-        <p className="text-og-sm font-medium text-og-fg">Loading workspace</p>
-        <p className="text-og-sm leading-5 text-og-fg-subtle">Reading the current working tree…</p>
+        <p className="text-og-sm font-medium text-og-fg">
+          {t("sandboxWorkspace.loadingWorkspace")}
+        </p>
+        <p className="text-og-sm leading-5 text-og-fg-subtle">
+          {t("sandboxWorkspace.readingTheCurrentWorkingTree")}
+        </p>
       </CenteredState>
     );
   }
@@ -1549,17 +1579,17 @@ function ChangesTabContent({
     <CenteredState icon={<CircleCheckIcon className="size-5" aria-hidden />} tone="success">
       <p className="text-og-sm font-medium text-og-fg">
         {comparison === "branch"
-          ? "No branch changes"
+          ? t("sandboxWorkspace.noBranchChanges")
           : comparison === "staged"
-            ? "No staged changes"
-            : "No uncommitted changes"}
+            ? t("sandboxWorkspace.noStagedChanges")
+            : t("sandboxWorkspace.noUncommittedChanges")}
       </p>
       <p className="text-og-sm leading-5 text-og-fg-subtle">
         {comparison === "branch"
-          ? "This branch matches the remote default branch."
+          ? t("sandboxWorkspace.thisBranchMatchesTheRemote")
           : comparison === "staged"
-            ? "Stage files to review the next commit here."
-            : "Local edits not yet committed will appear here."}
+            ? t("sandboxWorkspace.stageFilesToReviewThe")
+            : t("sandboxWorkspace.localEditsNotYetCommitted")}
       </p>
     </CenteredState>
   );

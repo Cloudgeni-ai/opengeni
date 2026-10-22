@@ -1,4 +1,7 @@
-import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  type ConnectionMetadata,
+} from "@opengeni/contracts";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -68,7 +71,14 @@ export async function getWorkspaceConnectionModelRestrictions(
    * no legacy Claude pool or v1 snapshot is read and these are used.
    */
   claudeCoreRestrictions?: ClaudeCoreModelRestrictions,
+  /**
+   * An already authorized public-workspace metadata read from this invocation.
+   * Its owner still observes the original failure; unavailable metadata keeps
+   * the independent scoped read and its original error behavior.
+   */
+  workspaceConnections?: Promise<readonly ConnectionMetadata[] | undefined>,
 ): Promise<ConnectionModelRestrictions> {
+  const sharedMetadata = workspaceConnections?.catch(() => undefined);
   const union = (rows: Array<{ allowedModelIds?: string[] | null }>) =>
     rows.some((row) => row.allowedModelIds == null)
       ? null
@@ -86,6 +96,8 @@ export async function getWorkspaceConnectionModelRestrictions(
     "organization-gateway/": [],
     "organization-openrouter/": [],
     "organization-opper/": [],
+    "organization-openai/": [],
+    "organization-azure-openai/": [],
     "organization-anthropic/": [],
     "organization-claude-subscription/": claudeCoreRestrictions
       ? copied(claudeCoreRestrictions["organization-claude-subscription/"])
@@ -98,8 +110,9 @@ export async function getWorkspaceConnectionModelRestrictions(
     }>(
       tx,
       sql`
-      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' WHEN 'opper' THEN 'organization-opper/' ELSE 'organization-openrouter/' END AS prefix,
-        allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active' AND provider_kind <> 'claude_subscription'
+      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' WHEN 'opper' THEN 'organization-opper/' WHEN 'openai' THEN 'organization-openai/' WHEN 'azure_openai' THEN 'organization-azure-openai/' WHEN 'openrouter' THEN 'organization-openrouter/' END AS prefix,
+        allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active'
+        AND provider_kind IN ('vercel_gateway', 'openrouter', 'anthropic', 'opper', 'openai', 'azure_openai')
       UNION ALL
       SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' WHEN 'opper' THEN 'workspace-opper/' ELSE 'workspace-openrouter/' END,
         allowed_model_ids FROM (
@@ -114,7 +127,12 @@ export async function getWorkspaceConnectionModelRestrictions(
     );
     for (const row of rows) restrictions[row.prefix] = row.allowedModelIds;
   });
-  for (const connection of await listDirectModelConnections(db, workspaceId, subjectId)) {
+  const metadata = await sharedMetadata;
+  const directConnections =
+    metadata === undefined
+      ? await listDirectModelConnections(db, workspaceId, subjectId)
+      : metadata.filter((connection) => connection.workspaceId === workspaceId);
+  for (const connection of directConnections) {
     const spec = directModelConnectionSpec(connection);
     if (spec) restrictions[`${spec.providerId}/`] = [spec.modelId];
   }
@@ -170,10 +188,12 @@ export async function assertModelConnectionAllowsTurn(
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||
     model.startsWith("organization-opper/") ||
+    model.startsWith("organization-openai/") ||
+    model.startsWith("organization-azure-openai/") ||
     model.startsWith("organization-anthropic/")
   ) {
     query = sql`SELECT allowed_model_ids AS models FROM organization_model_provider_connections
-      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : model.startsWith("organization-opper/") ? "opper" : "openrouter"} AND status = 'active'`;
+      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : model.startsWith("organization-opper/") ? "opper" : model.startsWith("organization-openai/") ? "openai" : model.startsWith("organization-azure-openai/") ? "azure_openai" : "openrouter"} AND status = 'active'`;
   } else if (
     model.startsWith("workspace-gateway/") ||
     model.startsWith("workspace-openrouter/") ||

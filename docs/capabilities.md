@@ -2,11 +2,14 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, Skill, API Integration, and Integration Facet mutations
+Capability, Plugin, API Integration, and Integration Facet mutations
 require the narrow `capabilities:manage` permission. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
+Workspace Skill authoring, review, install, import and removal instead require
+`documents:manage`, which ordinary Members hold: workspace Skills are shared
+team content.
 
 The catalog merges:
 
@@ -19,6 +22,13 @@ The catalog merges:
 Native Opengeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Sandbox Environments, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
 
 Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
+
+1Password is a built-in connection, not an imported registry row. It appears in
+the default Connections list and agent search even before an account is connected.
+Its catalog and chat setup actions open Secrets, where a person enters a service
+account token, selects ownership, and chooses vaults and their access modes.
+Chat setup opens in a new tab to preserve the conversation. It never uses generic
+MCP enablement; catalog imports and production data repairs are not required.
 
 ## Runtime Behavior
 
@@ -684,7 +694,7 @@ enabled strip carries only `mcp`/`api` rows, so its one remove affordance is
 
 The Connectors search and kind filters are scoped to Connectors. The catalog is
 narrowed to `kind: "mcp"` and `kind: "api"` items once
-(`isConnectorCatalogItem` in `apps/web/src/lib/capabilities.ts`) before the
+(`isConnectorCatalogItem` in `packages/react/src/app/lib/capabilities.tsx`) before the
 Featured, Enabled, Browse, and count projections are derived, so no Skill,
 or Plugin row can appear in any of them and the chip counts describe what
 that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly

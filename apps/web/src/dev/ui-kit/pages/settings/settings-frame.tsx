@@ -25,14 +25,14 @@ import {
 } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
-import { cn } from "@/lib/utils";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { chats, organization, organizationRoles, type Person } from "../../fixtures";
 import type { SectionKey } from "../../sections/registry";

@@ -1,7 +1,10 @@
 import { SubscriptionAccountPoolRows, subscriptionListedCount } from "./subscription-account-rows";
 import { SubscriptionAccountPage } from "./subscription-account-detail";
 import type { SuperGrokAccount } from "@opengeni/sdk";
-import { SubscriptionAccountRow, SubscriptionRotationSettingRows } from "./subscription-account-ui";
+import {
+  SubscriptionAccountRow,
+  SubscriptionRotationSettingRows,
+} from "@/components/models/subscription-account-ui";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -12,7 +15,7 @@ import {
   ModelsFormPage,
   ProviderTile,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import {
   SuperGrokDeviceCodePanel,
@@ -20,12 +23,13 @@ import {
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { FieldStack } from "@/components/ui/field";
-import { ListRow } from "@/components/ui/list-row";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { managesSubscriptionAccount } from "./use-subscription-account-pool";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { FieldStack } from "@opengeni/react/ui/field";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageMeterGroup, UsageReadout } from "@opengeni/react/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /* ----------------------------------------------------------------------------
@@ -54,9 +58,10 @@ function needsReconnect(account: SuperGrokAccount): boolean {
 
 export function planOf(account: SuperGrokAccount): string {
   const plan = account.plan ?? account.quota?.subscriptionTier;
-  return plan
-    ? `SuperGrok ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`
-    : "SuperGrok plan";
+  if (!plan) return "SuperGrok plan";
+  // The tier may already carry the product name ("SuperGrok", "SuperGrok Heavy").
+  const tier = plan.replace(/^super\s*grok[\s_-]*/i, "").trim();
+  return tier ? `SuperGrok ${tier.charAt(0).toLocaleUpperCase()}${tier.slice(1)}` : "SuperGrok";
 }
 
 export function percentLeft(account: SuperGrokAccount): number | null {
@@ -64,9 +69,9 @@ export function percentLeft(account: SuperGrokAccount): number | null {
   return typeof used === "number" ? Math.max(0, Math.min(100, Math.round(100 - used))) : null;
 }
 
-function accountStatus(account: SuperGrokAccount): "connected" | "paused" | "needs_reconnect" {
+function accountStatus(account: SuperGrokAccount): "connected" | "disabled" | "needs_reconnect" {
   if (needsReconnect(account)) return "needs_reconnect";
-  if (!account.allocatorEnabled) return "paused";
+  if (!account.allocatorEnabled) return "disabled";
   return "connected";
 }
 
@@ -92,7 +97,8 @@ export function superGrokListedCount(
 }
 /** Who a SuperGrok account is for, in the one tag its row and page carry. */
 function scopeOf(grok: SuperGrokSubscriptions, account: SuperGrokAccount, places: SuperGrokPlaces) {
-  if (grok.inherited || grok.organizationId) return places.scope.organization;
+  if (grok.inherited || grok.organizationId || account.scope === "organization")
+    return places.scope.organization;
   return account.scope === "user" ? places.scope.user : places.scope.workspace;
 }
 
@@ -172,7 +178,7 @@ export function SuperGrokRow({
   account: SuperGrokAccount;
   places: SuperGrokPlaces;
   /** Overrides the tag, for an organization account whose "Available in" is known. */
-  scopeLabel?: string | undefined;
+  scopeLabel?: ReactNode;
   onOpen: () => void;
 }) {
   const primary = grok.accounts.length > 1 && account.id === grok.activeAccountId;
@@ -186,15 +192,13 @@ export function SuperGrokRow({
       primary={primary}
       meta={[scopeLabel ?? scopeOf(grok, account, places), planOf(account)]}
       cells={{
-        usage: needsReconnect(account) ? null : status === "paused" ? (
-          <StatusBadge status="paused" variant="dot" />
+        usage: needsReconnect(account) ? null : status === "disabled" ? (
+          <StatusBadge status="disabled" variant="dot" />
         ) : (
           <UsageReadout
             percent={left}
             window="this period"
-            {...(account.quota?.periodEnd
-              ? { resetsLabel: formatReset(account.quota.periodEnd) }
-              : {})}
+            {...(account.quota?.periodEnd ? { resets: [{ at: account.quota.periodEnd }] } : {})}
           />
         ),
       }}
@@ -282,7 +286,7 @@ export function SuperGrokAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={Boolean(grok.organizationId)}
-      canManage={grok.canManageAccounts}
+      canManage={account ? managesSubscriptionAccount(grok, account) : grok.canManageAccounts}
       name={account ? superGrokAccountName(account) : "this account"}
       onClose={onClose}
     />

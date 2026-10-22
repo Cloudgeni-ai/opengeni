@@ -8,7 +8,7 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { requestBodyValidationHttpError } from "../src/http/request-body";
 import {
   registerUsageAllowanceRoutes,
@@ -826,7 +826,7 @@ describe("allowance HTTP contract", () => {
     ] as const)
       expect(
         workspaceActorContextExempt(method, `/v1/workspaces/external/host/customer${suffix}`),
-      ).toBe(true);
+      ).toBe(false);
     expect(workspaceActorContextExempt("POST", "/v1/workspaces/external/host/customer/usage")).toBe(
       false,
     );

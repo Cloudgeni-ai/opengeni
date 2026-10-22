@@ -113,6 +113,9 @@ provider route. On a subscription the title stays on the same account:
   credential.
 - Other turns use the configured title model as before.
 
+The title call's `agent.model.usage` event records `purpose: "session-title"`,
+so readers can tell it from the turn's own (`main`) calls.
+
 ## Code map
 
 | Concern | Source |

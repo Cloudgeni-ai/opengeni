@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline, type TimelineGroup } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 let sequence = 0;
 
@@ -68,7 +71,7 @@ function kinds(groups: TimelineGroup[]): string[] {
 }
 
 function fold(events: SessionEvent[]): TimelineGroup[] {
-  return groupTimeline(buildTimeline(events), { foldExchanges: true });
+  return groupTimeline(englishText, buildTimeline(englishText, events), { foldExchanges: true });
 }
 
 /**
@@ -254,14 +257,17 @@ describe("readable per-turn grouping", () => {
       "Second progress",
       "Final response",
     ]);
+    // The declared answer already streams below the row, where it stays once
+    // the turn settles: the answer being read never hops past the work row.
     expect(kinds(streaming)).toEqual([
       "agent-message",
       "agent-message",
-      "agent-message",
       "activity",
+      "agent-message",
     ]);
     const settled = fold([...live, final, event("turn.completed", {})]);
     expect(visibleProse(settled)).toEqual(["Final response"]);
+    expect(kinds(settled)).toEqual(["activity", "agent-message"]);
     const work = workRows(settled)[0]!;
     expect(work.kind === "activity" && kinds(work.work!.details)).toEqual([
       "agent-message",
@@ -425,7 +431,8 @@ describe("readable per-turn grouping", () => {
     expect(
       kinds(
         groupTimeline(
-          buildTimeline([
+          englishText,
+          buildTimeline(englishText, [
             x.prompt,
             ...x.first,
             x.result,

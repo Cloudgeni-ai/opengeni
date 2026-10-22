@@ -19,14 +19,18 @@ import {
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 
 import type { GoogleDriveKnowledgeSourceDialogProps } from "@/components/capabilities/google-drive-knowledge-source-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ErrorMessage } from "@/components/ui/error-message";
+import { Badge } from "@opengeni/react/ui/badge";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import {
   Dialog,
   DialogContent,
@@ -34,17 +38,17 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/dialog";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { Select } from "@opengeni/react/ui/select";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type {
   ApiIntegrationInstallationSummary,
   IntegrationFacetBindingSummary,
   IntegrationFacetDefinitionSummary,
   IntegrationInstanceFacetsResponse,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 type FacetEntry = IntegrationInstanceFacetsResponse["facets"][number];
 type FormValue = string | boolean;

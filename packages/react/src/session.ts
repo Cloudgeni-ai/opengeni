@@ -30,7 +30,14 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {
   NewConversationController,
@@ -59,6 +66,7 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
   InitialComposerDraft,
@@ -133,12 +141,41 @@ export type {
   ReasoningItem,
   SandboxItem,
   SessionStatusItem,
+  SessionUsageLimitStop,
   TimelineGroup,
   TimelineItem,
   TurnOutcome,
   ToolCallItem,
+  ToolOutputPreview,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
+  TimelineAnnotationSourceDescriptor,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,
 } from "./timeline/types";
+
+// Why a message can't start (an admission block, or a chat on somebody else's
+// personal machine) and the allowed ways forward, for any renderer. Styled web
+// surfaces live in `@opengeni/react/session-ui` (`SessionStartNotice`).
+export { useSessionStart } from "./hooks/use-session-start";
+export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
+export {
+  admissionControlNeedsRefresh,
+  admissionRecheckControl,
+  currentSessionMachineAccess,
+  isMachineComputeSelectable,
+  personalMachineCopy,
+  recheckSessionAdmission,
+  savedMessageMachineChoices,
+  sessionAdmissionCopy,
+  sessionAdmissionMachineChangedCopy,
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionReason,
+} from "./session-admission-model";
+export type {
+  PersonalMachineCopy,
+  SessionAdmissionCopy,
+  SessionAdmissionReason,
+} from "./session-admission-model";

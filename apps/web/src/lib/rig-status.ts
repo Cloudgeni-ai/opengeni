@@ -2,8 +2,8 @@
 // (`setup_append`, `definition_edit`, `proposed`, `verifying`, ...); this is the
 // single boundary that translates them into sentence-case labels and maps them
 // onto the shared StatusDot tone language. No rig surface renders a raw slug.
-import type { StatusTone } from "@/components/ui/status-dot";
-import type { RigChange, RigChangeKind, RigVersion } from "@/types";
+import type { StatusTone } from "@opengeni/react/ui/status-dot";
+import type { RigChange, RigChangeKind, RigVersion } from "@opengeni/react/app/types";
 
 /** Did this change's verification run pass? (The `passed` flag rides the
  *  open-ended verification record written by rig CI.) */

@@ -1,3 +1,4 @@
+export { isConnectedMachineOutcomeUnknownOutput } from "./connected-machine-output";
 export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
   AvailableOpenGeniSlackBots,
@@ -8,6 +9,82 @@ export type {
   ToolActionReview,
   ToolReviewDetailsPage,
   ToolReviewStatus,
+} from "@opengeni/contracts";
+export type {
+  SiteDataAccessMode,
+  SiteDataCollectionDefinitionRequest,
+  SiteDataCollectionResponse,
+  SiteDataDescribeResponse,
+  SiteDataErrorCode,
+  SiteDataFileListResponse,
+  SiteDataFileResponse,
+  SiteDataFileScope,
+  SiteDataFileUrlResponse,
+  SiteDataFilter,
+  SiteDataImportRequest,
+  SiteDataImportResponse,
+  SiteDataLimitsResponse,
+  SiteDataQueryRequest,
+  SiteDataQueryResponse,
+  SiteDataRecordResponse,
+  SiteDataSort,
+  SiteDataWriteOperation,
+  SiteDataWriteRequest,
+  SiteDataWriteResponse,
+  SiteDataWriteResultResponse,
+} from "@opengeni/contracts";
+export type {
+  SiteSqlDescribeResponse,
+  SiteSqlErrorCode,
+  SiteSqlExportFormat,
+  SiteSqlImportRequest,
+  SiteSqlImportResponse,
+  SiteSqlInspectResponse,
+  SiteSqlLimits,
+  SiteSqlMigrateResponse,
+  SiteSqlMigrationRequest,
+  SiteSqlMigrationResponse,
+  SiteSqlParams,
+  SiteSqlQueryAudience,
+  SiteSqlQueryDefinitionRequest,
+  SiteSqlQueryResponse,
+  SiteSqlResetRequest,
+  SiteSqlResetResponse,
+  SiteSqlRow,
+  SiteSqlRunRequest,
+  SiteSqlRunResponse,
+  SiteSqlSettingsRequest,
+  SiteSqlStatementRequest,
+  SiteSqlUsageResponse,
+  SiteSqlValue,
+} from "@opengeni/contracts";
+export type {
+  SiteAbuseCategory,
+  SiteAbuseReport,
+  SiteAccessMode,
+  SiteAuthAuthorizeRequest,
+  SiteAuthAuthorizeResponse,
+  SiteEmbeddedAgent,
+  SiteEmbeddedAgentChanges,
+  SiteHostnameAvailability,
+  SiteHostnameAvailabilityProblem,
+  SiteLimitProfile,
+  SiteLimitProfileKind,
+  SiteLimits,
+  SitePlatformBillingMode,
+  SitePlatformBrakeState,
+  SitePlatformMeter,
+  SitePlatformMeterUsage,
+  SitePlatformUsage,
+  SitePublication,
+  SitePublicationStatus,
+  SitePublishWarning,
+  SitePublishWarningFix,
+  SiteTakedownRequest,
+  SiteViewAs,
+  SiteViewer,
+  SiteViewerCapabilities,
+  UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 export {
   toolReviewAction,
@@ -36,6 +113,7 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 export type { Chats } from "./chats";
 export type { ServiceContext } from "./embedding-client";
 export {
@@ -124,6 +202,17 @@ export {
   turnCompletedWithEmptyFinalReply,
 } from "@opengeni/contracts/session-final-reply";
 export type { EmptyFinalReplyCompletion } from "@opengeni/contracts/session-final-reply";
+export {
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
+  SESSION_EVENT_CONTENT_STEP_TYPES,
+  SESSION_EVENT_CONVERSATION_FILTER_HEADER,
+  SESSION_EVENT_CONVERSATION_FILTER_VERSION,
+  SESSION_EVENT_PRESENTED_TOOL_LEAVES,
+  SESSION_EVENT_STEP_TYPES,
+  isPresentedSessionToolName,
+  isSessionModelResponsePhase,
+} from "@opengeni/contracts/session-history";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
 export type {
   PluginDiscoveryItem,
@@ -144,6 +233,7 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
+export type { OfficeWorkbook, OfficeWorkbookTicket } from "./types";
 export type {
   ModelConnectionAccessKind,
   ModelConnectionAccessPolicy,
@@ -168,6 +258,7 @@ export type {
   FetchLike,
   FetchResponse,
   GetSessionOptions,
+  InteractionSessionListOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
@@ -182,7 +273,9 @@ export {
   OPENGENI_SITE_BRIDGE_READY,
   OPENGENI_SITE_BRIDGE_REQUEST,
   OPENGENI_SITE_BRIDGE_RESPONSE,
+  OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD,
   OPENGENI_SITE_BRIDGE_VERSION,
+  OPENGENI_SITE_BRIDGE_VIEWER_METHOD,
   OpenGeniSiteBridgeError,
   createOpenGeniSiteClient,
   isOpenGeniSiteBridgeCancelMessage,
@@ -198,8 +291,11 @@ export type {
   OpenGeniSiteBridgeResponseMessage,
   OpenGeniSiteClient,
   OpenGeniSiteClientOptions,
+  OpenGeniSiteSignInResult,
   OpenGeniSiteToolCatalog,
   OpenGeniSiteToolCallRequest,
+  OpenGeniSiteViewer,
+  OpenGeniSiteCapabilities,
   OpenGeniSiteWorkspaceTools,
 } from "./site";
 export type {
@@ -241,6 +337,8 @@ export {
   OpenGeniApiError,
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
+  OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
@@ -379,9 +477,14 @@ export type {
 export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
+  createRealtimeWebsocketTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
 } from "./gateway-realtime-transport";
-export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
+export {
+  isSessionRealtimeModel,
+  projectSessionRealtimeLifecycle,
+  SESSION_REALTIME_MODELS,
+} from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
 // Provider-neutral Browser/Computer resource client + bounded frame protocol.
 export * from "./interaction";
@@ -419,11 +522,13 @@ export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-
 export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
 export type {
   WorkspaceLiveEvent,
+  WorkspaceSessionListEvent,
   WorkspaceLiveStreamOptions,
   WorkspaceLiveStreamTransport,
 } from "./workspace-live-stream";
 export type {
   CreateWorkspaceArtifactRequest,
+  DuplicateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
@@ -658,6 +763,15 @@ export type {
   AgentToolCallOutputPayload,
   ApiKey,
   BillingBalance,
+  BillingPlanBalance,
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
   PromotionalCreditScope,
   PromotionalCreditBalance,
   BillingEntitlementsResponse,
@@ -754,6 +868,10 @@ export type {
   GatewayRealtimeConnectRequest,
   GatewayRealtimeConnectResponse,
   GatewayRealtimeInitialItem,
+  RealtimeWebsocketProtocol,
+  SessionRealtimeWebsocketInitialItem,
+  SessionRealtimeWebsocketRequest,
+  SessionRealtimeWebsocketResponse,
   EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
@@ -788,8 +906,11 @@ export type {
   WorkspaceOpperCustomModelsResponse,
   CreateWorkspaceOpperCustomModelRequest,
   DeleteWorkspaceOpperCustomModelRequest,
+  OrganizationModelCatalogProviderKind,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  SubscriptionUsagePool,
+  SubscriptionUsagePoolsResponse,
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -831,6 +952,8 @@ export type {
   GrantSessionAdminAccessRequest,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
+  RealtimeTurnEagerness,
+  RealtimeVoiceSettings,
   CodexAccount,
   CodexPlanExcludedModel,
   CodexAccountOverview,
@@ -959,6 +1082,7 @@ export type {
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   CreateDocumentBaseRequest,
+  AppShotCapture,
   CreateFileUploadRequest,
   CreateFileUploadResponse,
   CreateGitHubAppManifestRequest,
@@ -993,7 +1117,10 @@ export type {
   Entitlements,
   EntitlementValue,
   EntitlementsMode,
+  FileAccess,
   FileAsset,
+  UpdateFileVisibilityRequest,
+  UpdateFileVisibilityResponse,
   FileListRequest,
   FileListResponse,
   HumanInputAnswer,
@@ -1171,6 +1298,8 @@ export type {
   Session,
   SessionAdmissionBlock,
   SessionBackgroundCommand,
+  WorkspaceBackgroundCommand,
+  WorkspaceBackgroundCommandListResponse,
   SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,
@@ -1198,7 +1327,9 @@ export type {
   SessionQueueSnapshot,
   SessionControlResponse,
   SessionRetryRequest,
+  SandboxCheckpointSelection,
   SandboxRecoverySelection,
+  SandboxRecoveryTarget,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
   SandboxRecoveryResponse,
@@ -1266,6 +1397,7 @@ export type {
   SessionEventReadMode,
   SessionEventResultMode,
   SessionEventSemanticClass,
+  SessionEventToolOutputPreview,
   SessionEventType,
   SessionGoal,
   SessionGoalRevision,
@@ -1512,6 +1644,7 @@ export type {
   UpdateMachineOperationPolicyRequest,
   MachineView,
   MachinesResponse,
+  SessionMachineAccess,
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,

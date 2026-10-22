@@ -5,16 +5,14 @@ import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID } from "@opengeni/core";
 import { Client as TemporalClient, Connection as TemporalConnection } from "@temporalio/client";
+import { freePort, startTestServices, type TestServices } from "@opengeni/testing/compose";
 import {
-  freePort,
   startE2eWorkerTopology,
   startProcess,
-  startTestServices,
   type StartedE2eWorkerTopology,
   type StartedProcess,
-  type TestServices,
   waitFor,
-} from "@opengeni/testing";
+} from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 

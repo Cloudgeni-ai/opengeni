@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import type { BundledSkillId } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   createDb,
@@ -87,7 +87,7 @@ describe("bundled Skill selection real PostgreSQL create identity", () => {
     expect(retry.created).toBe(false);
     expect(retry.session.id).toBe(first.session.id);
     expect(retry.session.bundledSkillIds).toEqual([]);
-    for (const bundledSkillIds of [undefined, ["builtin:opengeni-sites"] as const]) {
+    for (const bundledSkillIds of [undefined, ["builtin:sites"] as const]) {
       await expect(
         createSessionWithIdempotencyKeyResult(client.db, {
           ...request,
@@ -106,7 +106,7 @@ describe("bundled Skill selection real PostgreSQL create identity", () => {
       const request = {
         ...(await input()),
         ...(selection === "none" ? { bundledSkillIds: [] } : {}),
-        metadata: { keep: "ordinary metadata", [reservedKey]: ["builtin:opengeni-sites"] },
+        metadata: { keep: "ordinary metadata", [reservedKey]: ["builtin:sites"] },
       };
       const result = await createSessionWithIdempotencyKeyResult(client.db, request);
       if (result.denied) throw new Error("Unexpected admission denial");
@@ -139,9 +139,9 @@ describe("bundled Skill selection real PostgreSQL create identity", () => {
     // lacks. Reading it must narrow the selection, never fail the row mapping.
     const request = {
       ...(await input()),
-      bundledSkillIds: ["builtin:opengeni-sites" as const, "builtin:opengeni-documents" as const],
+      bundledSkillIds: ["builtin:sites" as const, "builtin:documents" as const],
     };
-    const known: BundledSkillId[] = ["builtin:opengeni-documents", "builtin:opengeni-sites"];
+    const known: BundledSkillId[] = ["builtin:documents", "builtin:sites"];
     const created = await createSessionWithIdempotencyKeyResult(client.db, request);
     if (created.denied) throw new Error("Unexpected admission denial");
     const sessionId = created.session.id;
@@ -152,7 +152,7 @@ describe("bundled Skill selection real PostgreSQL create identity", () => {
     expect(replay.session.bundledSkillIds).toEqual(known);
     await shared!.admin`UPDATE sessions
       SET metadata = jsonb_set(metadata, ${[reservedKey]}::text[],
-        '["builtin:not-in-this-build", "builtin:opengeni-documents", "builtin:opengeni-sites"]'::jsonb)
+        '["builtin:not-in-this-build", "builtin:documents", "builtin:sites"]'::jsonb)
       WHERE id=${sessionId}`;
     const session = await getSession(client.db, request.workspaceId, sessionId);
     expect(session!.bundledSkillIds).toEqual(known);

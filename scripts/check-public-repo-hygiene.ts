@@ -69,13 +69,18 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
 > = {
   // Upstream affine matrix field names in the generated desktop schema.
   "packages/contracts/src/cua-desktop-tools.gen.json": {
-    bytes: 208_598,
-    sha256: "c767b4329424e7e5ae2cbcf91901742263c0a44f2ac9bf97cac21b37d3737cf3",
+    bytes: 221_517,
+    sha256: "084a6ec460286603438552bf3064b74d6a707579b18ff9f5b9eeae48097509e9",
     offsets: "all",
   },
   "packages/contracts/src/cua-desktop-tools.linux.gen.json": {
-    bytes: 218_339,
-    sha256: "afc3b9b479b35c05f89736a36a965feceb217bd0944d8709605c0228ef129ed0",
+    bytes: 226_780,
+    sha256: "e3473c595e4bbfb3c33ceb610a2f8b9ad07d97db5066497aa47db3d587e0f88c",
+    offsets: "all",
+  },
+  "packages/contracts/src/cua-desktop-tools.windows.gen.json": {
+    bytes: 226_208,
+    sha256: "9366eef711e512307eaaba1ef8260b459126c5c999fb3250ccfffea03df814a4",
     offsets: "all",
   },
   "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {

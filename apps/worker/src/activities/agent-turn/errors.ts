@@ -1,6 +1,7 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -12,6 +13,7 @@ import {
   isSessionEventPersistenceError,
   DatabaseTransactionError,
   SandboxLeaseTransitionError,
+  KnowledgeLearningScopeChangedError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
@@ -22,6 +24,8 @@ import {
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
+  isMcpServiceUnavailableError,
+  isFirstPartyMcpSetupUnavailableError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -56,7 +60,10 @@ import {
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
-import { RetainedAttachmentTransportLimitError } from "../run-input";
+import {
+  RetainedAttachmentTransportLimitError,
+  RetainedAttachmentUnavailableError,
+} from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CODEX_USAGE_LIMIT_ERROR_TYPE,
@@ -75,7 +82,6 @@ import {
 import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
 import {
   CodexIncludedUsageExhaustedError,
-  CodexIncludedUsageUnknownError,
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
@@ -113,12 +119,18 @@ import {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+  FIRST_PARTY_MCP_SETUP_RETRY_MS,
+  MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
+  windowedRecoveryPolicy,
 } from "./provider-recovery-policy";
 export {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
 } from "./provider-recovery-policy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
@@ -126,10 +138,9 @@ export {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
-export function providerRecoveryLimit(failureCode: unknown): number {
-  return failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
-    ? MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES
-    : MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+export function providerRecoveryLimit(failureCode: unknown): number | undefined {
+  if (failureCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE) return undefined;
+  return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
 }
 /**
  * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
@@ -143,6 +154,21 @@ export function providerRecoveryJitterMs(delayMs: number, sample: number): numbe
   return Math.floor(Math.min(5_000, delayMs * 0.2) * bounded);
 }
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
+export const RETAINED_ATTACHMENT_UNAVAILABLE_CODE = "retained_attachment_unavailable";
+
+function findRetainedAttachmentUnavailableError(
+  error: unknown,
+): RetainedAttachmentUnavailableError | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof RetainedAttachmentUnavailableError) return current;
+    if (seen.has(current)) break;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
 
 export class PostCompactionContinuationEmptyError extends Error {
   readonly code = POST_COMPACTION_CONTINUATION_EMPTY_CODE;
@@ -176,7 +202,19 @@ export function providerRecoveryResult(input: {
   now?: number;
 }): ProviderRecoveryResult {
   const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
+  const window = windowedRecoveryPolicy(input.failureCode);
   const limit = providerRecoveryLimit(input.failureCode);
+  if (limit === undefined) {
+    return {
+      status: "recovering",
+      continueDelayMs: Math.max(
+        FIRST_PARTY_MCP_SETUP_RETRY_MS,
+        Number.isFinite(input.retryAfterMs) && (input.retryAfterMs ?? 0) > 0
+          ? Math.ceil(input.retryAfterMs!)
+          : 0,
+      ),
+    };
+  }
   const exhausted = (
     reason: "deadline" | "retry_limit" | "invalid_clock",
   ): Extract<ProviderRecoveryResult, { status: "exhausted" }> => ({
@@ -186,7 +224,7 @@ export function providerRecoveryResult(input: {
     providerRecoveryExhaustedReason: reason,
   });
   if (input.attemptNumber > limit) {
-    if (overload) return exhausted("retry_limit");
+    if (window) return exhausted("retry_limit");
     return {
       status: "exhausted",
       providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
@@ -195,7 +233,7 @@ export function providerRecoveryResult(input: {
   }
   const now = input.now ?? Date.now();
   const startedAt = input.recoveryStartedAt ?? (input.attemptNumber === 1 ? now : NaN);
-  if (overload && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
+  if (window && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
     return exhausted("invalid_clock");
   }
   const providerDelay =
@@ -216,24 +254,35 @@ export function providerRecoveryResult(input: {
             )
           ]!,
         )
-      : overload ||
-          input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable" ||
-          input.failureCode === "sandbox_command_start_unavailable" ||
-          input.failureCode === "mcp_transport_timeout" ||
-          input.failureCode === "mcp_transport_unavailable" ||
-          input.failureCode === "turn_execution_policy_definition_mismatch" ||
-          input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+      : input.failureCode === MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE
         ? Math.max(
             providerDelay ?? 0,
-            PROVIDER_CONNECTIVITY_BACKOFF_MS[
+            MCP_SERVICE_UNAVAILABLE_BACKOFF_MS[
               Math.min(
                 Math.max(Math.trunc(input.attemptNumber) - 1, 0),
-                PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                MCP_SERVICE_UNAVAILABLE_BACKOFF_MS.length - 1,
               )
             ]!,
           )
-        : PROVIDER_BACKPRESSURE_DELAY_MS;
+        : overload ||
+            input.failureCode === "provider_unavailable" ||
+            input.failureCode === "upstream_connectivity_unavailable" ||
+            input.failureCode === "sandbox_command_start_unavailable" ||
+            input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
+            input.failureCode === "mcp_transport_timeout" ||
+            input.failureCode === "mcp_transport_unavailable" ||
+            input.failureCode === "turn_execution_policy_definition_mismatch" ||
+            input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+          ? Math.max(
+              providerDelay ?? 0,
+              PROVIDER_CONNECTIVITY_BACKOFF_MS[
+                Math.min(
+                  Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                  PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                )
+              ]!,
+            )
+          : PROVIDER_BACKPRESSURE_DELAY_MS;
   const delayMs =
     continueDelayMs +
     (overload ||
@@ -243,7 +292,7 @@ export function providerRecoveryResult(input: {
       ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
       : 0);
   // Do not shorten Retry-After, or schedule a replacement outside the window.
-  if (overload && now + delayMs >= startedAt + PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS) {
+  if (window && now + delayMs >= startedAt + window.windowMs) {
     return exhausted("deadline");
   }
   return {
@@ -376,7 +425,7 @@ export function automaticRecoveryUnavailableFailure<
   });
   return {
     ...failure,
-    error: `${subject}. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.`,
+    error: `${subject}. This turn couldn't be retried automatically. Try again, or send a message to continue.`,
     retryable: false,
     automaticRecovery: "unavailable",
     lastRetryableError: failure.error,
@@ -740,14 +789,14 @@ function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>):
 function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
   return (
     sqlState !== null &&
-    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["57P01", "57P02", "57P03"].includes(sqlState))
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
   );
 }
 
 function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
   return (
     sqlState !== null &&
-    (sqlState.startsWith("08") || ["57P01", "57P02", "57P03"].includes(sqlState))
+    (sqlState.startsWith("08") || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
   );
 }
 
@@ -817,7 +866,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
       input.providerRecovery.providerRecoveryCount <= 0 ||
       input.providerRecovery.providerRecoveryCount >
-        providerRecoveryLimit(input.providerRecovery.failureCode) ||
+        (providerRecoveryLimit(input.providerRecovery.failureCode) ?? Infinity) ||
       !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode) ||
       !validProviderOverloadRecoveryDelay(
         input.providerRecovery.failureCode,
@@ -843,6 +892,9 @@ export function postClaimDatabaseRecoveryFailure(input: {
         }
       : {}),
   };
+  // Known usage whose receipt write failed travels with the exact attempt.
+  const sessionUsageReceipts = heldSessionUsageReceiptsForTurn(input.turnId);
+  if (sessionUsageReceipts.length > 0) detail.sessionUsageReceipts = sessionUsageReceipts;
   return ApplicationFailure.create({
     message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
     type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
@@ -937,6 +989,24 @@ export function modelPreparationFailureEventPayload(error: unknown, durationMs: 
         }
       : {}),
   };
+}
+
+/**
+ * The turn's first model request could not be dispatched until the context
+ * was compacted (proactive threshold or an operator-requested Compact). That
+ * is an expected step of preparation, not a failure: the same activity
+ * compacts and then reopens preparation for the retried request.
+ */
+export function compactionFirstPreparationEventPayload(durationMs: number) {
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: true,
+    failureCategory: "context_compaction",
+    failureStage: "context_compaction",
+    failureCode: "compaction_required",
+    retryable: true,
+  } as const;
 }
 
 /**
@@ -1202,6 +1272,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
+  // The worker's own included-usage refusal (usage exhausted or unverifiable)
+  // happens before dispatch, so the checkpoint request was never sent. It
+  // settles exactly like the same refusal on an ordinary request: recorded
+  // against the account, then the same turn re-places or waits for capacity.
+  if (findCodexCreditPolicyError(error)) return true;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
   // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
   // request recovers exactly like one on an ordinary request: failure
@@ -1354,9 +1429,38 @@ export function collectErrorStrings(value: unknown, seen = new WeakSet<object>()
  */
 export const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE =
   "unable to connect. is the computer able to access the url?";
+/** Bun's exact fetch text when an upstream drops an open connection. */
+export const STATUSLESS_UPSTREAM_SOCKET_CLOSED_MESSAGE =
+  "the socket connection was closed unexpectedly. for more information, pass `verbose: true` in the second argument to fetch()";
+const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES = new Set([
+  STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE,
+  STATUSLESS_UPSTREAM_SOCKET_CLOSED_MESSAGE,
+]);
 
 export function isExactStatuslessUpstreamConnectivityMessage(message: string): boolean {
-  return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
+  return STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES.has(message.trim().toLowerCase());
+}
+
+const TRANSIENT_TRANSPORT_CODE = /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i;
+
+/**
+ * A network fault code anywhere on the Error.cause chain. SDK and runner
+ * wrappers often keep the transport error only as `cause`, so the outermost
+ * error's own `code` is not enough.
+ */
+function transientTransportCode(error: unknown): string | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { code?: unknown; cause?: unknown };
+    if (typeof value.code === "string" && TRANSIENT_TRANSPORT_CODE.test(value.code)) {
+      return value.code;
+    }
+    current = value.cause;
+  }
+  return undefined;
 }
 
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
@@ -1425,13 +1529,7 @@ export function isTransientProviderError(error: unknown): boolean {
   if (status !== undefined && Number.isFinite(status)) {
     return status >= 500 && status < 600;
   }
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
-  if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
-    return true;
-  }
+  if (transientTransportCode(error)) return true;
   const message = error instanceof Error ? error.message : String(error);
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
@@ -1619,6 +1717,20 @@ export function providerRecoveryCode(
   error: unknown,
   failure: { code?: string; retryable?: boolean },
 ): string | undefined {
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isFirstPartyMcpSetupUnavailableError(error)
+  ) {
+    return FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
+  }
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isMcpServiceUnavailableError(error)
+  ) {
+    return MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE;
+  }
   if (failure.code !== "provider_unavailable" || !failure.retryable) return failure.code;
   const status = providerHttpStatus(error);
   let current = error;
@@ -1748,6 +1860,9 @@ function baseAgentRunFailurePayload(
   maxProviderRecoveryCount?: number;
   providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
+  if (error instanceof KnowledgeLearningScopeChangedError) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
       error: error.message,
@@ -1758,6 +1873,16 @@ function baseAgentRunFailurePayload(
   }
   if (error instanceof RetainedAttachmentTransportLimitError) {
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
+  }
+  if (findRetainedAttachmentUnavailableError(error)) {
+    // Storage may lag after a replica outage. The same turn retries with the
+    // connectivity backoff and never continues without the image's pixels.
+    return {
+      error:
+        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+      code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
+      retryable: true,
+    };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
     const databaseFailure =
@@ -1783,7 +1908,7 @@ function baseAgentRunFailurePayload(
     const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
     const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
     return {
-      error: "Opengeni encountered a database error.",
+      error: "A database error occurred.",
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
@@ -1918,7 +2043,7 @@ function baseAgentRunFailurePayload(
   if (isXaiSubscriptionHostedToolContinuationError(error)) {
     return {
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     };
@@ -1936,8 +2061,7 @@ function baseAgentRunFailurePayload(
   const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);
   if (xaiStreamTimeout) {
     return {
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: xaiStreamTimeout.responseObserved,
@@ -2018,8 +2142,8 @@ function baseAgentRunFailurePayload(
   if (codexTimeout) {
     return {
       error: codexTimeout.responseObserved
-        ? "The Codex response timed out after streaming began. Observed output was checkpointed; automatic replay is disabled because the upstream operation may still be active."
-        : "The Codex response timed out before any response was observed. Upstream acceptance is unknown, so automatic replay is disabled.",
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed."
+        : "The Codex response timed out before any response was observed.",
       code: "codex_response_timeout",
       retryable: false,
       timeoutClass: codexTimeout.timeoutClass,
@@ -2137,7 +2261,7 @@ function baseAgentRunFailurePayload(
     if (isExactStatuslessUpstreamConnectivityMessage(message)) {
       return {
         error:
-          "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+          "An upstream service could not be reached. The same turn will retry after a short delay.",
         code: "upstream_connectivity_unavailable",
         retryable: true,
       };
@@ -2154,7 +2278,7 @@ export type CodexCredentialFailure = {
    */
   kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
-  origin?: "included_usage_policy" | "usage_verification_policy";
+  origin?: "included_usage_policy";
 };
 
 export const CODEX_ALLOWANCE_FALLBACK_MS = 5 * 60 * 60_000;
@@ -2220,11 +2344,6 @@ export function codexCredentialCooldownUntil(
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
   const creditPolicy = findCodexCreditPolicyError(error);
-  if (creditPolicy instanceof CodexIncludedUsageUnknownError) {
-    // Verified pre-dispatch refusal. A short hard hold cannot authorize credit
-    // fallback and does not claim that the provider exhausted its allowance.
-    return { kind: "rate_limit", cooldownSeconds: 60, origin: "usage_verification_policy" };
-  }
   if (creditPolicy instanceof CodexIncludedUsageExhaustedError) {
     return {
       kind: "quota",

@@ -10,14 +10,11 @@
 //!
 //! # Safety posture
 //!
-//! The workspace forbids `unsafe_code`. Every backend here is built on a **safe
-//! binding crate**: Linux uses [`x11rb`] (safe X11 + the `XTEST` and `RANDR`
-//! extensions) for both capture and synthetic input, so no `unsafe` is needed.
-//! The macОS/Windows backends are compile-only structured seams that return
-//! [`PlatformError::Unsupported`] until their native (CGEvent/ScreenCaptureKit,
-//! SendInput/DXGI) code lands and is live-verified (deferred to
-//! native desktop milestone). Wiring them through safe crates (or a narrowly-scoped `allow(unsafe_code)`
-//! module) is the native desktop milestone task; the trait shape is fixed now so nothing reshapes.
+//! The workspace forbids `unsafe_code`. Linux uses [`x11rb`] (safe X11 + the
+//! `XTEST` and `RANDR` extensions) for capture and synthetic input. macOS and
+//! Windows reach their native APIs (ScreenCaptureKit/CGEvent, GDI/`SendInput`)
+//! through leaf FFI crates that confine every `unsafe` behind a safe API, so this
+//! crate keeps `unsafe_code` forbidden.
 //!
 //! # Frame encoding
 //!
@@ -35,7 +32,8 @@ use crate::error::{PlatformError, PlatformResult};
 
 #[cfg(target_os = "linux")]
 pub use crate::linux::{
-    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
+    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
 };
 
 /// A captured desktop frame: PNG-encoded image bytes plus the geometry they were
@@ -254,8 +252,8 @@ impl DesktopBackend for NoDesktop {
 /// On Linux, attempts to open the X11 display named by `$DISPLAY` (real screen or
 /// an Xvfb virtual framebuffer the caller spawned via [`crate::virtual_desktop`]);
 /// if none is reachable, falls back to [`NoDesktop`] (the host reports
-/// `display_unavailable`). On macOS/Windows, returns the structured native backend
-/// (which is `Unsupported` until native desktop milestone). Other targets get [`NoDesktop`].
+/// `display_unavailable`). On macOS/Windows, returns the native backend, which
+/// probes the signed-in session's display. Other targets get [`NoDesktop`].
 #[must_use]
 pub fn resolve_desktop() -> Box<dyn DesktopBackend> {
     #[cfg(target_os = "linux")]

@@ -1,24 +1,23 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
+  createApiKey,
   createDb,
   createRig,
   createRigVersion,
   createSession,
   getRigChange,
+  initializeSessionStartAtomically,
   listRigVersions,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const DELEGATION_SECRET = "rigs-routes-delegation-secret";
@@ -293,6 +292,15 @@ describe("rig route permission matrix", () => {
       sandboxBackend: "none",
       rigId: rig.id,
     });
+    // Creation reserves an idle shell (#4330); admitting its first turn makes it active.
+    await initializeSessionStartAtomically(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
 
     const blocked = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
     expect(blocked.status).toBe(409);
@@ -478,11 +486,20 @@ describe("rig route permission matrix", () => {
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
   });
 
-  test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {
+  test("workspace default rig setter is a settings action, validates rigId, and clears", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use", "workspace:read"]) };
-    const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage", "workspace:read"]) };
+    // Members create and edit Sandbox Environments, but the workspace default
+    // is a workspace setting.
+    const member = { authorization: await bearer(ws, "user:t", ["rigs:manage", "workspace:read"]) };
+    const manage = {
+      authorization: await bearer(ws, "user:m", [
+        "rigs:manage",
+        "workspace:read",
+        "workspace:admin",
+      ]),
+    };
     const base = `/v1/workspaces/${ws.workspaceId}`;
     const created = await app().request(`${base}/rigs`, {
       method: "POST",
@@ -497,6 +514,12 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ rigId: rig.id }),
     });
     expect(denied.status).toBe(403);
+    const memberDenied = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: member,
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(memberDenied.status).toBe(403);
 
     const invalid = await app().request(`${base}/default-rig`, {
       method: "PUT",
@@ -522,6 +545,24 @@ describe("rig route permission matrix", () => {
     });
     expect(cleared.status).toBe(200);
     expect((await cleared.json()).defaultRigId).toBeNull();
+
+    // A person-less API key keeps the rigs:manage an administrator gave it.
+    const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "compute",
+      prefix: token.slice(0, 14),
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "rigs:manage"],
+    });
+    const byKey = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(byKey.status, await byKey.clone().text()).toBe(200);
+    expect((await byKey.json()).defaultRigId).toBe(rig.id);
   });
 
   test.each(["organization", "user"] as const)(
@@ -544,6 +585,7 @@ describe("rig route permission matrix", () => {
           "rigs:manage",
           "rigs:use",
           "workspace:read",
+          "workspace:admin",
         ]),
       };
       const base = `/v1/workspaces/${target.workspaceId}`;
@@ -564,7 +606,11 @@ describe("rig route permission matrix", () => {
         const otherSubject = `user:${crypto.randomUUID()}`;
         await organizationMember([target], otherSubject);
         const otherHeaders = {
-          authorization: await bearer(target, otherSubject, ["rigs:manage", "rigs:use"]),
+          authorization: await bearer(target, otherSubject, [
+            "rigs:manage",
+            "rigs:use",
+            "workspace:admin",
+          ]),
         };
         expect(
           (await http.request(`${base}/rigs/${rig.id}`, { headers: otherHeaders })).status,
@@ -606,7 +652,12 @@ describe("rig route permission matrix", () => {
     await shared!.admin`
       update rigs set status = 'revoked', revoked_at = now() where id = ${revoked.id}`;
     const headers = {
-      authorization: await bearer(target, subjectId, ["rigs:manage", "rigs:use", "workspace:read"]),
+      authorization: await bearer(target, subjectId, [
+        "rigs:manage",
+        "rigs:use",
+        "workspace:read",
+        "workspace:admin",
+      ]),
     };
     const base = `/v1/workspaces/${target.workspaceId}`;
     const http = app();

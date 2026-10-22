@@ -1,5 +1,6 @@
 import type { ClientVoiceInputConfig, ReasoningEffort } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
+import { cachedClientConfigRead } from "../lib/client-config-read";
 
 /** The client-config fields the stock conversation and chat read. */
 export type ClientConfigFlagsSource = {
@@ -61,25 +62,6 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   realtimeVoiceOffered: false,
 };
 
-type ClientConfigFlagsInput = Awaited<ReturnType<ClientConfigFlagsSource["getClientConfig"]>>;
-
-// One read per client: the chat, its list, the new-chat composer and the
-// conversation all ask, and behind a session proxy each read is a round trip.
-const configReads = new WeakMap<object, Promise<ClientConfigFlagsInput>>();
-
-function readClientConfig(client: ClientConfigFlagsSource): Promise<ClientConfigFlagsInput> {
-  let read = configReads.get(client);
-  if (!read) {
-    read = client.getClientConfig();
-    configReads.set(client, read);
-    // A failed read is retried by the next mount rather than cached.
-    read.catch(() => {
-      if (configReads.get(client) === read) configReads.delete(client);
-    });
-  }
-  return read;
-}
-
 /** Deployment and session-proxy capabilities from the client config. */
 export function useClientConfigFlags(
   client: Partial<ClientConfigFlagsSource> | ClientConfigFlagsSource,
@@ -89,7 +71,9 @@ export function useClientConfigFlags(
     // Custom clients without a config read keep the defaults.
     if (typeof client.getClientConfig !== "function") return;
     let live = true;
-    readClientConfig(client as ClientConfigFlagsSource).then(
+    // One read per client: the chat, its list, the new-chat composer and the
+    // conversation all ask, and behind a session proxy each read is a round trip.
+    cachedClientConfigRead(client as ClientConfigFlagsSource).then(
       (config) => {
         if (live) {
           setFlags({

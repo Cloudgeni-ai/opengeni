@@ -77,7 +77,10 @@ export function registerSecretTools(
       return service;
     });
 
-  async function run(fn: (principal: AttemptPrincipal, service: VaultService) => Promise<unknown>) {
+  async function run(
+    fn: (principal: AttemptPrincipal, service: VaultService) => Promise<unknown>,
+    _mode: "read" | "write" = "read",
+  ) {
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const principal: AttemptPrincipal = {
@@ -125,7 +128,10 @@ export function registerSecretTools(
       inputSchema: SecretSaveInput.shape,
     },
     (input) =>
-      run((principal, service) => service.saveForAgent(principal, SecretSaveInput.parse(input))),
+      run(
+        (principal, service) => service.saveForAgent(principal, SecretSaveInput.parse(input)),
+        "write",
+      ),
   );
 
   if (hasLiteralPermission(grant.permissions, "secrets:read")) {
@@ -151,7 +157,10 @@ export function registerSecretTools(
       inputSchema: SecretMoveInput.shape,
     },
     (input) =>
-      run((principal, service) => service.moveForAgent(principal, SecretMoveInput.parse(input))),
+      run(
+        (principal, service) => service.moveForAgent(principal, SecretMoveInput.parse(input)),
+        "write",
+      ),
   );
 
   server.registerTool(
@@ -162,8 +171,9 @@ export function registerSecretTools(
       inputSchema: SecretDeleteInput.shape,
     },
     (input) =>
-      run((principal, service) =>
-        service.archiveForAgent(principal, SecretDeleteInput.parse(input)),
+      run(
+        (principal, service) => service.archiveForAgent(principal, SecretDeleteInput.parse(input)),
+        "write",
       ),
   );
 }

@@ -33,9 +33,12 @@
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
+//   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
+// The shared session UI renders through this app's router and API helpers.
+import "./app-host";
 import {
   Navigate,
   RouterProvider,
@@ -46,29 +49,48 @@ import {
   useParams,
   useSearch,
 } from "@tanstack/react-router";
-import { ProblemPanel } from "@/components/common";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
+import { DESKTOP_APP_RETURN_PATH } from "@opengeni/contracts";
+import { EXCEL_ADDIN_PATH } from "@/lib/excel-addin";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { routePatternFromMatches, routePatternFromRoutes } from "@/lib/client-error-reporting";
-import { RootRouteComponent, useAppContext } from "@/context";
-import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
-import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { RootRouteComponent } from "@/context";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  parseComposerLaunchSearch,
+  type ComposerLaunchSearch,
+} from "@opengeni/react/app/lib/composer-launch";
+import {
+  parseSessionSearchRoute,
+  type SessionSearchRoute,
+} from "@opengeni/react/app/lib/session-search-route";
+import {
+  artifactReturnSearch,
+  parseCheckoutOutcome,
+  type CheckoutOutcome,
+} from "@opengeni/react/app/lib/routes";
 import { parseCheckoutSessionId } from "@/lib/checkout-session-id";
-import { parseReturnTo, returnToOf, returnToSearch, type ReturnToSearch } from "@/lib/return-to";
+import {
+  parseReturnTo,
+  returnToOf,
+  returnToSearch,
+  type ReturnToSearch,
+} from "@opengeni/react/app/lib/return-to";
 import {
   parseModelsAccount,
   parseModelsView,
   workspaceModelsRedirect,
   type ModelsView,
-} from "@/lib/models-route";
+} from "@opengeni/react/app/lib/models-route";
 import {
   documentsRedirectSearch,
   parseKnowledgeSearch,
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
-import type { NativeSignInSearch } from "@/lib/native-sign-in-context";
+import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
+import { siteAuthSearch } from "@/lib/site-auth";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -81,12 +103,12 @@ import { parseSecretsIndexSearch, type SecretsIndexSearch } from "@/lib/secrets-
 import {
   workspaceSettingsSectionFromSearch,
   type WorkspaceSettingsSection,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 import {
   parseOrganizationSection,
   type LegacyOrganizationAdminSection,
   type OrganizationAdminSection as OrganizationSettingsSection,
-} from "@/lib/organization-admin";
+} from "@opengeni/react/app/lib/organization-admin";
 import {
   parseOrganizationRecordId,
   parseOrganizationView,
@@ -98,14 +120,19 @@ import {
   resolveLandingWorkspaceId,
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
-} from "@/lib/workspace-navigation-preference";
+} from "@opengeni/react/app/lib/workspace-navigation-preference";
+import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
 type OrganizationAdminSection = OrganizationSettingsSection | LegacyOrganizationAdminSection;
 
-export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
+export {
+  workspaceAgentPath,
+  workspaceSessionPath,
+  workspaceSessionsPath,
+} from "@opengeni/react/app/lib/routes";
 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
@@ -131,6 +158,14 @@ const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
 );
+const LazyExcelAddinRoute = lazyRouteComponent(
+  () => import("@/routes/excel-addin"),
+  "ExcelAddinRoute",
+);
+const LazyDesktopReturnRoute = lazyRouteComponent(
+  () => import("@/routes/desktop-return"),
+  "DesktopReturnRoute",
+);
 const LazySetupAccountRoute = lazyRouteComponent(
   () => import("@/routes/setup-account"),
   "SetupAccountRoute",
@@ -147,9 +182,17 @@ const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
   "NativeSignInRoute",
 );
+const LazySiteAuthorizeRoute = lazyRouteComponent(
+  () => import("@/routes/site-auth"),
+  "SiteAuthorizeRoute",
+);
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
+);
+const LazySubscriptionPlansPreview = lazyRouteComponent(
+  () => import("@/dev/subscription-plans-preview"),
+  "SubscriptionPlansPreview",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
@@ -170,7 +213,7 @@ const LazyScheduleFormRoute = lazyRouteComponent(
   () => import("@/routes/schedules"),
   "ScheduleFormRoute",
 );
-const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
   () => import("@/routes/playground"),
   "PlaygroundRoute",
@@ -180,7 +223,7 @@ const LazySessionDeepLinkRoute = lazyRouteComponent(
   "SessionDeepLinkRoute",
 );
 const LazySessionsIndexRoute = lazyRouteComponent(
-  () => import("@/routes/sessions-index"),
+  () => import("@opengeni/react/app/routes/sessions-index"),
   "SessionsIndexRoute",
 );
 const LazyWorkspaceSettingsRoute = lazyRouteComponent(
@@ -191,9 +234,12 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
-const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyArtifactsRoute = lazyRouteComponent(
+  () => import("@opengeni/react/app/routes/artifacts"),
+  "ArtifactsRoute",
+);
 const LazyRetainedArtifactRoute = lazyRouteComponent(
-  () => import("@/routes/retained-artifact"),
+  () => import("@opengeni/react/app/routes/retained-artifact"),
   "RetainedArtifactRoute",
 );
 const LazyIdentityLinkRoute = lazyRouteComponent(
@@ -298,6 +344,20 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+// How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
+// colleagues send this link to people who may not be signed in.
+const excelAddinRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: EXCEL_ADDIN_PATH.slice(1),
+  component: LazyExcelAddinRoute,
+});
+// Where a sign-in started in the desktop app lands in the person's browser:
+// hand them back to the app. PUBLIC, like `/reset-password`.
+const desktopReturnRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: DESKTOP_APP_RETURN_PATH.slice(1),
+  component: LazyDesktopReturnRoute,
+});
 const setupAccountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "setup-account",
@@ -332,12 +392,18 @@ const nativeSignInRoute = createRoute({
       ...text("code_challenge"),
       ...text("state"),
       ...text("device_name"),
-      ...(search.platform === "ios" || search.platform === "android"
-        ? { platform: search.platform }
-        : {}),
+      ...(isNativeAppPlatform(search.platform) ? { platform: search.platform } : {}),
     };
   },
   component: NativeSignIn,
+});
+// Where a published Site's gateway sends a viewer to sign in: confirm the
+// Site and account, then hand the gateway a one-time code (code + PKCE).
+const siteAuthorizeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "site-auth/authorize",
+  validateSearch: siteAuthSearch,
+  component: SiteAuthorize,
 });
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
@@ -351,6 +417,11 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+const subscriptionPlansPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/subscription-plans",
+  component: LazySubscriptionPlansPreview,
 });
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
@@ -723,7 +794,14 @@ const workspaceOrganizationRoute = createRoute({
     const checkout = parseCheckoutOutcome(search);
     const checkoutSession =
       checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
-    const section = parseOrganizationSection(search.section);
+    const requestedSection = parseOrganizationSection(search.section);
+    // Connected agents moved from Developer to their own page; older links
+    // (Connect an agent, an agent's page) still land on it.
+    const section =
+      requestedSection === "developer" &&
+      (search.view === "connect-agent" || parseAgentParam(search.agent))
+        ? ("agents" as const)
+        : requestedSection;
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
     const view =
       section === "models"
@@ -734,7 +812,7 @@ const workspaceOrganizationRoute = createRoute({
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
             : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
-    const agent = section === "developer" ? parseAgentParam(search.agent) : undefined;
+    const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
     const serviceAccount =
       section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
@@ -790,13 +868,21 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   connectAgentRoute,
   resetPasswordRoute,
+  excelAddinRoute,
+  desktopReturnRoute,
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
   nativeSignInRoute,
+  siteAuthorizeRoute,
   ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
+    ? [
+        composerChromeGalleryRoute,
+        onboardingPreviewRoute,
+        subscriptionPlansPreviewRoute,
+        devSessionTimelineRoute,
+      ]
     : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
@@ -851,6 +937,15 @@ const router = createRouter({
   ...ROUTER_PENDING_OPTIONS,
   ...routerErrorOptions(() => appRoutePattern()),
 });
+installDesktopShell((path) => router.history.push(path));
+warmDesktopPages([
+  LazySessionRoute,
+  LazySessionsIndexRoute,
+  LazyInboxRoute,
+  LazyCapabilitiesRoute,
+  LazySchedulesRoute,
+  LazyArtifactsRoute,
+]);
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {
@@ -1212,11 +1307,11 @@ function Organization() {
           ? {
               ...(parseDeveloperView(view) ? { view: parseDeveloperView(view)! } : {}),
               ...(webhook ? { webhook } : {}),
-              ...(agent ? { agent } : {}),
               ...(serviceAccount ? { serviceAccount } : {}),
             }
           : undefined
       }
+      connectedAgent={page === "agents" ? agent : undefined}
       person={person}
       invitation={invitation}
       workspace={workspace}
@@ -1263,6 +1358,11 @@ function Device() {
 function NativeSignIn() {
   const search = nativeSignInRoute.useSearch();
   return <LazyNativeSignInRoute search={search} />;
+}
+
+function SiteAuthorize() {
+  const search = siteAuthorizeRoute.useSearch();
+  return <LazySiteAuthorizeRoute search={search} />;
 }
 
 function ResetPassword() {

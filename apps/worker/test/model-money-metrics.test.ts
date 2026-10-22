@@ -3,7 +3,7 @@ import { configuredModels } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import {
   modelMetricProductId,
@@ -15,6 +15,9 @@ import {
   recordModelCreditsCharged,
   recordModelResponseUsage,
 } from "../src/observability-metrics";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 // Per-model usage and money metrics: pin the series names, the bounded label
 // set, and that no account/workspace/session identifier ever becomes a label.

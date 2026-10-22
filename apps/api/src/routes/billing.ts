@@ -1,5 +1,11 @@
 import {
   BillingCheckoutStatus,
+  BillingSubscriptionCatalog,
+  BillingSubscriptionChange,
+  CancelBillingSubscriptionRequest,
+  ChangeBillingSubscriptionRequest,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -33,14 +39,19 @@ import {
   recordStripeWebhookEvent,
   upsertBillingCustomer,
 } from "@opengeni/db";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
+import { sql } from "drizzle-orm";
 import { requireAccessContext } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import { subscriptionStore } from "../billing-subscription-store";
+import { StripeSubscriptions, subscriptionWebhookEvent } from "../billing-subscriptions";
+import { serializedStripeCustomer } from "../billing-stripe-customer";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
+  registerSubscriptionRoutes(app, deps);
   app.get("/v1/billing", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
@@ -342,6 +353,11 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         return c.json({ received: true, duplicate: true });
       }
     }
+    // Retain disabled subscription deliveries, but leave them unprocessed so
+    // an operator can replay them after activation. Top-up events remain live.
+    if (subscriptionWebhookEvent(event) && !deps.settings.subscriptionPlansEnabled) {
+      return c.json({ received: true, ignored: true });
+    }
     try {
       await handleStripeWebhookEvent(deps, stripeClient(deps), event);
       await markStripeWebhookProcessed(deps.db, event.id);
@@ -351,6 +367,120 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  });
+}
+
+function requireSubscriptionsEnabled(deps: ApiRouteDeps): void {
+  if (!deps.settings.subscriptionPlansEnabled || deps.settings.billingMode !== "stripe") {
+    throw new HTTPException(404, { message: "subscription plans are not enabled" });
+  }
+}
+
+function subscriptions(deps: ApiRouteDeps, stripe = stripeClient(deps)) {
+  return new StripeSubscriptions(
+    stripe,
+    subscriptionStore(deps.db),
+    deps.settings.subscriptionPlansEnabled,
+    stripeCustomerProvider(deps),
+  );
+}
+
+function registerSubscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.get("/v1/billing/subscription/plans", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    return c.json(BillingSubscriptionCatalog.parse(await subscriptions(deps).catalog(accountId)));
+  });
+  app.post("/v1/billing/subscription/checkout", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = CreateSubscriptionCheckoutRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid subscription checkout request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
+    return c.json(
+      CreateSubscriptionCheckoutResponse.parse(
+        await subscriptions(deps, stripe).checkout({
+          ...parsed.data,
+          accountId,
+          customerId,
+          successUrl: checkoutReturnUrl(
+            deps.settings.publicBaseUrl,
+            deps.settings.webBaseUrl,
+            parsed.data.successUrl,
+            "/billing?subscription=success",
+            "successUrl",
+          ),
+          cancelUrl: checkoutReturnUrl(
+            deps.settings.publicBaseUrl,
+            deps.settings.webBaseUrl,
+            parsed.data.cancelUrl,
+            "/billing?subscription=cancelled",
+            "cancelUrl",
+          ),
+        }),
+      ),
+    );
+  });
+  const changeSubscription = (action: "upgrade" | "change") => async (c: Context) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = ChangeBillingSubscriptionRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid subscription change request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    return c.json(
+      BillingSubscriptionChange.parse(
+        await subscriptions(deps)[action]({ ...parsed.data, accountId }),
+      ),
+    );
+  };
+  app.post("/v1/billing/subscription/upgrade", changeSubscription("upgrade"));
+  app.post("/v1/billing/subscription/change", changeSubscription("change"));
+  app.post("/v1/billing/subscription/cancel", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = CancelBillingSubscriptionRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid subscription cancellation request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    return c.json(
+      BillingSubscriptionChange.parse(
+        await subscriptions(deps).cancel({ ...parsed.data, accountId }),
+      ),
+    );
+  });
+  app.post("/v1/billing/subscription/portal", async (c) => {
+    requireSubscriptionsEnabled(deps);
+    const context = await requireAccessContext(c, deps);
+    const parsed = CreateBillingPortalRequest.safeParse(await c.req.json());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid billing portal request",
+      });
+    const accountId = requireSelectedAccount(context, parsed.data.accountId, "billing:manage");
+    const stripe = stripeClient(deps);
+    const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
+    const session = await stripe.billingPortal.sessions.create(
+      stripeBillingPortalSessionCreateParams({
+        customerId,
+        publicBaseUrl: deps.settings.publicBaseUrl,
+        webBaseUrl: deps.settings.webBaseUrl,
+        returnUrl: parsed.data.returnUrl,
+      }),
+    );
+    return c.json(
+      CreateBillingPortalResponse.parse({ portalSessionId: session.id, url: session.url }),
+    );
   });
 }
 
@@ -508,6 +638,10 @@ async function handleStripeWebhookEvent(
   stripe: Stripe,
   event: Stripe.Event,
 ): Promise<void> {
+  if (subscriptionWebhookEvent(event)) {
+    await subscriptions(deps, stripe).handleEvent(event);
+    return;
+  }
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
@@ -1059,28 +1193,34 @@ async function getOrCreateStripeCustomer(
   accountId: string,
 ): Promise<string> {
   const provider = stripeCustomerProvider(deps);
-  const existing = await getBillingCustomer(deps.db, accountId, provider);
-  if (existing) {
-    return existing.providerCustomerId;
-  }
-  const account = await getManagedAccount(deps.db, accountId);
-  if (!account) {
-    throw new HTTPException(404, { message: "account not found" });
-  }
-  const customer = await stripe.customers.create({
-    name: account.name,
-    ...(looksLikeEmail(context.subjectLabel) ? { email: context.subjectLabel } : {}),
-    metadata: {
-      opengeni_account_id: accountId,
-    },
-  });
-  await upsertBillingCustomer(deps.db, {
-    accountId,
+  return await serializedStripeCustomer({
+    stripe,
     provider,
-    providerCustomerId: customer.id,
-    email: customer.email,
+    accountId,
+    ...(looksLikeEmail(context.subjectLabel) ? { email: context.subjectLabel } : {}),
+    locked: (run) =>
+      withRlsContext(deps.db, { accountId, workspaceId: null }, async (tx) => {
+        // Same account lock as credit writers. All top-up/portal/subscription
+        // callers share transactional read/create/persist under this one fence.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${accountId}))`);
+        return await run({
+          read: async () =>
+            (await getBillingCustomer(tx, accountId, provider))?.providerCustomerId ?? null,
+          account: async () => {
+            const account = await getManagedAccount(tx, accountId);
+            if (!account) throw new HTTPException(404, { message: "account not found" });
+            return account;
+          },
+          save: (customer) =>
+            upsertBillingCustomer(tx, {
+              accountId,
+              provider,
+              providerCustomerId: customer.id,
+              email: customer.email,
+            }),
+        });
+      }),
   });
-  return customer.id;
 }
 
 export function stripeCustomerProvider(

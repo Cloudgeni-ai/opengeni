@@ -64,6 +64,7 @@ export async function startPostgresFixture(
   credentials: { key: Buffer; cert: Buffer },
   transport: Transport = "sslrequest",
   dropQuery = 0,
+  resetQuery = 0,
 ) {
   const secureContext = tls.createSecureContext(credentials);
   const peers = new Set<net.Socket>();
@@ -114,7 +115,11 @@ export async function startPostgresFixture(
         pending = pending.subarray(length);
         if (kind === 81) {
           queryCount += 1;
-          if (queryCount === dropQuery) {
+          if (queryCount === resetQuery) {
+            // Reset with this query in flight: the driver sees a socket error
+            // and, only after its callers' microtasks have run, the close.
+            stream.resetAndDestroy();
+          } else if (queryCount === dropQuery) {
             // Interrupt an incomplete DataRow, not just an idle connection, so
             // the driver's parser and queued query must both recover cleanly.
             stream.write(queryResult.subarray(0, 32 * 1024), () => stream.destroy());

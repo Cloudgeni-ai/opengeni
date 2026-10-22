@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { apiContractAdmission, createApp, type AppDependencies } from "../src/app";
 
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";

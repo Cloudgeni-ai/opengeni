@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as draftPreparation from "../src/application/draft-model-preparation";
 import type { ResourceRef } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -11,12 +12,9 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { submitComposerDraftForRequest } from "../src/application/composer-submit";
 import { saveHumanComposerDraft } from "../src/application/session-commands";
 import { normalizeResources } from "../src/domain/resources";
@@ -45,6 +43,57 @@ afterAll(async () => {
 }, 180_000);
 
 describe("established-session composer drafts", () => {
+  test("only a committed composer revision schedules preparation", async () => {
+    if (!available) return;
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "test",
+      accountExternalId: suffix,
+      accountName: "Draft preparation",
+      workspaceExternalSource: "test",
+      workspaceExternalId: suffix,
+      workspaceName: "Draft preparation",
+      subjectId: `draft-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const settings = testSettings();
+    const session = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    };
+    const input = {
+      expectedRevision: 0,
+      text: "Not sent",
+      resources: [],
+      model: settings.openaiModel,
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+    };
+    const prepare = spyOn(draftPreparation, "prepareDraftModel").mockImplementation(() => {});
+    try {
+      const saved = await saveHumanComposerDraft({ db, settings }, context, input);
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(prepare).toHaveBeenCalledWith({ db, settings }, context, saved);
+      await expect(saveHumanComposerDraft({ db, settings }, context, input)).rejects.toThrow();
+      expect(prepare).toHaveBeenCalledTimes(1);
+    } finally {
+      prepare.mockRestore();
+    }
+  }, 180_000);
+
   test("validates annotation quotes against canonical same-session events", async () => {
     if (!available) return;
 
@@ -304,8 +353,8 @@ describe("established-session composer drafts", () => {
       initialMessage: "initial",
       resources: [],
       metadata: {},
-      model: "gpt-5.6-sol",
-      reasoningEffort: "medium",
+      model: "previous-model",
+      reasoningEffort: "low",
       latencyMode: "standard",
       sandboxBackend: "none",
     });
@@ -379,6 +428,9 @@ describe("established-session composer drafts", () => {
       receipt: { operationKey: clientEventId },
       turn: { resources: [hostRepository] },
     });
+    const [stored] = await shared!.admin`
+      select model, reasoning_effort as "reasoningEffort" from sessions where id = ${session.id}`;
+    expect(stored).toEqual({ model: saved.model, reasoningEffort: saved.reasoningEffort });
 
     const replay = await submitComposerDraftForRequest(
       deps,

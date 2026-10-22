@@ -1,11 +1,31 @@
 import { expect, test } from "bun:test";
-import { catalogServiceIdentity, mergeConnectionServices } from "./connection-services";
+import {
+  catalogServiceIdentity,
+  mergeConnectionServices,
+  partitionConnectionServices,
+} from "./connection-services";
+import { CapabilityCatalogItem } from "@opengeni/contracts";
 const option = (id: string, connected = false) => ({
   id,
   name: id,
   status: connected ? "Connected" : "Not connected",
   connected,
   onOpen: () => {},
+});
+test("unconnected 1Password is visible with built-in connections, not search-only community results", () => {
+  const item = CapabilityCatalogItem.parse({
+    id: "api:1password",
+    kind: "api",
+    source: "built_in",
+    name: "1Password",
+    surfaceType: "first_party_onepassword",
+    providerDomain: "1password.com",
+    runtime: { available: true },
+  });
+  const service = { id: item.id, name: item.name, options: [option(item.id)] };
+  const result = partitionConnectionServices([service], true, [], [], [item]);
+  expect(result.featuredServices).toEqual([service]);
+  expect(result.remainingServices).toEqual([]);
 });
 test("groups explicit Slack identity without conflating its accounts", () => {
   const result = mergeConnectionServices([

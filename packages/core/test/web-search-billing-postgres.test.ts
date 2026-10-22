@@ -10,11 +10,8 @@ import {
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   WEB_SEARCH_CREDITS_DISABLED_MESSAGE,
   WEB_SEARCH_DEBIT_TYPE,

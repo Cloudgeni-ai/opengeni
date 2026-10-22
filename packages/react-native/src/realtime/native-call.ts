@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 import { sessionRealtimeTransportKind } from "@opengeni/sdk/realtime";
 import type { SessionRealtimeModel } from "@opengeni/sdk";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 /** System events from the platform call service (CallKit on iOS). */
 export type NativeCallEvent =
@@ -103,6 +104,7 @@ export function useNativeRealtimeCall(options: {
   title: string;
   target?: string | null | undefined;
 }): NativeRealtimeCall {
+  const t = useOpenGeniText();
   const { realtime, call } = options;
   const [callId, setCallId] = useState<string | null>(null);
   const [ending, setEnding] = useState(false);
@@ -178,18 +180,20 @@ export function useNativeRealtimeCall(options: {
   useEffect(() => {
     if (!callIdRef.current) return;
     if (status === "error" || status === "lost_owner") {
-      setError(realtime.snapshot.error ?? "Voice disconnected.");
+      setError(realtime.snapshot.error ?? t("native.realtime.nativeCall.voiceDisconnected"));
       void finish("failed");
     } else if (status === "idle" && connectedRef.current === callIdRef.current) {
       void finish("ended");
     }
-  }, [finish, realtime.snapshot.error, status]);
+  }, [finish, realtime.snapshot.error, status, t]);
 
   const start = useCallback(async () => {
     if (callIdRef.current) return;
     const current = realtimeRef.current;
     if (!current.canStart) {
-      throw new Error(current.admissionBlocker ?? "Voice is not ready yet.");
+      throw new Error(
+        current.admissionBlocker ?? t("native.realtime.nativeCall.voiceIsNotReadyYet"),
+      );
     }
     const id = randomCallId();
     callIdRef.current = id;
@@ -212,11 +216,15 @@ export function useNativeRealtimeCall(options: {
     try {
       await current.start();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not start the call.");
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : t("native.realtime.nativeCall.couldNotStartTheCall"),
+      );
       await finish("failed");
       throw cause;
     }
-  }, [call, finish, options.target, options.title]);
+  }, [call, finish, options.target, options.title, t]);
 
   const end = useCallback(async () => {
     if (!callIdRef.current) return;

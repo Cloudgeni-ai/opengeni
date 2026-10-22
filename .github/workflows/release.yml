@@ -207,6 +207,7 @@ jobs:
 
   publish:
     name: Publish verified release
+    environment: production-release
     needs: admission
     runs-on: ubuntu-latest
     timeout-minutes: 45

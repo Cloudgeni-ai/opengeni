@@ -13,12 +13,9 @@ import {
   MANAGED_AUTH_SESSION_SET_COOKIE,
   managedAuthSha256,
 } from "@opengeni/core/managed-auth-session-sets";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
 

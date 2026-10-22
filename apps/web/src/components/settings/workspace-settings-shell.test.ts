@@ -41,7 +41,7 @@ function grant(accountId: string, name: string, role: "owner" | "admin" | "membe
   };
 }
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     resetSessionView,
     workspaces,
@@ -117,7 +117,8 @@ const {
   workspaceManagementLocation,
   workspaceSettingsSectionFromSearch,
 } = await import("./workspace-settings-shell");
-const { forgetLastSessionId, lastSessionMemoryId } = await import("@/lib/last-session-memory");
+const { forgetLastSessionId, lastSessionMemoryId } =
+  await import("@opengeni/react/app/lib/last-session-memory");
 
 const base = `/workspaces/${workspaceId}`;
 
@@ -234,6 +235,7 @@ describe("settings rail", () => {
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
+        "Connected agents",
         "Insights",
         "Billing",
         "Developer",
@@ -241,7 +243,7 @@ describe("settings rail", () => {
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 6]);
+      ).toEqual([4, 7]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
@@ -287,6 +289,8 @@ describe("settings rail", () => {
       expect(linkLabels(view.section("organization"))).toEqual([
         "Organization identity",
         "Models",
+        // Every member connects their own coding agents.
+        "Connected agents",
         "Security & data",
       ]);
       // A short list stays one group, not lone rows.

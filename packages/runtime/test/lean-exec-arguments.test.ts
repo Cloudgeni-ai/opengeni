@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   LEAN_EXEC_COMMAND_DEFAULTS,
   LEAN_EXEC_COMMAND_PARAMETERS,

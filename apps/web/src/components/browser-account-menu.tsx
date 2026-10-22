@@ -1,4 +1,5 @@
 import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { HelpMenu } from "@/components/help-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
@@ -6,7 +7,7 @@ import { CheckIcon, LogOutIcon, RefreshCwIcon, UserRoundPlusIcon, UsersIcon } fr
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -14,7 +15,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@opengeni/react/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuCheck,
@@ -27,10 +28,10 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import { AccountTrigger } from "@/components/rail/account-trigger";
-import { useRail } from "@/components/rail/rail-context";
-import { AccountUsageMenuItem } from "@/components/usage/usage-entry";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
+import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
@@ -39,8 +40,8 @@ import {
   useOrganizationInvitations,
 } from "@/components/organization-invitations";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 type ManagedAuthLoginSlot = ManagedAuthSessionSetProjection["slots"][number];
 
@@ -287,6 +288,8 @@ export function BrowserAccountMenu({
             supportEmail={context.clientConfig.supportEmail}
             onSendFeedback={onSendFeedback}
           />
+          <DesktopAppSubmenu />
+          <ExcelAddinMenuItem />
           <DropdownMenuSeparator />
           <DropdownMenuItem
             className="forced-colors:text-[CanvasText]!"

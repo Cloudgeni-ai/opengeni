@@ -106,6 +106,15 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/unstarted-queue-retirement.ts#retireUnstartedSessionQueue": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/empty-session-queue.ts#repairEmptyQueuedSessionProjection": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/archived-session-imports.ts#appendTimeline": {
     inserts: 1,
     contract: "owned_suffix",
@@ -128,7 +137,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "owned_suffix",
   },
   "packages/db/src/index.ts#reconcileSubscriptionCoreCapacityWait": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
@@ -308,6 +317,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // A person's or host's change to a root's usage limit records
+  // session.usage_limit.updated under the canonical control-share locks.
+  "packages/db/src/session-usage-limits.ts#setSessionUsageLimitInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-control.ts#cancelSessionSubtreeInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
@@ -327,6 +342,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/session-queue-commands.ts#steerQueuedTurnInTransaction": {
     inserts: 1,
     contract: "canonical",
+  },
+  // A Steer that waited for the next model step replaces an ownerless wait
+  // (approval, question or capacity) right after the worker settles it.
+  "packages/db/src/session-queue-commands.ts#resolveWaitingSteerInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
   },
   "packages/db/src/session-queue-commands.ts#submitHumanPromptInTransaction": {
     inserts: 1,
@@ -387,6 +409,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "recoverSessionOwner",
   ],
   supersedeSessionCurrentDirectionInTransaction: [
+    "resolveWaitingSteerInTransaction",
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
     "submitHumanPromptInTransaction",
@@ -480,6 +503,8 @@ const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
 const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
 // Links finished preview sessions to their seeded schedule runs (metadata only).
 const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
+// A benchmark that seeds a disposable local fixture database, never a deployment.
+const DISPOSABLE_BENCH_SESSION_WRITER = "scripts/bench-insights-hourly.ts";
 const ARCHIVED_IMPORT_PATH = "packages/db/src/archived-session-imports.ts";
 const ARCHIVED_IMPORT_WRITER = `${ARCHIVED_IMPORT_PATH}#appendTimeline`;
 
@@ -550,6 +575,20 @@ function expectDevSeedGuards(source: string): void {
   expect(source).toContain("if (!LOOPBACK.has(url.hostname)) fail(");
   expect(source).toContain("if (url.port !== runtime.OPENGENI_API_PORT)");
   expect(source).toContain("set_config('opengeni.session_activity_gate_state', 'finalized', true)");
+}
+
+/** The benchmark may only seed a shared-harness database on a loopback test cluster. */
+function expectDisposableBenchGuards(source: string): void {
+  expect(source).toContain(
+    'const allocated = await acquireSharedTestDatabase("insights-hourly-lab");',
+  );
+  expect(source).toContain(
+    '!["localhost", "127.0.0.1", "::1"].includes(new URL(process.env.OPENGENI_TEST_PG_URL).hostname)',
+  );
+  expect(source).toContain(
+    'throw new Error("This benchmark only accepts a local disposable test cluster");',
+  );
+  expect(source).not.toContain("OPENGENI_DATABASE_URL");
 }
 
 function productionTypeScriptFiles(): string[] {
@@ -1354,8 +1393,10 @@ describe("session_events writer inventory", () => {
     );
     expect(writers.size).toBeGreaterThanOrEqual(61);
     const database = readFileSync(join(repoRoot, "packages/db/src/database.ts"), "utf8");
+    // Workspace RLS entry takes the shared session-tenancy fence in its setup
+    // statement, before the callback runs (behavior: rls-scope-round-trips).
     expect(database).toMatch(
-      /withRlsContext[\s\S]*?setRlsContext[\s\S]*?pg_advisory_xact_lock_shared[\s\S]*?const value = await fn/u,
+      /function sessionTenancyLock[\s\S]*?mode: "shared"[\s\S]*?withRlsContext[\s\S]*?sessionTenancyLock\(workspaceId\)[\s\S]*?applyRlsScope\(scoped[\s\S]*?value = await fn/u,
     );
     const migration = readFileSync(
       join(repoRoot, "packages/db/drizzle/0345_tenant_scoped_session_tenancy_fence.sql"),
@@ -1473,6 +1514,12 @@ describe("session_events writer inventory", () => {
         if (hasSessionActivityBoundary(node, source)) return;
         const enclosing = namedEnclosingFunction(node);
         if (!enclosing) {
+          if (file === DISPOSABLE_BENCH_SESSION_WRITER) {
+            // Top-level fixture seeding in a disposable benchmark database; pin
+            // its local-only guards and do not exempt any other unnamed writer.
+            expectDisposableBenchGuards(source);
+            return;
+          }
           violations.push(`${file}:${lineNumber(source, node)} unnamed session writer`);
           return;
         }

@@ -1,8 +1,11 @@
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
+  isStoredVerbatimAsLosslessJsonString,
   recordModelCallFact,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
+  type ModelCallTiming,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -37,7 +40,12 @@ import {
 } from "@opengeni/contracts";
 import { safeErrorDiagnostic } from "./errors";
 import {
+  holdSessionUsageReceipt,
+  releaseHeldSessionUsageReceiptMeteredByEvent,
+} from "./session-usage-custody";
+import {
   sanitizedModelUsageInput,
+  sessionUsageMeterAmountMicros,
   settleModelUsage,
   type ModelUsageBillingRecord,
 } from "@opengeni/core";
@@ -114,6 +122,7 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
+  mutate?: SessionEventMutation<"event">,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -130,6 +139,15 @@ export type CompactionModelUsageEventState = {
   usageCount: number;
   claimedSourceKeys: Set<string>;
 };
+
+/**
+ * Why the worker made a model call. The durable `agent.model.usage` payload
+ * records it so a reader can tell the turn's own inference (`main`, including
+ * the aggregate billing fallback) from the auxiliary context summarizer and
+ * session-title calls. Only the worker sets it, at the call site; it changes no
+ * source key, billing, credit, idempotency or metric label.
+ */
+export type ModelCallPurpose = "main" | "compaction" | "session-title";
 
 export function createModelResponseEventState(
   claimedSourceKeys: Set<string> = new Set<string>(),
@@ -239,6 +257,8 @@ export async function processModelResponseTerminalEvent(input: {
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  /** Timing of the call this terminal response completes; read once per claimed response. */
+  responseTiming?: () => ModelCallTiming | null;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -274,6 +294,7 @@ export async function processModelResponseTerminalEvent(input: {
   }
   input.state.claimedSourceKeys.add(sourceKey);
   input.state.responseCount = responseOrdinal;
+  const timing = input.responseTiming?.() ?? null;
 
   const responseUsage = terminal.usage;
 
@@ -325,6 +346,7 @@ export async function processModelResponseTerminalEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
+        purpose: "main",
         sourceKey,
         usage: responseUsage,
         normalizedUsage,
@@ -334,9 +356,11 @@ export async function processModelResponseTerminalEvent(input: {
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
+        timing,
       });
       if (authoritative && billing) {
         await recordAuthoritativeModelCallFact({
+          timing,
           db: input.db,
           observability: input.observability,
           accountId: input.accountId,
@@ -403,7 +427,7 @@ export async function processModelResponseTerminalEvent(input: {
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage;
   state: CompactionModelUsageEventState;
-  sourceKind?: "compaction" | "session-title";
+  sourceKind?: Exclude<ModelCallPurpose, "main">;
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -434,11 +458,12 @@ export async function processCompactionModelUsageEvent(input: {
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
 > {
+  const purpose = input.sourceKind ?? "compaction";
   const usageOrdinal = input.state.usageCount + 1;
   const sourceKey = modelUsageSourceKey({
     responseId: input.usage.responseId,
     dispatchId: input.dispatchId,
-    positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
+    positionalKey: `${purpose}-${usageOrdinal}`,
   });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
@@ -490,6 +515,7 @@ export async function processCompactionModelUsageEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
+        purpose,
         sourceKey,
         usage: input.usage,
         normalizedUsage,
@@ -552,6 +578,8 @@ export async function emitModelCallUsage(input: {
   provider: string;
   providerApi: ModelProviderApi;
   model: string;
+  /** Why the worker made this call; durable event and log line only, never a metric label. */
+  purpose: ModelCallPurpose;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
   normalizedUsage?: ModelCallUsageNormalization;
@@ -575,6 +603,8 @@ export async function emitModelCallUsage(input: {
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
+  /** Worker-measured call timing, stored with the event for Insights repair. */
+  timing?: ModelCallTiming | null;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -599,6 +629,7 @@ export async function emitModelCallUsage(input: {
           provider: input.provider,
           providerApi: input.providerApi,
           model: input.model,
+          purpose: input.purpose,
           sourceKey: input.sourceKey,
           ...(input.billingPath ? { billingPath: input.billingPath } : {}),
           ...(input.upstreamProvider ? { upstreamProvider: input.upstreamProvider } : {}),
@@ -612,6 +643,7 @@ export async function emitModelCallUsage(input: {
                 listByClassApprox: input.billingSnapshot.listByClassApprox ?? false,
               }
             : {}),
+          ...(input.timing ? { timing: input.timing } : {}),
           ...telemetry,
         },
       },
@@ -628,11 +660,13 @@ export async function emitModelCallUsage(input: {
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
   if (!authoritative) return false;
+  releaseReceiptMeteredByCommittedEvent(input, telemetry);
   try {
     input.observability.info("model call usage", {
       provider: input.provider,
       providerApi: input.providerApi,
       model: input.model,
+      purpose: input.purpose,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
@@ -662,6 +696,63 @@ export async function emitModelCallUsage(input: {
     // Durable event + billing already committed; metrics are best-effort only.
   }
   return true;
+}
+
+const METERED_PRICING_SOURCES = new Set(["configured_list_price", "gateway_reported"]);
+const MAX_METERED_SOURCE_KEY_BYTES = 1024;
+
+/**
+ * The committed `agent.model.usage` event metered this call's task usage in
+ * its own transaction (the database trigger applies `<turnId>:<sourceKey>`
+ * with the payload's amount; a failure would have rolled the event back).
+ * Drop a held receipt for that identity when the event carried exactly its
+ * amount, mirroring the trigger's acceptance rules conservatively: anything
+ * the trigger might value differently keeps the hold for the direct write.
+ * A source key the lossless codec stores encoded (NUL, a lone surrogate, the
+ * codec prefix) reaches the trigger as a different string and identity, so it
+ * never counts as metered here: the hold stays and fails closed.
+ */
+function releaseReceiptMeteredByCommittedEvent(
+  input: {
+    sessionId: string;
+    turnId: string;
+    sourceKey: string;
+    billingSnapshot?: Pick<
+      ModelUsageBillingRecord,
+      "estimatedProviderCostMicros" | "pricingSource"
+    >;
+  },
+  telemetry: { inputTokens?: number | null; outputTokens?: number | null },
+): void {
+  if (!isStoredVerbatimAsLosslessJsonString(input.sourceKey)) return;
+  const keyBytes = new TextEncoder().encode(input.sourceKey).byteLength;
+  if (keyBytes < 1 || keyBytes > MAX_METERED_SOURCE_KEY_BYTES) return;
+  const estimated = input.billingSnapshot?.estimatedProviderCostMicros ?? null;
+  const pricingSource = input.billingSnapshot?.pricingSource ?? null;
+  const tokens = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value < 1e15
+      ? value
+      : null;
+  const eventAmount =
+    estimated !== null &&
+    Number.isSafeInteger(estimated) &&
+    estimated >= 0 &&
+    estimated < 1e16 &&
+    pricingSource !== null &&
+    METERED_PRICING_SOURCES.has(pricingSource)
+      ? sessionUsageMeterAmountMicros({
+          estimatedProviderCostMicros: estimated,
+          gatewayReported: pricingSource === "gateway_reported",
+          inputTokens: tokens(telemetry.inputTokens),
+          outputTokens: tokens(telemetry.outputTokens),
+        })
+      : null;
+  releaseHeldSessionUsageReceiptMeteredByEvent({
+    sessionId: input.sessionId,
+    sourceId: `${input.turnId}:${input.sourceKey}`,
+    amountMicros: eventAmount,
+    pricingSource: eventAmount === null ? null : pricingSource,
+  });
 }
 
 /**
@@ -707,6 +798,8 @@ export async function recordModelUsageAndDebitCredits(
     observability?: ActivityServices["observability"];
     /** Configured provider id for metric labels; never billing authority. */
     metricProvider?: string;
+    /** The caller retains the response durably and retries the whole transaction. */
+    atomicReceiptPersistence?: boolean;
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
@@ -725,6 +818,16 @@ export async function recordModelUsageAndDebitCredits(
     sessionId: input.sessionId,
     turnId: input.turnId,
     turnAttemptId: input.turnAttemptId,
+    usageLimitMetrics: input.observability ?? null,
+    // A failed task-usage receipt write never loses or replays the response:
+    // custody writes it before the next model request or turn completion.
+    receiptCustody: input.atomicReceiptPersistence
+      ? null
+      : (receipt) =>
+          holdSessionUsageReceipt(
+            { accountId: input.accountId, workspaceId: input.workspaceId },
+            receipt,
+          ),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     debitMetadata: {
       sessionId: input.sessionId,
@@ -833,6 +936,7 @@ export async function recordAuthoritativeModelCallFact(input: {
   /** The shared-core subscription connection that served the call, if any. */
   subscriptionConnectionId?: string | null;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  timing?: ModelCallTiming | null;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -860,6 +964,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       totalTokens: input.billing.normalizedUsage.totalTokens,
+      timing: input.timing ?? null,
       ...(input.contextContributions !== undefined
         ? { contextContributions: input.contextContributions }
         : {}),

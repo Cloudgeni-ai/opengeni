@@ -1,3 +1,8 @@
+import { t } from "@opengeni/react/app/lib/console-text";
+import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
+import { AccountGroupHeading } from "@/components/models/subscription-account-ui";
+import { ModelsRefreshControl } from "./models-refresh-control";
+import { OrganizationCodexDetailPrefetch } from "@/components/models/use-organization-codex-overview";
 import { useClaudeSubscriptions } from "./use-claude-subscriptions";
 import {
   ClaudeAccountRows,
@@ -10,7 +15,13 @@ import {
   type OrganizationClaudePool,
 } from "./claude-subscription-models";
 import { DirectModelProviderConnections } from "@/components/direct-model-provider-connections";
-import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-connection";
+import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
+import type {
+  ModelAccountSettingValues,
+  OrganizationModelCatalogProviderKind,
+  WorkspaceModelCatalogModel,
+} from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -53,7 +64,7 @@ import {
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
 import { ModelCompactionPage } from "./model-compaction-page";
-import { SettingNavRow } from "@/components/ui/setting-row";
+import { SettingNavRow } from "@opengeni/react/ui/setting-row";
 import {
   ConnectAudienceFields,
   EVERYONE,
@@ -70,7 +81,7 @@ import {
   organizationReachLabel,
   useModelsNavigation,
   type ModelsScopeLabels,
-} from "@/components/models/models-ui";
+} from "@opengeni/react/app/components/models/models-ui";
 import {
   GATEWAYS,
   OrganizationModelsList,
@@ -106,33 +117,36 @@ import {
 import { useOrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SettingRowGroup } from "@/components/ui/setting-row";
-import { UsageReadout } from "@/components/ui/usage-meter";
-import { useAppContext } from "@/context";
-import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { billingClassForModel, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
 import {
   accountKey,
   accountKeyOf,
   connectStepOf,
   type GatewayId,
+  type WorkspaceGatewayId,
   type ModelsView,
-} from "@/lib/models-route";
+} from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
+  AccountRuleLocksPage,
   WorkspaceAccountRulesSection,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
   type WorkspaceModelAccountSettingsState,
 } from "./model-account-settings";
+import { ModelsScopePicker } from "./models-scope-picker";
 import { PersonalFallbackPreference } from "./model-account-policy-controls";
 import { compactionSummary } from "./model-compaction-page";
 
@@ -156,10 +170,12 @@ import { compactionSummary } from "./model-compaction-page";
    -------------------------------------------------------------------------- */
 
 /** The organization connection kind behind each API-key provider. */
-const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
+const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelCatalogProviderKind> = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  openai: "openai",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 };
@@ -207,6 +223,8 @@ export function useOrganizationModelAccounts({
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
     openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
     opper: useOrganizationProviderConnection(organizationGateway("opper")),
+    openai: useOrganizationProviderConnection(organizationGateway("openai")),
+    azure_openai: useOrganizationProviderConnection(organizationGateway("azure_openai")),
     anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
     claude_subscription: useOrganizationProviderConnection({
       ...organizationGateway("claude_subscription", claudeEnabled),
@@ -325,11 +343,14 @@ export function WorkspaceModelsPageBody({
     canManage: canManageConnections,
     enabled: claudeEnabled,
   });
-  const workspaceGateway = (id: GatewayId, enabled = true) => ({
+  // A shared workspace's provider key decides what every session runs on: a
+  // setting. Members connect their own accounts instead.
+  const canManageWorkspaceKeys = canManageConnections && (personal || canManageSettings);
+  const workspaceGateway = (id: WorkspaceGatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
-    canManageConnection: canManageConnections,
+    canManageConnection: canManageWorkspaceKeys,
     canManageCustomModels: canManageSettings,
     onConnectionChange: connectionChanged,
     enabled,
@@ -338,6 +359,21 @@ export function WorkspaceModelsPageBody({
     vercel: useProviderConnection(workspaceGateway("vercel")),
     openrouter: useProviderConnection(workspaceGateway("openrouter")),
     opper: useProviderConnection(workspaceGateway("opper")),
+    // OpenAI and Azure OpenAI keys are the organization's here; a workspace's
+    // own key is a direct connection (OpenAI and Azure OpenAI below). Hidden,
+    // reads nothing.
+    openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "openai",
+      enabled: false,
+    }),
+    azure_openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "azure_openai",
+      enabled: false,
+    }),
     anthropic: useProviderConnection(workspaceGateway("anthropic")),
     claude_subscription: useProviderConnection({
       ...workspaceGateway("claude_subscription", claudeEnabled),
@@ -370,16 +406,23 @@ export function WorkspaceModelsPageBody({
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
   const organizationDefaults = useOrganizationModelDefaults(organizationId, organizationAdmin);
-  const accountRules = useModelAccountSettingsOverview(
-    organizationId,
-    organizationAdmin && !workspacePage,
-  );
+  // On a workspace's page too: its rules name the default each would go back to.
+  const accountRules = useModelAccountSettingsOverview(organizationId, organizationAdmin);
   const workspaceAccountRules = useWorkspaceModelAccountSettings(
     workspaceId,
     workspacePage || !organizationAdmin,
   );
 
   const backToList = () => nav.openAccount(undefined);
+  // "Models for: [Defaults ▾]", on the Defaults (or Overview) and on each workspace's page.
+  const scopePicker = (
+    <ModelsScopePicker
+      workspaces={workspaces}
+      workspace={workspacePage ? { id: workspaceId, name: workspaceName, personal } : undefined}
+      administrator={organizationAdmin}
+      onSelect={(id) => nav.openWorkspace(id)}
+    />
+  );
   const codexPlaces: CodexPlaces = {
     personal,
     workspaceName,
@@ -550,7 +593,7 @@ export function WorkspaceModelsPageBody({
       );
     }
     return (GATEWAYS as readonly string[]).includes(provider)
-      ? gateways[provider as GatewayId].connected
+      ? canManageWorkspaceKeys && gateways[provider as GatewayId].connected
       : false;
   };
   const providerLoading = (provider: string): boolean =>
@@ -569,11 +612,15 @@ export function WorkspaceModelsPageBody({
   const reconnectAllowed = Boolean(workspaceStep && reconnectStep.current === view);
   // Anyone who can manage connections here may connect their own account on a
   // workspace's page: in their Personal workspace, or as "Only me" in a shared
-  // one. Workspace admins may also add a key for the whole workspace.
-  // Accounts for everyone in the organization stay with its owners and admins.
+  // one. A shared workspace's admins connect subscriptions and keys for
+  // everyone in that workspace: the workspace's own accounts, which the
+  // organization still owns and its owners and admins see. Accounts for
+  // everyone in the organization stay with its owners and admins.
   const memberConnects = !organizationAdmin && workspacePage && canManageConnections;
   // A member who isn't a workspace admin connects for themselves only.
   const onlyMe = memberConnects && !personal && !canManageSettings;
+  // A shared workspace's admin who isn't an organization owner or admin.
+  const workspaceAdminConnects = memberConnects && !personal && !onlyMe;
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -676,15 +723,15 @@ export function WorkspaceModelsPageBody({
     page = (
       <ConnectPickerPage
         target="workspace"
-        title={onlyMe ? "Connect your own subscription" : "Connect account"}
+        title={onlyMe ? "Connect your own subscription" : "Connect provider"}
         subtitle={
           personal
             ? "It pays for models in your Personal workspace, so only you use it."
             : onlyMe
               ? `Only work you start in ${workspaceName} uses it. Nobody else here can.`
-              : `Connect your own subscription, or a key for everyone in ${workspaceName}.`
+              : `Connect a subscription or an API key for everyone in ${workspaceName}.`
         }
-        codexAvailable={personal}
+        codexAvailable={personal || workspaceAdminConnects}
         // A Personal workspace can't hold its own SuperGrok account.
         grok={grok.unavailable || personal ? "hidden" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
@@ -702,7 +749,7 @@ export function WorkspaceModelsPageBody({
     page = (
       <ConnectPickerPage
         target="organization"
-        title="Connect account"
+        title="Connect provider"
         subtitle={`Connect it once for ${organizationName}, then choose who can use it.`}
         codexAvailable
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
@@ -750,6 +797,8 @@ export function WorkspaceModelsPageBody({
         {workspacePage &&
         personal &&
         canManageConnections &&
+        provider !== "openai" &&
+        provider !== "azure_openai" &&
         (GATEWAYS as readonly string[]).includes(provider) ? (
           // An organization key can't reach a Personal workspace, so a key for
           // your own chats here is connected for this workspace instead.
@@ -883,6 +932,10 @@ export function WorkspaceModelsPageBody({
       <p className="m-0 text-sm leading-5 text-fg-muted">
         {`Only work you start in ${workspaceName} uses it. Nobody else here can.`}
       </p>
+    ) : workspaceAdminConnects ? (
+      <p className="m-0 text-sm leading-5 text-fg-muted">
+        {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
+      </p>
     ) : undefined;
     page =
       provider === "codex" ? (
@@ -915,6 +968,15 @@ export function WorkspaceModelsPageBody({
           fields={note}
         />
       );
+  } else if (view === "account-rule-locks" && !workspacePage && organizationAdmin) {
+    page = (
+      <AccountRuleLocksPage
+        key={`account-rule-locks:${orgId}`}
+        organizationName={organizationName}
+        state={accountRules}
+        onClose={backToList}
+      />
+    );
   } else if ((view === "compaction" || view === "allowed-models") && !workspacePage) {
     // Opened from the organization's list: the defaults every workspace follows.
     page = !organizationAdmin ? (
@@ -1050,7 +1112,10 @@ export function WorkspaceModelsPageBody({
         state={orgGateways[key.id]}
         labels={labels}
         footnote={
-          organizationAdmin && canManageConnections ? (
+          organizationAdmin &&
+          canManageConnections &&
+          key.id !== "openai" &&
+          key.id !== "azure_openai" ? (
             <WorkspaceKeyFootnote
               title={orgGateways[key.id].config.title}
               workspaceName={workspaceName}
@@ -1074,35 +1139,40 @@ export function WorkspaceModelsPageBody({
     );
   } else if (!workspacePage) {
     page = (
-      <OrganizationModelsList
-        client={client}
-        organizationDefaults={organizationAdmin ? organizationDefaults : null}
-        accountRules={organizationAdmin ? accountRules : null}
-        modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
-        onEditAllowed={() => nav.openView("allowed-models")}
-        onEditCompaction={() => nav.openView("compaction")}
-        organizationName={organizationName}
-        administrator={organizationAdmin}
-        claudeEnabled={claudeEnabled}
-        labels={labels}
-        workspaces={workspaces}
-        workspacesError={workspacesError}
-        credits={credits}
-        creditsReturnLabel={organizationName}
-        anchorWorkspaceId={anchorWorkspaceId}
-        orgCodex={orgCodex}
-        orgGrok={orgGrok}
-        orgClaude={orgClaude}
-        orgGateways={orgGateways}
-        liveCodexUsage={Object.fromEntries(
-          codex.accounts
-            .filter((candidate) => candidate.source === "organization")
-            .map((candidate) => [candidate.id, codexUsageReadout(codex, candidate.id)]),
-        )}
-        onOpenAccount={(target) => nav.openAccount(target)}
-        onOpenWorkspace={(id, target) => nav.openWorkspace(id, target)}
-        onConnect={() => nav.openView("connect")}
-      />
+      <>
+        {scopePicker}
+        <OrganizationModelsList
+          client={client}
+          organizationId={organizationId}
+          organizationDefaults={organizationAdmin ? organizationDefaults : null}
+          accountRules={organizationAdmin ? accountRules : null}
+          modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
+          onEditAllowed={() => nav.openView("allowed-models")}
+          onEditCompaction={() => nav.openView("compaction")}
+          onEditAccountRuleLocks={() => nav.openView("account-rule-locks")}
+          organizationName={organizationName}
+          administrator={organizationAdmin}
+          claudeEnabled={claudeEnabled}
+          labels={labels}
+          workspaces={workspaces}
+          workspacesError={workspacesError}
+          credits={credits}
+          creditsReturnLabel={organizationName}
+          anchorWorkspaceId={anchorWorkspaceId}
+          orgCodex={orgCodex}
+          orgGrok={orgGrok}
+          orgClaude={orgClaude}
+          orgGateways={orgGateways}
+          liveCodexUsage={Object.fromEntries(
+            codex.accounts
+              .filter((candidate) => candidate.source === "organization")
+              .map((candidate) => [candidate.id, codexUsageReadout(codex, candidate.id)]),
+          )}
+          onOpenAccount={(target) => nav.openAccount(target)}
+          onOpenWorkspace={(id, target) => nav.openWorkspace(id, target)}
+          onConnect={() => nav.openView("connect")}
+        />
+      </>
     );
   } else {
     const listedGateways = GATEWAYS.filter((id) => providerListed(gateways[id]));
@@ -1128,6 +1198,8 @@ export function WorkspaceModelsPageBody({
       listedOrgGateways.length,
       readyOrgKeys.length,
     ];
+    const subscriptionsListed = listed[1]! + listed[2]! + listed[3]!;
+    const payAsYouGoListed = listed[0]! + listed[4]! + listed[5]! + listed[6]!;
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
@@ -1138,17 +1210,14 @@ export function WorkspaceModelsPageBody({
     // Owners and admins add accounts for everyone; others their own (see memberConnects).
     const canConnect = organizationAdmin || memberConnects;
     page = (
-      <DetailPage
-        back={{ label: "Models", onClick: () => nav.openWorkspace(undefined) }}
-        className={FLUSH_DETAIL_PAGE_CLASS}
-      >
-        <DetailPageHeader
-          title={personal ? "Your Personal workspace" : workspaceName}
-          meta={personal ? ["Only you"] : undefined}
-        />
-        <div className="mt-8 min-w-0">
+      <div className="min-w-0">
+        {/* The picker's tinted header says plainly this is one workspace, not the defaults. */}
+        {scopePicker}
+        <div className="min-w-0">
           <ModelsList
             workspaceId={workspaceId}
+            workspaceName={personal ? "your Personal workspace" : workspaceName}
+            defaultRules={accountRules.overview?.organization.values}
             accountRules={workspaceAccountRules}
             organizationId={organizationId}
             personal={personal}
@@ -1185,12 +1254,15 @@ export function WorkspaceModelsPageBody({
               />
             }
             accounts={
-              <RowList label="Accounts" columns={ACCOUNT_COLUMNS} flush>
-                <OpenGeniCreditsRow
-                  credits={credits}
-                  workspaceId={anchorWorkspaceId}
-                  workspaceName={workspaceName}
-                  scope={labels.everyone}
+              <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
+                {subscriptionsListed > 0 ? (
+                  <AccountGroupHeading>Subscriptions</AccountGroupHeading>
+                ) : null}
+                <ConnectedSubscriptionUsagePool
+                  client={client}
+                  scope="workspace"
+                  id={workspaceId}
+                  provider="codex"
                 />
                 <CodexAccountRows
                   codex={codex}
@@ -1198,7 +1270,14 @@ export function WorkspaceModelsPageBody({
                   organization={codexPool}
                   onKeptForPeople={reportKeptForPeople}
                 />
-                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {claudeEnabled ? (
+                  <ConnectedSubscriptionUsagePool
+                    client={client}
+                    scope="workspace"
+                    id={workspaceId}
+                    provider="claude"
+                  />
+                ) : null}
                 {claudeEnabled ? (
                   <ClaudeAccountRows
                     claude={claude}
@@ -1206,6 +1285,16 @@ export function WorkspaceModelsPageBody({
                     organization={claudePool}
                   />
                 ) : null}
+                <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
+                {payAsYouGoListed > 0 ? (
+                  <AccountGroupHeading>Pay as you go</AccountGroupHeading>
+                ) : null}
+                <OpenGeniCreditsRow
+                  credits={credits}
+                  workspaceId={anchorWorkspaceId}
+                  workspaceName={workspaceName}
+                  scope={labels.everyone}
+                />
                 {listedOrgGateways.map((id) => (
                   <OrganizationGatewayRow
                     key={`org:${id}`}
@@ -1252,6 +1341,30 @@ export function WorkspaceModelsPageBody({
                     />
                   </Section>
                 ) : null}
+                {workspacePage ? (
+                  <Section
+                    title="Voice"
+                    description={
+                      personal
+                        ? "Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens."
+                        : `How each voice model sounds and listens in this workspace. Anything not set here follows ${possessive(organizationName)} defaults.`
+                    }
+                  >
+                    <ElevenLabsVoiceConnection
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      canManage={canManageWorkspaceKeys}
+                      organizationName={organizationName}
+                      onConnectionChange={connectionChanged}
+                    />
+                    <RealtimeVoiceSettingsRows
+                      key={`voice-settings:${workspaceId}`}
+                      workspaceId={workspaceId}
+                      canManage={canManageSettings}
+                      organizationName={organizationName}
+                    />
+                  </Section>
+                ) : null}
                 {codexSectionVisible(codex) ? (
                   <Section title="Codex">
                     <CodexSettingRows
@@ -1295,13 +1408,24 @@ export function WorkspaceModelsPageBody({
             }
           />
         </div>
-      </DetailPage>
+      </div>
     );
   }
 
   return (
     <ModelsListLabelProvider value={listLabel}>
       <div ref={root} className="min-w-0">
+        {!key && !view ? <ModelsRefreshControl client={client} /> : null}
+        {organizationAdmin
+          ? orgCodex.accounts.map((candidate) => (
+              <OrganizationCodexDetailPrefetch
+                key={candidate.id}
+                client={client}
+                organizationId={orgId}
+                account={candidate}
+              />
+            ))
+          : null}
         {page}
       </div>
     </ModelsListLabelProvider>
@@ -1315,9 +1439,14 @@ function codexUsageReadout(
 ): ReactNode {
   const live = codex.usageMap[accountId];
   if (!live?.usage) return null;
-  const weekly = codexUsageReadings(live.usage, codex.now)[0]!;
+  const readings = codexUsageReadings(live.usage, codex.now);
+  const weekly = readings[0]!;
   return weekly.percent === null ? null : (
-    <UsageReadout percent={weekly.percent} window="this week" resetsLabel={weekly.resetsLabel} />
+    <UsageReadout
+      percent={weekly.percent}
+      window="this week"
+      resets={usageResets(readings, weekly.label)}
+    />
   );
 }
 
@@ -1421,7 +1550,7 @@ export function payerPhrase(
     case "organization_byok":
       return `billed to ${organization} ${model.providerLabel} key`;
     default:
-      return `paid by ${payerSummaryForModel(model).toLocaleLowerCase()}`;
+      return `paid by ${payerSummaryForModel(t, model).toLocaleLowerCase()}`;
   }
 }
 
@@ -1432,12 +1561,12 @@ function workspaceOwnedNote(
 ): string {
   const here = where.personal ? "your Personal workspace" : where.workspaceName;
   if (provider === "codex") {
-    return `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets. To share an account with other workspaces, connect it from Connect account.`;
+    return `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets. To share an account with other workspaces, connect it from Connect provider.`;
   }
   if (where.personal && provider !== "supergrok" && provider !== "claude_subscription") {
     return "This key will belong to your Personal workspace, so only you use it. Organization API keys can't be used in Personal workspaces.";
   }
-  return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect account.`;
+  return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect provider.`;
 }
 
 /** On an organization key's page: when a key owned by this workspace is the right tool. */
@@ -1477,6 +1606,8 @@ function WhoCanConnect({ organizationName }: { organizationName: string }) {
 
 function ModelsList({
   workspaceId,
+  workspaceName,
+  defaultRules,
   accountRules,
   organizationId,
   personal,
@@ -1495,6 +1626,10 @@ function ModelsList({
   providerSections,
 }: {
   workspaceId: string;
+  /** "Design", or "your Personal workspace". */
+  workspaceName: string;
+  /** The default sharing rules, when this person can read them. */
+  defaultRules?: ModelAccountSettingValues | undefined;
   accountRules: WorkspaceModelAccountSettingsState;
   organizationId: string | undefined;
   /** A Personal workspace follows the organization's account rules and has none of its own. */
@@ -1528,45 +1663,26 @@ function ModelsList({
   const connect = (
     <RowButton variant="default" onClick={onConnect}>
       <PlusIcon aria-hidden="true" />
-      Connect account
+      Connect provider
     </RowButton>
   );
-  // Defaults first: what a new chat here starts with, and who pays for it.
+  // Model providers first, as on the Defaults: what runs models here.
+  // Then what a new chat starts with, and how subscriptions are shared.
   return (
     <SectionStack>
-      <WorkspaceDefaultsSection
-        key={`defaults:${workspaceId}:${revision}`}
-        workspaceId={workspaceId}
-        organizationName={organizationName}
-        canManage={canManageSettings}
-        policy={policy}
-        describePayer={describePayer}
-        onEditAllowed={onEditAllowed}
-        onEditCompaction={onEditCompaction}
-      />
-      {personal ? null : (
-        <WorkspaceAccountRulesSection organizationName={organizationName} state={accountRules} />
-      )}
-      <PersonalFallbackPreference
-        organizationId={organizationId}
-        allowed={
-          accountRules.settings?.values.personalConnectionsAllowed === true &&
-          accountRules.settings.values.personalFallbackAllowed
-        }
-      />
       <Section
-        title="Accounts"
-        description="Subscriptions, API keys and credits that pay for models here."
+        title="Model providers"
+        description={`Subscriptions, API keys and credits that run models in ${workspaceName}.`}
         action={canConnect && !empty ? connect : null}
       >
         {empty ? (
           <EmptyState
             variant="page"
             icon={<KeyRoundIcon />}
-            title="No accounts connected"
+            title="No model providers connected"
             description={
               canConnect
-                ? "Connect a subscription or an API key to pay for models here."
+                ? "Connect a subscription or an API key to run models here."
                 : "Nothing pays for models here yet."
             }
             action={canConnect ? connect : null}
@@ -1580,6 +1696,32 @@ function ModelsList({
         )}
         {whoCanConnect}
       </Section>
+      <WorkspaceDefaultsSection
+        key={`defaults:${workspaceId}:${revision}`}
+        workspaceId={workspaceId}
+        workspaceName={workspaceName}
+        organizationName={organizationName}
+        canManage={canManageSettings}
+        policy={policy}
+        describePayer={describePayer}
+        onEditAllowed={onEditAllowed}
+        onEditCompaction={onEditCompaction}
+      />
+      {personal ? null : (
+        <WorkspaceAccountRulesSection
+          organizationName={organizationName}
+          workspaceName={workspaceName}
+          defaults={defaultRules}
+          state={accountRules}
+        />
+      )}
+      <PersonalFallbackPreference
+        organizationId={organizationId}
+        allowed={
+          accountRules.settings?.values.personalConnectionsAllowed === true &&
+          accountRules.settings.values.personalFallbackAllowed
+        }
+      />
       {providerSections}
     </SectionStack>
   );
@@ -1593,6 +1735,7 @@ export { compactionSummary } from "./model-compaction-page";
  */
 export function WorkspaceDefaultsSection({
   workspaceId,
+  workspaceName = "this workspace",
   organizationName,
   canManage,
   policy,
@@ -1601,6 +1744,7 @@ export function WorkspaceDefaultsSection({
   onEditCompaction,
 }: {
   workspaceId: string;
+  workspaceName?: string;
   organizationName: string;
   canManage: boolean;
   /** This workspace's Allowed models and catalog, from `useModelAccessPolicy`. */
@@ -1611,8 +1755,8 @@ export function WorkspaceDefaultsSection({
 }) {
   return (
     <Section
-      title="Defaults"
-      description={`This workspace uses ${organizationName}’s defaults unless you change them here.`}
+      title="New chats"
+      description={`What new chats in ${workspaceName} start with and which models people can pick.`}
     >
       <SettingRowGroup>
         <DefaultSessionModelPreferenceRow
@@ -1645,7 +1789,9 @@ type ConnectChoice =
   | "supergrok"
   | "vercel"
   | "openrouter"
-  | "opper";
+  | "opper"
+  | "openai"
+  | "azure_openai";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1763,6 +1909,8 @@ export function ConnectPickerPage({
               (choice.id === "vercel" ||
                 choice.id === "openrouter" ||
                 choice.id === "opper" ||
+                choice.id === "openai" ||
+                choice.id === "azure_openai" ||
                 choice.id === "anthropic" ||
                 choice.id === "claude_subscription")
                 ? onOpenConnected?.(choice.id)

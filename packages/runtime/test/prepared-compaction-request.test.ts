@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { OpenAIResponsesModel, type ModelRequest } from "@openai/agents";
 import { SandboxAgent } from "@openai/agents/sandbox";
 import OpenAI from "openai";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   CompactionNeededError,

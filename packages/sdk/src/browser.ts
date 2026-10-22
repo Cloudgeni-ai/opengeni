@@ -36,6 +36,8 @@ export {
   OpenGeniApiError,
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
+  OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,

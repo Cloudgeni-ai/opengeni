@@ -1,6 +1,7 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
+import { t } from "@opengeni/react/app/lib/console-text";
 import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
@@ -16,22 +17,24 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { RailProvider } from "@/components/rail/rail-context";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
+import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
+import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
+import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
+import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
-import { webSecretsUi } from "@/lib/secrets-ui";
-import { workspaceManagementLocation } from "@/lib/workspace-management-location";
+import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
+import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
-import { Button } from "@/components/ui/button";
-import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
+import { Button } from "@opengeni/react/ui/button";
+import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
-import { useAppContext, type AppContextValue } from "@/context";
-import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
-import { userErrorText } from "@/lib/api-error";
-import { isAbortError } from "@/lib/session-tools";
-import { orgLabel } from "@/lib/org";
-import { useStreamHealthTelemetry } from "@/lib/stream-health";
-import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
+import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { useWorkspaceIntegrations } from "@opengeni/react/app/lib/use-workspace-integrations";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { orgLabel } from "@opengeni/react/app/lib/org";
+import { useStreamHealthTelemetry } from "@opengeni/react/app/lib/stream-health";
+import { authorizedWorkspaceFromList } from "@opengeni/react/app/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
   workspaceOwnedValue,
@@ -40,8 +43,8 @@ import {
 import {
   beginWorkspaceOperationUnlessBlocked,
   type WorkspaceOperationIdentity,
-} from "@/lib/workspace-transition";
-import type { SlackUserLinkAccessRequest } from "@/types";
+} from "@opengeni/react/app/lib/workspace-transition";
+import type { SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
 
 const LazyWorkspaceManagementShell = lazy(() =>
   import("@/components/settings/workspace-settings-shell").then((module) => ({
@@ -104,19 +107,12 @@ export function WorkspaceShellRouteContent({
   });
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   const {
-    accessKeyVersion,
     captureWorkspaceInvocation,
     clearSlackLinkContinuation,
     client,
     ownsWorkspaceInvocation,
     preparePendingSlackLink,
     revalidatePrincipalAccess,
-    resetWorkspaceIntegrations,
-    setSelectedRepoIds,
-    setSelectedRepoRefs,
-    refreshGitHub,
-    refreshPersonalGitHub,
-    refreshWorkspaceMcpServers,
   } = context;
   const [ownedSlackAccess, setOwnedSlackAccess] = useState<WorkspaceOwnedState<SlackAccessState>>(
     () => ({ workspaceId, value: emptySlackAccessState() }),
@@ -162,11 +158,6 @@ export function WorkspaceShellRouteContent({
     [ownsWorkspaceInvocation, workspaceId],
   );
   const workspaceStateReady = context.workspaceStateOwnerId === workspaceId;
-  useGitHubHistoryRefresh(
-    workspaceId,
-    activeWorkspaceId !== null && workspaceStateReady,
-    refreshGitHub,
-  );
 
   const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
   const hasNarrowSlackFlow =
@@ -348,36 +339,7 @@ export function WorkspaceShellRouteContent({
     }
   }
 
-  useEffect(() => {
-    if (!activeWorkspaceId || !workspaceStateReady) {
-      return;
-    }
-    const abortController = new AbortController();
-    resetWorkspaceIntegrations();
-    setSelectedRepoIds(new Set());
-    setSelectedRepoRefs({});
-    void refreshGitHub(workspaceId, abortController.signal);
-    void refreshPersonalGitHub(workspaceId, abortController.signal);
-    void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
-      if (!abortController.signal.aborted && !isAbortError(error)) {
-        toast.error("Couldn't load workspace MCP tools", {
-          description: userErrorText(error),
-        });
-      }
-    });
-    return () => abortController.abort();
-  }, [
-    accessKeyVersion,
-    activeWorkspaceId,
-    refreshGitHub,
-    refreshPersonalGitHub,
-    refreshWorkspaceMcpServers,
-    resetWorkspaceIntegrations,
-    setSelectedRepoIds,
-    setSelectedRepoRefs,
-    workspaceStateReady,
-    workspaceId,
-  ]);
+  useWorkspaceIntegrations(context, workspaceId, activeWorkspaceId !== null && workspaceStateReady);
 
   if (!activeWorkspace && !hasNarrowSlackFlow && managementLocation?.kind === "settings") {
     const unavailable = (
@@ -538,7 +500,7 @@ function AuthorizedWorkspaceShell({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const organizationName = activeWorkspace
-    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, activeWorkspace.accountId, context.accessContext.accountGrants)
     : "Organization";
   useEffect(() => {
     onMount?.();
@@ -558,23 +520,30 @@ function AuthorizedWorkspaceShell({
       {/* Secret reference chips and the ask card's Generate use the contracts
           tokenizer and generator. */}
       <SecretsUiProvider value={webSecretsUi}>
-        {/* Settings mode swaps the rail: workspace and organization settings
+        <DesktopThisComputerProvider workspaceId={workspaceId}>
+          <AppShotCoordinator workspaceId={workspaceId} />
+          {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-        {managementLocation ? (
-          <WorkspaceManagementShell
-            workspaceId={workspaceId}
-            workspaceName={activeWorkspace?.name}
-            organizationName={organizationName}
-            location={managementLocation}
-          >
-            {children}
-          </WorkspaceManagementShell>
-        ) : (
+          {/* The rail state and the action system (⌘K, shortcuts, the desktop
+          menu bar) span both shells, so keys work in settings too. */}
           <RailProvider workspaceId={workspaceId}>
-            <RailShell>{children}</RailShell>
+            <ActionsProvider>
+              {managementLocation ? (
+                <WorkspaceManagementShell
+                  workspaceId={workspaceId}
+                  workspaceName={activeWorkspace?.name}
+                  organizationName={organizationName}
+                  location={managementLocation}
+                >
+                  {children}
+                </WorkspaceManagementShell>
+              ) : (
+                <RailShell>{children}</RailShell>
+              )}
+            </ActionsProvider>
           </RailProvider>
-        )}
+        </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>
   );

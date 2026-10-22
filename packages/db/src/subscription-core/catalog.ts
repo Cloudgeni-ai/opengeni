@@ -80,6 +80,8 @@ export type SubscriptionCoreServingConnection = {
    * list cannot be read outside an exact accepted turn.
    */
   cooledDownModelIds: string[];
+  /** Shared catalog proven fresh for the connection's current credential generation. */
+  modelCatalog?: { slugs: string[]; observedAt: number; expiresAt: number } | null;
 };
 
 type ModelPolicy = Pick<
@@ -204,6 +206,8 @@ export async function listSubscriptionCoreServingConnections(
         workspaceId: input.workspaceId,
         provider: providerId,
         kind: subscriptionCoreConnectionKind(provider),
+        now,
+        health: "effective",
       });
       const shared = world.filter((connection) => {
         if (
@@ -292,6 +296,16 @@ export async function listSubscriptionCoreServingConnections(
                   : ("organization" as const),
               ],
           cooledDownModelIds: [],
+          modelCatalog:
+            candidate.observedModelSlugs != null &&
+            candidate.modelCatalogObservedAt != null &&
+            candidate.modelCatalogExpiresAt != null
+              ? {
+                  slugs: [...candidate.observedModelSlugs],
+                  observedAt: candidate.modelCatalogObservedAt,
+                  expiresAt: candidate.modelCatalogExpiresAt,
+                }
+              : null,
         };
       });
       if (

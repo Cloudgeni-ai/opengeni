@@ -6,15 +6,19 @@ import { join } from "node:path";
 import libnpmpublish from "libnpmpublish";
 import {
   CanaryReceiptStore,
+  CANARY_RECEIPT_FILES,
   CANARY_RESPONSE_BYTES,
   type CanaryCustody,
 } from "./canary-publication-receipts";
+import { PUBLISHER_RECEIPT_FILES } from "./canary-reconciliation-inputs";
 import {
+  canarySitePins,
+  canaryWriteFailureDiagnostic,
   confirmCanaryCohort,
   freezeCanaryCohort,
-  publishAndVerifyCanaryCohort,
   publishPreparedCanaries,
   readRegistryPackage,
+  type FrozenCanaryArtifact,
 } from "./publish-canary";
 import { repoRoot } from "./publishable-workspaces";
 
@@ -110,7 +114,74 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+/** The publish job's writes followed by the separate confirmation job's wait. */
+async function publishAndConfirm(
+  cohort: readonly FrozenCanaryArtifact[],
+  custody: CanaryCustody,
+  token: string,
+  options: NonNullable<Parameters<typeof confirmCanaryCohort>[2]> & {
+    read: typeof readRegistryPackage;
+    publish: typeof libnpmpublish.publish;
+  },
+) {
+  await publishPreparedCanaries(cohort, custody, token, options.read, options.publish);
+  await confirmCanaryCohort(cohort, options.read, { ...options, custody });
+  return canarySitePins(cohort);
+}
+
 describe("canary acknowledgement and receipt phases", () => {
+  test("TUF failure retains diagnostics without inferring no write or exposing arbitrary errors", async () => {
+    expect(canaryWriteFailureDiagnostic(new Error("root was signed by 0/3 keys"))).toEqual({
+      category: "tuf_root_signature_verification_failed",
+    });
+    expect(
+      canaryWriteFailureDiagnostic(
+        Object.assign(new Error("synthetic-secret-token"), { code: "E403" }),
+      ),
+    ).toEqual({ category: "registry_or_transport_error", code: "E403" });
+    expect(
+      JSON.stringify(
+        canaryWriteFailureDiagnostic(
+          Object.assign(new Error("synthetic-secret-token"), { code: "synthetic-secret-token" }),
+        ),
+      ),
+    ).not.toContain("synthetic-secret-token");
+    const f = fixture(),
+      cohort = freezeCanaryCohort(f.packages, f.store);
+    let writes = 0;
+    await expect(
+      publishPreparedCanaries(
+        cohort,
+        f.store,
+        "synthetic-secret-token",
+        reader((name) => Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, false))),
+        (async () => {
+          writes++;
+          throw new Error("root was signed by 0/3 keys");
+        }) as typeof libnpmpublish.publish,
+        120_000,
+        async () => ({
+          file: "/synthetic/bundle.json",
+          transparencyLogUrl: "https://search.sigstore.dev/?logIndex=7",
+          evidence: { file: "bundle.json", bytes: 100, sha256: "a".repeat(64) },
+        }),
+      ),
+    ).rejects.toThrow("outcome is unknown");
+    expect(writes).toBe(1);
+    const prepared = f.events().find((row) => row.kind === "PROVENANCE_PREPARED");
+    expect(prepared.provenance).toEqual({
+      file: "bundle.json",
+      bytes: 100,
+      sha256: "a".repeat(64),
+    });
+    const unknown = f.events().find((row) => row.kind === "WRITE_UNKNOWN");
+    expect(unknown).toMatchObject({
+      noReplay: true,
+      diagnostic: { category: "tuf_root_signature_verification_failed" },
+    });
+    expect(f.events().filter((row) => row.kind === "WRITE_ACKNOWLEDGED")).toHaveLength(0);
+    expect(JSON.stringify(f.events())).not.toContain("synthetic-secret-token");
+  });
   test("retains every acknowledgement before the next write and waits for visibility only afterward", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store);
@@ -134,7 +205,7 @@ describe("canary acknowledgement and receipt phases", () => {
       calls.push("write");
       return accepted();
     };
-    const pins = await publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-secret-token", {
+    const pins = await publishAndConfirm(cohort, f.store, "synthetic-secret-token", {
       publish: publish as typeof libnpmpublish.publish,
       read: reader((name) => {
         const final = writes.length === cohort.length;
@@ -149,6 +220,8 @@ describe("canary acknowledgement and receipt phases", () => {
         elapsed += ms;
       },
       timeoutMs: 5000,
+      pollIntervalMs: 1000,
+      maxPollIntervalMs: 1000,
     });
     expect(writes).toEqual(names);
     expect(calls.slice(0, 8)).toEqual([
@@ -174,7 +247,7 @@ describe("canary acknowledgement and receipt phases", () => {
     let writes = 0,
       elapsed = 0;
     await expect(
-      publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-token", {
+      publishAndConfirm(cohort, f.store, "synthetic-token", {
         publish: (async () => {
           writes++;
           return accepted();
@@ -351,24 +424,6 @@ describe("canary acknowledgement and receipt phases", () => {
 });
 
 describe("strict raw receipt acceptance", () => {
-  test("all receipt reads share one deadline and one read cap", async () => {
-    const f = fixture();
-    const cohort = freezeCanaryCohort(f.packages, f.store);
-    let reads = 0;
-    await expect(
-      confirmCanaryCohort(
-        cohort,
-        reader((name) => {
-          reads++;
-          return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, false));
-        }),
-        { custody: f.store, maxReads: 3 },
-      ),
-    ).rejects.toThrow("read quota");
-    expect(reads).toBe(3);
-    expect(f.events().filter((event) => event.kind === "READ_RESPONSE")).toHaveLength(3);
-  });
-
   test.each(["latest", "integrity", "tag", "attestation", "predicate"] as const)(
     "never admits pins from a wrong %s receipt",
     async (field) => {
@@ -416,9 +471,12 @@ describe("strict raw receipt acceptance", () => {
     await expect(
       confirmCanaryCohort(cohort, read, { custody: f.store, now: () => elapsed, timeoutMs: 1000 }),
     ).rejects.toThrow("read_exceeded_deadline");
-    expect(f.events().filter((event) => event.kind === "READ_BODY" && event.complete)).toHaveLength(
-      2,
-    );
+    expect(
+      f
+        .events()
+        .filter((event) => event.kind === "READ_OBSERVATION")
+        .map((e) => e.observation),
+    ).toEqual(["read_exceeded_deadline"]);
     expect(f.events().filter((event) => event.kind === "COHORT_READS_MATCHED")).toHaveLength(0);
   });
 
@@ -530,9 +588,24 @@ describe("strict raw receipt acceptance", () => {
       () =>
         new CanaryReceiptStore(join(f.root, "bad-source"), {
           ...identity,
-          workflowSource: "b".repeat(40),
+          workflowSource: "invalid",
         }),
     ).toThrow("source identity");
+    const split = join(f.root, "split-source");
+    const splitIdentity = { ...identity, workflowSource: "b".repeat(40) };
+    new CanaryReceiptStore(split, splitIdentity).record("COHORT_PLAN", {});
+    expect(f.events(split)[0]).toMatchObject({ protocol: 2, identity: splitIdentity });
+  });
+
+  test("a long registry lag can retain more than the former 2048 files", () => {
+    expect(PUBLISHER_RECEIPT_FILES).toBe(CANARY_RECEIPT_FILES);
+    const f = fixture();
+    for (let index = 0; index < 2100; index++) {
+      f.store.record("READ_OBSERVATION", { package: names[0], observation: "version_pending" });
+    }
+    expect(f.store.record("PUBLICATION_FAILED", { phase: "receipt", noReplay: true }).file).toBe(
+      "2100.json",
+    );
   });
 });
 
@@ -547,7 +620,7 @@ describe("fresh complete-cohort qualification", () => {
         changed = false,
         elapsed = 0;
       await expect(
-        publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-token", {
+        publishAndConfirm(cohort, f.store, "synthetic-token", {
           publish: (async () => {
             writes++;
             return accepted();
@@ -571,6 +644,7 @@ describe("fresh complete-cohort qualification", () => {
             elapsed += ms;
           },
           timeoutMs: 5000,
+          pollIntervalMs: 1000,
         }),
       ).rejects.toThrow();
       expect(changed).toBe(true);
@@ -580,30 +654,6 @@ describe("fresh complete-cohort qualification", () => {
     },
   );
 
-  test("final qualification cannot reset the shared read quota", async () => {
-    const f = fixture();
-    const cohort = freezeCanaryCohort(f.packages, f.store);
-    let writes = 0,
-      receiptReads = 0;
-    await expect(
-      publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-token", {
-        publish: (async () => {
-          writes++;
-          return accepted();
-        }) as typeof libnpmpublish.publish,
-        read: reader((name) => {
-          const final = writes === cohort.length;
-          if (final) receiptReads++;
-          return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, final));
-        }),
-        maxReads: 11,
-      }),
-    ).rejects.toThrow("Final canary cohort");
-    expect(writes).toBe(4);
-    expect(receiptReads).toBe(4);
-    expect(f.events().filter((event) => event.kind === "COHORT_READS_MATCHED")).toHaveLength(0);
-  });
-
   test("final qualification remains inside the original monotonic deadline", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store);
@@ -611,7 +661,7 @@ describe("fresh complete-cohort qualification", () => {
       firstPackageReads = 0,
       elapsed = 0;
     await expect(
-      publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-token", {
+      publishAndConfirm(cohort, f.store, "synthetic-token", {
         publish: (async () => {
           writes++;
           return accepted();
@@ -638,7 +688,7 @@ describe("fresh complete-cohort qualification", () => {
       firstPackageReads = 0,
       moved = false;
     await expect(
-      publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-token", {
+      publishAndConfirm(cohort, f.store, "synthetic-token", {
         publish: (async () => {
           writes++;
           return accepted();
@@ -663,12 +713,12 @@ describe("fresh complete-cohort qualification", () => {
     ).toHaveLength(0);
   });
 
-  test("every final match is reread within the same exact quota", async () => {
+  test("every early match is reread once in the final complete-cohort pass", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store);
     let writes = 0;
     const receiptReads = new Map<string, number>();
-    const pins = await publishAndVerifyCanaryCohort(cohort, f.store, "synthetic-token", {
+    const pins = await publishAndConfirm(cohort, f.store, "synthetic-token", {
       publish: (async () => {
         writes++;
         return accepted();
@@ -678,12 +728,11 @@ describe("fresh complete-cohort qualification", () => {
         if (final) receiptReads.set(name, (receiptReads.get(name) ?? 0) + 1);
         return Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, final));
       }),
-      maxReads: 16,
     });
     expect(pins).toEqual(Object.fromEntries(names.map((name) => [name, version])));
     expect([...receiptReads.entries()]).toEqual(names.map((name) => [name, 2]));
     const matched = f.events().find((event) => event.kind === "COHORT_READS_MATCHED");
-    expect(matched.reads).toBe(16);
+    expect(matched.observations).toBe(8);
     expect(matched.freshCompleteCohort).toBe(true);
   });
 });

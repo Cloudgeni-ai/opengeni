@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { SlotPermit } from "@temporalio/worker";
 import {
   CONTROL_WORKER_MAX_CACHED_WORKFLOWS,

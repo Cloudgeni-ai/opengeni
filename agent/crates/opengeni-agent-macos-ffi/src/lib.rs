@@ -37,6 +37,11 @@
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod ffi;
+// Only the macOS FFI reads windows; the decision is built and tested everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod window_presence;
+
+pub use window_presence::{MacWindowPresence, MacWindowQuery};
 
 /// Runs one synchronous native operation with a thread-local Cocoa pool.
 ///
@@ -835,6 +840,50 @@ pub fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     }
 }
 
+/// Says why a window on the current Space that the window server lists as not
+/// on screen is not shown, without changing anything on screen.
+///
+/// # Errors
+///
+/// Returns [`MacFfiError`] if Accessibility is not granted or the process is
+/// gone.
+pub fn window_presence(query: &MacWindowQuery) -> Result<MacWindowPresence, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        with_autorelease_pool(|| ffi::window_presence(query))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = query;
+        Err(MacFfiError::Unsupported(
+            "macOS window presence is only available on macOS".to_string(),
+        ))
+    }
+}
+
+/// Brings a minimized window, or a window of a hidden application, back on
+/// screen without activating its application, then raises the person's front
+/// window again so the restored window lies behind it. Any other window is
+/// left alone. Returns what the window was before.
+///
+/// # Errors
+///
+/// Returns [`MacFfiError`] if Accessibility is not granted, the process is
+/// gone, or the window could not be restored.
+pub fn restore_window_behind(query: &MacWindowQuery) -> Result<MacWindowPresence, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        with_autorelease_pool(|| ffi::restore_window_behind(query))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = query;
+        Err(MacFfiError::Unsupported(
+            "macOS window restore is only available on macOS".to_string(),
+        ))
+    }
+}
+
 /// Launches an installed macOS application by bundle identifier.
 ///
 /// # Errors
@@ -1139,5 +1188,33 @@ pub fn request_grants() {
     #[cfg(target_os = "macos")]
     {
         with_autorelease_pool(ffi::request_grants);
+    }
+}
+
+/// One macOS screen-control permission, for asking about it on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopPermission {
+    /// Screen Recording, to see the screen.
+    ScreenRecording,
+    /// Accessibility, to click and type.
+    Accessibility,
+    /// Input Monitoring, so automated input yields to the person's own.
+    InputMonitoring,
+}
+
+/// Fires one permission's system prompt. A desktop app asks for them one at a
+/// time, each after explaining it. No-op on non-macOS.
+pub fn request_permission(permission: DesktopPermission) {
+    #[cfg(target_os = "macos")]
+    {
+        with_autorelease_pool(|| match permission {
+            DesktopPermission::ScreenRecording => ffi::request_screen_capture(),
+            DesktopPermission::Accessibility => ffi::request_accessibility(),
+            DesktopPermission::InputMonitoring => ffi::request_input_monitoring(),
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
     }
 }

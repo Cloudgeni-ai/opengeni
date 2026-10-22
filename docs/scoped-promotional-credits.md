@@ -1,6 +1,15 @@
 # Promotional credit coverage
 
-Signup and coupon credits share a model list. Offers can override it. Coverage
+Legacy signup and coupon credits share a model list. Offers can override it. Coverage
+for new Free monthly plan grants also follows the signup list (including its
+optional override); paid plan credit remains general. Monthly credit is spent
+first on covered models and expires without removing signup or purchased credit.
+See [subscription accounting and rollout](subscription-plans.md) for migration
+0844, unchanged existing grants, and required policy configuration.
+Migration 0845 stops new signup bonus money. Its zero-value eligibility receipt
+is not a promotional balance; monthly Free funding replaces the bonus. Existing
+signup credit stays spendable under its original scoped/general terms.
+Coverage
 can change for existing and new promotional balances; issued amounts and spent
 credits stay unchanged. Legacy unrestricted grants remain unrestricted.
 
@@ -48,8 +57,9 @@ if available, or pauses for credits.
 
 Deploy migration 0613 and all API/worker readers and debit writers **before**
 enabling scoped credits. Provision database roles as usual. Apply the runtime
-policy using the command above. Keep the signup grant's existing enablement
-switches. Do not roll back readers/writers while scoped balances remain.
+policy using the command above. Before 0845, signup money also requires its
+enablement switches; after 0845, signup records non-monetary eligibility regardless
+of those retired switches. Do not roll back readers/writers while scoped balances remain.
 
 `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is an optional bootstrap fallback until
 an operator writes the first runtime revision. Runtime policy then supersedes
@@ -59,14 +69,32 @@ behavior. Enabling policy does not restrict previously unrestricted grants.
 ## Customer flow
 
 Signup and redemption show the credit amount without promising specific models.
-The open model picker shows **Free credits**, **Uses credits**, or **Needs credits**.
-These labels stay inside the menu; the closed selector keeps its model and effort.
-**Free credits** appears only while a remaining promotional balance covers that
-model. With general credits only, credit-funded models show **Uses credits**.
-With no usable balance for a model, it shows **Needs credits**. Subscriptions,
-customer provider connections and unmetered models keep their ordinary labels.
-Billing shows each remaining balance; **View models** reveals current coverage.
-Eligible model usage spends free credits first, then general credits. General
+The open model picker shows **Free credits**, **Uses credits**, or
+**Not covered by your credits**. These labels stay inside the menu; the closed
+selector keeps its model and effort. **Free credits** appears only while a
+remaining promotional balance covers that model. With general credits only,
+credit-funded models show **Uses credits**. With no usable balance for a model,
+it shows **Not covered by your credits**. Subscriptions, customer provider
+connections and unmetered models keep their ordinary labels.
+
+Billing shows each remaining balance and names the models each promotional
+grant covers; opening a grant lists them all. The general row says whether any
+model can still use it. Settings > Models splits the balance into the amount
+any model can use and the amount only selected models can use, because a single
+total overstates what an uncovered model can spend.
+
+When the API refuses a Send or a new chat with HTTP 402 because no credit covers
+the model, the web console keeps a notice above the composer until the next
+accepted message. It names the model, shows the server's reason, lists the
+models the remaining credit covers with a one-click switch, and links to Billing
+when the person can buy credits. Before any Send, a new chat on an uncovered
+model shows the same notice while promotional credit covers other models. A turn
+that stops with `segmentLimit: "budget_exhausted"` says the remaining credit
+does not cover the model and to choose a covered model or add credits. These
+are presentation only: allocation, admission and policy are unchanged.
+
+Eligible model usage spends monthly plan credit first, then eligible promotions,
+then other general credits. General
 credits include purchases and unrestricted legacy grants.
 
 A scoped coupon redeems its fixed amount through a $0 Stripe checkout. It cannot

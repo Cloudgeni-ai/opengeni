@@ -1,5 +1,6 @@
 import type { CodexRateLimitResetCreditsAccountResult } from "@opengeni/db";
 import type { CodexResetRedemptionRecovery } from "@opengeni/db";
+import { codexOverviewProviderCall, type CodexProviderCall } from "./codex-overview-budget";
 // Codex (ChatGPT) subscription connect / status / usage routes.
 //
 // Connect uses the device-code flow split into two stateless calls: `start`
@@ -266,6 +267,7 @@ import {
   organizationSettingsPermission,
   requireNotAgent,
 } from "../http/acting-person";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import * as z from "zod/v4";
 import {
   CodexSourceRequest,
@@ -405,109 +407,6 @@ export async function requireOrganizationCodexHuman(
     throw error;
   }
   return human;
-}
-
-export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
-  // Built in process for an agent acting as a person: no browser credentials
-  // ride along, so there is no cross-site request to guard against.
-  if (isAgentActingAsPerson(c)) return;
-  const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-  if (contentType !== "application/json") {
-    throw new HTTPException(403, {
-      message: "JSON browser request required",
-    });
-  }
-  if (deps.settings.productAccessMode !== "local" && !deps.settings.publicBaseUrl) {
-    throw new HTTPException(503, {
-      message: "managed browser origin is not configured",
-    });
-  }
-  const origin = c.req.header("origin");
-  const localOriginMatches =
-    deps.settings.productAccessMode === "local" && localBrowserOriginMatchesRequest(c, origin);
-  if (
-    deps.settings.productAccessMode === "local"
-      ? !localOriginMatches
-      : origin !== new URL(deps.settings.publicBaseUrl!).origin
-  ) {
-    throw new HTTPException(403, {
-      message: "same-origin browser request required",
-    });
-  }
-  const fetchSite = c.req.header("sec-fetch-site")?.toLowerCase();
-  const localFetchSiteMatches =
-    localOriginMatches &&
-    (fetchSite === "same-origin" ||
-      fetchSite === "same-site" ||
-      (fetchSite === "cross-site" && localLoopbackOriginMatchesRequest(c, origin)));
-  if (
-    deps.settings.productAccessMode === "local"
-      ? !localFetchSiteMatches
-      : fetchSite !== "same-origin"
-  ) {
-    throw new HTTPException(403, {
-      message: "same-origin fetch metadata required",
-    });
-  }
-}
-
-function localBrowserOriginMatchesRequest(c: Context, value: string | undefined): boolean {
-  if (!value) return false;
-  let origin: URL;
-  try {
-    origin = new URL(value);
-  } catch {
-    return false;
-  }
-  if (
-    origin.origin !== value ||
-    origin.origin === "null" ||
-    (origin.protocol !== "http:" && origin.protocol !== "https:")
-  ) {
-    return false;
-  }
-
-  const forwardedProtocol = c.req.header("x-forwarded-proto")?.trim().toLowerCase();
-  const protocol = forwardedProtocol ? `${forwardedProtocol}:` : new URL(c.req.url).protocol;
-  if (protocol !== "http:" && protocol !== "https:") return false;
-  const forwardedHost = c.req.header("x-forwarded-host") ?? c.req.header("host");
-  if (!forwardedHost || /[\s,/?#@\\]/u.test(forwardedHost)) return false;
-
-  let request: URL;
-  try {
-    request = new URL(`${protocol}//${forwardedHost}`);
-  } catch {
-    return false;
-  }
-  return (
-    origin.protocol === request.protocol &&
-    (origin.hostname === request.hostname ||
-      (isLoopbackHostname(origin.hostname) && isLoopbackHostname(request.hostname)))
-  );
-}
-
-function localLoopbackOriginMatchesRequest(c: Context, value: string | undefined): boolean {
-  if (!value) return false;
-  try {
-    const origin = new URL(value);
-    const forwardedProtocol = c.req.header("x-forwarded-proto")?.trim().toLowerCase();
-    const protocol = forwardedProtocol ? `${forwardedProtocol}:` : new URL(c.req.url).protocol;
-    const forwardedHost = c.req.header("x-forwarded-host") ?? c.req.header("host");
-    if (!forwardedHost || /[\s,/?#@\\]/u.test(forwardedHost)) return false;
-    const request = new URL(`${protocol}//${forwardedHost}`);
-    return (
-      origin.origin === value &&
-      origin.protocol === request.protocol &&
-      isLoopbackHostname(origin.hostname) &&
-      isLoopbackHostname(request.hostname)
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isLoopbackHostname(value: string): boolean {
-  return value === "localhost" || value === "[::1]" || /^127(?:\.[0-9]{1,3}){3}$/u.test(value);
 }
 
 async function requireRedemptionHuman(
@@ -652,37 +551,7 @@ function freshActionableCredit(
   return credit && actionableCredit(credit) ? credit : null;
 }
 
-type CodexProviderCall = <T>(operation: () => Promise<T>) => Promise<T>;
-
 const CODEX_OVERVIEW_ROUTE_TIMEOUT_MS = 12_000;
-
-function createProviderCallLimiter(limit: number): CodexProviderCall {
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error("Codex provider concurrency limit must be a positive integer");
-  }
-  let permits = limit;
-  const waiters: Array<() => void> = [];
-  const acquire = async (): Promise<void> => {
-    if (permits > 0) {
-      permits -= 1;
-      return;
-    }
-    await new Promise<void>((resolve) => waiters.push(resolve));
-  };
-  const release = (): void => {
-    const next = waiters.shift();
-    if (next) next();
-    else permits += 1;
-  };
-  return async <T>(operation: () => Promise<T>): Promise<T> => {
-    await acquire();
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
-  };
-}
 
 type CodexRedemptionAccess = {
   ownership: "current_human" | "unowned" | "different_human" | "managed_human_unavailable";
@@ -1855,7 +1724,7 @@ async function coreOrganizationCodexOverview(
       canResumeRedemption && row.status === "active",
       canResumeRedemption,
       redemptions,
-      createProviderCallLimiter(2),
+      codexOverviewProviderCall(deps, organizationId),
       sources,
     ),
   );
@@ -2286,7 +2155,7 @@ async function coreCodexOverview(
   };
   const overview: Record<string, Awaited<ReturnType<typeof fetchCodexAccountOverview>>> = {};
   const queue = [...accounts];
-  const providerCall = createProviderCallLimiter(4);
+  const providerCall = codexOverviewProviderCall(deps, grant.accountId);
   let routeTimedOut = false;
   const worker = async (): Promise<void> => {
     for (;;) {

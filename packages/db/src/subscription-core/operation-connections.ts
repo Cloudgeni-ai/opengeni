@@ -29,6 +29,8 @@ import {
 import { SubscriptionCoreError } from "./errors";
 import {
   subscriptionCoreOperations,
+  subscriptionCoreQuotaBlocksNow,
+  subscriptionCoreUsageMergeOptions,
   type SubscriptionCoreConnectionCredential,
   type SubscriptionCoreConnectionCredentialLoad,
   type SubscriptionCoreConnectionRefreshDeps,
@@ -149,8 +151,10 @@ export const subscriptionCoreOperationConnections = memoByProvider(
      * Shared organization- or workspace-scoped connections that can serve an
      * operation in this workspace, in placement order: the session's explicit
      * choice (session scope only), then the effective primary, then pool
-     * order. Only active, allocatable connections in the effective inference
-     * pool qualify. Empty when the cutover is not enabled.
+     * order. Only active, allocatable connections the workspace's inference
+     * pool admits qualify: the pool the workspace selected, or both shared
+     * pools under the automatic source, exactly as for its chat turns. Empty
+     * when the cutover is not enabled.
      */
     async function listSubscriptionCoreOperationCandidates(
       db: Database,
@@ -165,14 +169,13 @@ export const subscriptionCoreOperationConnections = memoByProvider(
         )
           return [];
         const pool = await readSubscriptionCoreWorkspacePool(tx, provider, scope);
-        const effective = pool.source.effectiveSource;
-        if (effective === "disabled") return [];
+        if (pool.source.effectiveSource === "disabled") return [];
+        // The pool reader already lists only what the workspace's source admits.
         const eligible = pool.connections.filter(
           (entry) =>
             entry.row.status === "active" &&
             entry.row.allocator_enabled &&
-            entry.poolAllocatorEnabled &&
-            entry.source === effective,
+            entry.poolAllocatorEnabled,
         );
         // A workspace-scoped connection listed only because personal
         // workspaces may use it is not assigned here: operations refuse it.
@@ -270,6 +273,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       deps: SubscriptionCoreConnectionResolverDeps = {},
     ): {
       getToken: () => Promise<SubscriptionCoreConnectionToken>;
+      getFreshToken: () => Promise<SubscriptionCoreConnectionToken | null>;
       refresh: () => Promise<SubscriptionCoreConnectionToken>;
     } {
       const load = deps.load ?? operations().loadSubscriptionCoreConnectionCredential;
@@ -496,7 +500,13 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       });
       if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
       const applied = await operations()
-        .recordSubscriptionCoreUsageObservation(db, scope, connectionId, quota)
+        .recordSubscriptionCoreUsageObservation(
+          db,
+          scope,
+          connectionId,
+          quota,
+          subscriptionCoreUsageMergeOptions(provider.adapter, response),
+        )
         .catch(() => ({ applied: false, recovered: false }));
       return {
         kind: "read",
@@ -530,10 +540,12 @@ export const subscriptionCoreOperationConnections = memoByProvider(
     /**
      * Re-read live usage before a stored exhaustion is treated as current
      * (design 5.3, EP-N22): each shared connection of the workspace's pool
-     * whose stored quota is exhausted now and was not observed within
-     * `minIntervalMs` is probed on its own, in the caller's explicit
-     * workspace context. Probe failures keep the stored exhaustion. Returns
-     * the connections whose exhaustion ended (the caller wakes waiters).
+     * whose stored quota blocks now (exhausted, or a model cooldown runs that
+     * the adapter's reading can end: `subscriptionCoreQuotaBlocksNow`) and
+     * was not observed within `minIntervalMs` is probed on its own, in the
+     * caller's explicit workspace context. Probe failures keep the stored
+     * state. Returns the connections whose exhaustion or cooldown ended (the
+     * caller wakes waiters).
      */
     async function refreshExhaustedSubscriptionCoreQuota(
       db: Database,
@@ -551,7 +563,7 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       if (ids.length === 0) return [];
       const stale = (await readStoredQuotaRows(db, scope, ids)).filter((row) => {
         const quota = decodeSubscriptionQuota(row);
-        if (!quota || quotaCapacity(quota, now).kind !== "exhausted") return false;
+        if (!subscriptionCoreQuotaBlocksNow(provider.adapter, quota, now)) return false;
         const updatedAt = row.quota_updated_at ? new Date(row.quota_updated_at).getTime() : 0;
         return now - updatedAt >= minIntervalMs;
       });

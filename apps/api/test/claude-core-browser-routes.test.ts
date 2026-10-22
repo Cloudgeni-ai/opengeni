@@ -14,11 +14,8 @@
  * in its own process: the registration replaces module bindings process-wide.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { CLAUDE_OAUTH_TOKEN_URL } from "@opengeni/config";
 import type { Context, Hono as HonoApp } from "hono";
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { mintSandboxCodemodeToken, sandboxEnvironmentForRun } from "../src/activities/environment";
 
 const accountId = "11111111-1111-4111-8111-111111111111";

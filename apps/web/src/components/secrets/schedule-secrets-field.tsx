@@ -1,7 +1,7 @@
 import type { VaultPolicy, VaultSummary } from "@opengeni/react";
-import { Checkbox, Field, useField } from "@/components/ui/field";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { OWNER_LABEL } from "./vault-model";
+import { Checkbox, Field, useField } from "@opengeni/react/ui/field";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { OWNER_LABEL } from "@opengeni/react/app/components/secrets/vault-model";
 
 /* ----------------------------------------------------------------------------
    The schedule form's Secrets row (S12): which vaults every run may use.

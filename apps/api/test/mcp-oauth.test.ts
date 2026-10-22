@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQLWrapper } from "drizzle-orm/sql";
 import { Hono } from "hono";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
 import {

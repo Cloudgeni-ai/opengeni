@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { delegableApiKeyPermissions } from "@/lib/permissions";
+import { delegableApiKeyPermissions } from "@opengeni/react/app/lib/permissions";
 import { PermissionGroupPicker } from "./permission-picker";
 
 GlobalRegistrator.register();

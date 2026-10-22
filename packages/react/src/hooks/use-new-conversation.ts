@@ -22,6 +22,7 @@ import {
   type InitialComposerDraft,
 } from "./use-composer";
 import { useFileAttachments } from "./use-file-attachments";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Browser choices, not server-owned agent configuration or authority. */
 export type NewConversationCreateOptions = {
@@ -78,6 +79,7 @@ export type NewConversationController = ReturnType<typeof useNewConversation>;
 
 /** Stock new-chat state shared by OpenGeniChat and custom host layouts. */
 export function useNewConversation(options: UseNewConversationOptions = {}) {
+  const t = useOpenGeniText();
   const context = useOpenGeni(options);
   const scope = { client: context.client, workspaceId: context.workspaceId };
   const config = useClientConfigFlags(context.client);
@@ -181,7 +183,7 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       const creator = (context.client as unknown as Partial<Pick<OpenGeniClient, "createSession">>)
         .createSession;
       if (typeof creator !== "function")
-        throw new Error("New chats are not enabled for this product.");
+        throw new Error(t("hooks.useNewConversation.newChatsAreNotEnabled"));
       const created = await creator.call(context.client, context.workspaceId, {
         ...(input.startMode === "realtime" ? {} : { initialMessage }),
         idempotencyKey,
@@ -280,7 +282,8 @@ export function useNewConversation(options: UseNewConversationOptions = {}) {
       return false;
     const resources = uploadsEnabled ? filesRef.current.readyResources : [];
     const draftText = explicit ?? textRef.current;
-    const initialMessage = draftText.trim() || (resources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+    const initialMessage =
+      draftText.trim() || (resources.length > 0 ? FILE_ONLY_MESSAGE_TEXT(t) : "");
     if (!initialMessage) return false;
     return deliver({
       key: crypto.randomUUID(),

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, createSession, ensureManagedAccessForUser, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES } from "../src/runtime-posture";
@@ -107,6 +107,9 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
     `;
     expect(Array.from(rows)).toEqual([
       { table: "workspace_memberships", policy: "personal_document_authority_capability_read" },
+      // 0823 adds account-bound row-lock visibility for the same owner-only
+      // compute capability. WITH CHECK false does not create a write lane.
+      { table: "workspace_memberships", policy: "scoped_compute_capability_lock" },
       { table: "workspace_memberships", policy: "scoped_compute_capability_read" },
       { table: "workspace_memberships", policy: "variable_set_authority_capability_read" },
       // Vault routines (0739) read memberships and workspaces for reach. Same
@@ -124,6 +127,16 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       { table: "workspaces", policy: "document_default_backfill_lifecycle" },
       { table: "workspaces", policy: "vault_authority_capability_read" },
     ]);
+    const [lockPolicy] = await shared.admin`
+      select polcmd, pg_get_expr(polqual, polrelid) as qual,
+        pg_get_expr(polwithcheck, polrelid) as check
+      from pg_policy where polrelid = 'workspace_memberships'::regclass
+        and polname = 'scoped_compute_capability_lock'`;
+    expect(lockPolicy).toMatchObject({ polcmd: "w", check: "false" });
+    expect(lockPolicy!.qual).toContain("account_id");
+    expect(lockPolicy!.qual).toContain("current_setting('opengeni.account_id'");
+    expect(lockPolicy!.qual).toContain("scoped_compute_policy_capability_active");
+    expect(lockPolicy!.qual).toContain("CURRENT_USER");
   }, 180_000);
 
   test("leaves cross-organization workspace metadata readable while content stays isolated", async () => {

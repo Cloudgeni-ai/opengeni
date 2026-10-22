@@ -1,5 +1,49 @@
 # @opengeni/jev
 
+## 4.3.1
+
+### Minor Changes
+
+- 5e32e0f: Improve deferred tool discovery with field-aware retrieval, best-match-first schema
+  loading and compact alternatives, an optional generic decision model for ambiguous
+  queries, exact-name loading,
+  and a paginated tool-group directory. Freeze disclosures in append-only history and
+  keep the first-request tool block stable. Preserve native Responses search and direct
+  function loading. Add retrieval and live generic discovery evaluations.
+
+  Introduce a shared typed decision-model category for tool discovery and code search,
+  with the existing Jev client and OpenAI/OpenRouter Decisions adapters. Use explicit
+  deployment credentials, preserve legacy code-search configuration, and retain
+  provider usage provenance without customer-credit debits. Code-search stats, usage
+  events and metrics use decision rather than Jev names.
+
+### Patch Changes
+
+- Updated dependencies [5e32e0f]
+  - @opengeni/decisions@4.3.0
+
+## 4.2.0
+
+## 4.1.3
+
+## 4.1.1
+
+## 4.0.4
+
+## 3.4.0
+
+## 3.3.0
+
+## 3.2.2
+
+## 3.1.2
+
+## 3.0.0
+
+## 2.0.1
+
+## 2.0.0
+
 ## 1.4.4
 
 ## 1.4.3

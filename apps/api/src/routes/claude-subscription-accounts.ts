@@ -9,10 +9,8 @@ import { requireAccessGrant } from "@opengeni/core";
 import { ClaudeSubscriptionUsage, ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
 
 import { requireOrganizationCodexHuman } from "./codex";
-import {
-  requireSameOriginBrowserMutation,
-  requireSubscriptionScopeMutation,
-} from "./subscription-pool-access";
+import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 import { HTTPException } from "hono/http-exception";
 import type { Context } from "hono";

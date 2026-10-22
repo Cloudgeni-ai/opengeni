@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   canServe,
   type PlacementInput,
@@ -31,6 +31,8 @@ const compat = "0716_subscription_authority_compat.sql";
 const fences = "0717_subscription_authority_fences.sql";
 // Built from the owner reader withheld 0715 rewrites; it follows 0715.
 const personalConnectionVersions = "0730_subscription_core_personal_connection_versions.sql";
+// Patches the owner reader 0730 derives from; it follows 0730.
+const personalQuarantineExpiry = "0884_subscription_core_personal_quarantine_expiry.sql";
 const xaiCutover = "0747_subscription_core_xai_cutover.sql";
 const claudeCutover = "0748_subscription_core_claude_cutover.sql";
 // The drained retirement requires both receipts; held back with the cutovers.
@@ -92,9 +94,13 @@ for (const shape of ["workspace-workspace", "workspace-user"] as const) {
     }));
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${personalConnectionVersions}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
+      await owner`INSERT INTO schema_migrations(name) VALUES (${migration}), (${precursor}), (${providerKeyedReach}), (${workspaceManagedAccounts}), (${apiKeyConnections}), (${personalConnectFormat}), (${compat}), (${fences}), (${personalConnectionVersions}), (${personalQuarantineExpiry}), (${xaiCutover}), (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql')`;
+      await owner`insert into schema_migrations(name) values ('0843_indexed_inbox_lineage.sql')`;
+      await owner`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
       await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-      await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${personalConnectionVersions}, '0752_subscription_personal_sharing.sql')`;
+      await owner`DELETE FROM schema_migrations WHERE name IN (${migration}, ${precursor}, ${providerKeyedReach}, ${workspaceManagedAccounts}, ${apiKeyConnections}, ${personalConnectFormat}, ${compat}, ${fences}, ${personalConnectionVersions}, ${personalQuarantineExpiry}, '0752_subscription_personal_sharing.sql')`;
+      await owner`delete from schema_migrations where name = '0843_indexed_inbox_lineage.sql'`;
+      await owner`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
       const seedTables = [
         "managed_accounts",
         "workspaces",

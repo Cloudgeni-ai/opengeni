@@ -96,31 +96,7 @@ export function createBetterAuthSessionAdapter(
     },
 
     async createLegacySelectedSessionCookies(input, currentCookieHeader) {
-      const context = await auth.$context;
-      const cookie = context.authCookies.sessionToken;
-      const value = input ? signedCookieValue(input.token, context.secret) : "";
-      const headers = [
-        serializeCookieHeader(cookie.name, value, {
-          ...cookie.attributes,
-          ...(input ? {} : { maxAge: 0, expires: new Date(0) }),
-        }),
-      ];
-      for (const cacheCookie of [
-        context.authCookies.sessionData,
-        context.authCookies.accountData,
-        context.authCookies.dontRememberToken,
-      ]) {
-        for (const name of cacheCookieNames(cacheCookie.name, currentCookieHeader)) {
-          headers.push(
-            serializeCookieHeader(name, "", {
-              ...cacheCookie.attributes,
-              maxAge: 0,
-              expires: new Date(0),
-            }),
-          );
-        }
-      }
-      return headers;
+      return await managedAuthSessionCookieHeaders(auth, input?.token ?? null, currentCookieHeader);
     },
   };
 }
@@ -137,6 +113,43 @@ function liveResolvedSession(value: unknown): ManagedAuthResolvedSession | null 
         : Number.NaN;
   if (!Number.isFinite(expiryMillis) || expiryMillis <= Date.now()) return null;
   return value as ManagedAuthResolvedSession;
+}
+
+/**
+ * The provider's own session cookie for an exact session token (or its
+ * expiry when `token` is null), plus invalidation of stale provider cache
+ * cookies, exactly as a browser sign-in would set them.
+ */
+export async function managedAuthSessionCookieHeaders(
+  auth: ManagedAuth,
+  token: string | null,
+  currentCookieHeader?: string | null,
+): Promise<string[]> {
+  const context = await auth.$context;
+  const cookie = context.authCookies.sessionToken;
+  const value = token ? signedCookieValue(token, context.secret) : "";
+  const headers = [
+    serializeCookieHeader(cookie.name, value, {
+      ...cookie.attributes,
+      ...(token ? {} : { maxAge: 0, expires: new Date(0) }),
+    }),
+  ];
+  for (const cacheCookie of [
+    context.authCookies.sessionData,
+    context.authCookies.accountData,
+    context.authCookies.dontRememberToken,
+  ]) {
+    for (const name of cacheCookieNames(cacheCookie.name, currentCookieHeader)) {
+      headers.push(
+        serializeCookieHeader(name, "", {
+          ...cacheCookie.attributes,
+          maxAge: 0,
+          expires: new Date(0),
+        }),
+      );
+    }
+  }
+  return headers;
 }
 
 function cookieValue(header: string | null, name: string): string | null {

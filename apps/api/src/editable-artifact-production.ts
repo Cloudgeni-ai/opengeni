@@ -64,10 +64,8 @@ import {
   type ObjectStorage,
 } from "@opengeni/storage";
 import { EventBusEditableArtifactLiveHints } from "./editable-artifact-live-hints";
-import {
-  NativeEditableArtifactKernelAdapter,
-  loadVerifiedNativeArtifactRuntimeBinding,
-} from "./editable-artifact-native-kernel";
+import { OffThreadEditableArtifactKernel } from "./editable-artifact-kernel-pool";
+import { loadVerifiedNativeArtifactRuntimeBinding } from "./editable-artifact-native-kernel";
 import { EditableArtifactOfficeImportAdapter } from "./editable-artifact-office-import";
 import { EditableArtifactWorkspaceFileAdapter } from "./editable-artifact-workspace-files";
 
@@ -92,6 +90,8 @@ export async function createStandaloneEditableArtifactApplication(input: {
   db: Database;
   bus: EventBus;
   objectStorage: ObjectStorage;
+  /** Native kernel worker threads; defaults to DEFAULT_EDITABLE_ARTIFACT_KERNEL_THREADS. */
+  kernelThreads?: number;
 }): Promise<StandaloneEditableArtifactApplication> {
   const boundedObjects = createObjectStorageBoundedPorts(input.objectStorage);
   const materializationObjects = createObjectStorageBoundedPorts(input.objectStorage, {
@@ -102,7 +102,12 @@ export async function createStandaloneEditableArtifactApplication(input: {
   });
   const runtimeBinding = await loadVerifiedNativeArtifactRuntimeBinding();
   const runtime = runtimeBinding.runtime;
-  const kernel = new NativeEditableArtifactKernelAdapter(runtime, boundedObjects.read);
+  // The native kernel is synchronous; running it on worker threads keeps large
+  // snapshot replays from stalling every other request on this API process.
+  const kernel = new OffThreadEditableArtifactKernel({
+    objects: boundedObjects.read,
+    ...(input.kernelThreads !== undefined ? { threads: input.kernelThreads } : {}),
+  });
   const persistedStore = new PostgresEditableArtifactStore(input.db);
   const store = editableArtifactStorePortFromPostgres(persistedStore);
   const authorization = new PostgresEditableArtifactAuthorization(input.db);
@@ -232,6 +237,7 @@ export async function createStandaloneEditableArtifactApplication(input: {
     close() {
       clearInterval(cleanup);
       invalidations.close();
+      kernel.close();
     },
   });
 }

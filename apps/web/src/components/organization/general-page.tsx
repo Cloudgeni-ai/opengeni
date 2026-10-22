@@ -2,14 +2,14 @@ import { PencilIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
-import { CopyField } from "@/components/ui/copy-field";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { Section } from "@/components/ui/section";
-import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { Section } from "@opengeni/react/ui/section";
+import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 
 import { useOrganizationDirectory } from "./organization-directory";
 

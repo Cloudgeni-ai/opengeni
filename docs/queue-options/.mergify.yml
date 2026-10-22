@@ -1,0 +1,41 @@
+# DRAFT ONLY: outside all Mergify discovery paths. See mergify-rollout.md.
+# yaml-language-server: $schema=https://docs.mergify.com/mergify-configuration-schema.json
+merge_queue:
+  mode: serial
+  max_parallel_checks: 2
+  reset_on_external_merge: always
+  skip_intermediate_results: false
+
+defaults:
+  queue_rule:
+    merge_method: merge
+    checks_timeout: 45 min
+    max_checks_retries: 1
+    # null retains automatic failure bisection until individual bad PRs are found.
+    batch_max_failure_resolution_attempts: null
+    batch_max_wait_time: 30 seconds
+    branch_protection_injection_mode: merge
+    merge_conditions:
+      - check-success=Queue batch ready
+
+queue_rules:
+  # Isolate Version until descendant-tip release admission is implemented.
+  - name: version
+    batch_size: 1
+    queue_conditions:
+      - base=main
+      - head=changeset-release/main
+      - author=github-actions[bot]
+      - label=queue-reviewed
+      - check-success=Queue ready
+  - name: main
+    batch_size:
+      min: 1
+      max: 16
+    queue_conditions:
+      - base=main
+      - -head=changeset-release/main
+      - label=queue-reviewed
+      - check-success=Queue ready
+
+# No auto-queue/auto-merge rule: queue only after exact-head VM/review evidence.

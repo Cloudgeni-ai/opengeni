@@ -3,6 +3,11 @@
 > **Point-in-time design record.** Written against `main` at `9e21a09c` on
 > September 1, 2026 and resolved on September 3, 2026. Code wins where the
 > implementation later differs.
+>
+> **Partly superseded** by [published-sites-2026-10-14.md](published-sites-2026-10-14.md):
+> Sites can now be published on their own hostname under a configurable
+> wildcard Sites domain, served by a gateway that keeps the opaque-origin
+> frame and bridge described here.
 
 # Workspace HTML Sites
 
@@ -350,10 +355,10 @@ or React session implementation is required.
    requested canonical identities together.
 
 The product runtime packages this guidance as the native tool-bound
-`opengeni-sites` Skill. A create-only Site session admits it when
+`sites` Skill. A create-only Site session admits it when
 `artifacts_create` is present; an edit session admits it only when both
 `artifacts_get_source` and `artifacts_publish` are present. The authoritative source is
-`packages/runtime/src/bundled_site_skills/opengeni-sites`; it is shipped with the
+`packages/runtime/src/bundled_site_skills/sites`; it is shipped with the
 runtime and is not exposed through repository-local `.agents/skills`. Connected Machine attempts keep the same frozen Site tool surface,
 but do not advertise this worker-bundled filesystem Skill until its files have
 an explicit machine-delivery path.

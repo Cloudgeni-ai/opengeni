@@ -12,10 +12,14 @@ import {
 } from "./exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
+  RoutingWorkspaceRootChangedError,
   isRoutingMutationOutputRejectedError,
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
+import { ActiveBackendUnresolvableError } from "./routing/backend-resolver";
+import { runRoutedToolCall } from "./routing/routed-call-scope";
+import { createHash } from "node:crypto";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -74,6 +78,14 @@ const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
 const CUT_POLLING_OUTPUT_QUIET_MS = 5_000;
 /** Output that ends in an input prompt returns after this much silence. */
 const CUT_POLLING_PROMPT_QUIET_MS = 2_000;
+/**
+ * A Steer returns a foreground wait at once when the process keeps running as
+ * a session background command. A turn-scoped process (a handle held in one
+ * worker's memory) stops at the Steer's handover, as at any turn end, so its
+ * wait gets this much longer to see a short command finish and keep its
+ * result; after that the Steer is read and the process stops at the handover.
+ */
+export const TURN_SCOPED_STEER_GRACE_MS = 5_000;
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -141,8 +153,6 @@ type ActiveShellSession = {
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
-  /** Never adopt as a session background command; finalization stops it. */
-  turnScoped?: boolean;
 };
 
 type CommandCancellationSession = {
@@ -172,6 +182,10 @@ type CommandCancellationSession = {
     providerSessionId: number,
     command?: string,
   ): Promise<void>;
+  /** Rebind a session background command started by an earlier turn so this
+   * turn reads and writes it through the retained-process path. False when the
+   * handle is not such a command. */
+  attachSessionProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessIdentity?(providerSessionId: number): { id: string } | null;
   cancelSupervisedCommand?(providerSessionId: number, reason: "explicit_stop"): Promise<boolean>;
   writeStdinForProcessRead?(args: {
@@ -310,6 +324,18 @@ export type TurnToolCancellationFence = {
     args: ChannelAExecArgs,
   ): Promise<SynchronousCommandResult>;
   /**
+   * While active, every model-facing foreground wait (the exec_command and
+   * write_stdin wait windows) returns at its next provider slice with the
+   * process's live handle, exactly as when its window ends: the process keeps
+   * running and is adopted as a session background command. A handle that
+   * cannot become one (turn-scoped, held in this worker's memory) first gets
+   * up to TURN_SCOPED_STEER_GRACE_MS of its requested wait to finish, since
+   * the handover stops it. The worker activates this while a Steer waits for
+   * this turn, so the Steer is read within seconds instead of after the
+   * requested wait.
+   */
+  setForegroundWaitYield(active: boolean): void;
+  /**
    * Remove every attempt-scoped secret file the wrapped sessions wrote
    * (`secretfile` paths, leftover env files). Called at attempt end after the
    * writers drain; rejects with the first failure after trying every session.
@@ -362,27 +388,6 @@ export function modelWaitMs(value: unknown, cutPolling: boolean): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? Math.min(value, max)
     : TURN_DEFAULT_MODEL_WAIT_MS;
-}
-
-const BARE_INTERACTIVE_SHELL =
-  /^(?:exec\s+)?(?:(?:\/usr)?\/bin\/)?(?:ba|z|da|k|a|fi)?sh(?:\s+(?:-[A-Zabd-z]+|--[a-z][a-z-]*))*$/;
-
-/**
- * True when the command's final step starts a shell that only reads stdin (for
- * example `bash --noprofile --norc`): a REPL the model drives with write_stdin
- * during this turn. Such a shell never exits on its own, so adopting it as a
- * session background command would keep the sandbox busy indefinitely after
- * the turn. It stays turn-scoped instead and the ordinary finalization drain
- * stops it. A `-c` command string, a script argument, or any other trailing
- * token is not a bare shell and keeps normal background adoption.
- */
-export function isBareInteractiveShellCommand(command: string): boolean {
-  const steps = command
-    .split(/\n|;|&&|\|\|/)
-    .map((step) => step.trim())
-    .filter((step) => step.length > 0 && !step.startsWith("#"));
-  const last = steps.at(-1);
-  return last !== undefined && BARE_INTERACTIVE_SHELL.test(last);
 }
 
 // oxlint-disable-next-line no-control-regex
@@ -615,24 +620,80 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     ].join("\n"),
     markerPath,
   );
+  // Carry the group-leader program once, verbatim. The setsid, python and
+  // in-place branches all run this same text, so embedding it per branch
+  // tripled every command's provider argv and forced callers to split payloads
+  // into more sandbox round trips. A quoted heredoc keeps the exact command
+  // bytes visible (secret delivery matches its command by that text); the
+  // in-place branch evaluates the identical text in the current shell.
+  const capture = heredocSourceCapture(groupLeaderCommand, markerPath);
   return [
     ...processInspectionCommandLines(),
+    ...capture.lines,
     '__opengeni_outer_pid="$$"',
     '__opengeni_outer_pgid="$(__opengeni_process_group_id "$__opengeni_outer_pid")"',
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    `    exec "$__opengeni_setsid" /bin/sh -c "$${capture.variable}"`,
     "  fi",
     // macOS has setsid(2), but no setsid executable. The parent is proven
     // not to be a group leader, so the same process can safely start a session.
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} "$${capture.variable}"`,
     "fi",
-    groupLeaderCommand,
+    `eval "$${capture.variable}"`,
   ].join("\n");
+}
+
+/** Read `source` byte-for-byte from a quoted heredoc into a shell variable,
+ * without external tools. The program starts by unsetting that variable, so
+ * code evaluated in the current shell never observes it. The delimiter is
+ * derived from the per-invocation marker, keeping the wrapper a pure function
+ * of its inputs, and is re-derived until it cannot collide with the source. */
+function heredocSourceCapture(source: string, seed: string): { lines: string[]; variable: string } {
+  const derive = (attempt: number) =>
+    createHash("sha256").update(`${seed}\0${attempt}`, "utf8").digest("hex").slice(0, 32);
+  let attempt = 0;
+  let token = derive(attempt);
+  let delimiter = `__OPENGENI_HEREDOC_${token}__`;
+  let sentinel = `__OPENGENI_END_${token}__`;
+  while (source.split("\n").includes(delimiter) || source.includes(sentinel)) {
+    attempt += 1;
+    token = derive(attempt);
+    delimiter = `__OPENGENI_HEREDOC_${token}__`;
+    sentinel = `__OPENGENI_END_${token}__`;
+  }
+  const variable = `__opengeni_program_${token}`;
+  const line = `${variable}_line`;
+  const found = `${variable}_found`;
+  return {
+    variable,
+    lines: [
+      `${variable}=""`,
+      `${line}=""`,
+      `${found}=0`,
+      `while IFS= read -r ${line}; do`,
+      `  case "$${line}" in`,
+      `    *${sentinel})`,
+      `      ${line}="\${${line}%${sentinel}}"`,
+      `      ${variable}="$${variable}$${line}"`,
+      `      ${found}=1`,
+      "      break ;;",
+      "    *)",
+      `      ${variable}="$${variable}$${line}
+"`,
+      "      ;;",
+      "  esac",
+      `done <<'${delimiter}'`,
+      `unset ${variable}\n${source}${sentinel}`,
+      delimiter,
+      `[ "$${found}" = 1 ] || exit 125`,
+      `unset ${line} ${found}`,
+    ],
+  };
 }
 
 /** Keep large internal synchronous commands out of the repeated process-group
@@ -887,6 +948,51 @@ export function renderDirectToolFault(error: unknown, retainedProcessSessionId?:
   return `An error occurred while running the tool. Please try again. Error: ${details}`;
 }
 
+/**
+ * The result of a call that the routed sandbox refused before anything
+ * started, because the session moved to a route this attempt cannot serve
+ * while the call's step was running. The next step runs on the new route.
+ */
+export const ROUTE_MOVED_CALL_NOT_STARTED =
+  "Not run: this chat moved to another machine during this step, so this call did not start. The next step runs on that machine; call it again there if it is still needed.";
+
+/** A route move this attempt cannot serve, refused before dispatch. Walks only
+ * structural `cause` and AggregateError links, never message text. */
+export function isRouteMoveRefusal(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const seen = new Set<unknown>();
+  for (let inspected = 0; pending.length > 0 && inspected < 16; inspected += 1) {
+    const current = pending.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof RoutingWorkspaceRootChangedError) return true;
+    if (
+      current instanceof ActiveBackendUnresolvableError &&
+      current.code === "home_unavailable_this_turn"
+    )
+      return true;
+    if (current instanceof AggregateError) pending.push(...current.errors);
+    if (current instanceof Error && current.cause !== undefined) pending.push(current.cause);
+  }
+  return false;
+}
+
+/** A call refused by a route move before any of its operations resolved a
+ * route started nothing: return that as its result, so the step settles with
+ * a certain outcome for every call and the attempt ends at the next model
+ * request. A refusal after the call already reached a route still fails. */
+function withRouteMoveContainment(tool: FunctionTool): FunctionTool {
+  return {
+    ...tool,
+    invoke: (runContext, input, details) =>
+      runRoutedToolCall(
+        () => tool.invoke(runContext, input, details),
+        isRouteMoveRefusal,
+        () => ROUTE_MOVED_CALL_NOT_STARTED,
+      ),
+  };
+}
+
 function safeProcessIdentity(raw: string): ShellProcessIdentity | null {
   if (parseExecBannerExitCode(raw) !== 0) return null;
   const match = execOutput(raw)
@@ -960,6 +1066,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private reason: unknown;
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly shellSessions = new Map<number, ActiveShellSession>();
+  /** See setForegroundWaitYield. */
+  private foregroundWaitYield = false;
   private readonly pendingShellStarts = new Set<PendingShellStart>();
   private readonly remoteExecs = new Set<ActiveRemoteExec>();
   private rawExecInvoke: FunctionToolInvoke | null = null;
@@ -995,6 +1103,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  setForegroundWaitYield(active: boolean): void {
+    this.foregroundWaitYield = active;
   }
 
   async clearSecretFiles(): Promise<void> {
@@ -1447,7 +1559,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
 
     const wrapped = structuralTools.map((tool) => {
-      if (tool.type === "function") return this.wrapFunctionTool(tool as FunctionTool, session);
+      if (tool.type === "function")
+        return withRouteMoveContainment(this.wrapFunctionTool(tool as FunctionTool, session));
       if (tool.type === "apply_patch")
         return this.wrapApplyPatchTool(tool as ApplyPatchTool, session);
       if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
@@ -1490,6 +1603,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               return "command_input failed: provide a native session_id and nonempty chars; use command_read for observation";
             }
             try {
+              await session?.attachSessionProcess?.(input.session_id);
               if (session?.supportsCommandInput?.(input.session_id) === false) {
                 return "command_input unsupported: this retained provider command has no arbitrary stdin capability";
               }
@@ -1682,7 +1796,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   identity: null,
                   identityValidated: false,
                   cancellation: null,
-                  ...(isBareInteractiveShellCommand(parsed.cmd) ? { turnScoped: true } : {}),
                 });
                 pendingStart?.settle(retainedProcess.providerSessionId);
               }
@@ -1736,11 +1849,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
-                // The exact marker kill is the finalization authority for a
-                // turn-scoped shell; op-stream (remote) launches have none.
-                ...(!useRemoteOpCancellation && isBareInteractiveShellCommand(parsed.cmd)
-                  ? { turnScoped: true }
-                  : {}),
               };
               // Provider retention preserves the physical process but does not
               // transfer it to the session. Keep it turn-owned and cancellable
@@ -1803,6 +1911,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
                 })
               : input;
+            if (sessionId !== null) {
+              // A command an earlier turn left running is session-owned. Bind
+              // it before choosing a path so this turn never claims it as its
+              // own shell and stops it at finalization.
+              try {
+                await cancellationSession?.attachSessionProcess?.(sessionId);
+              } catch (error) {
+                return renderDirectToolFault(error, sessionId);
+              }
+            }
             const directProcessSession =
               sessionId === null ? null : retainedProcessSession(cancellationSession, sessionId);
             const typedHandleLoss =
@@ -2005,8 +2123,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }): Promise<string> {
     const { state, startedAt, waitMs, quietReturnAfterMs, maxOutputTokens } = input;
     const canAdoptInBackground =
-      state.turnScoped !== true &&
-      (state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true);
+      state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
     if (!state.typedHandleLoss && isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
@@ -2027,12 +2144,21 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let lastOutputAt: number | null = output ? performance.now() : null;
     let observationFailure: ProviderCommandObservationUnavailableError | null =
       input.initialObservationFailure ?? null;
+    let steerSeenAt: number | null = null;
     for (;;) {
       if (observationFailure?.readRetryAllowed === false) break;
       // Check cancellation before any return-control exit, so a Pause/Steer
       // that lands between slices never lets the command be adopted below.
       if (this.cancelled) throw cancellationError(this.reason);
       if (performance.now() - startedAt >= waitMs) break;
+      // A Steer is waiting: return control as if the window had ended. The
+      // process keeps running as a session background command; a turn-scoped
+      // one first gets a short grace to finish (TURN_SCOPED_STEER_GRACE_MS).
+      if (this.foregroundWaitYield) {
+        if (canAdoptInBackground) break;
+        steerSeenAt ??= performance.now();
+        if (performance.now() - steerSeenAt >= TURN_SCOPED_STEER_GRACE_MS) break;
+      }
       if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
         const now = performance.now();
         const quietMs = now - lastOutputAt;
@@ -2118,9 +2244,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
     }
     if (!canAdoptInBackground) {
-      // Docker/local handles belong to this exact worker session, and a bare
-      // interactive shell waits on stdin forever. Keep the shell registered
-      // with the turn fence: finalization must stop and settle it. Returning
+      // A handle held only in this worker's memory (no in-sandbox supervisor)
+      // cannot be controlled after the turn. Keep the shell registered with
+      // the turn fence: finalization must stop and settle it. Returning
       // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }

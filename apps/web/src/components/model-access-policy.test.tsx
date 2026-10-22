@@ -3,6 +3,12 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { actRun, renderHook } from "../../../../packages/react/test/render-hook";
+import {
+  clearSharedQueries,
+  invalidateSharedQueries,
+  retainSharedQueries,
+} from "@opengeni/react/app/lib/shared-query";
 
 const getWorkspaceModelAccessPolicy = mock(
   async (_workspaceId: string): Promise<WorkspaceModelAccessPolicy> => ({
@@ -36,11 +42,11 @@ const context = {
   },
 };
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => context,
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     title,
@@ -69,6 +75,8 @@ const {
   usableModelCount,
   useModelAccessPolicy,
 } = await import("./model-access-policy");
+const { useWorkspaceModelCatalog } =
+  await import("@opengeni/react/app/lib/use-workspace-model-catalog");
 
 /** The Defaults rows of the Models page that read the policy. */
 function DefaultsRows({ canManage = true }: { canManage?: boolean }) {
@@ -155,6 +163,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  clearSharedQueries(context.client);
   getWorkspaceModelAccessPolicy.mockClear();
   getWorkspaceModelCatalog.mockClear();
   updateWorkspaceModelAccessPolicy.mockClear();
@@ -176,6 +185,58 @@ beforeEach(() => {
 });
 
 describe("workspace model access policy editor", () => {
+  test("retains policy reads on revisits, shares the catalog, and responds to global Refresh", async () => {
+    const release = retainSharedQueries(context.client);
+    const first = await renderHook(() => useModelAccessPolicy("workspace-a"), {});
+    await first.unmount();
+    const second = await renderHook(
+      () => ({
+        policy: useModelAccessPolicy("workspace-a"),
+        catalog: useWorkspaceModelCatalog("workspace-a"),
+      }),
+      {},
+    );
+    try {
+      expect(second.result.current.policy.loading).toBe(false);
+      expect(second.result.current.policy.saved?.mode).toBe("provider");
+      expect(getWorkspaceModelAccessPolicy).toHaveBeenCalledTimes(1);
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(1);
+      await actRun(() => invalidateSharedQueries(context.client, ["model-settings"]));
+      expect(getWorkspaceModelAccessPolicy).toHaveBeenCalledTimes(2);
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledTimes(2);
+    } finally {
+      await second.unmount();
+      release();
+    }
+  });
+
+  test("a save finishing after navigation evicts the retained old policy before a revisit", async () => {
+    const release = retainSharedQueries(context.client);
+    const pending = deferred<WorkspaceModelAccessPolicy>();
+    updateWorkspaceModelAccessPolicy.mockImplementationOnce(() => pending.promise);
+    const first = await renderHook(() => useModelAccessPolicy("workspace-a"), {});
+    let saved!: Promise<boolean>;
+    await actRun(() => {
+      saved = first.result.current.save(first.result.current.saved!);
+    });
+    await first.unmount();
+    const changed = { allowedProviders: null, allowedModels: ["codex/gpt-5.6-sol"] };
+    getWorkspaceModelAccessPolicy.mockResolvedValue(changed);
+    await actRun(async () => {
+      pending.resolve(changed);
+      expect(await saved).toBe(false);
+    });
+    const second = await renderHook(() => useModelAccessPolicy("workspace-a"), {});
+    try {
+      expect(getWorkspaceModelAccessPolicy).toHaveBeenCalledTimes(2);
+      expect(second.result.current.saved?.mode).toBe("selected");
+      expect([...second.result.current.saved!.selectedModelIds]).toEqual(changed.allowedModels);
+    } finally {
+      await second.unmount();
+      release();
+    }
+  });
+
   test("turning Allow every model off lists models to pick, and Save shows once something changed", async () => {
     getWorkspaceModelAccessPolicy.mockImplementation(async () => ({
       allowedProviders: null,

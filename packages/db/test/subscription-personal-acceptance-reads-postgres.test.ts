@@ -16,10 +16,11 @@ import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   claimSessionWorkForAttempt,
   connectSubscriptionCoreCodexConnection,
   createDb,
@@ -34,6 +35,10 @@ import {
   recoverSubscriptionCoreCodexConnectionHealth,
   retiredSubscriptionObjectDescriptions,
   retiredSubscriptionObjectViolation,
+  RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+  SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
+  SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
+  SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -41,12 +46,18 @@ import { rawRows, withRlsContext } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  MAINTENANCE_PRIVATE_TABLES,
+  MAINTENANCE_PROBE_OWNER_ROUTINES,
+} from "../src/runtime-posture";
 import { withSubscriptionCoreAcceptedTurn } from "../src/subscription-core-placement-world";
+import { ABSENT_USAGE_HISTORY_POSTURE } from "./fixtures/absent-usage-history-posture";
 import {
   stageVaultPolicyColumns,
   withoutAbsentLaterPosture,
   withoutAbsentVaultPosture,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
@@ -479,8 +490,13 @@ beforeAll(async () => {
   // Stage a provisioned database without 0726, as a deployment is before it:
   // 0726 and every later migration (which may require 0726, or retire the
   // routines it patches) are held back, and only 0726 is applied below.
+  // Current session writers need the real additive 0834 activity xid column
+  // and trigger, which are independent of the routines this fixture exercises.
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
@@ -490,6 +506,10 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
+    // Current event readers also project 0810's nullable usage source key and
+    // 0889's nullable tool name.
+    await staging`alter table session_events add column usage_source_key text, add column tool_name text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -604,9 +624,141 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
         ([routine]) => `maintenance work check ${routine} is missing or has unsafe posture`,
       ),
     );
+    // 0773 (per-task usage limits).
+    heldBack.push(
+      ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
+        (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
+      ),
+      ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
+        (table) => `session usage limit private table ${table} is missing or unsafe`,
+      ),
+      "session usage limit capability has unsafe owner or direct runtime privileges",
+    );
+    // 0795 (Site lifecycle cancellation) is deliberately held back as well.
+    heldBack.push(
+      "Site cancellation capability ledger is missing or unsafe",
+      "Site cancellation policy predicate is missing or unsafe",
+      "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
+    );
+    // 0848–0849 add the strict-owner projections and maintenance claim boundary.
+    // The original checkpoint validators already exist and provisioning revokes
+    // their runtime EXECUTE, even before the later wrappers are installed.
+    heldBack.push(
+      ...MAINTENANCE_PRIVATE_TABLES.map(
+        (table) => `maintenance probe index ${table} is missing or accessible to runtime`,
+      ),
+      ...MAINTENANCE_PROBE_OWNER_ROUTINES.filter(
+        (routine) =>
+          routine !== "validate_sandbox_checkpoint_refs()" &&
+          routine !== "validate_sandbox_checkpoint_artifact_refs()",
+      ).map((routine) => `maintenance probe helper ${routine} is missing or unsafe`),
+      "maintenance claim predicate maintenance_claim_active(text, text) is missing or unsafe",
+      "maintenance claim predicate maintenance_title_event_visible(text, uuid) is missing or unsafe",
+    );
+    // 0851 adds exact session-tree machine access and agent creation authority.
+    heldBack.push(
+      ...[
+        "guard_session_agent_creation_provenance()",
+        "personal_machine_grant_covers_descendant(uuid, uuid, uuid, uuid)",
+        "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+      "target-schema runtime capability create_agent_child_session(uuid, uuid, uuid, uuid, uuid, integer, jsonb) is missing or ambiguous",
+    );
+    // 0854 adds the private-file lookup.
+    heldBack.push(
+      "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
+    );
+    // 0796-0798 (subscription plans and billing operations) are held back too.
+    heldBack.push(
+      ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      "owner-internal target-schema helper set_subscription_plan_catalog(jsonb, text, text) is missing or ambiguous",
+      "runtime role cannot read the subscription plan catalog",
+      "subscription plan maintenance inventory is missing",
+      "subscription plan Free anniversary helper is missing",
+    );
+    // 0805 (private actor visibility), 0823 (personal machine consents), and
+    // 0841 (chat-visible machine access explanation) are also held back.
+    heldBack.push(
+      ...[
+        "consent_session_turn_personal_machine(uuid, uuid, uuid, uuid)",
+        "get_session_attempt_machine(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, boolean, boolean)",
+        "get_session_machine_access(uuid, uuid, uuid)",
+        "session_private_actor_visible_keys()",
+      ].map((routine) => `target-schema runtime capability ${routine} is missing or ambiguous`),
+      ...[
+        "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
+        "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+        "live_session_turn_machine_consent(uuid)",
+      ].map((routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`),
+    );
+    // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
+    // are in the runtime and protected contracts.
+    const runtimeTables = [
+      // 0796 and 0797 (billing operations and subscription plans).
+      "billing_subscription_operations",
+      // 0820 (retained browser downloads).
+      "browser_session_retained_downloads",
+      // 0890 reconciliation tables are absent from this historical schema.
+      "model_call_fact_reconciliation_candidates",
+      "model_call_fact_reconciliation_progress",
+      "organization_plans",
+      "plan_credit_periods",
+      // 0792 (schedule blocker reviews) is also a later runtime/protected table.
+      "scheduled_task_blocker_reviews",
+      "session_title_operations",
+      "site_abuse_reports",
+      "site_auth_codes",
+      "site_data_collections",
+      "site_data_files",
+      "site_data_rate_windows",
+      "site_data_record_values",
+      "site_data_records",
+      "site_data_usage",
+      "site_data_validation_windows",
+      "site_data_workspace_validation_windows",
+      "site_hostname_holds",
+      "site_hostnames",
+      "site_limit_profiles",
+      "site_platform_brake",
+      "site_platform_storage",
+      "site_platform_totals",
+      "site_platform_usage",
+      "site_publications",
+      "site_runtime_conversations",
+      "site_runtime_rate_windows",
+      "site_runtime_usage",
+      // 0842 adds private Site/chat grants to both posture inventories.
+      "site_session_access",
+      "site_sql_databases",
+      "site_sql_migrations",
+      "site_sql_queries",
+      "site_sql_rate_windows",
+      "site_sql_usage",
+      "site_viewer_sessions",
+    ];
+    // 0823 machine-consent tables are protected but not runtime-privileged.
+    const protectedTables = [
+      ...runtimeTables,
+      "session_attempt_machine_consents",
+      "session_turn_machine_consents",
+    ].sort();
+    heldBack.push(
+      `runtime privilege tables are missing: ${runtimeTables.join(", ")}`,
+      `protected tables are missing: ${protectedTables.join(", ")}`,
+    );
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
+      ...ABSENT_USAGE_HISTORY_POSTURE,
+      // Selected-workspace Slack bot access arrives in the withheld 0864.
+      "scheduled Slack bot message capability set_slack_bot_workspace_access(uuid, uuid, uuid, text, boolean, uuid[]) is missing or unsafe",
+      "scheduled Slack bot message capability read_slack_bot_workspace_access(uuid, uuid, uuid) is missing or unsafe",
       "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
     ].sort();

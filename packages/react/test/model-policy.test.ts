@@ -12,6 +12,9 @@ import {
   modelUsesCredits,
   projectPickerRows,
 } from "../src/model-policy";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id" | "label">,
@@ -38,14 +41,32 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("treats rows without readiness or availability as ready and selectable", () => {
+    const rows = projectPickerRows(englishText, [
+      { id: "gpt-5.6-sol" } as unknown as WorkspaceModelCatalogModel,
+      catalogModel({
+        id: "blocked",
+        label: "Blocked",
+        credentialReadiness: {
+          status: "not_ready",
+          reason: "missing_credential",
+          basis: "configuration",
+          checkedAt: null,
+        },
+      }),
+    ]);
+    expect(rows.map((row) => [row.id, row.selectable, row.unavailableReason])).toEqual([
+      ["gpt-5.6-sol", true, null],
+    ]);
+  });
   test("shows promotional coverage and general credit requirements in model rows", () => {
     const models = (["promotional", "general", "unavailable"] as const).map((creditFunding) =>
       catalogModel({ id: creditFunding, label: creditFunding, cost: "credits", creditFunding }),
     );
-    expect(projectPickerRows(models).map((row) => row.fundingHint)).toEqual([
+    expect(projectPickerRows(englishText, models).map((row) => row.fundingHint)).toEqual([
       "Free credits",
       "Uses credits",
-      "Needs credits",
+      "Not covered by your credits",
     ]);
   });
   test.each([
@@ -98,7 +119,7 @@ describe("model-policy", () => {
       first: "Models",
     },
   ])("conditionally promotes the UI group: $name", ({ paid, codex, free, codexOnly, first }) => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({ id: "free", label: "Free", source: "opengeni", cost: "free" }),
       catalogModel({ id: "paid", label: "Paid", source: "opengeni", cost: "credits" }),
       catalogModel({ id: "codex/test", label: "Codex", source: "codex", cost: "subscription" }),
@@ -108,20 +129,20 @@ describe("model-policy", () => {
       unavailableReason: [free, paid, codex][index] ? null : "Blocked by workspace policy",
     }));
     const snapshot = structuredClone(rows);
-    const groups = groupPickerRowsByBillingClass(rows, { codexOnly });
+    const groups = groupPickerRowsByBillingClass(englishText, rows, { codexOnly });
     expect(groups[0]?.label).toBe(first);
     expect(groups.flatMap((group) => group.rows)).toHaveLength(3);
     expect(groups.flatMap((group) => group.rows).find((row) => row.id === "paid")).toEqual(rows[1]);
     expect(rows).toEqual(snapshot);
-    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("Models");
+    expect(groupPickerRowsByBillingClass(englishText, rows.slice(0, 2))[0]?.label).toBe("Models");
   });
 
   test("unknown legacy cost is not treated as free", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({ id: "legacy", label: "Legacy", source: "opengeni" }),
       catalogModel({ id: "codex/test", label: "Codex", source: "codex" }),
     ]);
-    expect(groupPickerRowsByBillingClass(rows).map((group) => group.label)).toEqual([
+    expect(groupPickerRowsByBillingClass(englishText, rows).map((group) => group.label)).toEqual([
       "Models",
       "Codex",
     ]);
@@ -176,7 +197,7 @@ describe("model-policy", () => {
         checkedAt: null,
       },
     });
-    expect(projectPickerRows([model])).toEqual([]);
+    expect(projectPickerRows(englishText, [model])).toEqual([]);
   });
   test("labels organization API keys like workspace ones, without connection scope", () => {
     const model = catalogModel({
@@ -189,17 +210,19 @@ describe("model-policy", () => {
       cost: "organization",
     });
     expect(billingClassForModel(model)).toBe("organization_byok");
-    expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("API keys");
-    expect(payerSummaryForModel(model)).toBe("Billed to the organization OpenRouter account");
-    expect(payerSummaryForModel({ ...model, cost: undefined })).toBe(
+    expect(projectPickerRows(englishText, [model])[0]?.billingClassLabel).toBe("API keys");
+    expect(payerSummaryForModel(englishText, model)).toBe(
       "Billed to the organization OpenRouter account",
     );
-    expect(payerSummaryForModel({ ...model, provider: "organization-gateway" })).toBe(
+    expect(payerSummaryForModel(englishText, { ...model, cost: undefined })).toBe(
+      "Billed to the organization OpenRouter account",
+    );
+    expect(payerSummaryForModel(englishText, { ...model, provider: "organization-gateway" })).toBe(
       "Billed to the organization Vercel account",
     );
   });
   test("omits disconnected subscription and workspace Gateway rails", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({ id: "managed", label: "Managed", source: "opengeni" }),
       catalogModel({
         id: "codex/gpt-5.6-sol",
@@ -228,7 +251,7 @@ describe("model-policy", () => {
   });
 
   test("labels a connected workspace Gateway as a workspace provider", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({
         id: "workspace-gateway/kimi-k3",
         label: "Kimi K3",
@@ -241,7 +264,9 @@ describe("model-policy", () => {
       billingClass: "byok",
       billingClassLabel: "API keys",
     });
-    expect(payerSummaryForModel(rows[0]!.catalog)).toBe("Billed to the workspace Vercel account");
+    expect(payerSummaryForModel(englishText, rows[0]!.catalog)).toBe(
+      "Billed to the workspace Vercel account",
+    );
   });
 
   test("keeps workspace OpenRouter billing separate from deployment OpenRouter", () => {
@@ -265,10 +290,14 @@ describe("model-policy", () => {
     });
 
     expect(billingClassForModel(workspaceModel)).toBe("byok");
-    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace OpenRouter account");
-    expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
+    expect(payerSummaryForModel(englishText, workspaceModel)).toBe(
+      "Billed to the workspace OpenRouter account",
+    );
+    expect(advancedSourceSummary(englishText, workspaceModel)).toBe(
+      "Workspace OpenRouter connection",
+    );
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
-    expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
+    expect(payerSummaryForModel(englishText, deploymentModel)).toBe("Free in this deployment");
   });
 
   test("keeps workspace and organization Opper billing separate from deployment Opper", () => {
@@ -299,14 +328,16 @@ describe("model-policy", () => {
     });
 
     expect(billingClassForModel(workspaceModel)).toBe("byok");
-    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace Opper account");
-    expect(advancedSourceSummary(workspaceModel)).toBe("Workspace Opper connection");
+    expect(payerSummaryForModel(englishText, workspaceModel)).toBe(
+      "Billed to the workspace Opper account",
+    );
+    expect(advancedSourceSummary(englishText, workspaceModel)).toBe("Workspace Opper connection");
     expect(billingClassForModel({ ...workspaceModel, cost: undefined })).toBe("byok");
     expect(billingClassForModel(organizationModel)).toBe("organization_byok");
     expect(billingClassForModel({ ...organizationModel, cost: undefined })).toBe(
       "organization_byok",
     );
-    expect(payerSummaryForModel(organizationModel)).toBe(
+    expect(payerSummaryForModel(englishText, organizationModel)).toBe(
       "Billed to the organization Opper account",
     );
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
@@ -319,12 +350,12 @@ describe("model-policy", () => {
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
     expect(billingClassForModel(model)).toBe("opengeni_credits");
-    expect(projectPickerRows([model])[0]).toMatchObject({
+    expect(projectPickerRows(englishText, [model])[0]).toMatchObject({
       billingClass: "opengeni_credits",
       billingClassLabel: "Models",
     });
-    expect(advancedSourceSummary(model)).toBe("Deployment-provided connection");
-    expect(payerSummaryForModel(model)).toBe("Opengeni · no model credits");
+    expect(advancedSourceSummary(englishText, model)).toBe("Deployment-provided connection");
+    expect(payerSummaryForModel(englishText, model)).toBe("Opengeni · no model credits");
   });
 
   test("uses deployment cost before upstream settlement in the payer summary", () => {
@@ -335,6 +366,7 @@ describe("model-policy", () => {
 
     expect(
       payerSummaryForModel(
+        englishText,
         catalogModel({
           id: "openrouter/model:free",
           label: "OpenRouter model",
@@ -345,6 +377,7 @@ describe("model-policy", () => {
     ).toBe("Free in this deployment");
     expect(
       payerSummaryForModel(
+        englishText,
         catalogModel({
           id: "openrouter/model:free",
           label: "OpenRouter model",
@@ -358,6 +391,7 @@ describe("model-policy", () => {
   test("uses explicit ownership cost labels independently of legacy billing metadata", () => {
     expect(
       payerSummaryForModel(
+        englishText,
         catalogModel({
           id: "supergrok/grok",
           label: "Grok",
@@ -369,6 +403,7 @@ describe("model-policy", () => {
     ).toBe("SuperGrok subscription · external billing");
     expect(
       payerSummaryForModel(
+        englishText,
         catalogModel({
           id: "workspace-gateway/model",
           label: "Gateway model",
@@ -382,7 +417,7 @@ describe("model-policy", () => {
   });
 
   test("projects curated shortLabel into picker rows", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({
         id: "gpt-5.6-sol",
         label: "GPT-5.6 Sol",
@@ -399,7 +434,7 @@ describe("model-policy", () => {
   });
 
   test("groups catalog rows by billing class", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({
         id: "gpt-5.6-sol",
         label: "Sol",
@@ -419,7 +454,7 @@ describe("model-policy", () => {
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),
     ]);
-    const groups = groupPickerRowsByBillingClass(rows);
+    const groups = groupPickerRowsByBillingClass(englishText, rows);
     expect(groups.map((group) => group.billingClass)).toEqual([
       "opengeni_credits",
       "codex_subscription",
@@ -460,11 +495,16 @@ describe("model-policy", () => {
     expect(coerceReasoningEffortForModel(model, "xhigh")).toBe("low");
     expect(billingClassForModel(model)).toBe("opengeni_credits");
     // The composer pill: compact name, effort only when effort is a choice.
-    expect(compactModelPill([{ ...model, shortLabel: "5.6 Sol" }], model.id, "high")).toEqual({
+    expect(
+      compactModelPill(englishText, [{ ...model, shortLabel: "5.6 Sol" }], model.id, "high"),
+    ).toEqual({
       name: "5.6 Sol",
       effort: "High",
     });
-    expect(compactModelPill([model], model.id, "low")).toEqual({ name: "Sol", effort: "Low" });
+    expect(compactModelPill(englishText, [model], model.id, "low")).toEqual({
+      name: "Sol",
+      effort: "Low",
+    });
     const single = {
       ...model,
       capabilities: {
@@ -472,12 +512,15 @@ describe("model-policy", () => {
         reasoning: { ...model.capabilities!.reasoning, efforts: ["low" as const] },
       },
     };
-    expect(compactModelPill([single], model.id, "low")).toEqual({ name: "Sol", effort: null });
-    expect(compactModelPill([], "codex/gpt-6-luna", "low").effort).toBeNull();
+    expect(compactModelPill(englishText, [single], model.id, "low")).toEqual({
+      name: "Sol",
+      effort: null,
+    });
+    expect(compactModelPill(englishText, [], "codex/gpt-6-luna", "low").effort).toBeNull();
   });
 
   test("marks blocked models non-selectable in picker rows", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({
         id: "blocked",
         label: "Blocked",
@@ -494,7 +537,7 @@ describe("model-policy", () => {
   });
 
   test("names the credit switch when it is the only reason a model is blocked", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({
         id: "paid",
         label: "Paid",
@@ -531,7 +574,7 @@ describe("model display across connection scopes", () => {
     });
 
   test("rows carry the clean display name, never the raw catalog label", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       claude("organization", "claude-opus-4-8"),
       anthropic("workspace", "claude-haiku-4-5-20251001"),
     ]);
@@ -539,13 +582,13 @@ describe("model display across connection scopes", () => {
   });
 
   test("org- and workspace-connected copies collapse to one row, keeping the selection", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       claude("organization", "claude-opus-5-5", "Claude Opus 5.5"),
       claude("workspace", "claude-opus-5-5", "Claude Opus 5.5"),
       anthropic("organization", "claude-sonnet-4-6"),
       anthropic("workspace", "claude-sonnet-4-6"),
     ]);
-    const groups = groupPickerRowsByBillingClass(rows, {
+    const groups = groupPickerRowsByBillingClass(englishText, rows, {
       selectedId: "workspace-claude-subscription/claude-opus-5-5",
     });
     expect(groups.map((group) => group.label)).toEqual(["Claude subscription", "API keys"]);
@@ -556,13 +599,15 @@ describe("model display across connection scopes", () => {
   });
 
   test("Claude rows already show the family-free name, with no extra compact label", () => {
-    const rows = projectPickerRows([claude("organization", "claude-opus-5-5", "Claude Opus 5.5")]);
+    const rows = projectPickerRows(englishText, [
+      claude("organization", "claude-opus-5-5", "Claude Opus 5.5"),
+    ]);
     expect(rows[0]?.label).toBe("Opus 5.5");
     expect(rows[0]?.shortLabel).toBeUndefined();
   });
 
   test("uncurated long names drop trailing access and stage qualifiers for narrow triggers", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({
         id: "opencode/muse-spark-1.3-contributor-free",
         label: "Muse Spark 1.3 Contributor Free",
@@ -578,6 +623,7 @@ describe("model display across connection scopes", () => {
     expect(short("only/free")).toBeUndefined();
     expect(
       compactModelPill(
+        englishText,
         [catalogModel({ id: "opencode/muse", label: "Muse Spark 1.3 Contributor Free" })],
         "opencode/muse",
         null,
@@ -586,11 +632,11 @@ describe("model display across connection scopes", () => {
   });
 
   test("deployment models with the same name stay separate choices", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       catalogModel({ id: "azure/gpt-6-sol", label: "GPT-6 Sol", cost: "credits" }),
       catalogModel({ id: "openai/gpt-6-sol", label: "GPT-6 Sol", cost: "credits" }),
     ]);
-    expect(groupPickerRowsByBillingClass(rows)[0]!.rows).toHaveLength(2);
+    expect(groupPickerRowsByBillingClass(englishText, rows)[0]!.rows).toHaveLength(2);
   });
 });
 
@@ -599,7 +645,7 @@ describe("scope collapse never merges different accounts", () => {
     catalogModel({ id, label, provider, providerLabel: provider, cost });
 
   test("the same model through OpenRouter and the Anthropic API stays two rows", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       row(
         "workspace-openrouter/anthropic/claude-sonnet-4.6",
         "workspace-openrouter",
@@ -619,7 +665,7 @@ describe("scope collapse never merges different accounts", () => {
         "workspace",
       ),
     ]);
-    const [keys] = groupPickerRowsByBillingClass(rows);
+    const [keys] = groupPickerRowsByBillingClass(englishText, rows);
     expect(keys!.label).toBe("API keys");
     // Org + workspace Anthropic collapse; OpenRouter is a different account.
     expect(
@@ -630,7 +676,7 @@ describe("scope collapse never merges different accounts", () => {
   });
 
   test("collapseScopes false keeps every row and scoped groups", () => {
-    const rows = projectPickerRows([
+    const rows = projectPickerRows(englishText, [
       row(
         "organization-anthropic/claude-sonnet-4.6",
         "organization-anthropic",
@@ -644,7 +690,7 @@ describe("scope collapse never merges different accounts", () => {
         "workspace",
       ),
     ]);
-    const groups = groupPickerRowsByBillingClass(rows, { collapseScopes: false });
+    const groups = groupPickerRowsByBillingClass(englishText, rows, { collapseScopes: false });
     expect(groups.map((group) => group.billingClass)).toEqual(["byok", "organization_byok"]);
   });
 });

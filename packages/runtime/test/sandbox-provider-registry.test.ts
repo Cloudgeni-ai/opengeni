@@ -7,7 +7,7 @@ import {
   SandboxBackend,
   type SandboxBackend as SandboxBackendType,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   PROVIDER_REGISTRY,
   SandboxConfigError,
@@ -54,6 +54,17 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
     openSandboxApiKey: "k",
     openSandboxImage:
       "registry.example.com/opengeni@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
+  // compute needs the control service, its agent gateway and the relay its agents use.
+  compute: {
+    computeApiUrl: "https://compute.example.test",
+    computeApiKey: "k",
+    computeLinkUrl: "wss://opengeni.example.test/v1/compute/agent-link",
+    publicBaseUrl: "https://opengeni.example.test",
+    selfhostedRelayUrl: "wss://relay.example.test",
+    selfhostedRelayTokenSecret: "relay-token-secret",
+    selfhostedNatsUrl: "nats://nats.example.test:4222",
+    agentOpStreamEnabled: true,
   },
 };
 
@@ -259,6 +270,20 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     // Modal's short server-default idle-reap can never kill an idle box before the
     // Opengeni reaper snapshots /workspace.
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
+    // No region is pinned unless configured: Modal keeps its own placement.
+    expect(client.options?.regions).toBeUndefined();
+  });
+
+  test("modal threads configured region placement into physical create options", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "modal",
+        modalTokenId: "tok-id",
+        modalTokenSecret: "tok-secret",
+        modalRegions: ["eu"],
+      }),
+    ) as { options?: Record<string, unknown> };
+    expect(client.options?.regions).toEqual(["eu"]);
   });
 
   test("docker threads an explicit shared workspace base directory", () => {
@@ -417,6 +442,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       "blaxel",
       "cloudflare",
       "vercel",
+      "compute",
     ] as const) {
       const settings = testSettings({ sandboxBackend: backend });
       expect(() => createSandboxClient(settings)).toThrow(SandboxConfigError);
@@ -455,6 +481,22 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       testSettings({ sandboxBackend: "e2b", e2bApiKey: "k", e2bTimeoutSeconds: 120 }),
     ) as { options?: { timeout?: number } };
     expect(e2b.options?.timeout).toBe(120);
+
+    // The key, domain and addresses reach the adapter explicitly, for every
+    // create and resume against E2B's cloud or an E2B-compatible API.
+    const e2bCompatible = createSandboxClient(
+      testSettings({
+        sandboxBackend: "e2b",
+        e2bApiKey: "k",
+        e2bDomain: "sandboxes.example.com",
+        e2bApiUrl: "https://api.sandboxes.example.com",
+      }),
+    ) as { options?: { connection?: Record<string, unknown> } };
+    expect(e2bCompatible.options?.connection).toEqual({
+      apiKey: "k",
+      domain: "sandboxes.example.com",
+      apiUrl: "https://api.sandboxes.example.com",
+    });
 
     const cloudflare = createSandboxClient(
       testSettings({

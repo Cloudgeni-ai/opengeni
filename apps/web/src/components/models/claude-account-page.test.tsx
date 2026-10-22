@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createElement } from "react";
 import type { Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { invalidateModelSettingsQueries } from "@opengeni/react/app/lib/shared-query";
 let createRoot: typeof import("react-dom/client").createRoot;
 let useClaude: typeof import("./use-claude-subscriptions").useClaudeSubscriptions;
 let ClaudeAccountPage: typeof import("./claude-subscription-models").ClaudeAccountPage;
@@ -65,6 +66,61 @@ const places = {
   openAccess: () => {},
   backToList: () => {},
 };
+
+test("Enable account shows Enabled or Disabled and still maps to the allocator", async () => {
+  let enabled = true;
+  const calls: unknown[] = [];
+  const list = async () => ({
+    accounts: [{ ...account, allocatorEnabled: enabled, allocatorVersion: enabled ? 1 : 2 }],
+    activeAccountId: id,
+    source: "workspace",
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: id },
+  });
+  const client = {
+    listClaudeSubscriptionAccounts: list,
+    getClaudeSubscriptionAccountUsage: async () => baseUsage,
+    refreshClaudeSubscriptionAccountUsage: async () => baseUsage,
+    getModelConnectionAccess: async () => null,
+    setClaudeSubscriptionAccountAllocator: async (...args: unknown[]) => {
+      calls.push(args);
+      enabled = false;
+    },
+  };
+  function Harness({ canManage }: { canManage: boolean }) {
+    pool = useClaude({
+      client: client as unknown as OpenGeniBrowserClient,
+      canManage,
+      workspaceId,
+    });
+    return createElement(ClaudeAccountPage, { claude: pool, accountId: id, places });
+  }
+  await act(async () => root.render(createElement(Harness, { canManage: true })));
+  const toggle = container.querySelector<HTMLButtonElement>(
+    'button[role="switch"][aria-label="Enable account@example.test"]',
+  )!;
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  const text = () => container.textContent ?? "";
+  expect(text()).toContain("Enable account");
+  expect(text()).toContain(
+    "Allow this account to be used for new work. Turning it off won’t interrupt running work.",
+  );
+  expect(text()).toContain("Enabled");
+  expect(text()).not.toContain("Use for new work");
+  const badge = () =>
+    container.querySelector('[data-slot="detail-page-header"] [data-slot="status-badge"]');
+  // A healthy, enabled account carries no header status.
+  expect(badge()).toBeNull();
+  await act(async () => toggle.click());
+  expect(calls).toEqual([[workspaceId, id, { enabled: false, expectedVersion: 1 }]]);
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(badge()?.textContent).toBe("Disabled");
+  expect(text()).not.toContain("Paused");
+  // People who can't manage the account read the same words as a fact.
+  await act(async () => root.render(createElement(Harness, { canManage: false })));
+  expect(container.querySelector('button[role="switch"]')).toBeNull();
+  expect(text()).toContain("AccountDisabled");
+  expect(text()).not.toContain("Paused");
+});
 for (const [organization, poll] of [
   [false, false],
   [true, false],
@@ -100,17 +156,13 @@ for (const [organization, poll] of [
         ...baseUsage,
         refreshStatus: reconnect ? "reconnect" : "not_checked",
       });
-      const refresh = async () => {
-        reconnect = true;
-        return read();
-      };
       const client = {
         listClaudeSubscriptionAccounts: list,
         listOrganizationClaudeSubscriptionAccounts: list,
         getClaudeSubscriptionAccountUsage: read,
         getOrganizationClaudeSubscriptionAccountUsage: read,
-        refreshClaudeSubscriptionAccountUsage: refresh,
-        refreshOrganizationClaudeSubscriptionAccountUsage: refresh,
+        refreshClaudeSubscriptionAccountUsage: read,
+        refreshOrganizationClaudeSubscriptionAccountUsage: read,
         getModelConnectionAccess: async () => null,
       };
       function Harness() {
@@ -128,18 +180,26 @@ for (const [organization, poll] of [
         'button[aria-label="Check usage now"]',
       )!;
       await act(async () => {
+        reconnect = true;
         if (poll) {
-          reconnect = true;
+          // A visibility event must not force a live check inside freshness.
           document.dispatchEvent(new Event("visibilitychange"));
         } else refreshButton.click();
       });
+      if (poll) {
+        expect(reads).toBe(1);
+        expect(pool.accounts[0]!.status).toBe("active");
+        await act(async () => invalidateModelSettingsQueries(client));
+      }
       expect(container.textContent).toContain("Claude no longer accepts this token.");
       expect(container.querySelector('[data-slot="notice"]')).not.toBeNull();
-      expect(reads).toBe(2);
+      // Global refresh re-reads metadata, then the live reconnect receipt
+      // reconciles the account; a meter-only refresh only needs the latter.
+      expect(reads).toBe(poll ? 3 : 2);
       expect(pool.accounts[0]!.status).toBe("needs_relogin");
       expect(container.textContent).toContain("Sign in to Claude again");
       await act(async () => document.dispatchEvent(new Event("visibilitychange")));
-      expect(reads).toBe(2);
+      expect(reads).toBe(poll ? 3 : 2);
     },
   );
 }
@@ -177,6 +237,7 @@ for (const [outcome, changeScope] of [
           },
         }),
         getClaudeSubscriptionAccountUsage: async () => baseUsage,
+        refreshClaudeSubscriptionAccountUsage: async () => baseUsage,
         getModelConnectionAccess: async () => null,
         disconnectClaudeSubscriptionAccount: async () => {
           disconnects++;
@@ -235,3 +296,49 @@ for (const [outcome, changeScope] of [
     },
   );
 }
+
+test("a workspace admin reads, never live-refreshes or edits, an organization account its workspace lists", async () => {
+  // Automatic source lists the organization's shared accounts beside the
+  // workspace's own; the workspace routes refuse those (409).
+  const refreshes: unknown[] = [],
+    reads: unknown[] = [];
+  const list = async () => ({
+    accounts: [{ ...account, scope: "organization" }],
+    activeAccountId: id,
+    source: "workspace",
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: id },
+  });
+  const client = {
+    listClaudeSubscriptionAccounts: list,
+    getClaudeSubscriptionAccountUsage: async (...args: unknown[]) => {
+      reads.push(args);
+      return baseUsage;
+    },
+    refreshClaudeSubscriptionAccountUsage: async (...args: unknown[]) => {
+      refreshes.push(args);
+      return baseUsage;
+    },
+    getModelConnectionAccess: async () => null,
+  };
+  function Harness() {
+    pool = useClaude({
+      client: client as unknown as OpenGeniBrowserClient,
+      canManage: true,
+      workspaceId,
+    });
+    return createElement(ClaudeAccountPage, { claude: pool, accountId: id, places });
+  }
+  await act(async () => root.render(createElement(Harness)));
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  expect(refreshes).toEqual([]);
+  expect(reads).toEqual([[workspaceId, id]]);
+  expect(pool.canManageAccounts).toBe(true);
+  const text = container.textContent ?? "";
+  expect(text).toContain("Managed by the owners and admins of Example organization.");
+  expect(text).toContain("Shared");
+  expect(container.querySelector('button[role="switch"]')).toBeNull();
+  expect(container.querySelector('[aria-label^="More actions for"]')).toBeNull();
+  await expect(pool.rename({ ...account, scope: "organization" } as never, "x")).rejects.toThrow(
+    "Manage this account in its owning scope.",
+  );
+});

@@ -1,12 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { createProviderCallBudget, VaultProviderError, type VaultProvider } from "@opengeni/vaults";
+import { VAULT_LIMITS, type VaultProviderFreshness } from "@opengeni/contracts";
+import {
+  createProviderCallBudget,
+  VaultProviderError,
+  type ProviderItemMeta,
+  type ProviderPage,
+  type ProviderVault,
+  type VaultProvider,
+  type VaultProviderContext,
+} from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
 import {
+  aggregateProviderFreshness,
   PROVIDER_RATE_LIMIT_DEFAULT_BACKOFF_MS,
   planProviderMirror,
   providerPrimaryFieldId,
   providerSecretName,
+  providerVaultFreshness,
   syncProviderVault,
+  vaultRefreshScopeKey,
   type ProviderMirrorPlan,
   type ProviderMirrorStore,
   type ProviderSyncStatusUpdate,
@@ -16,11 +28,10 @@ function memoryStore() {
   const plans: ProviderMirrorPlan[] = [];
   const statuses: ProviderSyncStatusUpdate[] = [];
   const store: ProviderMirrorStore = {
-    async replaceMirror(plan) {
-      plans.push(plan);
-    },
-    async setSyncStatus(update) {
+    async settleRefresh(update, plan) {
+      if (plan) plans.push(plan);
       statuses.push(update);
+      return true;
     },
   };
   return { store, plans, statuses };
@@ -28,6 +39,41 @@ function memoryStore() {
 
 const ctx = () => ({ connectionId: null, budget: createProviderCallBudget(50) });
 const NOW = new Date("2026-10-12T12:00:00.000Z");
+
+const meta = (index: number, patch: Partial<ProviderItemMeta> = {}): ProviderItemMeta => ({
+  externalItemId: `item-${index}`,
+  name: `Item ${index}`,
+  type: "login",
+  websites: [],
+  fields: [],
+  version: "1",
+  updatedAt: null,
+  ...patch,
+});
+
+const fieldsOf = (count: number): ProviderItemMeta["fields"] =>
+  Array.from({ length: count }, (_, index) => ({
+    externalFieldId: `field-${index}`,
+    name: `field ${index}`,
+    kind: "concealed",
+  }));
+
+const sites = (count: number) =>
+  Array.from({ length: count }, (_, index) => `https://site-${index}.example`);
+
+/** A position-paged listing (offset cursors) without a snapshot. */
+function offsetPage<T>(
+  upstream: T[],
+  cursor: string | undefined,
+  limit: number,
+  afterFirstPage: () => void = () => undefined,
+): ProviderPage<T> {
+  const offset = cursor ? Number(cursor) : 0;
+  const items = upstream.slice(offset, offset + limit);
+  const nextCursor = offset + limit < upstream.length ? String(offset + limit) : null;
+  if (offset === 0) afterFirstPage();
+  return { items, nextCursor, snapshot: null };
+}
 
 describe("provider mirror planning", () => {
   test("sanitizes and de-duplicates item names deterministically", () => {
@@ -160,6 +206,55 @@ describe("provider mirror planning", () => {
     const long = "n".repeat(200);
     expect([...providerSecretName(long)].length).toBe(120);
   });
+
+  test("a vault above the native item limit is refused whole, never mirrored as its first items", () => {
+    const item = (index: number): ProviderItemMeta => ({
+      externalItemId: `item-${index}`,
+      name: `Item ${index}`,
+      type: "login",
+      websites: [],
+      fields: [],
+      version: null,
+      updatedAt: null,
+    });
+    const atLimit = Array.from({ length: VAULT_LIMITS.itemsPerVault }, (_, index) => item(index));
+    const plan = planProviderMirror(atLimit, "7");
+    expect(plan.items).toHaveLength(VAULT_LIMITS.itemsPerVault);
+    expect(plan.truncated).toBe(0);
+    expect(() => planProviderMirror([...atLimit, item(VAULT_LIMITS.itemsPerVault)], "8")).toThrow(
+      expect.objectContaining({ code: "provider_inventory_incomplete" }),
+    );
+  });
+
+  test("an item beyond the field or website limits is refused whole, never cut down", () => {
+    const atLimits = meta(1, {
+      fields: fieldsOf(VAULT_LIMITS.fieldsPerItem),
+      websites: [
+        `https://${"a".repeat(VAULT_LIMITS.websiteMaxChars - "https://".length)}`,
+        ...sites(VAULT_LIMITS.websitesPerItem - 1),
+      ],
+    });
+    const plan = planProviderMirror([atLimits], "1");
+    expect(plan.items[0]!.fields).toHaveLength(VAULT_LIMITS.fieldsPerItem);
+    expect(plan.items[0]!.websites).toEqual(atLimits.websites);
+    expect(plan.truncated).toBe(0);
+    for (const oversized of [
+      meta(2, { fields: fieldsOf(VAULT_LIMITS.fieldsPerItem + 1) }),
+      meta(2, { websites: sites(VAULT_LIMITS.websitesPerItem + 1) }),
+      meta(2, { websites: [`https://${"a".repeat(VAULT_LIMITS.websiteMaxChars)}`] }),
+    ]) {
+      const named = { ...oversized, name: "Payroll export" };
+      expect(() => planProviderMirror([atLimits, named], "2")).toThrow(
+        expect.objectContaining({ code: "provider_inventory_incomplete" }),
+      );
+      try {
+        planProviderMirror([named], "2");
+      } catch (error) {
+        // Provider item names are untrusted and never echoed.
+        expect((error as Error).message).not.toContain("Payroll");
+      }
+    }
+  });
 });
 
 describe("syncProviderVault", () => {
@@ -280,5 +375,432 @@ describe("syncProviderVault", () => {
       code: "provider_not_found",
     });
     expect(statuses.every((status) => status.lastSyncedAt === null)).toBe(true);
+  });
+
+  test("an active rate limit is respected even by a forced refresh", async () => {
+    const fake = createFakeVaultProvider({ vaults: [{ externalVaultId: "rw", name: "RW" }] });
+    const { store, statuses } = memoryStore();
+    const until = new Date(NOW.getTime() + 60_000);
+    const result = await syncProviderVault({
+      provider: fake,
+      ctx: ctx(),
+      target: { externalVaultId: "rw", mirroredContentVersion: null, rateLimitedUntil: until },
+      store,
+      now: () => NOW,
+      force: true,
+    });
+    expect(result).toEqual({ status: "skipped_rate_limited", rateLimitedUntil: until });
+    expect(fake.calls).toHaveLength(0);
+    expect(statuses).toHaveLength(0);
+  });
+
+  test("every successful check records operations and the provider's freshness, even unchanged", async () => {
+    const fake = createFakeVaultProvider({
+      vaults: [{ externalVaultId: "rw", name: "RW", items: [] }],
+      capabilities: { files: false },
+    });
+    const { store, plans, statuses } = memoryStore();
+    const unchanged = await syncProviderVault({
+      provider: fake,
+      ctx: ctx(),
+      target: { externalVaultId: "rw", mirroredContentVersion: "1", rateLimitedUntil: null },
+      store,
+      now: () => NOW,
+    });
+    expect(unchanged).toEqual({ status: "unchanged", contentVersion: "1" });
+    expect(plans).toHaveLength(0);
+    expect(statuses.at(-1)).toMatchObject({
+      syncStatus: "ok",
+      lastSyncedAt: NOW,
+      // A legacy provider reports no freshness: Opengeni's check time never stands in for it.
+      freshness: null,
+      operations: {
+        createItemTypes: ["login", "api_key", "note"],
+        updateItem: true,
+        archiveItem: true,
+        archiveKind: "archive",
+        deleteItem: false,
+        readFiles: false,
+        createTotp: true,
+      },
+    });
+  });
+
+  test("paged providers are traversed completely with the cache epoch, forced refresh and freshness", async () => {
+    const fake = createFakeVaultProvider({
+      vaults: [
+        {
+          externalVaultId: "rw",
+          name: "RW",
+          items: Array.from({ length: 150 }, (_, index) => ({
+            name: `Item ${index}`,
+            fields: [{ name: "password", value: "p" }],
+          })),
+        },
+      ],
+    });
+    const seen: VaultProviderContext[] = [];
+    const observed: VaultProviderFreshness[] = [];
+    const pageOf = <T>(
+      all: T[],
+      cursor: string | undefined,
+      limit: number,
+      freshness: VaultProviderFreshness,
+    ): ProviderPage<T> => {
+      const start = cursor ? Number(cursor) : 0;
+      const next = start + limit < all.length ? String(start + limit) : null;
+      return {
+        items: all.slice(start, start + limit),
+        nextCursor: next,
+        snapshot: "s1",
+        freshness,
+      };
+    };
+    const reported = (sourceSyncedAt: string): VaultProviderFreshness => ({
+      state: "current",
+      lastCheckedAt: NOW.toISOString(),
+      sourceSyncedAt,
+      source: "cache",
+      errorCode: null,
+      retryAt: null,
+    });
+    const paged: VaultProvider = {
+      ...fake,
+      async listVaultPage(pageCtx, page) {
+        seen.push(pageCtx);
+        return pageOf<ProviderVault>(
+          await fake.listVaults(pageCtx),
+          page.cursor,
+          page.limit,
+          reported("2026-10-12T11:58:00.000Z"),
+        );
+      },
+      async listItemPage(pageCtx, externalVaultId, page) {
+        seen.push(pageCtx);
+        return pageOf(
+          await fake.listItems(pageCtx, externalVaultId),
+          page.cursor,
+          page.limit,
+          reported(page.cursor ? "2026-10-12T11:50:00.000Z" : "2026-10-12T11:55:00.000Z"),
+        );
+      },
+    };
+    const { store, plans, statuses } = memoryStore();
+    const result = await syncProviderVault({
+      provider: paged,
+      ctx: { ...ctx(), onFreshness: (freshness) => observed.push(freshness) },
+      target: {
+        externalVaultId: "rw",
+        mirroredContentVersion: "1",
+        rateLimitedUntil: null,
+        cacheEpoch: "41",
+      },
+      store,
+      now: () => NOW,
+      force: true,
+    });
+    expect(result).toMatchObject({ status: "synced", itemCount: 150 });
+    expect(plans[0]!.items).toHaveLength(150);
+    // One vault page and two item pages, each with the epoch and the forced refresh.
+    expect(seen).toHaveLength(3);
+    expect(seen.every((call) => call.cacheEpoch === "41" && call.forceRefresh === true)).toBe(true);
+    expect(observed).toHaveLength(3);
+    // The oldest upstream synchronization any page reported, never the check time.
+    expect(statuses.at(-1)!.freshness).toEqual({
+      source: "cache",
+      sourceSyncedAt: "2026-10-12T11:50:00.000Z",
+    });
+  });
+
+  test("an incomplete or invalid inventory keeps the previous mirror and records a safe failure", async () => {
+    const fake = createFakeVaultProvider({
+      vaults: [{ externalVaultId: "rw", name: "RW", items: [{ name: "A", fields: [] }] }],
+    });
+    const looping: VaultProvider = {
+      ...fake,
+      // The same cursor twice: the traversal can never be proven complete.
+      listItemPage: async () => ({ items: [], nextCursor: "again", snapshot: null }),
+    };
+    const broken: VaultProvider = {
+      ...fake,
+      async listItems() {
+        throw new TypeError("secret-bearing adapter detail");
+      },
+    };
+    for (const provider of [looping, broken]) {
+      const { store, plans, statuses } = memoryStore();
+      const result = await syncProviderVault({
+        provider,
+        ctx: ctx(),
+        target: { externalVaultId: "rw", mirroredContentVersion: null, rateLimitedUntil: null },
+        store,
+        now: () => NOW,
+      });
+      expect(result).toMatchObject({ status: "failed", syncStatus: "error" });
+      expect(plans).toHaveLength(0);
+      expect(statuses.at(-1)!.lastSyncedAt).toBeNull();
+      expect(statuses.at(-1)!.syncErrorMessage).not.toContain("secret-bearing");
+    }
+  });
+
+  test("an item beyond the mirror limits keeps the previous mirror and records why", async () => {
+    const fake = createFakeVaultProvider({
+      vaults: [
+        {
+          externalVaultId: "rw",
+          name: "RW",
+          items: [{ name: "Fine", fields: [{ name: "password", value: "p" }] }],
+        },
+      ],
+    });
+    const oversized = meta(9, {
+      name: "Payroll export",
+      fields: fieldsOf(VAULT_LIMITS.fieldsPerItem + 1),
+    });
+    const provider: VaultProvider = {
+      ...fake,
+      async listItems(listCtx, externalVaultId) {
+        return [...(await fake.listItems(listCtx, externalVaultId)), oversized];
+      },
+    };
+    const { store, plans, statuses } = memoryStore();
+    const result = await syncProviderVault({
+      provider,
+      ctx: ctx(),
+      target: { externalVaultId: "rw", mirroredContentVersion: null, rateLimitedUntil: null },
+      store,
+      now: () => NOW,
+    });
+    expect(result).toMatchObject({
+      status: "failed",
+      syncStatus: "error",
+      code: "provider_inventory_incomplete",
+    });
+    expect(plans).toHaveLength(0);
+    expect(statuses.at(-1)).toMatchObject({
+      syncErrorCode: "provider_inventory_incomplete",
+      lastSyncedAt: null,
+    });
+    expect(statuses.at(-1)!.syncErrorMessage).toContain(`${VAULT_LIMITS.fieldsPerItem} fields`);
+    expect(statuses.at(-1)!.syncErrorMessage).not.toContain("Payroll");
+  });
+
+  test("an offset-paged listing without a snapshot never replaces the mirror", async () => {
+    // Review regression: the first page is read, then "Item 0" is deleted, so
+    // every later item moves up one position and "Item 100" (which still
+    // exists) is never listed. Replacing the mirror would delete it.
+    const upstream = Array.from({ length: 101 }, (_, index) => meta(index));
+    const fake = createFakeVaultProvider({ vaults: [{ externalVaultId: "rw", name: "RW" }] });
+    const provider: VaultProvider = {
+      ...fake,
+      async listItemPage(_pageCtx, _externalVaultId, page) {
+        return offsetPage(upstream, page.cursor, page.limit, () => upstream.splice(0, 1));
+      },
+    };
+    const target = { externalVaultId: "rw", mirroredContentVersion: null, rateLimitedUntil: null };
+    const { store, plans, statuses } = memoryStore();
+    const result = await syncProviderVault({ provider, ctx: ctx(), target, store, now: () => NOW });
+    expect(result).toMatchObject({
+      status: "failed",
+      syncStatus: "error",
+      code: "provider_inventory_incomplete",
+    });
+    expect(upstream.some((item) => item.externalItemId === "item-100")).toBe(true);
+    expect(plans).toHaveLength(0);
+    expect(statuses.at(-1)!.syncErrorMessage).toContain("several pages without a snapshot");
+
+    // One page needs no snapshot, and pages under one snapshot are consistent.
+    for (const snapshot of [null, "s1"]) {
+      const pages = Array.from({ length: snapshot ? 150 : 100 }, (_, index) => meta(index));
+      const consistent: VaultProvider = {
+        ...fake,
+        async listItemPage(_pageCtx, _externalVaultId, page) {
+          return { ...offsetPage(pages, page.cursor, page.limit), snapshot };
+        },
+      };
+      const memory = memoryStore();
+      expect(
+        await syncProviderVault({
+          provider: consistent,
+          ctx: ctx(),
+          target,
+          store: memory.store,
+          now: () => NOW,
+        }),
+      ).toMatchObject({ status: "synced", itemCount: pages.length });
+      expect(memory.plans[0]!.items).toHaveLength(pages.length);
+    }
+  });
+
+  test("a vault missing from a multi-page vault listing without a snapshot is not reported removed", async () => {
+    const vaults = Array.from(
+      { length: 150 },
+      (_, index): ProviderVault => ({
+        externalVaultId: `vault-${index}`,
+        name: `Vault ${index}`,
+        contentVersion: "1",
+        itemCount: 0,
+      }),
+    );
+    const fake = createFakeVaultProvider();
+    for (const [snapshot, code] of [
+      [null, "provider_inventory_incomplete"],
+      ["s1", "provider_not_found"],
+    ] as const) {
+      const provider: VaultProvider = {
+        ...fake,
+        async listVaultPage(_pageCtx, page) {
+          return { ...offsetPage(vaults, page.cursor, page.limit), snapshot };
+        },
+      };
+      const { store, plans } = memoryStore();
+      const result = await syncProviderVault({
+        provider,
+        ctx: ctx(),
+        target: { externalVaultId: "gone", mirroredContentVersion: "1", rateLimitedUntil: null },
+        store,
+        now: () => NOW,
+      });
+      expect(result).toMatchObject({ status: "failed", code });
+      expect(plans).toHaveLength(0);
+    }
+  });
+});
+
+describe("provider freshness", () => {
+  const observation = (
+    source: "live" | "cache" | "unknown",
+    sourceSyncedAt: string | null,
+  ): VaultProviderFreshness => ({
+    state: "current",
+    lastCheckedAt: null,
+    sourceSyncedAt,
+    source,
+    errorCode: null,
+    retryAt: null,
+  });
+
+  test("aggregates one observation for a whole check", () => {
+    expect(aggregateProviderFreshness([], NOW)).toBeNull();
+    expect(
+      aggregateProviderFreshness(
+        [observation("live", null), observation("live", "2026-10-12T11:59:00.000Z")],
+        NOW,
+      ),
+    ).toEqual({ source: "live", sourceSyncedAt: "2026-10-12T11:59:00.000Z" });
+    expect(
+      aggregateProviderFreshness(
+        [observation("live", null), observation("cache", "2026-10-11T09:00:00.000Z")],
+        NOW,
+      ),
+    ).toEqual({ source: "cache", sourceSyncedAt: "2026-10-11T09:00:00.000Z" });
+    // A cached page that does not say how old it is makes the whole check's age unknown.
+    expect(
+      aggregateProviderFreshness(
+        [observation("cache", "2026-10-11T09:00:00.000Z"), observation("cache", null)],
+        NOW,
+      ),
+    ).toEqual({ source: "cache", sourceSyncedAt: null });
+    // Never later than the check itself.
+    expect(
+      aggregateProviderFreshness([observation("unknown", "2030-01-01T00:00:00.000Z")], NOW),
+    ).toEqual({ source: "unknown", sourceSyncedAt: NOW.toISOString() });
+  });
+
+  test("projects state, check time, provider observation, errors and retry time", () => {
+    const vault = {
+      id: "v",
+      source: "keeper",
+      syncStatus: "ok" as const,
+      lastSyncedAt: "2026-10-12T11:58:00.000+00:00",
+      rateLimitedUntil: null,
+      updatedAt: "2026-10-12T11:58:00.000Z",
+      syncErrorCode: null,
+      providerFreshness: { source: "cache" as const, sourceSyncedAt: "2026-10-12T10:00:00Z" },
+    };
+    expect(providerVaultFreshness({ ...vault, source: "opengeni" }, NOW)).toBeUndefined();
+    expect(providerVaultFreshness(vault, NOW)).toEqual({
+      state: "current",
+      lastCheckedAt: "2026-10-12T11:58:00.000Z",
+      sourceSyncedAt: "2026-10-12T10:00:00.000Z",
+      source: "cache",
+      errorCode: null,
+      retryAt: null,
+    });
+    expect(providerVaultFreshness(vault, NOW, { maxAgeMs: 60_000 })!.state).toBe("stale");
+    expect(providerVaultFreshness(vault, NOW, { refreshing: true })!.state).toBe("refreshing");
+    expect(
+      providerVaultFreshness({ ...vault, lastSyncedAt: null, providerFreshness: null }, NOW),
+    ).toMatchObject({ state: "stale", lastCheckedAt: null, source: "unknown" });
+    expect(
+      providerVaultFreshness(
+        { ...vault, syncStatus: "auth_expired", syncErrorCode: "provider_auth_expired" },
+        NOW,
+      ),
+    ).toMatchObject({
+      state: "unavailable",
+      errorCode: "provider_auth_expired",
+      // The last successful check stays visible.
+      lastCheckedAt: "2026-10-12T11:58:00.000Z",
+    });
+    const limited = {
+      ...vault,
+      syncStatus: "rate_limited" as const,
+      syncErrorCode: "provider_rate_limited",
+      rateLimitedUntil: "2026-10-12T12:05:00.000Z",
+    };
+    expect(providerVaultFreshness(limited, NOW)).toMatchObject({
+      state: "unavailable",
+      errorCode: "provider_rate_limited",
+      retryAt: "2026-10-12T12:05:00.000Z",
+    });
+    expect(providerVaultFreshness(limited, new Date("2026-10-12T12:06:00.000Z"))).toMatchObject({
+      state: "stale",
+      retryAt: null,
+    });
+  });
+
+  test("refreshes are de-duplicated only within one tenant, workspace and principal", () => {
+    const human = (subjectId: string, viaApiKey = false) =>
+      vaultRefreshScopeKey({
+        kind: "principal",
+        principal: {
+          kind: "human",
+          accountId: "a",
+          workspaceId: "w",
+          subjectId,
+          verifiedHuman: !viaApiKey,
+          viaApiKey,
+        },
+      });
+    const attempt = (attemptId: string, workspaceId = "w") =>
+      vaultRefreshScopeKey({
+        kind: "principal",
+        principal: {
+          kind: "attempt",
+          accountId: "a",
+          workspaceId,
+          sessionId: "s",
+          turnId: "t",
+          attemptId,
+          executionGeneration: 1,
+        },
+      });
+    const keys = [
+      human("user:1"),
+      human("user:2"),
+      human("user:1", true),
+      attempt("x"),
+      attempt("y"),
+      attempt("x", "w2"),
+      vaultRefreshScopeKey({
+        kind: "subject",
+        accountId: "a",
+        workspaceId: "w",
+        subjectId: "user:1",
+      }),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(human("user:1")).toBe(human("user:1"));
   });
 });

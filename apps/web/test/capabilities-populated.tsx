@@ -9,10 +9,10 @@ import {
 } from "@opengeni/react/connect";
 import { CatalogHeader, CatalogActionContext } from "../src/components/capabilities/catalog-header";
 import { ConnectionAccessNotice } from "../src/components/capabilities/connection-access-notice";
-import { Button } from "../src/components/ui/button";
-import { Input } from "../src/components/ui/input";
-import { Dialog, DialogTitle, DialogDescription } from "../src/components/ui/dialog";
-import { CapabilityDialogContent } from "../src/components/capabilities/detail-dialog";
+import { Button } from "@opengeni/react/ui/button";
+import { Input } from "@opengeni/react/ui/input";
+import { Dialog, DialogTitle, DialogDescription } from "@opengeni/react/ui/dialog";
+import { CapabilityDialogContent } from "@opengeni/react/app/components/capabilities/detail-dialog";
 import "@opengeni/react/connect.css";
 import "../src/styles.css";
 

@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 export const KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS = 1_024;
@@ -77,112 +78,130 @@ function boundedJson(value: unknown): boolean {
   }
 }
 
-export const KnowledgeRecordId = z
-  .string()
-  .regex(
-    /^(document|document_chunk):[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
-  );
+export const KnowledgeRecordId = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .regex(
+      /^(document|document_chunk):[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+    ),
+);
 export type KnowledgeRecordId = z.infer<typeof KnowledgeRecordId>;
 
-export const KnowledgeRecordKind = z.enum(["document", "document_chunk"]);
+export const KnowledgeRecordKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["document", "document_chunk"]),
+);
 export type KnowledgeRecordKind = z.infer<typeof KnowledgeRecordKind>;
 
-export const KnowledgeAuthority = z.object({
-  kind: z.enum(["organization", "workspace", "personal"]),
-});
+export const KnowledgeAuthority = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["organization", "workspace", "personal"]),
+  }),
+);
 export type KnowledgeAuthority = z.infer<typeof KnowledgeAuthority>;
 
-export const KnowledgeSource = z.object({
-  kind: z.enum([
-    "manual_upload",
-    "meeting_transcript",
-    "repository",
-    "email",
-    "chat",
-    "document",
-    "web",
-    "other",
-  ]),
-  uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
-  externalId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-  title: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-  author: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-  createdAt: z.string().nullable(),
-  updatedAt: z.string().nullable(),
-  version: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-});
+export const KnowledgeSource = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum([
+      "manual_upload",
+      "meeting_transcript",
+      "repository",
+      "email",
+      "chat",
+      "document",
+      "web",
+      "other",
+    ]),
+    uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
+    externalId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+    title: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+    author: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+    createdAt: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+    version: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+  }),
+);
 export type KnowledgeSource = z.infer<typeof KnowledgeSource>;
 
-export const KnowledgeSearchRequest = z
-  .object({
-    query: boundedUtf8(KNOWLEDGE_QUERY_MAX_BYTES).pipe(z.string().min(1)),
-    baseIds: z.array(z.string().uuid()).max(50).optional(),
-    mode: z.enum(["hybrid", "vector", "keyword"]).optional(),
-    sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
-    authorityKinds: z.array(KnowledgeAuthority.shape.kind).max(3).optional(),
-    aclTags: z
-      .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)))
-      .max(64)
-      .optional(),
-    limit: z.number().int().positive().max(KNOWLEDGE_SEARCH_MAX_RESULTS).default(5),
-  })
-  .strict();
+export const KnowledgeSearchRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      query: boundedUtf8(KNOWLEDGE_QUERY_MAX_BYTES).pipe(z.string().min(1)),
+      baseIds: z.array(z.string().uuid()).max(50).optional(),
+      mode: z.enum(["hybrid", "vector", "keyword"]).optional(),
+      sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
+      authorityKinds: z.array(KnowledgeAuthority.shape.kind).max(3).optional(),
+      aclTags: z
+        .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)))
+        .max(64)
+        .optional(),
+      limit: z.number().int().positive().max(KNOWLEDGE_SEARCH_MAX_RESULTS).default(5),
+    })
+    .strict(),
+);
 export type KnowledgeSearchRequest = z.input<typeof KnowledgeSearchRequest>;
 
-export const KnowledgeBrowseRequest = z
-  .object({
-    parentId: KnowledgeRecordId.optional(),
-    topic: boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)).optional(),
-    sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
-    cursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
-    limit: z
-      .number()
-      .int()
-      .positive()
-      .max(KNOWLEDGE_BROWSE_MAX_LIMIT)
-      .default(KNOWLEDGE_BROWSE_DEFAULT_LIMIT),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.parentId && (value.topic || (value.sourceKinds?.length ?? 0) > 0)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "document contents do not accept topic or source filters",
-      });
-    }
-  });
+export const KnowledgeBrowseRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      parentId: KnowledgeRecordId.optional(),
+      topic: boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)).optional(),
+      sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
+      cursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(KNOWLEDGE_BROWSE_MAX_LIMIT)
+        .default(KNOWLEDGE_BROWSE_DEFAULT_LIMIT),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.parentId && (value.topic || (value.sourceKinds?.length ?? 0) > 0)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "document contents do not accept topic or source filters",
+        });
+      }
+    }),
+);
 export type KnowledgeBrowseRequest = z.input<typeof KnowledgeBrowseRequest>;
 
-export const KnowledgeProviderCitation = z.object({
-  provider: z.literal("google_drive"),
-  externalObjectId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
-  providerRevision: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-  sourceVersion: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
-  driveId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
-  deepLink: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
-  aclRevision: z.string().regex(/^[0-9a-f]{64}$/u),
-  authorizationObservedAt: z.string().datetime({ offset: true }),
-  authorizationExpiresAt: z.string().datetime({ offset: true }),
-  reauthorizedAt: z.string().datetime({ offset: true }),
-});
+export const KnowledgeProviderCitation = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    provider: z.literal("google_drive"),
+    externalObjectId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
+    providerRevision: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+    sourceVersion: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES),
+    driveId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+    deepLink: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
+    aclRevision: z.string().regex(/^[0-9a-f]{64}$/u),
+    authorizationObservedAt: z.string().datetime({ offset: true }),
+    authorizationExpiresAt: z.string().datetime({ offset: true }),
+    reauthorizedAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type KnowledgeProviderCitation = z.infer<typeof KnowledgeProviderCitation>;
 
-export const KnowledgeLinkTarget = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("knowledge"),
-    id: KnowledgeRecordId,
-  }),
-  z.object({
-    kind: z.literal("external"),
-    uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)),
-  }),
-]);
+export const KnowledgeLinkTarget = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("knowledge"),
+      id: KnowledgeRecordId,
+    }),
+    z.object({
+      kind: z.literal("external"),
+      uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)),
+    }),
+  ]),
+);
 export type KnowledgeLinkTarget = z.infer<typeof KnowledgeLinkTarget>;
 
-export const KnowledgeLink = z.object({
-  relation: z.enum(["parent", "contents", "previous", "next", "source"]),
-  target: KnowledgeLinkTarget,
-});
+export const KnowledgeLink = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    relation: z.enum(["parent", "contents", "previous", "next", "source"]),
+    target: KnowledgeLinkTarget,
+  }),
+);
 export type KnowledgeLink = z.infer<typeof KnowledgeLink>;
 
 /**
@@ -192,144 +211,158 @@ export type KnowledgeLink = z.infer<typeof KnowledgeLink>;
  * taxonomy. Personal subject ids and inaccessible linked-record metadata are
  * deliberately absent.
  */
-export const KnowledgeRecord = z.object({
-  id: KnowledgeRecordId,
-  kind: KnowledgeRecordKind,
-  title: boundedUtf8(KNOWLEDGE_TITLE_MAX_BYTES),
-  content: z.object({
-    format: z.literal("markdown"),
-    body: boundedUtf8(KNOWLEDGE_BODY_MAX_BYTES).nullable(),
-    summary: boundedUtf8(KNOWLEDGE_SUMMARY_MAX_BYTES).nullable(),
-    topics: z.array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES)).max(KNOWLEDGE_TOPICS_MAX_ITEMS),
-    metadata: z.record(z.string(), z.unknown()).refine(boundedJson, {
-      message: "knowledge metadata exceeds its JSON projection boundary",
+export const KnowledgeRecord = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: KnowledgeRecordId,
+    kind: KnowledgeRecordKind,
+    title: boundedUtf8(KNOWLEDGE_TITLE_MAX_BYTES),
+    content: z.object({
+      format: z.literal("markdown"),
+      body: boundedUtf8(KNOWLEDGE_BODY_MAX_BYTES).nullable(),
+      summary: boundedUtf8(KNOWLEDGE_SUMMARY_MAX_BYTES).nullable(),
+      topics: z.array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES)).max(KNOWLEDGE_TOPICS_MAX_ITEMS),
+      metadata: z.record(z.string(), z.unknown()).refine(boundedJson, {
+        message: "knowledge metadata exceeds its JSON projection boundary",
+      }),
+    }),
+    authority: KnowledgeAuthority,
+    provenance: z.object({
+      source: KnowledgeSource,
+      indexedAt: z.string(),
+      citation: KnowledgeProviderCitation.nullable().optional(),
+    }),
+    lifecycle: z.object({
+      state: z.literal("active"),
+      updatedAt: z.string(),
+    }),
+    quality: z.object({
+      trust: z.literal("sourced"),
+      freshnessAt: z.string(),
+      conflict: z.literal("not_evaluated"),
+      correction: z.literal("current_source_version"),
+    }),
+    links: z.array(KnowledgeLink).max(8),
+    projection: z.object({
+      truncated: z.boolean(),
+      fields: z
+        .array(
+          z.enum([
+            "title",
+            "content.body",
+            "content.summary",
+            "content.topics",
+            "content.metadata",
+            "provenance.source.uri",
+            "provenance.source.externalId",
+            "provenance.source.title",
+            "provenance.source.author",
+            "provenance.source.version",
+            "provenance.citation",
+          ]),
+        )
+        .max(11),
     }),
   }),
-  authority: KnowledgeAuthority,
-  provenance: z.object({
-    source: KnowledgeSource,
-    indexedAt: z.string(),
-    citation: KnowledgeProviderCitation.nullable().optional(),
-  }),
-  lifecycle: z.object({
-    state: z.literal("active"),
-    updatedAt: z.string(),
-  }),
-  quality: z.object({
-    trust: z.literal("sourced"),
-    freshnessAt: z.string(),
-    conflict: z.literal("not_evaluated"),
-    correction: z.literal("current_source_version"),
-  }),
-  links: z.array(KnowledgeLink).max(8),
-  projection: z.object({
-    truncated: z.boolean(),
-    fields: z
-      .array(
-        z.enum([
-          "title",
-          "content.body",
-          "content.summary",
-          "content.topics",
-          "content.metadata",
-          "provenance.source.uri",
-          "provenance.source.externalId",
-          "provenance.source.title",
-          "provenance.source.author",
-          "provenance.source.version",
-          "provenance.citation",
-        ]),
-      )
-      .max(11),
-  }),
-});
+);
 export type KnowledgeRecord = z.infer<typeof KnowledgeRecord>;
 
-export const KnowledgeSearchResult = z.object({
-  record: KnowledgeRecord,
-  retrieval: z.object({
-    /** Final bounded ordering score after the documented quality adjustment. */
-    score: z.number().min(0).max(1),
-    /** Semantic score before the quality adjustment. */
-    semanticScore: z.number().min(0).max(1),
-    matchType: z.enum(["hybrid", "vector", "keyword"]),
-    vectorScore: z.number().min(0).max(1).nullable(),
-    keywordScore: z.number().min(0).max(1).nullable(),
-    relevanceSignals: z
-      .array(z.enum(["vector", "keyword"]))
-      .min(1)
-      .max(2),
-    freshness: z.enum(["current", "aging", "stale"]),
-    qualityAdjustment: z.number().min(0).max(1),
-    duplicateCount: z.number().int().nonnegative(),
+export const KnowledgeSearchResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    record: KnowledgeRecord,
+    retrieval: z.object({
+      /** Final bounded ordering score after the documented quality adjustment. */
+      score: z.number().min(0).max(1),
+      /** Semantic score before the quality adjustment. */
+      semanticScore: z.number().min(0).max(1),
+      matchType: z.enum(["hybrid", "vector", "keyword"]),
+      vectorScore: z.number().min(0).max(1).nullable(),
+      keywordScore: z.number().min(0).max(1).nullable(),
+      relevanceSignals: z
+        .array(z.enum(["vector", "keyword"]))
+        .min(1)
+        .max(2),
+      freshness: z.enum(["current", "aging", "stale"]),
+      qualityAdjustment: z.number().min(0).max(1),
+      duplicateCount: z.number().int().nonnegative(),
+    }),
   }),
-});
+);
 export type KnowledgeSearchResult = z.infer<typeof KnowledgeSearchResult>;
 
-export const KnowledgeSearchResponse = z.object({
-  results: z.array(KnowledgeSearchResult).max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-  selection: z.object({
-    relevanceFloor: z.object({
-      policy: z.literal("any_signal"),
-      vectorScore: z.literal(KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE),
-      keywordScore: z.literal(KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE),
-    }),
-    dedupe: z.object({
-      policy: z.literal("exact_textual_content"),
-    }),
-    candidates: z.object({
-      ranked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-      rechecked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-      omittedOnRecheck: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-    }),
-    omitted: z.object({
-      belowRelevanceFloor: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS),
-      asDuplicate: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-      forLimit: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-      forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
-    }),
-    budget: z.object({
-      maxResults: z.literal(KNOWLEDGE_SEARCH_MAX_RESULTS),
-      maxResponseBytes: z.literal(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
-      responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
-      tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
-      estimatedTokens: z.number().int().nonnegative(),
-      maxEstimatedTokens: z.literal(
-        Math.ceil(
-          KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+export const KnowledgeSearchResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    results: z.array(KnowledgeSearchResult).max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+    selection: z.object({
+      relevanceFloor: z.object({
+        policy: z.literal("any_signal"),
+        vectorScore: z.literal(KNOWLEDGE_SEARCH_MIN_VECTOR_SCORE),
+        keywordScore: z.literal(KNOWLEDGE_SEARCH_MIN_KEYWORD_SCORE),
+      }),
+      dedupe: z.object({
+        policy: z.literal("exact_textual_content"),
+      }),
+      candidates: z.object({
+        ranked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        rechecked: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        omittedOnRecheck: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      }),
+      omitted: z.object({
+        belowRelevanceFloor: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(KNOWLEDGE_SEARCH_MAX_FLOOR_OMISSIONS),
+        asDuplicate: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        forLimit: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESULTS),
+      }),
+      budget: z.object({
+        maxResults: z.literal(KNOWLEDGE_SEARCH_MAX_RESULTS),
+        maxResponseBytes: z.literal(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
+        responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES),
+        tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
+        estimatedTokens: z.number().int().nonnegative(),
+        maxEstimatedTokens: z.literal(
+          Math.ceil(
+            KNOWLEDGE_SEARCH_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+          ),
         ),
-      ),
+      }),
     }),
   }),
-});
+);
 export type KnowledgeSearchResponse = z.infer<typeof KnowledgeSearchResponse>;
 
-export const KnowledgeGetResponse = z.object({
-  record: KnowledgeRecord,
-});
+export const KnowledgeGetResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    record: KnowledgeRecord,
+  }),
+);
 export type KnowledgeGetResponse = z.infer<typeof KnowledgeGetResponse>;
 
-export const KnowledgeBrowseResponse = z.object({
-  records: z.array(KnowledgeRecord).max(KNOWLEDGE_BROWSE_MAX_LIMIT),
-  nextCursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).nullable(),
-  hasMore: z.boolean(),
-  selection: z.object({
-    omitted: z.object({
-      forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_LIMIT),
-    }),
-    compactedRecordCount: z.number().int().nonnegative().max(1),
-    budget: z.object({
-      maxResults: z.literal(KNOWLEDGE_BROWSE_MAX_LIMIT),
-      maxResponseBytes: z.literal(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
-      responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
-      tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
-      estimatedTokens: z.number().int().nonnegative(),
-      maxEstimatedTokens: z.literal(
-        Math.ceil(
-          KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+export const KnowledgeBrowseResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    records: z.array(KnowledgeRecord).max(KNOWLEDGE_BROWSE_MAX_LIMIT),
+    nextCursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).nullable(),
+    hasMore: z.boolean(),
+    selection: z.object({
+      omitted: z.object({
+        forResponseBudget: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_LIMIT),
+      }),
+      compactedRecordCount: z.number().int().nonnegative().max(1),
+      budget: z.object({
+        maxResults: z.literal(KNOWLEDGE_BROWSE_MAX_LIMIT),
+        maxResponseBytes: z.literal(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+        responseBytes: z.number().int().nonnegative().max(KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES),
+        tokenEstimateBytesPerToken: z.literal(KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN),
+        estimatedTokens: z.number().int().nonnegative(),
+        maxEstimatedTokens: z.literal(
+          Math.ceil(
+            KNOWLEDGE_BROWSE_MAX_RESPONSE_BYTES / KNOWLEDGE_SEARCH_TOKEN_ESTIMATE_BYTES_PER_TOKEN,
+          ),
         ),
-      ),
+      }),
     }),
   }),
-});
+);
 export type KnowledgeBrowseResponse = z.infer<typeof KnowledgeBrowseResponse>;

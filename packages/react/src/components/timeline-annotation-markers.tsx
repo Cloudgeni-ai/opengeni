@@ -1,6 +1,7 @@
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { useLayoutEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { usePortalContainer } from "../ui/portal-container";
 import { cn } from "../lib/cn";
 import {
   annotationBoxIntersects,
@@ -18,6 +19,7 @@ import {
   matchingQuoteInSource,
   occurrenceOffsets,
 } from "./timeline-annotation-shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 function lastVisibleRect(range: Range): DOMRect | null {
   try {
@@ -127,6 +129,8 @@ export function TimelineAnnotationMarkers({
   onSelect?: ((id: string) => void) | undefined;
   rootRef: RefObject<HTMLElement | null>;
 }) {
+  const t = useOpenGeniText();
+  const portalContainer = usePortalContainer();
   const [markers, setMarkers] = useState<AnnotationBadgeAnchor[]>([]);
 
   useLayoutEffect(() => {
@@ -166,7 +170,7 @@ export function TimelineAnnotationMarkers({
             "pointer-events-auto absolute flex h-4 min-w-4 -translate-x-1/2 -translate-y-[110%] items-center justify-center rounded-full bg-og-accent px-0.5 text-[10px] font-semibold tabular-nums text-og-accent-fg shadow-sm outline-hidden select-none after:absolute after:-inset-2 after:content-[''] focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:after:-inset-2.5",
             marker.incomplete && "ring-1 ring-og-accent-fg/35",
           )}
-          aria-label={`Annotation ${marker.ordinal}`}
+          aria-label={t("timelineAnnotationMarkers.annotationOrdinal", { ordinal: marker.ordinal })}
           onMouseDown={(event) => event.preventDefault()}
           onClick={(event) => {
             event.preventDefault();
@@ -178,7 +182,7 @@ export function TimelineAnnotationMarkers({
         </button>
       ))}
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 

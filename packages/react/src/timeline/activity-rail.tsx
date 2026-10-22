@@ -12,6 +12,7 @@ import {
   BrainCircuitIcon,
   MessageSquareTextIcon,
   SendIcon,
+  WrenchIcon,
 } from "lucide-react";
 import {
   Component,
@@ -19,6 +20,7 @@ import {
   lazy,
   Suspense,
   useContext,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -28,13 +30,21 @@ import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
-import { defaultToolRegistry } from "./tool-renderers";
+import { defaultToolRegistry, rendersToolOutputPreview } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
-import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
+import {
+  BodyNote,
+  PayloadBlock,
+  ActivityDisclosure,
+  ToolCallTruncationProvider,
+  ToolOutputPreviewProvider,
+} from "./shared";
+import { invokedToolCall } from "./invoked-tool";
 import { toolDisplayName } from "./tool-display-name";
-import type { ActivityItem, AgentMessageItem, MemoryItem, WorkerItem } from "./types";
+import type { ActivityItem, AgentMessageItem, MemoryItem, ToolCallItem, WorkerItem } from "./types";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 const LazyPlatformActivityRow = lazy(() => import("./platform-activity-row"));
@@ -95,6 +105,7 @@ export function ActivityRail({
   bare,
   className,
 }: ActivityRailProps) {
+  const msg = useOpenGeniText();
   const debug = useStartupDetails();
   const reducedMotion = useReducedMotion();
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -191,7 +202,7 @@ export function ActivityRail({
               startedAt={startedAt}
               notice={
                 dispatch?.dispatchWait?.lastError
-                  ? "Unable to start yet. Your messages are saved."
+                  ? msg("timeline.activityRail.unableToStartYetYour")
                   : undefined
               }
               phase={responsePending ? "waiting" : "preparing"}
@@ -207,7 +218,7 @@ export function ActivityRail({
           className="og-genie-details self-start"
           onClick={() => setDetailsOpen(false)}
         >
-          Hide startup details
+          {msg("timeline.activityRail.hideStartupDetails")}
         </button>
       ) : null}
       {dispatch && (detailsOpen || debug) ? (
@@ -216,6 +227,7 @@ export function ActivityRail({
       {visibleItems.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(visibleItems[index - 1]!);
         const row = renderActivity(
+          msg,
           item,
           toolRegistry,
           onOpenSession,
@@ -283,6 +295,7 @@ function assertNever(item: never): never {
 }
 
 export function renderActivity(
+  msg: OpenGeniText,
   item: ActivityItem,
   toolRegistry: ToolRegistry,
   onOpenSession: ((sessionId: string) => void) | undefined,
@@ -300,7 +313,7 @@ export function renderActivity(
             item={item}
             d={ActivityDisclosure}
             p={PayloadBlock}
-            t={toolDisplayName}
+            t={(name: string) => toolDisplayName(msg, name)}
             b={BotIcon}
             m={Markdown}
             j={rowJsx}
@@ -309,15 +322,32 @@ export function renderActivity(
         </Suspense>
       );
     case "tool-call": {
-      const Renderer = toolRegistry.resolve(item);
+      // A deferred tool run through tool_invoke reads as the tool it ran.
+      const shown = invokedToolCall(item);
+      const Renderer = toolRegistry.resolve(shown);
+      const outputPreview = item.outputPreview ?? null;
+      // A row that cannot read its preview waits for its exact output; one
+      // whose read failed, or that has no reader, falls back to the generic
+      // row, which says it shows a preview.
+      const exactFirst = outputPreview !== null && !rendersToolOutputPreview(Renderer, shown);
+      const Shown =
+        exactFirst && (outputPreview.state === "error" || !outputPreview.load)
+          ? toolRegistry.fallback
+          : Renderer;
       return (
-        <ToolRowBoundary name={toolDisplayName(item.name)} resetKeys={[item.status, Renderer]}>
+        <ToolRowBoundary name={toolDisplayName(msg, shown.name)} resetKeys={[item.status, Shown]}>
           <ToolCallTruncationProvider value={item.truncation ?? null}>
-            <Renderer
-              item={item}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-            />
+            <ToolOutputPreviewProvider value={outputPreview}>
+              {exactFirst && outputPreview.load && outputPreview.state !== "error" ? (
+                <ToolOutputExactRow item={shown} preview={outputPreview} />
+              ) : (
+                <Shown
+                  item={shown}
+                  loadRetainedScreenshot={loadRetainedScreenshot}
+                  loadRetainedArtifact={loadRetainedArtifact}
+                />
+              )}
+            </ToolOutputPreviewProvider>
           </ToolCallTruncationProvider>
         </ToolRowBoundary>
       );
@@ -356,17 +386,46 @@ export function renderActivity(
 }
 
 /**
+ * A tool row whose renderer needs its exact output: it reads it on mount and
+ * stands in as a quiet loading row until the output lands.
+ */
+function ToolOutputExactRow({
+  item,
+  preview,
+}: {
+  item: ToolCallItem;
+  preview: NonNullable<ToolCallItem["outputPreview"]>;
+}) {
+  const msg = useOpenGeniText();
+  const pending = preview.state === "preview";
+  const load = preview.load;
+  useEffect(() => {
+    if (pending) load?.();
+  }, [pending, load]);
+  return (
+    <div data-og-tool-output-loading="" aria-busy="true">
+      <ActivityDisclosure
+        icon={<WrenchIcon className="size-3.5" />}
+        title={toolDisplayName(msg, item.name, item.display)}
+        preview={msg("timeline.toolRenderers.loadingOutput")}
+        expandable={false}
+      />
+    </div>
+  );
+}
+
+/**
  * Human labels for the memory kinds, translated at the SDK boundary so a raw
  * enum slug never renders as UI. Kept local to the library (the app has its own
  * `KIND_LABEL`); an unknown kind simply omits the chip rather than showing a slug.
  */
-const MEMORY_KIND_LABEL: Record<string, string> = {
-  preference: "Preference",
-  semantic: "Fact",
-  procedural: "Procedure",
-  decision: "Decision",
-  episodic: "History",
-};
+const MEMORY_KIND_LABEL = (msg: OpenGeniText): Record<string, string> => ({
+  preference: msg("timeline.activityRail.preference"),
+  semantic: msg("timeline.activityRail.fact"),
+  procedural: msg("timeline.activityRail.procedure"),
+  decision: msg("timeline.activityRail.decision"),
+  episodic: msg("timeline.activityRail.history"),
+});
 
 /**
  * A memory write the agent made mid-turn. A calm, NEUTRAL step (a successful save
@@ -383,8 +442,9 @@ function MemoryRow({
   item: MemoryItem;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
 }) {
+  const msg = useOpenGeniText();
   const corrected = item.variant === "corrected";
-  const kindLabel = MEMORY_KIND_LABEL[item.memoryKind];
+  const kindLabel = MEMORY_KIND_LABEL(msg)[item.memoryKind];
   // A supersede carries both the old text (`preview`) and the new (`replacementPreview`);
   // an in-place update / archive carries only `preview`.
   const superseded = corrected && Boolean(item.replacementPreview);
@@ -397,7 +457,11 @@ function MemoryRow({
       iconTone="muted"
       title={
         <span className="inline-flex min-w-0 items-center gap-2">
-          <span className="shrink-0">{corrected ? "Updated memory" : "Saved to memory"}</span>
+          <span className="shrink-0">
+            {corrected
+              ? msg("timeline.activityRail.updatedMemory")
+              : msg("timeline.activityRail.savedToMemory")}
+          </span>
           {kindLabel ? (
             <span className="shrink-0 rounded-og-xs bg-og-surface-2 px-1.5 py-px text-og-xs font-normal leading-tight text-og-fg-subtle">
               {kindLabel}
@@ -425,17 +489,19 @@ function MemoryRow({
           <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
             {item.preview}
           </p>
-          <BodyNote tone="muted">Updated in place.</BodyNote>
+          <BodyNote tone="muted">{msg("timeline.activityRail.updatedInPlace")}</BodyNote>
         </>
       ) : corrected ? (
         // A correction with no replacement (and not an in-place update) archived the record.
-        <BodyNote tone="muted">Archived.</BodyNote>
+        <BodyNote tone="muted">{msg("timeline.activityRail.archived")}</BodyNote>
       ) : (
         <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
           {item.preview}
         </p>
       )}
-      {item.deduped ? <BodyNote tone="muted">Merged into an existing memory.</BodyNote> : null}
+      {item.deduped ? (
+        <BodyNote tone="muted">{msg("timeline.activityRail.mergedIntoAnExistingMemory")}</BodyNote>
+      ) : null}
       {deepLink ? (
         <button
           type="button"
@@ -445,7 +511,7 @@ function MemoryRow({
             "outline-hidden transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >
-          View in memory
+          {msg("timeline.activityRail.viewInMemory")}
           <ArrowRightIcon className="size-3.5 transition-transform duration-150 group-hover/memlink:translate-x-0.5" />
         </button>
       ) : null}
@@ -467,13 +533,14 @@ function WorkerRow({
   item: WorkerItem;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  const msg = useOpenGeniText();
   const identity = useAgentIdentity();
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
   const sessionId = item.workerSessionId;
   const name = identity.titleFor(sessionId) ?? (item.action === "spawn" ? item.title : null);
-  const title = workerRowTitleParts(item, name);
+  const title = workerRowTitleParts(msg, item, name);
   const prompt = item.prompt?.trim() ? item.prompt.trim() : null;
   const failure = failed ? item.failure : null;
   const hasBody = Boolean(prompt) || Boolean(failure);
@@ -493,7 +560,13 @@ function WorkerRow({
       {hasBody ? (
         <>
           {prompt ? (
-            <AgentRowSection label={item.action === "spawn" ? "Brief" : "Message"}>
+            <AgentRowSection
+              label={
+                item.action === "spawn"
+                  ? msg("timeline.activityRail.brief")
+                  : msg("timeline.activityRail.message")
+              }
+            >
               {prompt}
             </AgentRowSection>
           ) : null}
@@ -512,6 +585,19 @@ function WorkerRow({
  * One tool row that fails to render shows a one-line note in its place, so the
  * rest of the work group (and the live preview) keeps reading normally.
  */
+function ToolRowRenderError({ name }: { name: string }) {
+  const t = useOpenGeniText();
+  return (
+    <div
+      data-testid="tool-row-render-error"
+      role="status"
+      className="px-1.5 py-1.5 text-og-menu text-og-fg-subtle"
+    >
+      {t("timeline.activityRail.nameCouldNotBeDisplayed", { name })}
+    </div>
+  );
+}
+
 class ToolRowBoundary extends Component<
   { name: string; resetKeys: readonly unknown[]; children: ReactNode },
   { failed: boolean; resetKeys: readonly unknown[] }
@@ -535,14 +621,6 @@ class ToolRowBoundary extends Component<
 
   render(): ReactNode {
     if (!this.state.failed) return this.props.children;
-    return (
-      <div
-        data-testid="tool-row-render-error"
-        role="status"
-        className="px-1.5 py-1.5 text-og-menu text-og-fg-subtle"
-      >
-        {this.props.name} · couldn't be displayed
-      </div>
-    );
+    return <ToolRowRenderError name={this.props.name} />;
   }
 }

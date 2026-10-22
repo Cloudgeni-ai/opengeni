@@ -53,7 +53,10 @@ impl Drop for OwnedChild {
             return;
         }
         let reservation = self.reservation.take();
-        let failure_witness = reservation.clone();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("PTY child {:?}", child.process_id()),
+        );
         // portable-pty kill only signals (and some platforms do not report its
         // errors). Retain ownership through a positive wait, even with no Tokio
         // runtime or after cancellation of the relay/registration task.
@@ -61,19 +64,23 @@ impl Drop for OwnedChild {
             .name("pty-cleanup".into())
             .spawn(move || {
                 crate::with_work_reservation_sync(reservation.clone(), || {
+                    let mut witness = witness;
                     let _ = child.kill();
-                    if child.wait().is_err() {
-                        if let Some(reservation) = &reservation {
-                            reservation.mark_unsettled();
+                    loop {
+                        match child.wait() {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
                         }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                     }
                     drop(reservation);
                 });
             });
-        if cleanup.is_err() {
-            if let Some(reservation) = failure_witness {
-                reservation.mark_unsettled();
-            }
+        if let Err(error) = cleanup {
+            tracing::warn!(%error, "could not start PTY cleanup thread");
         }
     }
 }
@@ -166,11 +173,14 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         pixel_height: 0,
     };
 
+    let identity = crate::run_as::resolve(&req.run_as)?;
     let pair = NativePtySystem::default()
         .openpty(size)
         .map_err(|e| PlatformError::os(format!("openpty: {e}")))?;
 
-    let argv: Vec<String> = if req.command.is_empty() {
+    let argv: Vec<String> = if let (true, Some(identity)) = (req.command.is_empty(), &identity) {
+        vec![identity.shell.to_string_lossy().into_owned()]
+    } else if req.command.is_empty() {
         default_shell.to_vec()
     } else {
         req.command.clone()
@@ -183,6 +193,20 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     cmd.args(&argv[1..]);
     if !req.cwd.is_empty() {
         cmd.cwd(&req.cwd);
+    } else if let Some(identity) = &identity {
+        // Without a cwd the terminal starts where a login would: the user's
+        // home, or `/` when the account has none (login(1) does the same).
+        // portable-pty would otherwise chdir into $HOME and fail.
+        if identity.home.is_dir() {
+            cmd.cwd(&identity.home);
+        } else {
+            cmd.cwd("/");
+        }
+    }
+    if let Some(identity) = &identity {
+        for (k, v) in identity.login_env() {
+            cmd.env(k, v);
+        }
     }
     for (k, v) in &req.env {
         cmd.env(k, v);
@@ -195,17 +219,29 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     };
     cmd.env("TERM", term);
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])))?;
+    let slave = pair.slave;
+    let spawn = move || {
+        let child = slave
+            .spawn_command(cmd)
+            .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])));
+        // The slave handle is no longer needed once the child holds it; dropping
+        // it lets the master see EOF when the child exits.
+        drop(slave);
+        child
+    };
+    let child = match &identity {
+        None => spawn()?,
+        Some(identity) => {
+            give_terminal_to(pair.master.as_ref(), identity)?;
+            // Forked from a thread already running as the user, so the shell
+            // never holds the agent's credentials.
+            crate::run_as::on_identity_thread(identity, spawn)?
+        }
+    };
     let child = OwnedChild {
         child: Some(child),
         reservation: crate::current_work_reservation(),
     };
-    // The slave handle is no longer needed once the child holds it; dropping it
-    // lets the master see EOF when the child exits.
-    drop(pair.slave);
 
     let reader = pair
         .master
@@ -224,9 +260,105 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     })
 }
 
+/// Makes the user own their terminal device, as a login would, so programs that
+/// reopen it by name (or check its owner) work.
+#[cfg(unix)]
+fn give_terminal_to(
+    master: &(dyn portable_pty::MasterPty + Send),
+    identity: &crate::run_as::RunAsIdentity,
+) -> PlatformResult<()> {
+    let Some(name) = master.tty_name() else {
+        return Ok(());
+    };
+    std::os::unix::fs::chown(&name, Some(identity.uid), Some(identity.gid))
+        .map_err(|e| PlatformError::from_io(&format!("chown {}", name.display()), &e))
+}
+
+#[cfg(not(unix))]
+fn give_terminal_to(
+    _master: &(dyn portable_pty::MasterPty + Send),
+    _identity: &crate::run_as::RunAsIdentity,
+) -> PlatformResult<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Clone)]
+    struct RecoveringChild(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl portable_pty::ChildKiller for RecoveringChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::Child for RecoveringChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            if self.0.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(portable_pty::ExitStatus::with_exit_code(0))
+            } else {
+                Err(std::io::Error::other(
+                    "synthetic transient PTY wait failure",
+                ))
+            }
+        }
+        fn process_id(&self) -> Option<u32> {
+            Some(123)
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_pty_wait_failure_recovers_only_after_actual_exit() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let drain = Arc::new(UpdateDrain::default());
+        let exited = Arc::new(AtomicBool::new(false));
+        drop(OwnedChild {
+            child: Some(Box::new(RecoveringChild(exited.clone()))),
+            reservation: drain.reserve_work(None),
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.unavailable_reason().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain
+            .unavailable_reason()
+            .unwrap()
+            .contains("PTY child Some(123)"));
+        assert_eq!(
+            drain.reserve_update("update"),
+            UpdateReservation::Unavailable
+        );
+        exited.store(true, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.snapshot().is_none_or(|state| state.routed != 0) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(drain.seal_update("update"));
+    }
 
     /// The platform default-shell argv for the test host.
     fn default_shell() -> Vec<String> {

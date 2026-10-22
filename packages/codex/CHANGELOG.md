@@ -1,5 +1,250 @@
 # @opengeni/codex
 
+## 4.3.1
+
+### Minor Changes
+
+- 9976132: Add pooled weekly subscription utilization, estimated plan-size weighting and reset-aware forecasts with one total remaining bar. Retain observed limit history; organization pools cover organization accounts and workspace pools cover all visible accounts available to that workspace, using each account's total usage. Show five-hour limits only when blocking an account; keep individual account details in the account list.
+- 67262de: Adds the Ultrafast speed for GPT-6 Astra and GPT-6.1 Sol. When a model offers it, the model picker replaces the Fast toggle with a Speed choice (Standard, Fast, Ultrafast) and shows what the faster speeds cost: 8× usage on a ChatGPT/Codex plan, or the rate multiple on metered routes. A Codex account offers Ultrafast only when its own model list advertises the tier, so the picker shows it only when some account serving the workspace can run it, and an Ultrafast turn is placed only on such an account. Ultrafast requests use `service_tier: "ultrafast"`, and a response served at a lower tier is not counted as Ultrafast. Turns accepted before a model declared Ultrafast keep running unchanged.
+
+### Patch Changes
+
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [23fed2a]
+- Updated dependencies [e4915c1]
+- Updated dependencies [16781e5]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9976132]
+- Updated dependencies [724b529]
+- Updated dependencies [3915617]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [b95784c]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/contracts@4.3.0
+  - @opengeni/network@4.3.0
+
+## 4.2.0
+
+### Patch Changes
+
+- Updated dependencies [641e179]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+  - @opengeni/contracts@4.2.0
+  - @opengeni/network@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- @opengeni/contracts@4.1.2
+- @opengeni/network@4.1.2
+
+## 4.1.1
+
+### Patch Changes
+
+- 84688e2: Reuse familiar Codex prompt prefixes across sessions for the same person in a workspace by separating Responses cache affinity from session identity. Keep request bodies, per-session cache keys, conversation sockets, and continuation chains unchanged.
+- Updated dependencies [afff3f9]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/network@4.1.0
+
+## 4.0.4
+
+### Patch Changes
+
+- 958d157: A Codex response whose connection breaks mid-stream (a reset HTTP body or a WebSocket that closes before the response finishes) now fails as the same typed interrupted stream as one that ends without a terminal event, so the turn recovers instead of failing.
+- b4a3b7f: Codex subscription requests now actually use the Responses WebSocket. The model client sends its request body as a stream, which the socket transport treated as ineligible, so every request silently went over HTTP.
+- 88459ff: A Codex turn now opens its conversation's Responses WebSocket while the rest of the turn prepares, so the first model request no longer waits for the handshake (about half a second on a new connection). A request that arrives while that handshake is still in progress waits for it instead of opening a second connection, and the model SDK's own telemetry headers no longer split a conversation's connection.
+- 1d24639: Reserve persistent Responses sockets for explicitly scoped conversation requests so title side requests cannot displace a warmed main connection or continuation chain. Add immutable request-receipt snapshots of local dispatch/socket timing and allowlisted response-scoped server timing, without changing model request content, prewarming, retries, or custody.
+- 7bac0d9: A conversation whose Responses WebSocket drops mid-response twice within ten minutes uses HTTP for the next 30 minutes, as the Codex CLI falls back to HTTPS after repeated WebSocket failures. A completed response clears the count. Those requests report `http; reason=stream_dropped`.
+- a34aebb: Responses WebSocket requests continue the previous response on the same connection: when a request extends the last completed response exactly, it sends `previous_response_id` and only the new input items, and falls back to the full request otherwise or when the provider no longer holds that response. The transport now serves the OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API (`/openai/v1/responses`) as well as the Codex subscription, with one connection per conversation (`OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED`, default on). Other OpenAI-compatible hosts stay on HTTP. Each request's transport label and the model-request phase metrics say whether the input was full or incremental.
+
+  Share lifecycle and failure policy in the network package. Use the JavaScript WebSocket implementation to release sent buffers, retain only continuation fingerprints, coalesce concurrent handshakes, and retire idle connections when credentials change. The existing durable model-step retry budget owns dropped responses; its final retry uses HTTP, with no additional retry budget or timer-based cooldown. HTTP remains selected through turn recovery and subsequent successful steps, but a new turn tries the socket again. Definitive continuation refusal settles and re-admits request custody before a full-input resend. Transport diagnostics distinguish first-request cache behavior and final-prefix startup overlap; no speculative model prewarm is sent.
+
+- Updated dependencies [e7113e3]
+- Updated dependencies [35dcfa0]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2a81601]
+- Updated dependencies [b1b51e2]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [1d24639]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [a22ed79]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/network@4.0.0
+
+## 3.4.0
+
+### Patch Changes
+
+- 42caae1: Each Codex model request now reports how it was carried: over a new or reused Responses WebSocket, or over HTTP with the reason the socket did not carry it (not a streaming request, connection busy, handshake failed or backing off, or no socket transport in the path). The request audit event carries it as `transport`, and the model-request phase metrics gain a bounded `transport` label, so per-step latency can be compared by transport.
+- Updated dependencies [28844d8]
+- Updated dependencies [ceaf911]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/network@3.4.0
+
+## 3.3.0
+
+### Patch Changes
+
+- Updated dependencies [38ac98e]
+  - @opengeni/contracts@3.3.0
+  - @opengeni/network@3.3.0
+
+## 3.2.2
+
+### Patch Changes
+
+- Updated dependencies [a0c35a1]
+  - @opengeni/contracts@3.2.0
+  - @opengeni/network@3.2.0
+
+## 3.1.2
+
+### Patch Changes
+
+- Updated dependencies [17d61c6]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/network@3.1.0
+
+## 3.0.0
+
+### Patch Changes
+
+- Updated dependencies [501bb83]
+- Updated dependencies [2077293]
+- Updated dependencies [db3efc5]
+- Updated dependencies [957f6ee]
+- Updated dependencies [6339cec]
+- Updated dependencies [37169cd]
+- Updated dependencies [d367818]
+  - @opengeni/contracts@3.0.0
+  - @opengeni/network@3.0.0
+
+## 2.0.1
+
+### Patch Changes
+
+- Updated dependencies [2ea5f7b]
+  - @opengeni/contracts@2.0.1
+  - @opengeni/network@2.0.1
+
+## 2.0.0
+
+### Patch Changes
+
+- 4532435: Codex Apps keeps working when a workspace routes models through its organization's Codex accounts. The workspace's designated Apps account now loads, and its token refreshes persist, through the Apps designation itself instead of the model-routing pool; that authority still reaches only the designated account, owned by this workspace and its current owner. Turning Apps off (`DELETE /v1/workspaces/:workspaceId/codex/apps`) now works in every routing mode, so `apps.canDisable` is accurate.
+
+  Apps no longer posts an authorization card every time it sets up a turn. A card appears only when an Apps tool call needs one, at most once per turn, and an unusable designated account is reported with the new `tool.auth_needed` reason `designated_credential_unavailable` instead of `refresh_failed`. Clients should treat unknown reasons generically, as before.
+
+- 851cbdc: Protect Codex extra credits by default, add revocable per-account spending consent with included-allowance-first rotation, and allow organization accounts to pause without disconnecting. Preserve unknown balances as null in usage responses.
+- d393b9b: A Codex turn survives a brief provider 5xx again. An HTTP 5xx answer from the provider (for example a 503 after an upstream reset) is now recorded as a definite refusal rather than an unknown outcome, so the client's normal retry can send a new request instead of the whole turn failing. Timeouts (408, 504), conflicts (409) and missing responses stay ambiguous and are not replayed.
+- 6d5f287: Wait for Codex stream-failure request settlement before exposing the provider error to the worker, including a final buffered failure without a trailing blank separator. Preserve the provider diagnostic when terminal auditing or settlement rejects. A slow refusal receipt previously made transient overload skip same-turn recovery; failed settlement still prevents replay.
+- 0eae048: Treat a failure the provider declares inside a Codex response stream (`response.failed`, `error`, `response.incomplete`, for example "servers are currently overloaded") as a definite answer when no completed output preceded it, the same as an HTTP 5xx status. Previously only account refusals were definite, so a transient overload recorded the request as an unresolved outcome and failed the turn as non-retryable. A failure after completed output, or a stream that ends without any terminal event, stays unresolved.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [c2f4153]
+- Updated dependencies [de2d721]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [6861501]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [4532435]
+- Updated dependencies [f96605f]
+- Updated dependencies [496ce55]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [ce7b403]
+- Updated dependencies [445baf4]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [945490f]
+- Updated dependencies [8e878ac]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [eb68b58]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [7ce535f]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [a91718c]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/network@2.0.0
+
 ## 1.4.4
 
 ### Patch Changes

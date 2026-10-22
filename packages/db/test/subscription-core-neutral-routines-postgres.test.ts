@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -78,6 +78,8 @@ beforeAll(async () => {
     // Rewrites routines 0707, 0713 and 0714 create.
     "0715_subscription_core_api_key_connections.sql",
     "0716_subscription_authority_compat.sql",
+    "0843_indexed_inbox_lineage.sql",
+    "0846_independent_session_titles.sql",
     "0717_subscription_authority_fences.sql",
     "0726_subscription_personal_acceptance_reads.sql",
     // 0728 adds a format-aware overload next to 0707's personal connect writer.
@@ -89,6 +91,14 @@ beforeAll(async () => {
     // Reads the registry/receipt and rewrites the admission guard withheld above.
     "0746_subscription_failover_readiness_and_request_fence.sql",
     "0752_subscription_personal_sharing.sql",
+    // Binds a policy to 0707's owner capability and rewrites 0707's disconnect writer.
+    "0777_workspace_admin_subscription_connections.sql",
+    // Patches 0707's owner reader (as 0715 rewrites it).
+    "0884_subscription_core_personal_quarantine_expiry.sql",
+    // Rewrites 0707's disconnect writer and 0777's policies.
+    "0897_workspace_owner_administers_subscriptions.sql",
+    // Restricts the predicate 0897 creates.
+    "0900_workspace_admin_predicate_privileges.sql",
   ];
   // The drained SuperGrok and Claude cutovers and the retirement after them
   // are maintenance-only: a rolling deployment of 0707 never applies them, so
@@ -455,9 +465,15 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
         from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
         where namespace.nspname in ('opengeni_private', 'opengeni_subscription_internal')
           and proc.proname like '%subscription_core%'`;
+      // The neutral lists also carry routines whose names do not say
+      // subscription_core (the usage-history readers and capture triggers);
+      // only the ones this query selects are counted.
+      const namedSubscriptionCore = [
+        ...SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+        ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+      ].filter((signature) => signature.split("(")[0]!.includes("subscription_core"));
       expect(rows.length).toBe(
-        SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES.length +
-          SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES.length +
+        namedSubscriptionCore.length +
           // Registered kind lookup and B1's narrow kind/receipt reader.
           2,
       );
@@ -562,12 +578,26 @@ describe("provider-neutral subscription-core routines (migration 0707)", () => {
       // 0730 builds its reader from the live owner reader (0707, as 0715
       // rewrote it). A later fix to the owner reader's membership, writer
       // context or kind rule must reach the version reader too: this compares
-      // the two live bodies after 0730's three substitutions.
+      // the two live bodies after 0730's three substitutions (on the owner
+      // reader as 0730 read it: 0884's effective status columns undone, the
+      // only owner-reader change that does not reach the version reader).
       const [row] = await database!.admin<{ base: string; versions: string }[]>`
         select
           pg_get_functiondef('opengeni_private.subscription_core_personal_connections(text,uuid,uuid,text)'::regprocedure) as base,
           pg_get_functiondef('opengeni_private.subscription_core_personal_connection_versions(text,uuid,uuid,text)'::regprocedure) as versions`;
       const substitutions: Array<[string, string]> = [
+        [
+          [
+            "connection.provider_account_id,",
+            "          CASE WHEN connection.status = 'error'",
+            "              AND connection.health_retry_at <= pg_catalog.clock_timestamp()",
+            "            THEN 'active' ELSE connection.status END,",
+            "          CASE WHEN connection.status = 'error'",
+            "              AND connection.health_retry_at <= pg_catalog.clock_timestamp()",
+            "            THEN NULL ELSE connection.last_error END,",
+          ].join("\n"),
+          "connection.provider_account_id, connection.status, connection.last_error,",
+        ],
         [
           "FUNCTION opengeni_private.subscription_core_personal_connections(",
           "FUNCTION opengeni_private.subscription_core_personal_connection_versions(",

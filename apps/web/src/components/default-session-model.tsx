@@ -1,36 +1,34 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
 import type { DefaultModelSelectionSource, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { payerShortLabel } from "@/components/models/models-ui";
-import { ModelPicker } from "@/components/pickers";
-import { buttonVariants } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/setting-row";
-import { useAppContext } from "@/context";
+import { payerShortLabel } from "@opengeni/react/app/components/models/models-ui";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
+import { buttonVariants } from "@opengeni/react/ui/button";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   availabilityReasonLabel,
   billingClassForModel,
   billingClassLabel,
   payerSummaryForModel,
   type PickerModelRow,
-} from "@/lib/model-policy";
-import { initialReasoningEffort } from "@/lib/session-tools";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/app/lib/model-policy";
+import { initialReasoningEffort } from "@opengeni/react/app/lib/session-tools";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
-import type { IntelligenceEffort } from "@/lib/session-tools";
+import type { IntelligenceEffort } from "@opengeni/react/app/lib/session-tools";
 
 type Draft = { model: string; reasoningEffort: IntelligenceEffort };
 
 /** How an unsaved workspace default is chosen, in plain words. */
-function automaticDefaultNote(
-  source: DefaultModelSelectionSource | undefined,
-  organizationName: string | undefined,
-): string {
+function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): string {
   switch (source) {
     case "organization":
-      return `Following ${organizationName ?? "your organization"}.`;
+      return "Uses the default.";
     case "subscription":
       return "Picked from your connected subscription until you choose one.";
     case "credits":
@@ -76,9 +74,9 @@ export function defaultModelPickerRows(
       label: catalog.label,
       ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
       billingClass,
-      billingClassLabel: billingClassLabel(billingClass),
+      billingClassLabel: billingClassLabel(t, billingClass),
       selectable: false,
-      unavailableReason: availabilityReasonLabel(catalog.availability.reason) ?? "Unavailable",
+      unavailableReason: availabilityReasonLabel(t, catalog.availability.reason) ?? "Unavailable",
       provider: catalog.provider,
       providerLabel: catalog.providerLabel,
       catalog,
@@ -96,11 +94,11 @@ export function defaultModelSummary(
   const runnable =
     catalog.credentialReadiness.status === "ready" && catalog.availability.selectable;
   return {
-    text: `${catalog.label} · ${payerSummaryForModel(catalog)}`,
+    text: `${catalog.label} · ${payerSummaryForModel(t, catalog)}`,
     unavailable: runnable
       ? null
       : `Can't run right now: ${
-          availabilityReasonLabel(catalog.availability.reason) ?? "Unavailable"
+          availabilityReasonLabel(t, catalog.availability.reason) ?? "Unavailable"
         }`,
   };
 }
@@ -128,7 +126,6 @@ export function DefaultSessionModelPreferenceRow(props: {
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
   const organizationScope = props.organizationDefaults !== undefined;
-  const organizationLabel = props.organizationName ?? "your organization";
   const configured = organizationScope
     ? (props.organizationDefaults?.defaults?.sessionDefaults ?? null)
     : resolveWorkspaceSessionDefaults(workspace?.settings);
@@ -219,7 +216,7 @@ export function DefaultSessionModelPreferenceRow(props: {
         toast.success(
           organizationScope
             ? "Default model is automatic again"
-            : `Default model follows ${organizationLabel} again`,
+            : "Default model is back to the default",
         );
         if (!organizationScope) await catalog.refresh();
       }
@@ -268,7 +265,7 @@ export function DefaultSessionModelPreferenceRow(props: {
               <>
                 {" "}
                 <InlineAction onClick={() => void reset()}>
-                  {organizationScope ? "Make automatic" : `Use ${organizationLabel}’s default`}
+                  {organizationScope ? "Make automatic" : "Use the default"}
                 </InlineAction>
               </>
             ) : null}
@@ -276,7 +273,7 @@ export function DefaultSessionModelPreferenceRow(props: {
         ) : organizationScope ? (
           `${starts} Automatic until you choose one: a connected subscription, then Opengeni credits, then this server’s default.`
         ) : (
-          `${starts} ${automaticDefaultNote(automatic?.source, props.organizationName)}`
+          `${starts} ${automaticDefaultNote(automatic?.source)}`
         )
       }
       error={cantRun}

@@ -4,12 +4,21 @@ import {
   browserProduct,
   extensionArchitecture,
   extensionPlatform,
+  isAllowedDebuggerMethod,
   parseExtensionCommand,
   parseExtensionReady,
   tabUnavailableReason,
 } from "../src/protocol";
 
 describe("attached browser extension protocol", () => {
+  test("admits focus emulation but no other Emulation method", () => {
+    expect(isAllowedDebuggerMethod("Emulation.setFocusEmulationEnabled")).toBe(true);
+    expect(isAllowedDebuggerMethod("Input.dispatchMouseEvent")).toBe(true);
+    expect(isAllowedDebuggerMethod("Emulation.setDeviceMetricsOverride")).toBe(false);
+    expect(isAllowedDebuggerMethod("Browser.close")).toBe(false);
+    expect(isAllowedDebuggerMethod("Input")).toBe(false);
+  });
+
   test("projects ordinary tabs and marks Chrome-owned pages unavailable", () => {
     expect(
       attachedTab({

@@ -1,8 +1,13 @@
 import { ChevronDownIcon, MicIcon } from "lucide-react";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ModelMark } from "@opengeni/react";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
+import { Button } from "@opengeni/react/ui/button";
+import { coveredModelsSummary } from "@opengeni/react/app/lib/credit-coverage";
 
 /** A balance row opens its current coverage without leaving billing. */
 export function CreditScopeDetails({
@@ -10,13 +15,17 @@ export function CreditScopeDetails({
   amount,
   eligibleModelIds,
   coversVoice = false,
+  description,
 }: {
   label: string;
   amount: string;
   eligibleModelIds: readonly string[];
   /** Also pays for dictation and live voice. */
   coversVoice?: boolean | undefined;
+  /** Defaults to the covered models, by name. */
+  description?: string | undefined;
 }) {
+  const coverage = `Only for ${coveredModelsSummary(eligibleModelIds)}`;
   return (
     <Collapsible className="group/credit min-w-0">
       <CollapsibleTrigger asChild>
@@ -27,8 +36,8 @@ export function CreditScopeDetails({
         >
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm font-medium text-fg">{label}</span>
-            <span className="mt-0.5 block text-xs font-normal text-fg-muted">
-              Free credits · View models
+            <span className="mt-0.5 block text-xs font-normal whitespace-normal text-fg-muted">
+              {description ?? coverage}
             </span>
           </span>
           <span className="shrink-0 text-sm font-medium text-fg tabular-nums">{amount}</span>

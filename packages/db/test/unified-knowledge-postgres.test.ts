@@ -12,7 +12,7 @@ import { parseDocumentBytes, type DocumentServices } from "@opengeni/documents";
 import type { ObjectStorage } from "@opengeni/storage";
 import { knowledgeContractPdf } from "./fixtures/knowledge-pdf";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   appendSessionHistoryItems,
@@ -873,7 +873,7 @@ describe("unified Knowledge storage", () => {
     );
   }, 180_000);
 
-  test("a private agent reads shared facts but only authors its own personal Knowledge", async () => {
+  test("a private agent authors personal Knowledge by default and shared Knowledge only by explicit choice", async () => {
     const f = await fixture();
     const sharedFact = await save(f.human, "A shared customer fact");
     const { agent } = await attempt(f, null, true);
@@ -884,21 +884,23 @@ describe("unified Knowledge storage", () => {
     expect((await getKnowledgeEntry(client.db, f.human, privateFact.entryId))?.scope).toBe(
       "personal",
     );
-    await fails(
-      save(agent, "Cannot overwrite the shared fact", {
-        entryId: sharedFact.entryId,
-        expectedVersion: 1,
-      }),
-      "42501",
-    );
-    await fails(
-      archiveKnowledgeEntry(client.db, agent, {
-        operationId: crypto.randomUUID(),
-        entryId: sharedFact.entryId,
-        expectedVersion: 1,
-      }),
-      "42501",
-    );
+    // Correcting a shared fact by its id, or choosing the workspace scope,
+    // saves to the workspace under the workspace's own Knowledge mode.
+    const corrected = await save(agent, "A corrected shared fact", {
+      entryId: sharedFact.entryId,
+      expectedVersion: 1,
+    });
+    expect(corrected.outcome).toBe("published");
+    const after = await getKnowledgeEntry(client.db, f.human, sharedFact.entryId);
+    expect(after?.scope).toBe("workspace");
+    expect(after?.revision.entry.content).toBe("A corrected shared fact");
+    const chosen = await save(agent, "A fact for everyone", { scope: "workspace" });
+    expect((await getKnowledgeEntry(client.db, f.human, chosen.entryId))?.scope).toBe("workspace");
+    await archiveKnowledgeEntry(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      entryId: sharedFact.entryId,
+      expectedVersion: 2,
+    });
     const other = { ...f.human, actor: { ...f.human.actor, subjectId: "user:someone-else" } };
     expect(await getKnowledgeEntry(client.db, other, privateFact.entryId)).toBeNull();
   });

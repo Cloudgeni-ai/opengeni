@@ -239,7 +239,10 @@ Durable records:
   and operation frontier, lifecycle state;
 - `editable_artifact_transactions`: one authoritative transaction header,
   derived actor/attempt authority, request hash, sequence interval, causal base
-  and resulting frontier/state hash;
+  and resulting frontier/state hash. Spreadsheet operation ids are an ordered
+  list in command order (id `i` is the operation at the sequence start plus
+  `i`), unique but not lexically sorted; selective-undo targets stay a
+  canonically sorted set;
 - `editable_artifact_operation_segments`: bounded binary segments belonging to
   one transaction;
 - `editable_artifact_snapshots`: immutable content-addressed model snapshot,

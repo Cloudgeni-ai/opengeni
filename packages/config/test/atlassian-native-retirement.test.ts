@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { FirstPartyMcpToolName, FIRST_PARTY_REMOTE_MCP_TOOL_NAMES } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveFirstPartyMcpToolPolicy } from "../src/index";
 
 test("historical native Atlassian tools parse but cannot be advertised by a deployment policy", () => {

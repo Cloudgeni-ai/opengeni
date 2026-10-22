@@ -23,6 +23,7 @@ import {
   type BrowserSupervisorDriver,
   type BrowserSupervisorDriverContext,
   type BrowserSupervisorOptions,
+  type ControllerFailureContext,
 } from "../src";
 
 const adminToken = `admin.${"a".repeat(48)}`;
@@ -50,7 +51,10 @@ describe("BrowserControlServer", () => {
           body: createBody(reference),
         });
       expect((await create()).status).toBe(503);
-      expect((await json(await update("POST", randomUUID()))).data.idle).toBe(false);
+      expect((await json(await update("POST", randomUUID()))).data).toMatchObject({
+        idle: false,
+        blockers: [{ kind: "controller_previous_update", count: 1 }],
+      });
       expect((await update("DELETE", randomUUID())).status).toBe(409);
       expect((await create()).status).toBe(503);
       expect((await json(await update("DELETE"))).data).toMatchObject({
@@ -116,6 +120,7 @@ describe("BrowserControlServer", () => {
           }),
         );
         expect(proof.data.idle).toBe(false);
+        expect(proof.data.blockers).toContainEqual({ kind: "controller_request", count: 1 });
       } finally {
         finishBody!();
       }
@@ -124,6 +129,8 @@ describe("BrowserControlServer", () => {
   });
 
   test("keeps update idle proof private and includes open browser lifetimes", async () => {
+    // `empty` additionally requires that no session exists at all; only then
+    // may the parent agent stop this controller to reclaim its memory.
     await withServer(async ({ server, reference }) => {
       for (const token of [undefined, viewToken, controlToken]) {
         expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
@@ -133,7 +140,7 @@ describe("BrowserControlServer", () => {
       ).toBe(405);
       const idle = async () =>
         await json(await request(server, "/v1/runtime", { token: adminToken }));
-      expect((await idle()).data).toEqual({ idle: true });
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
       expect(
         (
           await request(server, "/v1/browser-sessions", {
@@ -143,7 +150,7 @@ describe("BrowserControlServer", () => {
           })
         ).status,
       ).toBe(201);
-      expect((await idle()).data).toEqual({ idle: false });
+      expect((await idle()).data).toEqual({ idle: false, empty: false });
       expect(
         (
           await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
@@ -153,7 +160,7 @@ describe("BrowserControlServer", () => {
           })
         ).status,
       ).toBe(200);
-      expect((await idle()).data).toEqual({ idle: true });
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
     });
   });
 
@@ -289,6 +296,28 @@ describe("BrowserControlServer", () => {
         },
       },
     );
+  });
+
+  test("create returns the launch observation with the tab inventory", async () => {
+    await withServer(async ({ server, reference }) => {
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      expect(created.status).toBe(201);
+      const data = (await json(created)).data as {
+        observation: { target: { id: string } };
+        targets: Array<{ id: string }>;
+      };
+      const listed = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+        { token: viewToken },
+      );
+      expect(data.targets).toEqual((await json(listed)).data as unknown as Array<{ id: string }>);
+      expect(data.targets.map((target) => target.id)).toContain(data.observation.target.id);
+    });
   });
 
   test("passkey sync is control-only, bound to the session path and validated", async () => {
@@ -850,6 +879,20 @@ describe("BrowserControlServer", () => {
         ).status,
       ).toBe(200);
 
+      const malformedSetAside = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/end`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: {
+            controllerGeneration: reference.controllerGeneration,
+            removeState: true,
+            setAsideInterruptedLaunch: "yes",
+          },
+        },
+      );
+      expect(malformedSetAside.status).toBe(400);
       const ended = await request(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/end`,
@@ -859,6 +902,9 @@ describe("BrowserControlServer", () => {
           body: {
             controllerGeneration: reference.controllerGeneration,
             removeState: true,
+            // A resident browser ends normally; the flag only affects a
+            // preserved interrupted launch.
+            setAsideInterruptedLaunch: true,
           },
         },
       );
@@ -1360,7 +1406,7 @@ describe("BrowserControlServer", () => {
   test("rejects malformed bodies without reflecting private driver failures", async () => {
     const unexpected: Array<{
       error: unknown;
-      context: { method: string; pathname: string };
+      context: ControllerFailureContext;
     }> = [];
     await withServer(
       async ({ server, reference }) => {
@@ -1379,11 +1425,23 @@ describe("BrowserControlServer", () => {
           body: createBody(reference),
         });
         expect(failed.status).toBe(500);
-        expect(JSON.stringify(await json(failed))).not.toContain("private-driver-detail");
+        const body = await json(failed);
+        expect(JSON.stringify(body)).not.toContain("private-driver-detail");
+        // Operators learn which class failed where, beside the unchanged error.
+        expect(body).toMatchObject({
+          error: { code: "driver_failed", message: "interaction controller request failed" },
+          diagnostic: { errorClass: "Error" },
+        });
+        expect(Object.keys((body as unknown as { error: object }).error).sort()).toEqual([
+          "code",
+          "message",
+          "retryable",
+        ]);
         expect(unexpected).toHaveLength(1);
         expect(unexpected[0]?.context).toEqual({
           method: "POST",
           pathname: "/v1/browser-sessions",
+          kind: "unexpected",
         });
         expect(unexpected[0]?.error).toMatchObject({ message: "private-driver-detail" });
       },
@@ -1417,13 +1475,12 @@ async function withServer(
       environment: NodeJS.ProcessEnv;
     };
     onBrowserContext?: (context: BrowserSupervisorDriverContext) => void;
-    onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
+    onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-server-");
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: join(directory, "sockets"),
     createDriver: async (context) => {
       options.onBrowserContext?.(context);
       return fakeDriver(context, options);

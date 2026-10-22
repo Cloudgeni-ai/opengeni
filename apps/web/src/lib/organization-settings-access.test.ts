@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
-import { organizationLandingWorkspaceId, organizationSettingsWorkspaceId } from "./org";
+import {
+  organizationLandingWorkspaceId,
+  organizationSettingsWorkspaceId,
+} from "@opengeni/react/app/lib/org";
 import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "./organization-settings-access";
-import type { AccessContext, Workspace } from "@/types";
+import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 const managed = { productAccessMode: "managed", auth: { mode: "managedSession" } } as const;
 const local = { productAccessMode: "local", auth: { mode: "none" } } as const;
@@ -52,6 +55,7 @@ describe("organization settings access", () => {
       ]),
     ).toEqual(
       [
+        "agents",
         "billing",
         "developer",
         "general",
@@ -66,9 +70,15 @@ describe("organization settings access", () => {
     );
   });
 
-  test("members see only what they can use: identity (read-only), Models and security", () => {
+  test("members see only what they can use: identity (read-only), Models, their agents and security", () => {
     // Models shows a member their own Personal workspace's default and allowed models.
-    expect(visible("member", ["account:read"])).toEqual(["identity", "models", "security"]);
+    // Every member connects their own coding agents to the organization MCP server.
+    expect(visible("member", ["account:read"])).toEqual([
+      "agents",
+      "identity",
+      "models",
+      "security",
+    ]);
   });
 
   test("a session without an organization membership gets no Models page", () => {
@@ -82,6 +92,7 @@ describe("organization settings access", () => {
       { workspaceId: "ws-elsewhere", accountId: "other", permissions: ["workspace:admin"] },
     ];
     expect(visible("member", ["account:read"], managed, grants)).toEqual([
+      "agents",
       "identity",
       "models",
       "security",
@@ -117,6 +128,8 @@ describe("organization settings access", () => {
     const pages = visible("owner", ["account:admin"], local);
     expect(pages).toContain("workspaces");
     expect(pages).not.toContain("people");
+    // The organization MCP server signs in managed people only.
+    expect(pages).not.toContain("agents");
   });
 
   test("a hidden page falls back to the first page the person can use", () => {

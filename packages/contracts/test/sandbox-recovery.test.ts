@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
+  SandboxCheckpointSelection,
   SandboxFreshWorkspaceRecovery,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
+  SandboxRecoverySelection,
   automaticSandboxRecoveryDiscontinuity,
   freshWorkspaceSandboxRecoveryDiscontinuity,
   sandboxRecoveryDiscontinuity,
@@ -65,6 +67,68 @@ test("recovery projection distinguishes automatic Retry from explicit human cons
   ).toBe(true);
 });
 
+test("current archive retry and fresh continuation require an exact bounded target", () => {
+  const {
+    version: _version,
+    artifactId: _artifactId,
+    capturedAt: _capturedAt,
+    ...identity
+  } = selection;
+  const target = { ...identity, restoreStatus: "unrecoverable", restoreCompletedAt: null };
+  const request = { operationId: crypto.randomUUID(), action: "retry", target };
+  expect(SandboxRecoveryRequest.safeParse(request).success).toBe(true);
+  expect(SandboxRecoveryRequest.safeParse({ ...request, action: "continue_fresh" }).success).toBe(
+    false,
+  );
+  expect(
+    SandboxRecoveryRequest.safeParse({
+      ...request,
+      action: "continue_fresh",
+      acceptEmptyWorkspace: true,
+    }).success,
+  ).toBe(true);
+  expect(
+    SandboxRecoveryRequest.safeParse({
+      ...request,
+      action: "continue_fresh",
+      acceptEmptyWorkspace: false,
+    }).success,
+  ).toBe(false);
+  expect(SandboxRecoveryRequest.safeParse({ ...request, subjectId: "user:other" }).success).toBe(
+    false,
+  );
+  expect(
+    SandboxRecoveryRequest.safeParse({ ...request, target: { ...target, objectKey: "secret" } })
+      .success,
+  ).toBe(false);
+  expect(
+    SandboxRecoveryRequest.safeParse({
+      ...request,
+      target: { ...target, revision: "x".repeat(513) },
+    }).success,
+  ).toBe(false);
+});
+
+test("deliberate empty continuation distinguishes a retained archive from successful restoration", () => {
+  const warning = freshWorkspaceSandboxRecoveryDiscontinuity({
+    version: 1,
+    sessionId: selection.sessionId,
+    sandboxGroupId: selection.sandboxGroupId,
+    leaseId: selection.leaseId,
+    leaseEpoch: 3,
+    workspaceGeneration: 44,
+    archiveGeneration: 10,
+    lostAt: selection.capturedAt,
+    reason: "restore_abandoned",
+  });
+  expect(warning).toContain("authorized person chose");
+  expect(warning).toContain("previous archive is retained");
+  expect(warning).toContain("External effects are not undone");
+  expect(warning).toContain("never automatically replay");
+  expect(warning).toContain("Selection alone does not prove");
+  expect(warning).not.toContain("no checkpoint");
+});
+
 test("automatic lanes are a closed public set; an empty workspace carries no checkpoint", () => {
   expect(
     SandboxRecoveryProjection.parse({
@@ -119,4 +183,24 @@ test("shared checkpoint and empty-workspace warnings never claim success, counts
   expect(SandboxFreshWorkspaceRecovery.safeParse({ ...recovery, reason: "other" }).success).toBe(
     false,
   );
+});
+test("a portable checkpoint is named only by automaticCheckpoint, never the public selection", () => {
+  const portable = { ...selection, artifactId: null };
+  expect(SandboxRecoverySelection.safeParse(portable).success).toBe(false);
+  expect(SandboxCheckpointSelection.parse(portable)).toEqual(portable);
+  const projection: SandboxRecoveryProjection = {
+    version: 1,
+    status: "eligible",
+    reason: null,
+    checkpoint: null,
+    operationId: null,
+    automaticAvailable: true,
+    automaticLane: "checkpoint",
+    automaticCheckpoint: portable,
+  };
+  expect(SandboxRecoveryProjection.parse(projection)).toEqual(projection);
+  expect(SandboxRecoveryProjection.safeParse({ ...projection, checkpoint: portable }).success).toBe(
+    false,
+  );
+  expect(automaticSandboxRecoveryDiscontinuity(portable)).toContain(selection.capturedAt);
 });

@@ -1,7 +1,7 @@
 # Advanced In-Process Embedding
 
 > Most customer products do **not** need this integration shape. When Opengeni
-> remains a standalone service and the product presents an OpenGeni-backed agent
+> remains a standalone service and the product presents an Opengeni-backed agent
 > in its own UI, mount `OpenGeniChat` or `SessionConversation` from
 > `@opengeni/react` behind the packaged `createSessionProxyHandler` from
 > `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
@@ -65,7 +65,7 @@ behavior is not appropriate. The proxy does not need billing, sandbox environmen
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
-**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+**Opengeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
@@ -85,9 +85,142 @@ synthetic prompt. See the [conversation UI guide](../docs-site/integrate/convers
 for optional hooks and their scope/lifetime boundaries. Simple embeds still
 use one `OpenGeniChat` component.
 
+**The full session app.** A page that already holds the person's own
+credential (a delegated token, a native-app token, an API key) can render the
+Opengeni web app's session UI itself: the chat list with search, projects,
+pins and archive, the session page with its header, timeline, approvals,
+questions and dock, the new-chat page, and the composer with its pickers.
+`SessionApp` from `@opengeni/react/session-app` is that UI, the same
+components the web app renders, backed by the same app state, with in-memory
+navigation. Pages it does not show (settings, billing, schedules) open the web
+app (`consoleUrl`) through `openUrl`.
+
+```tsx
+import { SessionApp } from "@opengeni/react/session-app";
+import "@opengeni/react/compiled.css";
+
+<SessionApp
+  apiBaseUrl="https://api.example.com"
+  headers={() => ({ Authorization: `Bearer ${token}` })}
+  consoleUrl="https://app.example.com"
+  workspaceId={workspaceId}
+  features={{ dock: true }}
+  messageContext={[
+    { id: "page", text: "The person is on the billing page of Acme." },
+    { id: "invoice", label: "Invoice #1042", text: "They have invoice #1042 open: …" },
+  ]}
+  onUnauthorized={() => refreshToken()}
+/>;
+```
+
+`consoleUrl` is the Opengeni web app's origin, which the embed links to for
+pages it does not show. `sessionId` and `onSessionChange` let the page own
+which chat is open; `onSessionChange` runs only when the person opens another
+chat. `openUrl` receives everything that leaves the embed (app pages, provider
+sign-in, checkout, files opened in full); a host that cannot open browser tabs,
+such as an Office add-in, passes its own. `onUnauthorized` runs on any 401,
+from the client or a raw app request. `compiled.css` is the only stylesheet
+the embed needs; it uses the Inter font when the page loads it. Server rendering
+produces only its loading state; the app starts in the browser.
+
+A preset decides which features show and single keys switch them:
+
+| Feature | `app` (web, desktop) | `companion` (first-party side panes) | `embed` (default; customer page) |
+| --- | --- | --- | --- |
+| `chatList`: search, filters, projects, pins, archive, subagent rows | on | on | on |
+| `dock`: files, terminal, desktop, browser, artifacts, inspector | on | on | off |
+| `adminAccess`: workspace-admin access indicator and grant | on | off | off |
+| `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
+| `brand`: the Opengeni row at the top of the chat list | on | on | off |
+
+Everything else (model and effort, capabilities, repositories, runs on,
+secrets, usage limit, approvals and questions, goals, attachments, voice, find
+in chat, message actions) is always on and follows the server's client
+configuration and the person's permissions, as in the web app. A switch only
+hides; it never grants. `slots` adds host sections to the shell (a workspace
+picker or account row under the chat list, banners above the canvas),
+`theme` follows the host application (the embed sets its own `data-og-theme`
+and never touches the host page's `<html>`), and `messageContext` adds
+per-message model context (never instructions) to every new chat and message:
+text, one item or a list of items. An item with a `label` shows as a pill above
+the composer (its `detail` in the tooltip), and the person can leave it out of
+their messages; a new label brings it back. Pass a new value whenever the
+context changes (the Excel add-in passes the current selection). A function is
+also accepted; it is read when each message is sent and shows no pill.
+With the dock off, entries that only open a dock panel hide with it.
+
+The dock's heavier pieces are opt-in so a page that does not show them never
+downloads them. Call `enableWorkbench()` from `@opengeni/react/workbench` once
+(ideally from a lazily loaded module) to turn on highlighted diffs, the
+terminal, the desktop viewer and the code editor. `surfaces` supplies the PDF
+preview and the editable document, spreadsheet and presentation editor; without
+an editor, those artifacts show a link that opens them in the web app.
+
+Everything stays inside the embed: menus, popovers, dialogs and tooltips
+render in its own root with its theme, its toasts stay out of the page's own
+toaster (two embeds on one page share one stack), ⌘/Ctrl+F is only caught
+while focus is inside it, and it never changes the page title or navigates the
+page. The exceptions are deliberate: Reload, offered when part of the app fails
+to download, reloads the page, as the embed's code is the page's; connecting a
+GitHub account opens GitHub's sign-in popup; creating a GitHub App posts its
+manifest to GitHub in a new tab; and links in a sandbox terminal open in a new
+tab. Two
+`SessionApp`s on one page keep separate state, navigation and events.
+The Excel add-in (`apps/web/office`) is the reference `companion` host.
+
+`SessionApp` calls the Opengeni API directly, so it needs a credential with the
+person's own workspace permissions. `OpenGeniChat` and the session proxy
+(`createSessionProxyHandler`) stay the path for products that must not hand the
+browser a credential; the proxy serves only the conversation routes, so it
+renders the conversation components above.
+
 Embedded defaults keep Opengeni's own product choices out of the host's
-product. The Opengeni web app does not mount these surfaces and keeps its own
-behavior. Existing explicit settings keep working.
+product. The Opengeni web app renders its session UI from the same
+`@opengeni/react` components as `SessionApp`. Existing explicit settings keep
+working.
+
+### Computer connection offers
+
+The agent offers `api:connected-machine` without deciding whether the person is
+in a desktop app or browser. `SessionConversation` recognizes that offer and
+renders `ThisComputerCard` with the host's `computerConnection` props. Supply the
+same props through `OpenGeniChat.conversationProps` or `SessionConversationView`.
+The existing `timelineProps.renderAuthNeeded` override still takes precedence.
+
+```tsx
+import "@opengeni/react/this-computer.css";
+
+<SessionConversation
+  sessionId={sessionId}
+  computerConnection={{
+    productName: "Acme",
+    // Inside your desktop app: useThisComputer(yourHost, workspaceId).
+    computer: desktopComputer,
+    // Only needed for outstanding operating-system permissions.
+    onSetup: () => setPermissionGuideOpen(true),
+    // Outside it: your OS-appropriate installer and account/workspace handoff.
+    downloads: [{ label: "Download Acme for Mac", url: yourMacDownloadUrl }],
+    openAppUrl: yourConnectUrl,
+  }}
+/>
+```
+
+For a product using the desktop kit, build `yourConnectUrl` with
+`computerConnectUrl({ scheme: "acme", webUrl, subjectId })` from
+`@opengeni/sdk/app-links`; `webUrl` is the product deployment's native workspace
+or chat destination. Other desktop architectures can supply `onConnect` to open
+their own connection flow instead. A callback finishing does not claim that a
+computer is online: provide the actual `computer` status or personal `machines`
+inventory for that. Keep these props bound to the current signed-in person and
+workspace; callbacks and links come from the host, never the model's event.
+
+Inside the desktop app one click invokes the host connection; on the web, the
+person installs the product's app and returns to **Open app and connect**. System
+permissions and sign-in/consent are not bypassed. Without host configuration the
+default offer explains that computer setup is unavailable. It never substitutes
+an Opengeni download, setup token, shell command, or model-supplied setup URL.
+
+### Embedded defaults
 
 | Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |
 | --- | --- |
@@ -158,7 +291,8 @@ approval, and answer; the endpoint checks it with `verifyToolRequest` from
 ([your own tools](product-integration.md#your-own-tools-as-the-signed-in-user-node)).
 Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
-`@opengeni/sdk` outside React. See
+`@opengeni/sdk` outside React. Your product's own links (its scheme, in-app
+paths) are drawn with `renderLink` on `Markdown` or `OpenGeniLinkProvider`. See
 [links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
 
 A host that mounts the styled React surfaces
@@ -395,7 +529,7 @@ with exact agent turn/attempt claims, and is consumed only by commands that
 create work; it cannot impersonate a human or change access. V2 core callers
 can provide the same typed fields on their trusted `AccessGrant`. The optional
 display label belongs on `serviceInitiator`, not in its context. Identity fields
-and context are bounded; OpenGeni-owned lineage/backfill keys and the
+and context are bounded; Opengeni-owned lineage/backfill keys and the
 `unattributed-legacy` migration sentinel are reserved.
 
 Ordinary delegated and first-party/Codemode credentials remain `ogd_`. The
@@ -484,6 +618,37 @@ approval authority. Normal resource authorization and command receipts apply.
 
 See `examples/site-session-embed` for a standard React provider, timeline and
 durable composer using this transport without knowing its execution location.
+
+### Site Data inside a Site
+
+`site.data` and `site.files` ([Site Data](site-data.md)) use the same HTTP
+transport with `published-artifacts/current/...` paths. A host opts in by
+building its bridge with `createSiteToolBridge({ artifactId, siteVersionId,
+requestedTools, fetchResponse, ... })`: the bridge rewrites `current` to the
+pinned Site, adds `x-opengeni-site-frame`, `x-opengeni-site-id` and
+`x-opengeni-site-version`, and the frame advertises `siteData: 1`. The API
+gives every framed request viewer reach, whoever is viewing. Hosts without
+`fetchResponse` or a pinned Site (inline HTML, tools-only hosts, local
+previews) do not advertise it, and Site code gets `site_data_unsupported`
+without a request being sent; their bridges also refuse `current` Site Data
+paths. No host forwards an explicit `published-artifacts/<id>/data|files`
+path from a Site. `site.sql.run` (Site SQL) travels the same way on
+`published-artifacts/current/sql/queries/<name>` and gets
+`site_sql_unsupported` where Site Data is unsupported. `createOpenGeniSessionProxy`
+does not forward Site Data or Site SQL routes yet.
+
+### Viewers and published Sites
+
+Hosts can answer `site.viewer` and `site.auth.signIn()` by passing `viewer`
+(a `SiteViewer`) and optionally `onSignIn` to `PublishedHtmlArtifactFrame`
+or `ArtifactSandbox`; the frame then advertises `viewer: 1`. The console
+passes the signed-in member (`kind: "member"`, `id: "user:<subject>"`) and
+resolves sign-in at once. Without `viewer`, Site code gets `null`. Sites
+published to their own hostname run in the Sites gateway's shell, which
+answers the same methods for members, invited people and guests and sends
+sign-in through the app's `/site-auth/authorize` page. Products manage
+publications with the `OpenGeniClient` methods in
+[Published Sites](published-sites.md); they never need to proxy Site hosts.
 
 ### Session Authorization
 
@@ -763,6 +928,19 @@ resolves values from it live when a `{{secret:…}}` reference runs, so the host
 never returns secret plaintext through the credential port. See
 [`secrets.md`](secrets.md#providers).
 
+For a product whose secret store lives behind another service, use a remote
+`external` vault connection instead. One connection can expose multiple vaults;
+separate user-owned connections keep user-specific inventories isolated. The
+host verifies the signed request, maps the native account/workspace/subject to
+its own tenant/user, and authorizes each metadata, read or supported write
+operation. The same references work in tools, shells, browsers and Sites.
+See [external-vaults.md](external-vaults.md) for setup, pending verification,
+capabilities and freshness. Native secret ask cards remain hosted-only.
+
+This is not a replacement for the renewable run-credential callback: that port
+still owns short-lived per-attempt credentials, Git/MCP bindings, renewal and
+cleanup. A vault read does not establish those lifecycle guarantees.
+
 A standalone product can supply the same material without embedding: a
 workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
 is a signed HTTP endpoint that Opengeni uses as that workspace's `runCredentials`
@@ -872,8 +1050,11 @@ creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. With an agent configuration it only
-refines inside the enabled capabilities (a name owned by a capability that is
-off is a 422 `agent_config_conflict`); prefer `agent.capabilities`. It accepts only names from
+refines inside the enabled capabilities: a name owned by a capability that is
+off is left out, so a client built against an older capability map keeps
+creating sessions when a tool moves under a capability it turns off (an agent's
+own `session_create` list is still a 422 `agent_config_conflict`); prefer
+`agent.capabilities`. It accepts only names from
 `FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
 connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools, while explicit `[]` remains
 empty. Connector tools require an explicit selection and their independent
@@ -958,6 +1139,14 @@ Standalone uses `createDb(settings.databaseUrl)` and no search-path override. Em
 - `provisionRoles(adminConnection, { targetSchema, rlsStrategy })` for app/Temporal role setup.
 - `createDb(databaseUrl, { searchPath, rlsStrategy, userLookup, max })` for postgres-js handles.
 - `registerDbBinding(db, { rlsStrategy, userLookup })` for an externally constructed Drizzle handle.
+
+`createDb` and the exported `Database` port use explicit-table builders, not
+Drizzle's relational `db.query.<table>` API. Use, for example,
+`db.select().from(schema.sessions).where(eq(schema.sessions.id, id))`, importing
+tables from `@opengeni/db/schema`. This avoids constructing unused relational
+builders for every transaction. An injected schema-configured Drizzle handle
+remains compatible; a host can still use relational queries through its original
+handle. Transactions, savepoints, prepared statements, and RLS scopes are unchanged.
 
 For `rlsStrategy: "force"`, role provisioning rejects every privilege-bearing
 role relationship. PostgreSQL 16+ managed services may retain the automatic

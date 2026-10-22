@@ -560,7 +560,7 @@ async function workspaceAdministrator(
         where grant_row.account_id = ${input.accountId}::uuid
           and grant_row.workspace_id = ${input.workspaceId}::uuid
           and grant_row.subject_id = ${input.subjectId}
-          and grant_row.role = 'admin'
+          and opengeni_private.workspace_membership_administers(grant_row.role, grant_row.permissions)
       ) as admin`,
   );
   return row?.admin === true;

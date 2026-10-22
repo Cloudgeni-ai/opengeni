@@ -10,7 +10,7 @@ import {
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
@@ -83,8 +83,7 @@ const MARKERS: Record<string, RegExp> = {
     /goal_(?:set|complete|update|pause|resume)|goal pause|active goal|goal is active|goal tools|goal\.completed|completing a goal/u,
   knowledge: /knowledge_|instruction_policy|task_note|Knowledge|durable storage/u,
   subagents: /session_(?:events|wait|get|send_message)|child worker|Session coordination|a child,/u,
-  artifacts:
-    /opengeni-documents|opengeni-visualize|opengeni-sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
+  artifacts: /documents|visualize|sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
   attachments: /\.opengeni\/files|Attached files/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,
@@ -306,10 +305,9 @@ describe("modular composer: secrets module (AG-2)", () => {
         "",
         "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it. Find saved items and their ready references with `secret_search`.",
         "- Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.",
-        "- Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
         '- Never ask for passwords, keys or codes in chat or in a plain text question. Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.',
         "- Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
-        "- For playbooks, read the `opengeni-secrets` skill.",
+        "- For playbooks, read the `secrets` Skill.",
       ].join("\n"),
     );
     const lines = section.split("\n").filter((line) => line.trim().length > 0);
@@ -325,7 +323,8 @@ describe("modular composer: secrets module (AG-2)", () => {
           const lines = section.split("\n").filter((line) => line.trim().length > 0);
           expect(lines.length - 1).toBeLessThanOrEqual(6);
           expect(section).toContain("Never ask for passwords, keys or codes in chat");
-          expect(section).toContain("Solve CAPTCHAs");
+          // The CAPTCHA rule lives with the browser and computer entry tools.
+          expect(section).not.toContain("CAPTCHA");
         }
   });
 
@@ -342,7 +341,7 @@ describe("modular composer: secrets module (AG-2)", () => {
   test("each tool-naming clause follows its tool", () => {
     const noSearch = secretsSection(SECRETS_ONLY, ["secret_search"])!;
     expect(noSearch).not.toContain("secret_search");
-    expect(noSearch).not.toContain("opengeni-secrets");
+    expect(noSearch).not.toContain("secrets");
     expect(noSearch).toContain("{{secret:Item}}");
 
     const noSave = secretsSection(SECRETS_ONLY, ["secret_save"])!;
@@ -364,7 +363,7 @@ describe("modular composer: secrets module (AG-2)", () => {
     );
 
     const noSkills = secretsSection({ ...SECRETS_ONLY, skills: false })!;
-    expect(noSkills).not.toContain("opengeni-secrets");
+    expect(noSkills).not.toContain("secrets");
   });
 
   test("integration setup points to the secret question only with secrets and human input", () => {
@@ -587,5 +586,42 @@ describe("modular composer: prompt-cache stability", () => {
     expect(String(modular.instructions).length).toBeLessThan(
       String(legacy.instructions).length * 0.55,
     );
+  });
+});
+
+describe("deployment environment instructions", () => {
+  test("survive workspace and child identity overrides, governance and legacy rendering", () => {
+    const settings = testSettings({
+      deploymentAgentInstructions: "Read /operator/AGENTS.md before host work.",
+    });
+    for (const identity of [null, "Research specialist", "Child critic"]) {
+      const result = inspectPersistentAgentInstructions(settings, {
+        agentConfig: { ...config(allAgentCapabilities()), identity },
+        workspaceAgentIdentity: "Project workspace",
+        workspaceGovernance: "Project charter",
+        sessionInstructions: "Investigate the dataset",
+      });
+      expect(result.composed).toContain(
+        "# Deployment environment\n\nRead /operator/AGENTS.md before host work.",
+      );
+      expect(result.composed).toContain(identity ?? "Project workspace");
+      expect(result.composed).toContain("Project charter");
+      expect(result.composed.match(/Read \/operator\/AGENTS.md/g)).toHaveLength(1);
+    }
+    expect(
+      inspectPersistentAgentInstructions(settings, {
+        instructionsTemplate: "Custom legacy persona",
+      }).composed,
+    ).toContain("Read /operator/AGENTS.md before host work.");
+  });
+
+  test("blank deployment instructions preserve the existing prompt bytes", () => {
+    const options = { agentConfig: config(allAgentCapabilities()) };
+    expect(
+      inspectPersistentAgentInstructions(
+        testSettings({ deploymentAgentInstructions: "  " }),
+        options,
+      ),
+    ).toEqual(inspectPersistentAgentInstructions(testSettings(), options));
   });
 });

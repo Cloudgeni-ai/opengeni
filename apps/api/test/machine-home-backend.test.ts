@@ -22,12 +22,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import postgres from "postgres";
-import {
-  testSettings,
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   createDb,
@@ -47,6 +44,7 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { withChannelA } from "../src/sandbox/channel-a";
+import { resolveSessionAgentConfigForCreate } from "../../../packages/core/src/domain/agent-config-resolution";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -93,7 +91,7 @@ function busWithAgent(opts: {
               requestId: req.requestId,
               result: {
                 $case: "ping",
-                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayTokens: [] },
               },
             }
           : op?.$case === "exec"
@@ -264,6 +262,171 @@ afterAll(async () => {
 }, 180_000);
 
 describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
+  test("new root sessions follow the workspace machine; explicit placement and keyed replay stay pinned", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: sandboxId },
+    })} where id = ${workspaceId}`;
+    const idempotencyKey = crypto.randomUUID();
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use the workspace machine", idempotencyKey },
+    );
+    expect(session.activeSandboxId).toBe(sandboxId);
+    expect(session.sandboxBackend).toBe("selfhosted");
+    const explicit = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "explicitly use managed compute", sandboxBackend: "modal" },
+    );
+    expect(explicit.sandboxBackend).toBe("modal");
+    expect(explicit.activeSandboxId).toBeNull();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "managed" },
+    })} where id = ${workspaceId}`;
+    const replay = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use the workspace machine", idempotencyKey },
+    );
+    expect(replay.id).toBe(session.id);
+    expect(replay.activeSandboxId).toBe(sandboxId);
+    const next = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "use the changed default" },
+    );
+    expect(next.sandboxBackend).toBe("modal");
+    expect(next.activeSandboxId).toBeNull();
+  }, 60_000);
+
+  test("an unavailable workspace default never falls back to another machine or persists a chat", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: crypto.randomUUID() },
+    })} where id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "must not run elsewhere",
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("default machine is unavailable"),
+    });
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+    expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("a saved workspace machine default fails when Connected Machine execution is disabled", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: sandboxId },
+    })} where id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(
+        deps(bus, testSettings({ ...settings, sandboxOwnershipEnabled: false })),
+        grant(accountId, workspaceId),
+        workspaceId,
+        { initialMessage: "must not silently run in a managed sandbox" },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where workspace_id = ${workspaceId}`;
+    expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("workspace defaults cannot select another tenant's otherwise healthy machine", async () => {
+    if (!available) return;
+    const own = await seedMachine();
+    const foreign = await seedMachine();
+    await admin`update workspaces set settings = settings || ${admin.json({
+      defaultExecutionTarget: { kind: "machine", targetSandboxId: foreign.sandboxId },
+    })} where id = ${own.workspaceId}`;
+    await expect(
+      createSessionForRequest(
+        deps(own.bus),
+        grant(own.accountId, own.workspaceId),
+        own.workspaceId,
+        { initialMessage: "do not use foreign compute" },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
+  test.each([true, false])(
+    "pending keyed roots retain placement when the workspace default changes (machine=%s)",
+    async (onMachine) => {
+      if (!available) return;
+      const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+      const key = crypto.randomUUID();
+      await expect(
+        createAndStartSessionWithOutcome({
+          db,
+          bus,
+          workflowClient: stubWorkflowClient(),
+          accountId,
+          workspaceId,
+          initialMessage: "repair the original placement",
+          resources: [],
+          tools: [],
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+          model: settings.openaiModel,
+          reasoningEffort: settings.openaiReasoningEffort,
+          turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+            modelId: settings.openaiModel,
+            requestedModelId: null,
+            modelSource: "deployment",
+            reasoningEffort: settings.openaiReasoningEffort,
+            reasoningSource: "deployment",
+          }),
+          sandboxBackend: onMachine ? "selfhosted" : "modal",
+          agentConfig: resolveSessionAgentConfigForCreate({
+            settings,
+            creator: "api",
+            request: undefined,
+            instructions: undefined,
+            workspaceSettings: {},
+            parent: null,
+            goal: false,
+          }).config,
+          metadata: {},
+          firstPartyMcpTools: [],
+          createIdempotencyKey: key,
+          ...(onMachine
+            ? { seedTargetSandbox: { sandboxId, workingDir: "original-folder", settings } }
+            : {}),
+          captureInitialTurnAuthority: async () => {
+            throw new Error("fixture stops after shell commit");
+          },
+        }),
+      ).rejects.toThrow("fixture stops after shell commit");
+      await admin`update workspaces set settings = settings || ${admin.json({
+        defaultExecutionTarget: onMachine
+          ? { kind: "managed" }
+          : { kind: "machine", targetSandboxId: sandboxId },
+      })} where id = ${workspaceId}`;
+      const repaired = await createSessionForRequest(
+        deps(bus),
+        grant(accountId, workspaceId),
+        workspaceId,
+        { initialMessage: "repair the original placement", idempotencyKey: key },
+      );
+      expect(repaired.sandboxBackend).toBe(onMachine ? "selfhosted" : "modal");
+      expect(repaired.activeSandboxId).toBe(onMachine ? sandboxId : null);
+      expect(repaired.workingDir).toBe(onMachine ? "/srv/project/original-folder" : null);
+      expect(repaired.initialTurnId).toBeTruthy();
+    },
+    60_000,
+  );
+
   test("a machine-targeted top-level create ⇒ home + first turn 'selfhosted'", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
@@ -515,6 +678,60 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
         },
       ),
     ).rejects.toThrow(/streaming command protocol required for exec/iu);
+    const [leaseCount] = await admin<{ count: string }[]>`
+      select count(*)::text as count
+      from sandbox_leases
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${session.sandboxGroupId}`;
+    expect(leaseCount?.count).toBe("0");
+  }, 60_000);
+
+  test("a session without a home sandbox routes direct operations to its attached machine", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "use the machine I attach",
+        sandboxBackend: "none",
+      },
+    );
+    expect(session.sandboxBackend).toBe("none");
+    const direct = async () =>
+      await withChannelA(
+        { db, settings, bus },
+        { accountId, workspaceId, session, subjectId: "subject" },
+        async ({ service, lease }) => {
+          expect(lease).toBeNull();
+          return await service.terminalExec({
+            command: "echo machine-home-ok",
+            cwd: "",
+            timeoutMs: 1_000,
+            emitStream: false,
+          });
+        },
+      );
+    // Nothing attached: there is no machine and no home sandbox to use.
+    await expect(direct()).rejects.toThrow("sandbox not available");
+
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        sessionBackend: session.sandboxBackend,
+        sessionGroupId: session.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+    );
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandboxId });
+    // Attached: the operation reaches the machine (this fixture has no
+    // op-stream, so exec fails there) and never creates a cloud lease.
+    await expect(direct()).rejects.toThrow(/streaming command protocol required for exec/iu);
     const [leaseCount] = await admin<{ count: string }[]>`
       select count(*)::text as count
       from sandbox_leases

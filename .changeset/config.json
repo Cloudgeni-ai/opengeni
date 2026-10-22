@@ -4,6 +4,7 @@
   "commit": false,
   "fixed": [
     [
+      "@opengeni/agent-host",
       "@opengeni/agent-proto",
       "@opengeni/api-router",
       "@opengeni/artifact-kernel-wasm-document",
@@ -18,6 +19,7 @@
       "@opengeni/contracts",
       "@opengeni/core",
       "@opengeni/db",
+      "@opengeni/decisions",
       "@opengeni/documents",
       "@opengeni/events",
       "@opengeni/github",
@@ -34,7 +36,9 @@
       "@opengeni/subscriptions",
       "@opengeni/tool-gateway",
       "@opengeni/vaults",
+      "@opengeni/vaults-keeper",
       "@opengeni/vaults-onepassword",
+      "@opengeni/vaults-protonpass",
       "@opengeni/worker-bundle",
       "@opengeni/xai-subscription"
     ]

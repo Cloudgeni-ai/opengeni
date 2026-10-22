@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { INSTRUCTION_POLICY_STALE_BASELINE_DIAGNOSTIC } from "../src";
 
 const migrationUrl = new URL("../drizzle/0293_confirm_time_rule_rebaseline.sql", import.meta.url);

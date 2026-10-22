@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
-import { ControlRequest, ControlResponse, OpState } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ErrorCode, OpState } from "@opengeni/agent-proto";
 import * as db from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import { MockAgentResponder } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { fileContentDigest } from "../../runtime/src/sandbox/selfhosted/file-transfer";
 import { runOnSandbox } from "../src/sandbox/fleet";
 
@@ -16,7 +16,8 @@ async function fixture(options: {
   content?: string;
   original?: string;
   capable?: boolean;
-  afterStart?: "revoke" | "replace" | "unauthorized";
+  machineCapable?: boolean | "missing";
+  afterStart?: "revoke" | "revoke-machine" | "replace" | "unauthorized";
 }) {
   let live: db.EnrollmentRecord | null = {
     id: "33333333-3333-4333-8333-333333333333",
@@ -24,7 +25,14 @@ async function fixture(options: {
     status: "active",
     connectionInstanceId: "runner-a",
     workspaceRoot: "/workspace",
-    agentCapabilities: { transactionalFsWrite: options.capable !== false },
+    agentCapabilities: {
+      transactionalFsWrite: options.capable !== false,
+      ...(options.machineCapable === "missing"
+        ? {}
+        : {
+            transactionalFsWriteMachine: options.machineCapable !== false,
+          }),
+    },
     opStream: false,
   } as db.EnrollmentRecord;
   const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
@@ -54,6 +62,32 @@ async function fixture(options: {
       const request = ControlRequest.decode(payload);
       requests.push(request);
       const op = request.op;
+      // Enforce the deployed registry's rule, not just the happy wire shape.
+      // Old agents advertise transactionalFsWrite but reject epoch-zero uploads.
+      const upload =
+        op?.$case === "opStart" ||
+        op?.$case === "writeChunk" ||
+        op?.$case === "opQuery" ||
+        op?.$case === "opCancel";
+      if (
+        upload &&
+        request.epoch === 0 &&
+        live?.agentCapabilities.transactionalFsWriteMachine !== true
+      ) {
+        return {
+          data: ControlResponse.encode(
+            ControlResponse.fromPartial({
+              requestId: request.requestId,
+              error: {
+                code: ErrorCode.ERROR_CODE_FENCED,
+                message: "transaction requires a live connection and nonzero session epoch",
+                detail: { failure_code: "WRITE_FENCED" },
+              },
+            }),
+          ).finish(),
+        };
+      }
+      expect(request.epoch).toBe(0);
       let response: ControlResponse;
       if (op?.$case === "opStart" && op.opStart.op?.$case === "fsWrite") {
         operationId = request.requestId;
@@ -73,6 +107,11 @@ async function fixture(options: {
           },
         });
         if (options.afterStart === "revoke") live = { ...live!, agentCapabilities: {} };
+        if (options.afterStart === "revoke-machine")
+          live = {
+            ...live!,
+            agentCapabilities: { transactionalFsWrite: true },
+          };
         if (options.afterStart === "replace") live = { ...live!, connectionInstanceId: "runner-b" };
         if (options.afterStart === "unauthorized") live = null;
       } else if (op?.$case === "writeChunk") {
@@ -159,7 +198,7 @@ test.each([false, true])(
   },
 );
 
-test.each(["revoke", "replace", "unauthorized"] as const)(
+test.each(["revoke", "revoke-machine", "replace", "unauthorized"] as const)(
   "run_on rechecks authority and pins the file-transfer route: %s",
   async (afterStart) => {
     const result = await fixture({ afterStart });
@@ -171,6 +210,37 @@ test.each(["revoke", "replace", "unauthorized"] as const)(
     expect(result.requests.some((request) => request.op?.$case === "fsWrite")).toBe(false);
   },
 );
+
+test.each([false, "missing"] as const)(
+  "run_on refuses an old agent's epoch-zero transfer before any file operation (%p)",
+  async (machineCapable) => {
+    for (const content of [
+      "x".repeat(262145),
+      "ø".repeat(131073),
+      "x".repeat(500 * 1024),
+      CONTENT,
+    ]) {
+      const result = await fixture({ machineCapable, content, original: "unchanged" });
+      expect(result.result).toMatchObject({ ok: false, kind: "write" });
+      expect(result.result.reason).toContain("262144 bytes (256 KiB)");
+      expect(result.result.reason).toContain("until the agent is updated; no file was written");
+      expect(result.requests).toHaveLength(0);
+      expect(result.files.fileText(PATH)).toBe("unchanged");
+    }
+    for (const bytes of [200 * 1024, 256 * 1024]) {
+      const result = await fixture({ machineCapable, content: "x".repeat(bytes) });
+      expect(result.result).toMatchObject({ ok: true, bytesWritten: bytes });
+      expect(result.requests.map((request) => request.op?.$case)).toEqual(["fsWrite"]);
+    }
+  },
+);
+
+test("run_on accepts the reported 500 KiB write on a capable agent", async () => {
+  const content = "x".repeat(500 * 1024);
+  const result = await fixture({ content });
+  expect(result.result).toMatchObject({ ok: true, bytesWritten: content.length });
+  expect(Buffer.from(result.committed!).toString()).toBe(content);
+});
 
 test("run_on preserves legacy small writes and refuses oversized messages without a capable runner", async () => {
   const small = await fixture({ capable: false, content: "small" });

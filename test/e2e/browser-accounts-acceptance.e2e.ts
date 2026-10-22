@@ -21,11 +21,11 @@ import { migrate } from "@opengeni/db/migrate";
 import { OpenGeniClient } from "@opengeni/sdk";
 import {
   acquireOwnerMigratedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   firefox,
@@ -35,6 +35,7 @@ import {
   type BrowserType,
   type Locator,
   type Page,
+  type Request as BrowserRequest,
   type Route,
 } from "playwright";
 
@@ -46,7 +47,12 @@ import {
   type FiniteReviewDiagnosticsWindow,
 } from "./browser-account-finite-review-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
-import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import {
+  cancelledWithReplacedDocument,
+  DocumentRequestLedger,
+  isBrowserCancellation,
+  observeChromiumNeutralSessionSetRequestAuthority,
+} from "./browser-account-request-observation";
 import {
   observeCapabilityResume,
   consumeCapabilityResumeRead,
@@ -392,20 +398,6 @@ type FiniteReadRetirementInput = {
   startedAt: number;
 };
 
-type DocumentReplacementRetirementInput = {
-  actorEpoch: string | null;
-  confirmedActorEpoch: string;
-  currentSessionSetAuthorityHash: string | null;
-  dispatchPhase: string;
-  expectedDispatchPhase: string;
-  method: string;
-  pathname: string;
-  replacementStartedAt: number;
-  requestSessionSetAuthorityHash: string | null;
-  startedAt: number;
-  workspaceId: string;
-};
-
 type LogoutAllFiniteReadRetirementInput = {
   acceptedActorTransitions: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
@@ -453,19 +445,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     );
   const isActorOwnedRead =
     (input.method === "GET" &&
-      (pathname === "/v1/auth/get-session" ||
-        pathname === "/v1/auth/session-set" ||
-        pathname === "/v1/workspaces" ||
-        pathname === "/v1/organization-invitations" ||
-        // The person's own inbox; a session page reads it again as it unmounts.
-        pathname === "/v1/inbox" ||
-        (pathname === "/v1/billing" &&
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
-            requestUrl.searchParams.get("accountId") ?? "",
-          )) ||
-        pathname.startsWith("/v1/workspaces/"))) ||
-    (input.method === "POST" &&
-      /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname));
+      (pathname === "/v1/auth/get-session" || pathname === "/v1/auth/session-set")) ||
+    isActorFencedRead(input.method, requestUrl);
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
   );
@@ -710,37 +691,6 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
   );
 }
 
-function finiteReadMayRetireAfterDocumentReplacement(
-  input: DocumentReplacementRetirementInput,
-): boolean {
-  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
-  const documentOwnedSessionRead = new RegExp(
-    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}(?:/lineage)?$`,
-    "u",
-  ).test(input.pathname);
-  // Chromium may omit the HttpOnly Cookie header from Playwright metadata
-  // after destroying the old document. The only headerless exception is the
-  // exact same-actor deep-link document replaced before re-authentication;
-  // that interval cannot replace the session-set authority, and every other
-  // actor, phase, path, method, and timing check remains mandatory.
-  const requestAuthorityMatches =
-    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
-    (input.requestSessionSetAuthorityHash === null &&
-      input.expectedDispatchPhase === "cross-slot-deep-link");
-  return (
-    new Set(["GET", "HEAD"]).has(input.method) &&
-    input.actorEpoch !== null &&
-    input.actorEpoch === input.confirmedActorEpoch &&
-    input.dispatchPhase === input.expectedDispatchPhase &&
-    documentOwnedSessionRead &&
-    input.currentSessionSetAuthorityHash !== null &&
-    requestAuthorityMatches &&
-    Number.isFinite(input.startedAt) &&
-    Number.isFinite(input.replacementStartedAt) &&
-    input.startedAt <= input.replacementStartedAt
-  );
-}
-
 function finiteReadMayRetireAfterLogoutAllAuthorityReset(
   input: LogoutAllFiniteReadRetirementInput,
 ): boolean {
@@ -792,6 +742,36 @@ function isActorTransitionRead(method: string, pathname: string): boolean {
   return (
     method === "GET" ||
     (method === "POST" && /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))
+  );
+}
+
+// The person's own reads outside any workspace. Like workspace reads they carry
+// the selected actor's epoch, so the actor fence rejects one still in flight
+// when another tab moves the selection on. The inbox polls (and reads again on
+// focus), so one can be in flight at any moment.
+const PERSON_ACTOR_READ_PATHS = new Set([
+  "/v1/workspaces",
+  "/v1/organization-invitations",
+  "/v1/inbox",
+  "/v1/billing",
+]);
+
+function isPersonActorRead(method: string, url: URL): boolean {
+  return (
+    method === "GET" &&
+    PERSON_ACTOR_READ_PATHS.has(url.pathname) &&
+    (url.pathname !== "/v1/billing" ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+        url.searchParams.get("accountId") ?? "",
+      ))
+  );
+}
+
+/** A read the actor fence rejects (409) once the selected actor has changed. */
+function isActorFencedRead(method: string, url: URL): boolean {
+  return (
+    isPersonActorRead(method, url) ||
+    (url.pathname.startsWith("/v1/workspaces/") && isActorTransitionRead(method, url.pathname))
   );
 }
 
@@ -905,6 +885,11 @@ function observeBrowser(page: Page): BrowserProblems {
     retiredFiniteReadTombstones: new Map(),
   };
   observedBrowserProblems.set(page, problems);
+  // A reload or navigation takes down the old document's requests; Chromium
+  // then reports no terminal for them at all, so the ledger closes them itself.
+  const documents = new DocumentRequestLedger();
+  const isMainFrameDocumentRequest = (request: BrowserRequest) =>
+    request.isNavigationRequest() && request.frame() === page.mainFrame();
   const requestPhases = new WeakMap<
     object,
     {
@@ -915,6 +900,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   >();
   page.on("request", (request) => {
+    documents.request(request, isMainFrameDocumentRequest(request) ? request.url() : null);
     const requestUrl = new URL(request.url());
     const pathname = requestUrl.pathname;
     if (companionReadDiagnostics?.page === page) {
@@ -980,6 +966,7 @@ function observeBrowser(page: Page): BrowserProblems {
   });
   page.on("response", (response) => {
     const request = response.request();
+    documents.response(request);
     problems.capabilityDiagnostics.response(request, problems.phase, response.status());
     if (companionReadDiagnostics?.page === page) {
       companionReadDiagnostics.ledger.response("browser", request, response.status());
@@ -1018,8 +1005,7 @@ function observeBrowser(page: Page): BrowserProblems {
         pathname.endsWith("/attention") &&
         new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
       (response.status() === 409 &&
-        isActorTransitionRead(request.method(), pathname) &&
-        pathname.startsWith("/v1/workspaces/") &&
+        isActorFencedRead(request.method(), new URL(response.url())) &&
         problems.phase === "cross-tab-select-race");
     if (recordsActorTransition) {
       const dispatch = requestPhases.get(request);
@@ -1089,7 +1075,17 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("framenavigated", (frame) => {
-    if (frame === page.mainFrame()) problems.mainFrameCommits.push(performance.now());
+    if (frame !== page.mainFrame()) return;
+    problems.mainFrameCommits.push(performance.now());
+    if (!documents.mainFrameNavigated(frame.url())) return;
+    for (const [request, pending] of problems.pendingFiniteReads) {
+      if (!documents.replaced(request)) continue;
+      problems.pendingFiniteReads.delete(request);
+      problems.retiredFiniteReads.push(`${pending.description} [retired=document-replaced]`);
+    }
+    for (const request of problems.activeStreams.keys()) {
+      if (documents.replaced(request)) problems.activeStreams.delete(request);
+    }
   });
   page.on("pageerror", (error) => {
     const message = `[${problems.phase}] ${error.message}`;
@@ -1136,7 +1132,44 @@ function observeBrowser(page: Page): BrowserProblems {
       });
       return;
     }
+    const documentReplacedBeforeFailure =
+      documents.replaced(request) || documents.replacing(request);
+    documents.failed(request);
     const check = (async () => {
+      if (isBrowserCancellation(failure)) {
+        // WebKit and Firefox can cancel a superseded document request, or the
+        // outgoing document's in-flight reads, before they report the
+        // navigation responsible; one protocol round trip delivers it.
+        if (
+          await cancelledWithReplacedDocument(
+            documents,
+            request,
+            documentReplacedBeforeFailure,
+            () => page.evaluate(() => undefined),
+          )
+        ) {
+          // Taken down with its document by a reload or navigation: nothing it
+          // could still deliver has a document to reach.
+          problems.retirementChecks.push(
+            JSON.stringify({
+              dispatchPhase: dispatch?.phase ?? "unknown",
+              failure,
+              method: request.method(),
+              pathname: failedUrl.pathname,
+              responsePhase,
+              result: "cancelled-with-replaced-document",
+            }),
+          );
+          problems.acceptedRequestTerminals.push({
+            observedAt: failedAt,
+            origin: failedUrl.origin,
+            pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+            responsePhase,
+            terminal: "failed",
+          });
+          return;
+        }
+      }
       const problem = requestFailureProblem({
         crossTabReloadStartedAt: problems.crossTabReloadStartedAt,
         acceptedActorTransitions: actorMutationAcceptances,
@@ -1222,6 +1255,15 @@ async function waitForFiniteReadQuiescenceAcross(
         actorDispatches: problems.actorDispatches.slice(-20),
         retirementChecks: problems.retirementChecks.slice(-20),
         retiredFiniteReads: problems.retiredFiniteReads.slice(-20),
+        edge: [...problems.pendingFiniteReads.values()].map((pending) => ({
+          pending: pending.description,
+          edgeMatches: edgeRequestLog.filter(
+            (entry) =>
+              entry.pathname === pending.pathname &&
+              Math.abs(entry.startedAt - pending.startedAt) < 60_000,
+          ),
+        })),
+        edgePending: [...pendingAccountApiRequests.values()],
       })),
     )}; acceptances=${JSON.stringify(actorMutationAcceptances.slice(-20))}`,
   );
@@ -1250,8 +1292,15 @@ async function waitForCompanionFiniteReadQuiescence(
     `companion browser reads did not settle around the intentional hold: ${JSON.stringify(
       [...problems.pendingFiniteReads.entries()]
         .filter(([request]) => request !== intentionallyHeldRequest)
-        .map(([, pending]) => pending.description)
-        .sort(),
+        .map(([, pending]) => ({
+          pending: pending.description,
+          edgeMatches: edgeRequestLog.filter(
+            (entry) =>
+              entry.pathname === pending.pathname &&
+              Math.abs(entry.startedAt - pending.startedAt) < 60_000,
+          ),
+        }))
+        .sort((left, right) => left.pending.localeCompare(right.pending)),
     )}`,
   );
 }
@@ -1311,54 +1360,6 @@ async function retirePendingReadsAfterConfirmedActorTransition(
       `${pending.description} [retired=confirmed-actor-${input.confirmedActorEpoch}]`,
     );
     problems.retiredFiniteReadTombstones.set(request, pending.description);
-    problems.pendingFiniteReads.delete(request);
-  }
-}
-
-async function retirePendingReadsAfterConfirmedDocumentReplacement(
-  page: Page,
-  problems: BrowserProblems,
-  input: {
-    confirmedActorEpoch: string;
-    dispatchPhase: string;
-    replacementStartedAt: number;
-    workspaceId: string;
-  },
-): Promise<void> {
-  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
-    await browserCookieHeader(page.context()),
-  );
-  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions/`;
-  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
-    if (
-      (pending.method !== "GET" && pending.method !== "HEAD") ||
-      pending.actorEpoch !== input.confirmedActorEpoch ||
-      pending.dispatchPhase !== input.dispatchPhase ||
-      !pending.pathname.startsWith(exactWorkspacePrefix) ||
-      pending.startedAt > input.replacementStartedAt
-    ) {
-      continue;
-    }
-    const requestSessionSetAuthorityHash =
-      pending.sessionSetAuthorityHashImmediate ??
-      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
-    const mayRetire = finiteReadMayRetireAfterDocumentReplacement({
-      actorEpoch: pending.actorEpoch,
-      confirmedActorEpoch: input.confirmedActorEpoch,
-      currentSessionSetAuthorityHash,
-      dispatchPhase: pending.dispatchPhase,
-      expectedDispatchPhase: input.dispatchPhase,
-      method: pending.method,
-      pathname: pending.pathname,
-      replacementStartedAt: input.replacementStartedAt,
-      requestSessionSetAuthorityHash,
-      startedAt: pending.startedAt,
-      workspaceId: input.workspaceId,
-    });
-    if (!mayRetire) continue;
-    problems.retiredFiniteReads.push(
-      `${pending.description} [retired=confirmed-document-replacement]`,
-    );
     problems.pendingFiniteReads.delete(request);
   }
 }
@@ -1777,8 +1778,11 @@ async function expectAndConsumeActorTransitionResponse(
     const pathnameValid =
       response.pathname === input.pathname ||
       (input.timing?.kind === "direct-race-fence" &&
-        input.workspaceId !== undefined &&
-        response.pathname.startsWith(`/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`));
+        ((input.workspaceId !== undefined &&
+          response.pathname.startsWith(
+            `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`,
+          )) ||
+          isPersonActorRead(response.method, new URL(request.url()))));
     if (!pathnameValid) {
       throw new Error(
         `actor transition response did not target its exact old workspace: ${JSON.stringify({ input, response: responseEvidence })}`,
@@ -1807,7 +1811,12 @@ async function expectAndConsumeActorTransitionResponse(
       problems.pendingFiniteReads.delete(request);
     }
   }
-  expect(problems.actorTransitionResponses.length).toBeLessThanOrEqual(2);
+  // Each fenced read is one the old actor had in flight; the same resource
+  // fenced twice would mean the page kept reading as the old actor.
+  const fencedResources = problems.actorTransitionResponses.map(
+    ({ method, pathname }) => `${method} ${pathname}`,
+  );
+  expect(fencedResources).toEqual([...new Set(fencedResources)]);
   const exactConsoleErrors = problems.actorTransitionResponses.map(
     (response) =>
       `[${input.phase}] Failed to load resource: the server responded with a status of ${input.status} (${input.statusLabel}) @ ${response.pathname}`,
@@ -2050,23 +2059,28 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   }> = [];
   for (const pageError of problems.pageErrorEvidence) {
     const match =
-      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
+      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/auth\/session-set|\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
         pageError.message,
       );
     const pathnameAndSearch = match?.groups?.pathnameAndSearch;
     const url =
       pathnameAndSearch === undefined ? undefined : new URL(pathnameAndSearch, input.origin);
+    // The neutral projection can be cancelled by this same reload. Unlike an
+    // outgoing live-stream reconnect, it must consume a failed terminal that
+    // already passed requestFailureProblem's authority/acceptance/reload fence.
+    const neutralSessionSet = pathnameAndSearch === "/v1/auth/session-set";
     if (
       url === undefined ||
       `http://${match?.groups?.authority}` !== input.origin ||
-      url.pathname !== input.pathname ||
-      !exactBoundedWorkspaceLiveStreamSearch(url.search) ||
+      (!neutralSessionSet &&
+        (url.pathname !== input.pathname || !exactBoundedWorkspaceLiveStreamSearch(url.search))) ||
       !Number.isFinite(pageError.observedAt) ||
       pageError.observedAt < input.acceptedAt
     ) {
       return [];
     }
     if (
+      !neutralSessionSet &&
       outgoingDocumentWindow !== null &&
       pageError.observedAt >= outgoingDocumentWindow.startedAt &&
       pageError.observedAt <= outgoingDocumentWindow.committedAt
@@ -2768,6 +2782,14 @@ const pendingAccountApiRequests = new Map<
   Request,
   { method: string; pathname: string; actorEpoch: string | null; authorityHash: string | null }
 >();
+const edgeRequestLog: Array<{
+  method: string;
+  pathname: string;
+  actorEpoch: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  status: number | null;
+}> = [];
 const selectAdmissionDiagnostics: Array<{
   authorityHash: string | null;
   pending: Array<{
@@ -2860,8 +2882,20 @@ async function observeAccountApiRequest(
     });
   }
   pendingAccountApiRequests.set(request, metadata);
+  const edgeEntry = {
+    method: metadata.method,
+    pathname: metadata.pathname,
+    actorEpoch: metadata.actorEpoch,
+    startedAt: performance.now(),
+    endedAt: null as number | null,
+    status: null as number | null,
+  };
+  edgeRequestLog.push(edgeEntry);
+  if (edgeRequestLog.length > 400) edgeRequestLog.shift();
   try {
     const response = await dispatch();
+    edgeEntry.endedAt = performance.now();
+    edgeEntry.status = response.status;
     readDiagnostics?.response("server", request, response.status);
     readDiagnostics?.finish("server", request, "handler-resolved");
     return response;
@@ -4263,67 +4297,6 @@ describe("provider-neutral browser account acceptance", () => {
       expect(finiteReadMayRetireAfterActorTransition(invalid)).toBe(false);
     }
 
-    const documentReplacementRetirement = {
-      actorEpoch: "current-actor-epoch",
-      confirmedActorEpoch: "current-actor-epoch",
-      currentSessionSetAuthorityHash: "a".repeat(64),
-      dispatchPhase: "cross-slot-deep-link",
-      expectedDispatchPhase: "cross-slot-deep-link",
-      method: "GET",
-      pathname:
-        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/lineage",
-      replacementStartedAt: 200,
-      requestSessionSetAuthorityHash: "a".repeat(64),
-      startedAt: 100,
-      workspaceId: "00000000-0000-0000-0000-000000000001",
-    } satisfies DocumentReplacementRetirementInput;
-    expect(finiteReadMayRetireAfterDocumentReplacement(documentReplacementRetirement)).toBe(true);
-    expect(
-      finiteReadMayRetireAfterDocumentReplacement({
-        ...documentReplacementRetirement,
-        requestSessionSetAuthorityHash: null,
-      }),
-    ).toBe(true);
-    for (const invalid of [
-      { ...documentReplacementRetirement, method: "POST" },
-      { ...documentReplacementRetirement, actorEpoch: null },
-      { ...documentReplacementRetirement, actorEpoch: "old-actor-epoch" },
-      {
-        ...documentReplacementRetirement,
-        dispatchPhase: "slot-revocation-reauthentication",
-      },
-      {
-        ...documentReplacementRetirement,
-        pathname:
-          "/v1/workspaces/another-workspace/sessions/00000000-0000-4000-8000-000000000002/lineage",
-      },
-      {
-        ...documentReplacementRetirement,
-        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/not-a-uuid/lineage",
-      },
-      {
-        ...documentReplacementRetirement,
-        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog",
-      },
-      {
-        ...documentReplacementRetirement,
-        currentSessionSetAuthorityHash: null,
-      },
-      {
-        ...documentReplacementRetirement,
-        dispatchPhase: "slot-revocation-reauthentication",
-        expectedDispatchPhase: "slot-revocation-reauthentication",
-        requestSessionSetAuthorityHash: null,
-      },
-      {
-        ...documentReplacementRetirement,
-        requestSessionSetAuthorityHash: "b".repeat(64),
-      },
-      { ...documentReplacementRetirement, startedAt: 201 },
-    ]) {
-      expect(finiteReadMayRetireAfterDocumentReplacement(invalid)).toBe(false);
-    }
-
     const logoutAllRetirement = {
       acceptedActorTransitions: [
         {
@@ -4653,6 +4626,104 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toEqual({ cost: 6, terminalIndexes: [1, 2, 0] });
     expect(minimumCostTerminalAssignment([new Map(), new Map()], 1)).toBeNull();
+  });
+
+  test("WebKit neutral session-set race pageerrors require a unique validated failed terminal", () => {
+    const origin = "http://127.0.0.1:23212";
+    const pathname = "/v1/auth/session-set";
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathname} due to access control checks.`;
+    const failure: BrowserRequestFailureInput = {
+      engine: "webkit",
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      failure: "Load request cancelled",
+      method: "GET",
+      url: `${origin}${pathname}`,
+      sessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      failedAt: 400,
+      crossTabReloadStartedAt: 300,
+      acceptedActorTransitions: [
+        {
+          path: "/v1/auth/session-set/select",
+          actorEpoch: "new",
+          sessionSetAuthorityHash: "a".repeat(64),
+          acceptedAt: 200,
+        },
+      ],
+    };
+    // The request listener admits this terminal only after proving authority,
+    // pre-acceptance dispatch, the exact reload window and native cancellation.
+    expect(requestFailureProblem(failure)).toBeNull();
+    const terminal = {
+      observedAt: 400,
+      origin,
+      pathnameAndSearch: pathname,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const match = (
+      terminals: BrowserProblems["acceptedRequestTerminals"],
+      errors = [{ message, observedAt: 410 }],
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          crossTabReloadStartedAt: 300,
+          mainFrameCommits: [450],
+        },
+        "webkit",
+        {
+          acceptedAt: 200,
+          origin,
+          settledAt: 500,
+          pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        },
+      );
+    const accepted = [terminal];
+    expect(match(accepted)).toEqual([message]);
+    expect(accepted).toEqual([]);
+    // Unlike the narrowly proven outgoing stream reconnect, a neutral read
+    // never qualifies through the document-replacement window alone.
+    expect(match([])).toEqual([]);
+    for (const changed of [
+      { terminal: "finished" as const },
+      { pathnameAndSearch: `${pathname}/select` },
+      { pathnameAndSearch: `${pathname}?unrelated=1` },
+      { origin: "http://127.0.0.1:23213" },
+      { responsePhase: "settled" },
+      { observedAt: 199 },
+      { observedAt: 1_501 },
+    ]) {
+      const rejected = [{ ...terminal, ...changed }];
+      expect(match(rejected)).toEqual([]);
+      expect(rejected).toHaveLength(1);
+    }
+    expect(match([terminal, terminal])).toEqual([]);
+    expect(
+      match(
+        [terminal],
+        [
+          { message, observedAt: 410 },
+          { message, observedAt: 411 },
+        ],
+      ),
+    ).toEqual([]);
+    for (const suffix of ["/select", "?unrelated=1"]) {
+      expect(
+        match(
+          [{ ...terminal, pathnameAndSearch: `${pathname}${suffix}` }],
+          [
+            {
+              message: message.replace(pathname, `${pathname}${suffix}`),
+              observedAt: 410,
+            },
+          ],
+        ),
+      ).toEqual([]);
+    }
   });
 
   test("the strict browser ledger correlates WebKit race pageerrors without broad CORS exemptions", () => {
@@ -5070,6 +5141,87 @@ describe("provider-neutral browser account acceptance", () => {
       );
     }
   });
+
+  test("the strict browser ledger attributes reads a reload took down before reporting it, and nothing else", async () => {
+    // WebKit always, and Firefox usually, reports that a reload cancelled the
+    // outgoing document's in-flight read before Playwright delivers the
+    // reload's document request. Chromium reports neither.
+    const held: Array<() => void> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname.startsWith("/v1/held")) {
+          const { promise, resolve } = Promise.withResolvers<Response>();
+          held.push(() => resolve(new Response("late fixture response")));
+          return promise;
+        }
+        return new Response("<!doctype html><title>Document ledger fixture</title>", {
+          headers: { "content-type": "text/html" },
+        });
+      },
+    });
+    const origin = `http://127.0.0.1:${server.port}`;
+    const engine = requestedEngine as EngineName;
+    const browser = await launchAccountBrowser(engine);
+    try {
+      const reloaded = await browser.newPage();
+      const reloadedProblems = observeBrowser(reloaded);
+      setBrowserPhase(reloadedProblems, "document-ledger-fixture");
+      await reloaded.goto(`${origin}/workspace`);
+      const reloads = 5;
+      for (let iteration = 0; iteration < reloads; iteration += 1) {
+        const dispatched = held.length;
+        await reloaded.evaluate(() => void fetch("/v1/held").catch(() => undefined));
+        while (held.length === dispatched) await Bun.sleep(5);
+        await reloaded.reload({ waitUntil: "domcontentloaded" });
+      }
+      await reloaded.evaluate(() => undefined);
+      await expectNoBrowserProblems(reloadedProblems);
+      const attributed = reloadedProblems.retirementChecks
+        .map((check) => JSON.parse(check) as { pathname: string; result: string })
+        .filter(({ pathname }) => pathname === "/v1/held");
+      expect(attributed).toEqual(
+        Array.from({ length: engine === "chromium" ? 0 : reloads }, () => ({
+          dispatchPhase: "document-ledger-fixture",
+          failure: expect.any(String),
+          method: "GET",
+          pathname: "/v1/held",
+          responsePhase: "document-ledger-fixture",
+          result: "cancelled-with-replaced-document",
+        })),
+      );
+
+      // A cancellation no navigation explains remains a strict failure.
+      const aborted = await browser.newPage();
+      const abortedProblems = observeBrowser(aborted);
+      setBrowserPhase(abortedProblems, "document-ledger-fixture");
+      await aborted.goto(`${origin}/workspace`);
+      const dispatched = held.length;
+      await aborted.evaluate(() => {
+        const controller = new AbortController();
+        (window as { abortHeldRead?: () => void }).abortHeldRead = () => controller.abort();
+        void fetch("/v1/held-aborted", { signal: controller.signal }).catch(() => undefined);
+      });
+      while (held.length === dispatched) await Bun.sleep(5);
+      const failed = aborted.waitForEvent("requestfailed");
+      await aborted.evaluate(() => (window as { abortHeldRead?: () => void }).abortHeldRead?.());
+      await failed;
+      await settlePendingRequestFailureChecks(abortedProblems);
+      expect(abortedProblems.failedRequests).toEqual([
+        expect.stringMatching(
+          new RegExp(
+            `^\\[dispatch=document-ledger-fixture; actor=missing; response=document-ledger-fixture\\] GET ${origin.replaceAll(".", "\\.")}/v1/held-aborted: `,
+            "u",
+          ),
+        ),
+      ]);
+    } finally {
+      for (const release of held) release();
+      await browser.close();
+      await server.stop(true);
+    }
+  }, 60_000);
 
   test("repeated finite review reads finish without native transport cancellation", async () => {
     const reviewAccount = await createActualUser({
@@ -5603,7 +5755,6 @@ describe("provider-neutral browser account acceptance", () => {
         delete from auth_sessions where id = (
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
-      const slotRevocationReloadStartedAt = performance.now();
       const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
       // Firefox does not emit these native HTTP console errors. Preserve its
       // existing strict ledgers; this barrier joins Chromium/WebKit delivery.
@@ -5617,12 +5768,6 @@ describe("provider-neutral browser account acceptance", () => {
       }
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
-      await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
-        confirmedActorEpoch: projectionBeforeSlotRevocation.actorEpoch,
-        dispatchPhase: "cross-slot-deep-link",
-        replacementStartedAt: slotRevocationReloadStartedAt,
-        workspaceId: beta.workspaceId,
-      });
       // A replacement document and a later re-authentication are separate
       // mounts. Consume the exact denied metadata reads from the reload now,
       // rather than accumulating both transitions in one allowance window.

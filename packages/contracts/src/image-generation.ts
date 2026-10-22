@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, RetainedArtifactReferenceSchema } from "./retained-output";
 
@@ -5,108 +6,116 @@ import { RETAINED_OUTPUT_MAX_PAGE_BYTES, RetainedArtifactReferenceSchema } from 
 // accepts four. Keep the provider-neutral tool at the reliable shared limit.
 export const IMAGE_GENERATION_MAX_REFERENCES = 4;
 
-const WorkspaceImagePathSchema = z
-  .string()
-  .max(512)
-  // Keep the provider-visible pattern within the portable JSON Schema regex
-  // subset. Codex rejects lookaround before inference.
-  .regex(/^\/workspace\/.+$/)
-  // Path traversal remains an exact runtime validation concern. Zod does not
-  // project custom refinements into JSON Schema, so this preserves the guard
-  // without sending unsupported regex syntax to model providers.
-  .refine((path) => path.split("/").every((segment) => segment !== "." && segment !== ".."), {
-    message: "Sandbox image paths cannot contain dot segments",
-  })
-  .describe(
-    "Absolute /workspace path to a PNG, JPEG, or WebP image. Convert SVG or other formats before using them as image-generation references.",
-  );
+const WorkspaceImagePathSchema = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .max(512)
+    // Keep the provider-visible pattern within the portable JSON Schema regex
+    // subset. Codex rejects lookaround before inference.
+    .regex(/^\/workspace\/.+$/)
+    // Path traversal remains an exact runtime validation concern. Zod does not
+    // project custom refinements into JSON Schema, so this preserves the guard
+    // without sending unsupported regex syntax to model providers.
+    .refine((path) => path.split("/").every((segment) => segment !== "." && segment !== ".."), {
+      message: "Sandbox image paths cannot contain dot segments",
+    })
+    .describe(
+      "Absolute /workspace path to a PNG, JPEG, or WebP image. Convert SVG or other formats before using them as image-generation references.",
+    ),
+);
 
 /** One ordered, workspace-owned input used to guide or edit an image. */
-export const ImageGenerationReferenceSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("sandbox_path"),
-      path: WorkspaceImagePathSchema,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("file"),
-      fileId: z.string().uuid(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("artifact"),
-      artifactId: z.string().uuid(),
-    })
-    .strict(),
-]);
+export const ImageGenerationReferenceSchema = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("sandbox_path"),
+        path: WorkspaceImagePathSchema,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("file"),
+        fileId: z.string().uuid(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("artifact"),
+        artifactId: z.string().uuid(),
+      })
+      .strict(),
+  ]),
+);
 export type ImageGenerationReference = z.infer<typeof ImageGenerationReferenceSchema>;
 
 /** Provider-neutral minimum shared by native and adapter-backed image tools. */
-export const GenerateImageToolInput = z
-  .object({
-    prompt: z.string().trim().min(1).max(32_000),
-    references: z
-      .array(ImageGenerationReferenceSchema)
-      .max(IMAGE_GENERATION_MAX_REFERENCES)
-      .optional()
-      .default([])
-      .describe(
-        "Ordered image references. Every sandbox path, File, or artifact must resolve to PNG, JPEG, or WebP bytes.",
-      ),
-  })
-  .strict();
+export const GenerateImageToolInput = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      prompt: z.string().trim().min(1).max(32_000),
+      references: z
+        .array(ImageGenerationReferenceSchema)
+        .max(IMAGE_GENERATION_MAX_REFERENCES)
+        .optional()
+        .default([])
+        .describe(
+          "Ordered image references. Every sandbox path, File, or artifact must resolve to PNG, JPEG, or WebP bytes.",
+        ),
+    })
+    .strict(),
+);
 export type GenerateImageToolInput = z.infer<typeof GenerateImageToolInput>;
 
 /** Closed durable result shared by native and adapter-backed image tools. */
-export const GeneratedImageReceiptSchema = z
-  .object({
-    type: z.literal("generated_image"),
-    artifact: RetainedArtifactReferenceSchema,
-    sandboxPath: z
-      .string()
-      .max(256)
-      .regex(
-        /^\/workspace\/generated-images\/generated-image-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(png|jpg|webp)$/,
-      ),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (value.artifact.kind !== "generated_image") {
-      ctx.addIssue({
-        code: "custom",
-        path: ["artifact", "kind"],
-        message: "generated-image receipt requires a generated-image artifact",
-      });
-      return;
-    }
-    if (value.artifact.retrieval.maxRangeBytes !== RETAINED_OUTPUT_MAX_PAGE_BYTES) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["artifact", "retrieval", "maxRangeBytes"],
-        message: "generated-image receipt requires the canonical range size",
-      });
-    }
-    const extension =
-      value.artifact.contentType === "image/png"
-        ? "png"
-        : value.artifact.contentType === "image/jpeg"
-          ? "jpg"
-          : value.artifact.contentType === "image/webp"
-            ? "webp"
-            : null;
-    if (
-      extension === null ||
-      value.sandboxPath !==
-        `/workspace/generated-images/generated-image-${value.artifact.artifactId}.${extension}`
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["sandboxPath"],
-        message: "generated-image sandbox path does not match its artifact",
-      });
-    }
-  });
+export const GeneratedImageReceiptSchema = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("generated_image"),
+      artifact: RetainedArtifactReferenceSchema,
+      sandboxPath: z
+        .string()
+        .max(256)
+        .regex(
+          /^\/workspace\/generated-images\/generated-image-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(png|jpg|webp)$/,
+        ),
+    })
+    .strict()
+    .superRefine((value, ctx) => {
+      if (value.artifact.kind !== "generated_image") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["artifact", "kind"],
+          message: "generated-image receipt requires a generated-image artifact",
+        });
+        return;
+      }
+      if (value.artifact.retrieval.maxRangeBytes !== RETAINED_OUTPUT_MAX_PAGE_BYTES) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["artifact", "retrieval", "maxRangeBytes"],
+          message: "generated-image receipt requires the canonical range size",
+        });
+      }
+      const extension =
+        value.artifact.contentType === "image/png"
+          ? "png"
+          : value.artifact.contentType === "image/jpeg"
+            ? "jpg"
+            : value.artifact.contentType === "image/webp"
+              ? "webp"
+              : null;
+      if (
+        extension === null ||
+        value.sandboxPath !==
+          `/workspace/generated-images/generated-image-${value.artifact.artifactId}.${extension}`
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sandboxPath"],
+          message: "generated-image sandbox path does not match its artifact",
+        });
+      }
+    }),
+);
 export type GeneratedImageReceipt = z.infer<typeof GeneratedImageReceiptSchema>;

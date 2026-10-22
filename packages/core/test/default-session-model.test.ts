@@ -19,12 +19,9 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import {
   getActorNewSessionModelChoice,
@@ -36,6 +33,7 @@ import {
   creditsDefaultSessionModel,
   loadWorkspaceClaudeSubscriptionReadiness,
   resolveDefaultSessionModel,
+  resolveDefaultSessionModelForSelections,
   selectDefaultSessionModel,
 } from "../src/default-session-model";
 import { createSessionForRequest } from "../src/domain/sessions";
@@ -75,6 +73,55 @@ test("scoped grants choose a funded credit model without overriding saved choice
       },
     }).model,
   ).toBe("gpt-6-astra");
+});
+
+test("an already-read catalog balance needs no second ledger read, including an empty balance", async () => {
+  const settings = hostedSettings();
+  const accountId = crypto.randomUUID();
+  const balance = {
+    accountId,
+    balanceMicros: 10_000_000,
+    generalBalanceMicros: 0,
+    currency: "usd" as const,
+    updatedAt: new Date().toISOString(),
+    promotionalCredits: [
+      {
+        grantId: crypto.randomUUID(),
+        label: "Scoped credits",
+        remainingMicros: 10_000_000,
+        eligibleModelIds: ["gpt-6-sol"],
+      },
+    ],
+  };
+  // A read on this object fails: the resolver must consume the supplied
+  // request snapshot rather than fetch a potentially different ledger state.
+  const noDatabase = {} as Database;
+  const input = {
+    settings,
+    accountId,
+    workspaceSettings: {},
+    selections: selections(settings),
+    organizationDefaults: null,
+  };
+  expect(
+    await resolveDefaultSessionModelForSelections(noDatabase, {
+      ...input,
+      creditBalance: balance,
+    }),
+  ).toMatchObject({ model: "gpt-6-sol", source: "credits" });
+  expect(
+    await resolveDefaultSessionModelForSelections(noDatabase, {
+      ...input,
+      creditBalance: { ...balance, balanceMicros: 0, promotionalCredits: [] },
+    }),
+  ).toMatchObject({ model: DEFAULT_OPENROUTER_MODEL_ID, source: "deployment" });
+  expect(
+    await resolveDefaultSessionModelForSelections(noDatabase, {
+      ...input,
+      workspaceSettings: { sessionDefaults: { model: "gpt-6-astra", reasoningEffort: "high" } },
+      creditBalance: balance,
+    }),
+  ).toMatchObject({ model: "gpt-6-astra", source: "workspace" });
 });
 
 // A deployment shaped like the hosted one: a free OpenRouter default, the

@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { CheckIcon, HammerIcon, RotateCcwIcon, XIcon } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { setNote, setPick, useExplicitPick, useNote } from "./picks";
 import {
   alternativeLetter,

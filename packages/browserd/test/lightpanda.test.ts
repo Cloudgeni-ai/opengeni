@@ -5,11 +5,26 @@ import {
   LIGHTPANDA_BINARY_SHA256,
   LIGHTPANDA_VERSION,
   LightpandaRunner,
+  lazyPinnedLightpandaBinary,
   resolvePinnedLightpandaBinary,
   type ResolvedLightpandaBinary,
 } from "../src";
 
 describe("Lightpanda native lifecycle", () => {
+  test("verifies the binary on first use and does not remember a failed check", async () => {
+    const directory = await mkdtemp("/tmp/ogb-lightpanda-lazy-");
+    const binary = join(directory, "lightpanda");
+    try {
+      // Creating the resolver reads nothing, so a missing binary costs startup nothing.
+      const resolveBinary = lazyPinnedLightpandaBinary({ binaryPath: binary });
+      await expect(resolveBinary()).rejects.toThrow("ENOENT");
+      await writeFile(binary, "not the pinned executable", { mode: 0o755 });
+      await expect(resolveBinary()).rejects.toThrow("digest mismatch");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("rejects unpinned and indirect native executables", async () => {
     const directory = await mkdtemp("/tmp/ogb-lightpanda-binary-");
     const binary = join(directory, "lightpanda");

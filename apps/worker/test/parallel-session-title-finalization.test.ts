@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { resolveTurnModel } from "@opengeni/runtime";
+import * as independentTitle from "../src/activities/independent-session-title";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import * as admission from "../src/activities/agent-turn/admission";
@@ -8,7 +10,7 @@ import * as modelUsage from "../src/activities/agent-turn/model-usage";
 import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
 import { runTurnStreamAttempt } from "../src/activities/agent-turn/stream-attempt";
 
-for (const persistence of ["committed", "failed"] as const) {
+for (const persistence of ["committed", "failed", "independent"] as const) {
   test(`main 503 joins completed title cleanup: persistence ${persistence}`, async () => {
     const order: string[] = [];
     const unavailable = Object.assign(new Error("503 upstream connection terminated"), {
@@ -18,7 +20,11 @@ for (const persistence of ["committed", "failed"] as const) {
       sandboxBackend: "none",
       billingMode: "disabled",
       usageLimitsMode: "none",
+      ...(persistence === "independent"
+        ? { environmentsEncryptionKey: Buffer.alloc(32, 42).toString("base64") }
+        : {}),
     });
+    let finishAdmission!: () => void;
     const titleRequest = { requestId: "title", transportAttempt: 1 };
     const titleRequests = createCoreCodexRequests({
       reserve: async () => ({ operationId: "title-operation" }),
@@ -30,6 +36,13 @@ for (const persistence of ["committed", "failed"] as const) {
     const usage = { responseId: "title-response", usage: { inputTokens: 20, outputTokens: 5 } };
     const checkpoint = [{ type: "message", role: "user", content: "Find relevant events" }];
     const spies = [
+      spyOn(independentTitle, "admitIndependentSessionTitle").mockImplementation(async () => {
+        order.push("title_admission_started");
+        await new Promise<void>((resolve) => {
+          finishAdmission = resolve;
+        });
+        order.push("title_admitted");
+      }),
       spyOn(runInput, "turnInput").mockResolvedValue({
         input: { input: checkpoint },
         persistedHistoryCount: checkpoint.length,
@@ -40,6 +53,8 @@ for (const persistence of ["committed", "failed"] as const) {
       } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
       spyOn(admission, "ensureRunAllowedBetweenModelCalls").mockResolvedValue(),
       spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2),
+      // No explicit workspace recovery adds a discontinuity notice here.
+      spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false),
@@ -67,9 +82,12 @@ for (const persistence of ["committed", "failed"] as const) {
         async *[Symbol.asyncIterator]() {
           // The real title generator has returned its provider response before
           // the main stream fails; persistence still belongs to worker cleanup.
-          await titleGeneration;
-          expect(titleRequests.canRecover()).toBe(false);
+          if (persistence !== "independent") {
+            await titleGeneration;
+            expect(titleRequests.canRecover()).toBe(false);
+          }
           order.push("main_503");
+          if (persistence === "independent") queueMicrotask(finishAdmission);
           throw unavailable;
         },
       }),
@@ -87,8 +105,27 @@ for (const persistence of ["committed", "failed"] as const) {
           runSettings: settings,
           db: {} as db.Database,
           runtime: {
-            runStream: async () => stream,
+            runStream: async (
+              _agent: unknown,
+              _input: unknown,
+              _settings: unknown,
+              options: {
+                onModelTransportDispatched?: (clock: {
+                  dispatchedAtUnixMs: number;
+                  monotonicTimeMs: number;
+                }) => void;
+              },
+            ) => {
+              if (persistence === "independent")
+                options.onModelTransportDispatched?.({
+                  dispatchedAtUnixMs: Date.now(),
+                  monotonicTimeMs: performance.now(),
+                });
+              return stream;
+            },
             generateSessionTitle: () => {
+              if (persistence === "independent")
+                throw new Error("The source turn must not own title generation");
               titleGeneration = (async () => {
                 await titleRequests.reserve(titleRequest);
                 await titleRequests.observe({ ...titleRequest, outcome: "response_received" });
@@ -112,6 +149,7 @@ for (const persistence of ["committed", "failed"] as const) {
             modelRunSettings: settings,
             toolCancellationFenceRef: { current: null },
             firstModelRequestPreparationRecorded: true,
+            initialModelWireDispatch: { record() {} },
             publish: async () => {},
           },
           historySink: { seedHistory() {}, reconcileConversationTruth: async () => {} },
@@ -133,7 +171,9 @@ for (const persistence of ["committed", "failed"] as const) {
           workerPreparationStartedAt: performance.now(),
           groupBoxBackend: "none",
           agent: {},
-          resolvedModel: null,
+          resolvedModel:
+            persistence === "independent" ? resolveTurnModel(settings, "gpt-5.6-sol") : null,
+          startSessionTitleWorkflow: persistence === "independent" ? async () => "started" : null,
           turnTools: [],
           generateSessionTitleInParallel: true,
           sessionTitlePrompt: "Find relevant events",
@@ -146,13 +186,17 @@ for (const persistence of ["committed", "failed"] as const) {
           finalizeTurnOpStreamOps: async () => {},
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]),
       ).rejects.toBe(unavailable);
-      expect(order).toEqual([
-        "main_503",
-        "usage_committed",
-        "title_write",
-        ...(persistence === "committed" ? ["title_request_settled"] : []),
-      ]);
-      expect(titleRequests.canRecover()).toBe(persistence === "committed");
+      expect(order).toEqual(
+        persistence === "independent"
+          ? ["title_admission_started", "main_503", "title_admitted"]
+          : [
+              "main_503",
+              "usage_committed",
+              "title_write",
+              ...(persistence === "committed" ? ["title_request_settled"] : []),
+            ],
+      );
+      expect(titleRequests.canRecover()).toBe(persistence !== "failed");
     } finally {
       for (const spy of spies) spy.mockRestore();
     }

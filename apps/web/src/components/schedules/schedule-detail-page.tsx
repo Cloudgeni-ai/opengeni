@@ -32,37 +32,37 @@ import {
 import { toast } from "sonner";
 import { modelDisplayName } from "@opengeni/react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailFact, DetailFacts, DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { InlineHelp } from "@/components/ui/inline-help";
+} from "@opengeni/react/ui/detail-page";
+import { DetailFact, DetailFacts, DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { modelPayerHint } from "@/lib/model-payer";
-import { useAppContext } from "@/context";
-import { formatElapsedSeconds } from "@/lib/format";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { modelPayerHint } from "@opengeni/react/app/lib/model-payer";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatElapsedSeconds } from "@opengeni/react/app/lib/format";
 import {
   markScheduledTaskAttentionSeen,
   notifyScheduledTaskAttentionUpdated,
@@ -82,17 +82,17 @@ import {
   scheduledTaskStateLabel,
   visibleScheduledTaskPolicyDrift,
 } from "@/lib/scheduled-tasks";
-import { sessionDisplayTitle } from "@/lib/session-rename";
-import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-import { cn } from "@/lib/utils";
+import { sessionDisplayTitle } from "@opengeni/react/app/lib/session-rename";
+import { useWorkspaceMachines } from "@opengeni/react/app/lib/use-workspace-machines";
+import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { useWorkspaceRigs } from "@opengeni/react/app/lib/use-workspace-rigs";
+import { cn } from "@opengeni/react/app/lib/utils";
 import type {
   ScheduledTask,
   ScheduledTaskAccessAttention,
   ScheduledTaskRun,
   Session,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import {
   NAME_MAX_LENGTH,
@@ -115,11 +115,12 @@ import {
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
-import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
+import { scheduledRunErrorText, scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { ScheduleBlockerNotice, SchedulePausedChatNotice } from "./schedule-blocker-notice";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
 import { ScheduleAccounts, scheduleAccountsDescription } from "./schedule-accounts";
 import { useScheduleActions } from "./use-schedule-actions";
-import { MoreMenu } from "@/components/ui/page-actions";
+import { MoreMenu } from "@opengeni/react/ui/page-actions";
 
 const POLL_MS = 30_000;
 
@@ -582,6 +583,9 @@ function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledT
   if (latest?.status === "failed") {
     return <StatusBadge status="failed">Last run failed</StatusBadge>;
   }
+  if (scheduledRunSkippedForPausedChat(latest)) {
+    return <StatusBadge status="paused">Last run: chat paused</StatusBadge>;
+  }
   return null;
 }
 
@@ -622,7 +626,9 @@ function Overview({
   const sentence = `${scheduleWords(task.schedule, now).sentence}.`;
   const status =
     task.status === "paused"
-      ? "Paused, so it won't run until you turn it back on."
+      ? task.blocker?.state === "paused"
+        ? "Paused itself, so it won't run until you turn it back on."
+        : "Paused, so it won't run until you turn it back on."
       : !state.active
         ? `${state.label}, so it won't run.`
         : task.schedule.type === "manual"
@@ -637,7 +643,25 @@ function Overview({
     <>
       <DetailSection className="pt-6">
         {accessNotices}
-        {latest?.status === "failed" ? (
+        {task.blocker ? (
+          <ScheduleBlockerNotice
+            blocker={task.blocker}
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : scheduledRunSkippedForPausedChat(latest) ? (
+          <SchedulePausedChatNotice
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : null}
+        {latest?.status === "failed" && !task.blocker ? (
           <Notice tone="failed" title="The last run failed" className="mb-4">
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
           </Notice>
@@ -915,15 +939,19 @@ function ScheduleAside({
   const machine = machineId
     ? fleet.machines.find((candidate) => candidate.sandboxId === machineId)
     : undefined;
-  const where = machineId
-    ? `${machine?.name ?? "Connected machine"}${
-        task.agentConfig.machineTarget?.workingDir
-          ? ` · ${task.agentConfig.machineTarget.workingDir}`
-          : ""
-      }`
-    : task.runMode === "existing_session"
-      ? "Where the chat runs"
-      : "Managed sandbox";
+  const where = scheduleInheritsChatSettings(task)
+    ? "Where the chat runs"
+    : task.agentConfig.executionTarget === "workspace_default"
+      ? "Workspace default"
+      : machineId
+        ? `${machine?.name ?? "Connected machine"}${
+            task.agentConfig.machineTarget?.workingDir
+              ? ` · ${task.agentConfig.machineTarget.workingDir}`
+              : ""
+          }`
+        : task.runMode === "existing_session"
+          ? "Where the chat runs"
+          : "Managed sandbox";
   return (
     <DetailAside label={`About ${task.name}`}>
       <DetailAsideItem label="Owner">

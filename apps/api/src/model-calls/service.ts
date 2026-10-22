@@ -18,8 +18,13 @@ import {
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceCatalogSettings,
+  recordSessionUsageLimitEvent,
+  requireSessionUsageLimitAllows,
+  type SessionUsageLimitMetricsSink,
+  sessionUsageLimitRefusalFromError,
   settingsWithModelProviderCredentials,
   settleModelUsage,
+  type HeldSessionUsageReceipt,
   type ModelCallCaller,
   type ModelCallInput,
   type ModelCallOutput,
@@ -40,6 +45,9 @@ import {
   reserveSubscriptionCoreCodexOperationRequest,
   settleSubscriptionCoreCodexOperationRequest,
   withCreditDebitAttribution,
+  fenceSessionUsageReceipt,
+  releaseSessionUsageReceipt,
+  settleSessionUsageReceipt,
   type Database,
   type SubscriptionCoreCodexOperationLeaseRef,
   type SubscriptionCoreCodexOperationScope,
@@ -53,6 +61,7 @@ import {
   type SingleModelCallResult,
 } from "@opengeni/runtime/model-call";
 import { XaiSubscriptionReloginRequired } from "@opengeni/xai-subscription";
+import { PendingUsageSettlements } from "./pending-usage-settlements";
 import {
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
@@ -66,12 +75,17 @@ export type ModelCallServiceDeps = {
   entitlements?: EntitlementsPort | null;
   codexFetch?: CodexFetch;
   log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
+  /** Content-free task usage-limit counters (closed-set labels). */
+  usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
+  /** Retained task usage receipts awaiting DB-only recovery (tests inject one). */
+  pendingUsageSettlements?: PendingUsageSettlements;
 };
 
 const PROVIDER_MESSAGE_MAX_LENGTH = 512;
 
 export function createModelCallService(deps: ModelCallServiceDeps): ModelCallService {
   const catalogSource = deps.catalogSourceSettings ?? deps.settings;
+  const pendingSettlements = deps.pendingUsageSettlements ?? new PendingUsageSettlements();
 
   async function selections(caller: ModelCallCaller): Promise<{
     catalogSettings: Settings;
@@ -145,32 +159,86 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       const subscription = source.kind === "connected_subscription" ? source.provider : null;
       const chargesOpenGeniCredits = model.billing.metering === "opengeni_credits";
       const countsTowardTokenCap = model.billing.upstreamPayer === "deployment";
-      const admission = await admitModelCall(deps, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        model: model.id,
-        chargesOpenGeniCredits,
-        countsTowardTokenCap,
-        subjectId: input.subjectId,
-      });
-      if (!admission.allowed) {
-        throw new ModelCallError({
-          status: admission.denial === "insufficient_credits" ? 402 : 429,
-          type: "insufficient_quota",
-          code: admission.denial,
-          message: admission.message,
+      // a call made by a live agent attempt (its grant was verified
+      // by the attempt boundary) counts against that task's usage limit and is
+      // refused once the limit is reached. Other callers have no task.
+      const usageLimitSessionId = attemptSessionId(input.grant);
+      const sourceId = `model_call:${input.requestId}`;
+      if (usageLimitSessionId) {
+        if (pendingSettlements.full) {
+          // Never drop a retained receipt to make room for another call.
+          recordSessionUsageLimitEvent(deps.usageLimitMetrics, "single_call", "unavailable");
+          throw sessionUsageUnavailable();
+        }
+        try {
+          await pendingSettlements.flush(usageLimitSessionId);
+        } catch {
+          recordSessionUsageLimitEvent(deps.usageLimitMetrics, "single_call", "unavailable");
+          throw sessionUsageUnavailable();
+        }
+        // Admission opens this call's durable custody marker in the same
+        // statement, so its usage is owed by the task on every replica until
+        // settlement fills it (or maintenance discloses it as unpriced).
+        await requireSingleCallSessionUsageLimit(deps, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: usageLimitSessionId,
+          runtime: true,
+          openSourceId: sourceId,
         });
       }
-      let settings = await settingsWithModelProviderCredentials(deps.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        settings: catalogSettings,
-        productModelId: model.id,
-        codexSubscriptionActive: subscription === "codex",
-      });
-      // A single Claude subscription call has no shared-core operation path
-      // yet and the legacy Claude pool is deleted (C4): fail closed.
-      if (subscription === "claude") throw subscriptionCapacityUnavailable("Claude");
+      const releaseMarker = async (): Promise<void> => {
+        if (!usageLimitSessionId) return;
+        await releaseSessionUsageReceipt(deps.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: usageLimitSessionId,
+          sourceId,
+        }).catch(() => {
+          // An unreleased marker only blocks after the overdue window and is
+          // then disclosed as unpriced by maintenance; never fails the call.
+        });
+      };
+      // Everything between opening the marker and dispatching the request can
+      // refuse the call. No request was sent on those exits, so the marker is
+      // released; once dispatch starts, custody stays until settlement.
+      const prepareDispatch = async () => {
+        const admission = await admitModelCall(deps, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          model: model.id,
+          chargesOpenGeniCredits,
+          countsTowardTokenCap,
+          subjectId: input.subjectId,
+        });
+        if (!admission.allowed) {
+          throw new ModelCallError({
+            status: admission.denial === "insufficient_credits" ? 402 : 429,
+            type: "insufficient_quota",
+            code: admission.denial,
+            message: admission.message,
+          });
+        }
+        const settings = await settingsWithModelProviderCredentials(deps.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          settings: catalogSettings,
+          productModelId: model.id,
+          codexSubscriptionActive: subscription === "codex",
+        });
+        // A single Claude subscription call has no shared-core operation path
+        // yet and the legacy Claude pool is deleted (C4): fail closed.
+        if (subscription === "claude") throw subscriptionCapacityUnavailable("Claude");
+        return { admission, settings };
+      };
+      let prepared: Awaited<ReturnType<typeof prepareDispatch>>;
+      try {
+        prepared = await prepareDispatch();
+      } catch (error) {
+        await releaseMarker();
+        throw error;
+      }
+      const { admission, settings } = prepared;
       const request = {
         ...input.request,
         ...reasoningEffortFor(model, input.request.reasoningEffort),
@@ -191,6 +259,8 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             ? await withCodexOperation(deps, settings, input, model, execute)
             : await execute();
       } catch (error) {
+        // No response, so no reported usage to record for this call.
+        await releaseMarker();
         const mapped = publicModelCallError(error);
         if (mapped instanceof ModelCallError && mapped.status >= 500) {
           // Names and statuses only: provider messages can echo prompt content.
@@ -205,9 +275,17 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         throw mapped;
       }
       const usage = result.usage;
+      // Settlement failure must not discard a completed answer. Every write
+      // below is idempotent on the request's source identity.
+      let owedReceipt: HeldSessionUsageReceipt | null = null;
+      const logSettlementFailure = (error: unknown) => {
+        deps.log?.("Model call usage settlement failed", {
+          requestId: input.requestId,
+          model: model.id,
+          errorName: error instanceof Error ? error.name : typeof error,
+        });
+      };
       if (usage) {
-        // Settlement failure must not discard a completed answer. The usage
-        // record is idempotent on the request id; the operator is alerted.
         await withCreditDebitAttribution(creditDebitAttributionForGrant(input.grant), () =>
           // Execution settings carry the workspace catalog the price resolves from.
           settleModelUsage(settings, deps.db, {
@@ -219,20 +297,142 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             creditPolicyRevision: admission.creditPolicyRevision,
             ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
             normalizedUsage: normalizeModelCallUsage(usage.usage),
-            sourceId: `model_call:${input.requestId}`,
+            sourceId,
+            ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
+            usageLimitMetrics: deps.usageLimitMetrics ?? null,
+            // A failed task-usage receipt never suppresses the credit
+            // settlement that follows it; the receipt is owed below.
+            receiptCustody: (held, error) => {
+              owedReceipt = held;
+              logSettlementFailure(error);
+            },
             debitMetadata: { modelCallId: input.requestId },
           }),
-        ).catch((error: unknown) => {
-          deps.log?.("Model call usage settlement failed", {
-            requestId: input.requestId,
+        ).catch(async (error: unknown) => {
+          logSettlementFailure(error);
+          if (!usageLimitSessionId || owedReceipt) return;
+          // Settlement failed before or after the task receipt; the amount
+          // is unknown here. An unpriced receipt fills a still-open marker
+          // (disclosed, never free); a receipt already recorded for this
+          // source is kept and this write is a no-op conflict.
+          const unknownAmount: HeldSessionUsageReceipt = {
+            sessionId: usageLimitSessionId,
+            sourceId,
+            turnId: null,
+            amountMicros: null,
+            pricingSource: null,
             model: model.id,
-            errorName: error instanceof Error ? error.name : typeof error,
+          };
+          await writeOwedReceipt(deps.db, input, unknownAmount).catch(() => {
+            owedReceipt = unknownAmount;
           });
+        });
+      } else if (usageLimitSessionId) {
+        // A response without a usage report is an unknown amount for the
+        // task: disclosed as unpriced, never counted as free.
+        const unreported: HeldSessionUsageReceipt = {
+          sessionId: usageLimitSessionId,
+          sourceId,
+          turnId: null,
+          amountMicros: null,
+          pricingSource: null,
+          model: model.id,
+        };
+        await writeOwedReceipt(deps.db, input, unreported).catch((error: unknown) => {
+          owedReceipt = unreported;
+          logSettlementFailure(error);
+        });
+      }
+      const owed = owedReceipt as HeldSessionUsageReceipt | null;
+      if (owed) {
+        // Whatever the failure class, this task's known usage is still owed.
+        // Retain the exact receipt for DB-only retry and fence the durable
+        // marker so every replica stops admitting this task's model requests
+        // until it lands. The provider is never called again.
+        const retained = pendingSettlements.retain(owed.sessionId, sourceId, () =>
+          writeOwedReceipt(deps.db, input, owed),
+        );
+        if (!retained) {
+          recordSessionUsageLimitEvent(deps.usageLimitMetrics, "single_call", "accounting_failure");
+        }
+        await fenceSessionUsageReceipt(deps.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: owed.sessionId,
+          sourceId,
+        }).catch(() => {
+          // The unfilled marker still blocks once overdue.
         });
       }
       return { model: model.id, result } satisfies ModelCallOutput;
     },
   };
+}
+
+async function writeOwedReceipt(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  receipt: HeldSessionUsageReceipt,
+): Promise<void> {
+  await settleSessionUsageReceipt(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    sessionId: receipt.sessionId,
+    sourceId: receipt.sourceId,
+    turnId: receipt.turnId,
+    amountMicros: receipt.amountMicros,
+    pricingSource: receipt.amountMicros === null ? null : receipt.pricingSource,
+    model: receipt.model,
+  });
+}
+
+function sessionUsageUnavailable(): ModelCallError {
+  return new ModelCallError({
+    status: 503,
+    type: "service_unavailable",
+    code: "session_usage_limit_unavailable",
+    message: "Usage for this task is temporarily unavailable. Try again shortly.",
+  });
+}
+
+/** The session of a verified live agent attempt, or null for every other caller. */
+function attemptSessionId(grant: ModelCallInput["grant"]): string | null {
+  if (grant?.principalKind !== "agent_attempt") return null;
+  const sessionId = grant.metadata?.sessionId;
+  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
+}
+
+async function requireSingleCallSessionUsageLimit(
+  deps: {
+    db: Parameters<typeof requireSessionUsageLimitAllows>[0];
+    usageLimitMetrics?: SessionUsageLimitMetricsSink | null;
+  },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    runtime?: boolean;
+    openSourceId?: string;
+  },
+): Promise<void> {
+  try {
+    await requireSessionUsageLimitAllows(deps.db, input, {
+      sink: deps.usageLimitMetrics,
+      boundary: "single_call",
+    });
+  } catch (error) {
+    const refusal = sessionUsageLimitRefusalFromError(error);
+    if (refusal) {
+      throw new ModelCallError({
+        status: 402,
+        type: "insufficient_quota",
+        code: "session_usage_limit_reached",
+        message: refusal.message,
+      });
+    }
+    // Unreadable usage state is never treated as unlimited.
+    throw sessionUsageUnavailable();
+  }
 }
 
 function assertModelSupportsRequest(model: ConfiguredModel, request: ModelCallInput["request"]) {

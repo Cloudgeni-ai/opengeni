@@ -486,7 +486,9 @@ describe("release image workflow contract", () => {
       expect(patchCopy).toBeGreaterThan(-1);
       expect(patchCopy).toBeLessThan(frozenInstall);
       expect(treeCopy).toBeGreaterThan(frozenInstall);
-      expect(stage.slice(frozenInstall - 120, frozenInstall)).toContain("--mount=type=cache,");
+      const installRun = stage.lastIndexOf("\nRUN ", frozenInstall);
+      expect(installRun).toBeGreaterThan(-1);
+      expect(stage.slice(installRun, frozenInstall)).toContain("--mount=type=cache,");
 
       const staged = (source: string, end: number) =>
         Array.from(
@@ -562,7 +564,8 @@ describe("release image workflow contract", () => {
     expect(dockerfile).toContain("xdotool scrot ffmpeg");
     expect(dockerfile).toContain("COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc");
     expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
-    expect(dockerfile).toContain("COPY --from=browserd-build /out/agent-browser");
+    expect(dockerfile).toContain("COPY --from=browserd-build /out/opengeni-browserd");
+    expect(dockerfile).not.toContain("agent-browser");
     expect(dockerfile).toContain("ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome");
   });
 
@@ -674,7 +677,7 @@ describe("release image workflow contract", () => {
     const parsed = Bun.YAML.parse(candidate) as {
       on: {
         workflow_dispatch: {
-          inputs: Record<string, { required?: boolean }>;
+          inputs: Record<string, { required?: boolean; default?: unknown }>;
         };
       };
       jobs: Record<
@@ -694,6 +697,9 @@ describe("release image workflow contract", () => {
       >;
     };
     const admissionParsed = Bun.YAML.parse(admissionWorkflow) as {
+      on: {
+        workflow_call: { inputs: Record<string, { required?: boolean; default?: unknown }> };
+      };
       permissions: Record<string, string>;
       jobs: Record<
         string,
@@ -701,8 +707,10 @@ describe("release image workflow contract", () => {
           permissions?: Record<string, string>;
           steps?: Array<{
             name?: string;
+            if?: string;
             run?: string;
             uses?: string;
+            env?: Record<string, string>;
             with?: Record<string, unknown>;
           }>;
         }
@@ -780,23 +788,32 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/production');
     expect(candidate).not.toContain('[ "$(git rev-parse origin/production)" = "$SOURCE_SHA" ]');
     expect(parsed.on.workflow_dispatch.inputs.controller_sha?.required).toBe(true);
+    expect(parsed.on.workflow_dispatch.inputs.provenance_sha).toMatchObject({
+      required: false,
+      default: "",
+    });
     expect(parsed.jobs.admission?.uses).toBe("./.github/workflows/release-source-admission.yml");
     expect(parsed.jobs.admission?.with).toEqual({
       source_sha: "${{ inputs.source_sha }}",
       controller_sha: "${{ inputs.controller_sha }}",
+      provenance_sha: "${{ inputs.provenance_sha }}",
     });
     expect(parsed.jobs["artifact-runtime"]?.needs).toBe("admission");
     expect(parsed.jobs.candidate?.needs).toEqual(["admission", "artifact-runtime"]);
     expect(parsed.jobs.admission?.permissions).toEqual({
+      actions: "read",
       checks: "read",
       contents: "read",
       "pull-requests": "read",
+      statuses: "read",
     });
     expect(admissionParsed.permissions).toEqual({ contents: "read" });
     expect(admissionParsed.jobs.verify?.permissions).toEqual({
+      actions: "read",
       checks: "read",
       contents: "read",
       "pull-requests": "read",
+      statuses: "read",
     });
     const controllerCheckout = admissionParsed.jobs.verify?.steps?.find(
       (step) => step.name === "Check out exact retained release controller",
@@ -807,6 +824,35 @@ describe("release image workflow contract", () => {
         (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
       )?.run,
     ).toBe("node scripts/check-release-pr-automation.mjs verify-approved-merge");
+    // Tested-descendant admission: explicit separate provenance, Git objects
+    // fetched only for that lane, and no release-source checkout.
+    expect(admissionParsed.on.workflow_call.inputs.provenance_sha).toMatchObject({
+      required: false,
+      default: "",
+    });
+    const verifyStep = admissionParsed.jobs.verify?.steps?.find(
+      (step) => step.name === "Verify controller identity and exact reviewed merge provenance",
+    );
+    expect(verifyStep?.env).toMatchObject({
+      SOURCE_SHA: "${{ inputs.source_sha }}",
+      RELEASE_PROVENANCE_SHA: "${{ inputs.provenance_sha }}",
+      RELEASE_DESCENDANT_GIT_DIR: "${{ github.workspace }}",
+    });
+    const historyStep = admissionParsed.jobs.verify?.steps?.find(
+      (step) =>
+        step.name === "Restore protected main history as Git data for the descendant merge audit",
+    );
+    expect(historyStep?.if).toBe(
+      "${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}",
+    );
+    expect(historyStep?.run).toContain("--unshallow origin");
+    expect(historyStep?.run).toContain("'+refs/heads/main:refs/remotes/origin/main'");
+    expect(historyStep?.run).not.toMatch(/git (checkout|switch|restore|worktree|reset)/);
+    expect(admissionParsed.jobs.verify?.steps?.map((step) => step.name)).toEqual([
+      "Check out exact retained release controller",
+      "Restore protected main history as Git data for the descendant merge audit",
+      "Verify controller identity and exact reviewed merge provenance",
+    ]);
     expect(admissionWorkflow).not.toContain("ref: ${{ inputs.source_sha }}");
     expect(candidate).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
     expect(parsed.jobs.candidate?.permissions).toEqual({
@@ -893,6 +939,7 @@ describe("release image workflow contract", () => {
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
+      "desktop-image",
     ];
     for (const jobName of [
       "worker-image",
@@ -902,7 +949,12 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
-    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+    for (const jobName of [
+      "api-image",
+      "artifact-materializer-image",
+      "sandbox-image",
+      "desktop-image",
+    ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual([
         "automation-admission",
         "plan",
@@ -920,8 +972,14 @@ describe("release image workflow contract", () => {
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
+      "desktop-image",
     ]);
-    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+    for (const jobName of [
+      "api-image",
+      "artifact-materializer-image",
+      "sandbox-image",
+      "desktop-image",
+    ]) {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
     for (const jobName of [
@@ -935,7 +993,7 @@ describe("release image workflow contract", () => {
     expect(parsed.jobs.images?.if).toBe(
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
-    expect(images.match(/packages: write/g)).toHaveLength(7);
+    expect(images.match(/packages: write/g)).toHaveLength(8);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
@@ -978,6 +1036,7 @@ describe("release image workflow contract", () => {
     );
     expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
+    expect(images).toContain("DESKTOP_IMAGE_RESULT: ${{ needs.desktop-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
       (step) => step.name === "Require every workload image build",
     );
@@ -990,6 +1049,7 @@ describe("release image workflow contract", () => {
         "${{ needs.artifact-outbox-dispatcher-image.result }}",
       RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
+      DESKTOP_IMAGE_RESULT: "${{ needs.desktop-image.result }}",
     });
     const aggregateResult = (...results: string[]) =>
       Bun.spawnSync(["bash", "-c", aggregate?.run ?? "exit 1"], {
@@ -1002,14 +1062,13 @@ describe("release image workflow contract", () => {
           ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: results[4],
           RELAY_IMAGE_RESULT: results[5],
           SANDBOX_IMAGE_RESULT: results[6],
+          DESKTOP_IMAGE_RESULT: results[7],
         },
       }).exitCode;
-    expect(
-      aggregateResult("success", "success", "success", "success", "success", "success", "success"),
-    ).toBe(0);
+    expect(aggregateResult(...(Array(8).fill("success") as string[]))).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (let index = 0; index < 7; index += 1) {
-        const results = Array(7).fill("success") as string[];
+      for (let index = 0; index < 8; index += 1) {
+        const results = Array(8).fill("success") as string[];
         results[index] = result;
         expect(aggregateResult(...results)).not.toBe(0);
       }
@@ -1018,15 +1077,15 @@ describe("release image workflow contract", () => {
       images.match(
         /push: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/g,
       ),
-    ).toHaveLength(7);
-    expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
+    ).toHaveLength(8);
+    expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(8);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
-    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(7);
+    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(8);
     expect(
       images.match(
         /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
       ),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
     expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
     expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA canary receipt");
@@ -1041,6 +1100,10 @@ describe("release image workflow contract", () => {
     );
     expect(images).toContain(
       "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}",
+    );
+    expect(images).toContain("DESKTOP_DIGEST: ${{ needs.desktop-image.outputs.desktop_digest }}");
+    expect(images).toContain(
+      'desktop: { repository: "ghcr.io/cloudgeni-ai/opengeni-desktop", digest: $desktopDigest }',
     );
     expect(images).toContain('--arg tag "canary-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
@@ -1378,8 +1441,35 @@ describe("release image workflow contract", () => {
     expect(login).not.toContain("admin-password");
   });
 
+  test("agent publication pins a new release tag to the built source on manual dispatch", async () => {
+    const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
+    const publish = parsed.jobs.publish!.steps!.find((step) =>
+      step.uses?.startsWith("softprops/action-gh-release@"),
+    );
+
+    expect(publish).toBeDefined();
+    expect(publish!.with?.target_commitish).toBe("${{ github.sha }}");
+    expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
+  });
+
+  test("standalone macOS agent signing keeps the same stable identity as the app", async () => {
+    const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.build!.steps!;
+    for (const name of [
+      "macOS codesign + notarize (if creds present)",
+      "macOS assemble + sign + notarize .app bundle (if creds present)",
+    ]) {
+      const step = steps.find((candidate) => candidate.name === name);
+      expect(step?.run).toContain("--binary-identifier ai.opengeni.agent");
+    }
+  });
+
   test("agent publication creates only immutable-compatible versioned releases", async () => {
     const agentRelease = await workflow("agent-release.yml");
+
+    expect(agentRelease).toContain("https://app.opengeni.ai/install.sh");
+    expect(agentRelease).toContain("https://app.opengeni.ai/install.ps1");
+    expect(agentRelease).not.toContain("https://get.opengeni.ai/install.");
 
     expect(agentRelease).toContain(
       "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
@@ -1431,7 +1521,6 @@ describe("release image workflow contract", () => {
     for (const executable of [
       "Contents/MacOS/opengeni-agent",
       "Contents/Helpers/opengeni-browserd",
-      "Contents/Helpers/agent-browser",
       "Contents/Helpers/opengeni-computer-native",
     ]) {
       expect(agentRelease.slice(finalBundleValidation)).toContain(executable);
@@ -1457,7 +1546,6 @@ describe("release image workflow contract", () => {
     expect(agentRelease).toContain("Build interaction helpers (Linux glibc)");
     expect(agentRelease).toContain("bun_target=bun-linux-x64;");
     expect(agentRelease).toContain("bun_target=bun-linux-arm64;");
-    expect(agentRelease).toContain("OPENGENI_BROWSERD_TARGET_MUSL=false");
     expect(agentRelease).toContain("linux browserd must use the glibc dynamic linker");
     expect(agentRelease).not.toContain("bun-linux-x64-musl");
     expect(agentRelease).not.toContain("bun-linux-arm64-musl");

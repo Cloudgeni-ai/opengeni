@@ -2,16 +2,18 @@ import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { QuoteIcon } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { usePortalContainer } from "../ui/portal-container";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import type { TimelineAnnotationSourceDescriptor } from "../timeline";
+import { annotationFromSelection } from "../timeline/annotation-model";
 import {
   clipRangeToSource,
   matchingQuoteInSource,
-  occurrenceOffsets,
   quoteOccurrenceIndex,
   truncateAnnotationQuote,
   visibleClientRect,
 } from "./timeline-annotation-shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 type SelectionCandidate = {
   annotation: DraftTimelineAnnotation;
@@ -21,34 +23,8 @@ type SelectionCandidate = {
 };
 
 const CONTROL_SELECTOR = "button,input,textarea,select,summary,[contenteditable='true']";
-const SOURCE_CONTEXT_BYTES = 160;
-const MAX_QUOTE_BYTES = 16 * 1024;
 const POPOVER_WIDTH = 280;
 const POPOVER_HEIGHT = 64;
-
-function utf8Prefix(value: string, maxBytes: number): string {
-  let output = "";
-  let bytes = 0;
-  for (const character of value) {
-    const next = new TextEncoder().encode(character).byteLength;
-    if (bytes + next > maxBytes) break;
-    output += character;
-    bytes += next;
-  }
-  return output;
-}
-
-function utf8Suffix(value: string, maxBytes: number): string {
-  let output = "";
-  let bytes = 0;
-  for (const character of [...value].reverse()) {
-    const next = new TextEncoder().encode(character).byteLength;
-    if (bytes + next > maxBytes) break;
-    output = character + output;
-    bytes += next;
-  }
-  return output;
-}
 
 function selectionElement(node: Node | null): Element | null {
   return node instanceof Element ? node : (node?.parentElement ?? null);
@@ -75,13 +51,6 @@ function isWhollyInsideControl(range: Range, boundary: HTMLElement): boolean {
   return (
     start instanceof Element && start === end && boundary.contains(start) && start !== boundary
   );
-}
-
-function annotationId(): string {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
-  }
-  return `annotation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -111,41 +80,19 @@ function buildCandidate(
   if (!clipped) return null;
   const sourceKey = startBoundary.dataset.ogAnnotationSourceKey;
   const source = sourceKey ? sources.get(sourceKey) : undefined;
+  if (!source) return null;
   const rawQuote = clipped.toString();
-  const quote = (source ? matchingQuoteInSource(source.text, rawQuote) : null) ?? rawQuote;
-  if (
-    !source ||
-    quote.trim().length === 0 ||
-    new TextEncoder().encode(quote).byteLength > MAX_QUOTE_BYTES
-  ) {
-    return null;
-  }
-  const sourceOffsets = occurrenceOffsets(source.text, quote);
-  if (sourceOffsets.length === 0) return null;
-  const occurrence = quoteOccurrenceIndex(startBoundary, clipped, quote);
-  const startOffset = sourceOffsets[Math.min(occurrence, sourceOffsets.length - 1)]!;
-  const endOffset = startOffset + quote.length;
+  const quote = matchingQuoteInSource(source.text, rawQuote) ?? rawQuote;
+  const annotation = annotationFromSelection(source, {
+    text: quote,
+    occurrence: quoteOccurrenceIndex(startBoundary, clipped, quote),
+  });
+  if (!annotation) return null;
   const rect = visibleClientRect(range) ?? visibleClientRect(clipped);
   if (!rect) return null;
   const position = popoverPosition(rect);
   return {
-    annotation: {
-      id: annotationId(),
-      quote,
-      note: "",
-      source: {
-        kind: source.kind,
-        eventId: source.eventId,
-        eventType: source.eventType,
-        sequence: source.sequence,
-        turnId: source.turnId,
-        startOffset,
-        endOffset,
-        contextBefore: utf8Suffix(source.text.slice(0, startOffset), SOURCE_CONTEXT_BYTES),
-        contextAfter: utf8Prefix(source.text.slice(endOffset), SOURCE_CONTEXT_BYTES),
-        ...(source.label ? { label: source.label } : {}),
-      },
-    },
+    annotation,
     left: position.left,
     top: position.top,
     keyboard,
@@ -161,10 +108,12 @@ export function TimelineAnnotationSelection({
   sources: ReadonlyMap<string, TimelineAnnotationSourceDescriptor>;
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const [candidate, setCandidate] = useState<SelectionCandidate | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const initialSelectionObservedRef = useRef(false);
   const pointerOriginRef = useRef<"unset" | "inside" | "outside">("unset");
+  const portalContainer = usePortalContainer();
   const portalStyle = usePortalTokenStyle(rootRef.current);
 
   useEffect(() => {
@@ -249,7 +198,7 @@ export function TimelineAnnotationSelection({
       data-og-annotation-popover=""
       style={{ left: candidate.left, top: candidate.top, ...portalStyle }}
       className="og-root fixed z-[80] flex max-w-[min(18rem,calc(100vw-1.5rem))] -translate-x-1/2 items-start gap-2 rounded-2xl border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm font-medium text-og-fg shadow-xl outline-hidden transition hover:border-og-accent/40 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
-      aria-label={`Add a note about “${preview}”`}
+      aria-label={t("timelineAnnotationSelection.addANoteAboutPreview", { preview })}
       title={candidate.annotation.quote}
       onPointerDown={(event) => event.preventDefault()}
       onClick={() => {
@@ -260,13 +209,13 @@ export function TimelineAnnotationSelection({
     >
       <QuoteIcon className="mt-0.5 size-3.5 shrink-0 text-og-accent" aria-hidden="true" />
       <span className="min-w-0 text-left">
-        <span className="block leading-5">Add note</span>
+        <span className="block leading-5">{t("timelineAnnotationSelection.addNote")}</span>
         <span className="mt-0.5 block truncate text-og-xs font-normal text-og-fg-muted">
           {preview}
         </span>
       </span>
     </button>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 

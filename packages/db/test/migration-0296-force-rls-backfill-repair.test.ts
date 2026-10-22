@@ -1,5 +1,5 @@
 // Migration 0296: `FORCE ROW LEVEL SECURITY` binds the TABLE OWNER,
-// and OpenGeni migrates as a NON-superuser owner without BYPASSRLS. No tenant
+// and Opengeni migrates as a NON-superuser owner without BYPASSRLS. No tenant
 // GUC is set during a migration, so 0256's and 0262's `origin_workspace_id`
 // backfills matched ZERO rows and reported success on every real deployment.
 //
@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

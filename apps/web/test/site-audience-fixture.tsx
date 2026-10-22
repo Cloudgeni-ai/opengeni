@@ -8,8 +8,8 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { Toaster } from "sonner";
-import { ArtifactsRoute } from "../src/routes/artifacts";
-import { artifactReturnSearch } from "../src/lib/routes";
+import { ArtifactsRoute } from "@opengeni/react/app/routes/artifacts";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
 import { siteId, workspaceId } from "./site-audience-context";
 import "../src/styles.css";
 

@@ -7,10 +7,11 @@
  * fails when a registered route is neither in the catalog nor exempt.
  */
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";
+import { ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports } from "./action-schema-imports";
 
 export type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
 import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
@@ -22,6 +23,14 @@ import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-t
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
+  {
+    pattern: /^\/v1\/site-auth\//,
+    reason: "signing a person in to a published Site, from their own signed-in browser",
+  },
+  {
+    pattern: /^\/v1\/site-runtime(\/|$)/,
+    reason: "published Site gateway calls, signed by the gateway",
+  },
   {
     pattern: /^\/v1\/native-app\//,
     reason: "signing the native app in and out, and its push device: the app's own credential",
@@ -37,13 +46,12 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
+  {
+    pattern: /^\/v1\/office\/workbook-tickets$/,
+    reason: "the Office add-in connecting its own workbook socket",
+  },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
-  {
-    pattern: /^\/v1\/workspaces\/:workspaceId\/machines\/:enrollmentId\/audience(\/preview)?$/,
-    reason:
-      "who can use a connected machine is decided by a person on the Machines page or through the API; agents are refused",
-  },
 ];
 
 export function isActionCatalogExempt(path: string): boolean {
@@ -77,6 +85,11 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     reason:
       "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
   },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/usage-limit$/,
+    reason:
+      "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
+  },
 ];
 
 export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {
@@ -93,6 +106,15 @@ export type RegisteredRoute = { method: string; path: string };
  * by @opengeni/contracts that the route accepts.
  */
 export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: string }> = [
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vault-providers\/connections$/,
+    request: "InstallVaultProviderRequest",
+  },
+  {
+    pattern:
+      /^PUT \/v1\/workspaces\/:workspaceId\/vault-providers\/connections\/:connectionId\/credentials$/,
+    request: "ReplaceVaultProviderCredentialsRequest",
+  },
   {
     pattern:
       /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
@@ -138,6 +160,24 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
   {
     pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
     request: "SessionControlRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication$/,
+    request: "UpsertSitePublicationRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/fixes$/,
+    request: "SitePublishWarningFix",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/takedown$/,
+    request: "SiteTakedownRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/site-limit-profile$/,
+    request: "SiteLimitProfile",
   },
 ];
 
@@ -272,9 +312,8 @@ export const ACTION_CATALOG_PATH = new URL(
 );
 
 if (import.meta.main && process.argv.includes("--write")) {
-  await Bun.write(
-    ACTION_CATALOG_PATH,
-    renderActionCatalog(buildActionCatalog(registeredApiRoutes())),
-  );
+  const catalog = buildActionCatalog(registeredApiRoutes());
+  await Bun.write(ACTION_CATALOG_PATH, renderActionCatalog(catalog));
+  await Bun.write(ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports(catalog));
   console.log(`[action-catalog] wrote ${ACTION_CATALOG_PATH.pathname}`);
 }

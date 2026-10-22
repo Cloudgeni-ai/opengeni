@@ -16,11 +16,13 @@ mock.module("@tanstack/react-router", () => ({
     select({ location: { pathname } }),
 }));
 
-mock.module("@/components/rail/rail-context", () => ({
+mock.module("@opengeni/react/app/components/rail/rail-context", () => ({
   useRail: () => rail,
 }));
 
-mock.module("@/components/rail/session-list", () => ({
+mock.module("@opengeni/react/app/components/rail/session-list", () => ({
+  CollapsedSessionsButton: () => null,
+  SessionList: () => null,
   NewSessionLink: ({ children, ...props }: { children: ReactNode }) => (
     <a href="#new-session" {...props}>
       {children}
@@ -41,20 +43,43 @@ mock.module("@/components/rail/inbox-link", () => ({
 }));
 
 const client = { listKnowledgeEntries: async () => ({ entries: [] }) };
-mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({ client }) }));
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { PrimaryNav, WorkspaceShortcutLinks } = await import("./primary-nav");
+await import("@/navigation-host");
+const { PrimaryNavExtras, WorkspaceShortcutLinks } = await import("./primary-nav");
+const { PrimaryNav: SharedPrimaryNav, SessionShellSlotsProvider } =
+  await import("@opengeni/react/app/components/rail/rail-sections");
+/** The rail's primary navigation as the web shell composes it. */
+function PrimaryNav() {
+  return (
+    <SessionShellSlotsProvider slots={{ primaryNav: <PrimaryNavExtras /> }}>
+      <SharedPrimaryNav />
+    </SessionShellSlotsProvider>
+  );
+}
 const originalMatchMedia = window.matchMedia;
 window.matchMedia = (query) => {
   const media = originalMatchMedia.call(window, query);
   Object.defineProperty(media, "matches", { get: () => window.innerHeight < 720 });
   return media;
 };
-const railHeader = await Bun.file(new URL("./rail-header.tsx", import.meta.url)).text();
-const railShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
+// The shared shell owns the rail layout; the web shell fills its slots.
+const railShell = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/session-shell.tsx",
+    import.meta.url,
+  ),
+).text();
+const railHeader = await Bun.file(
+  new URL(
+    "../../../../../packages/react/src/app/components/rail/rail-sections.tsx",
+    import.meta.url,
+  ),
+).text();
+const webRailShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
 describe("rail overflow boundaries", () => {
   test("contains scrolling session controls above a non-shrinking footer on the rail glow", () => {
@@ -69,6 +94,15 @@ describe("rail overflow boundaries", () => {
     expect(railShell).toMatch(
       /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border"/,
     );
+  });
+
+  test("reserves the macOS title row outside scrolling without pinning the workspace picker", () => {
+    expect(railShell).toMatch(
+      /windowControlsInPage \? \([\s\S]*?data-rail-window-controls[\s\S]*?<RailHeader showSwitcher=\{false\} \/>[\s\S]*?data-rail-scroll-viewport/,
+    );
+    expect(railShell).toContain("{!windowControlsInPage ? <RailHeader /> : null}");
+    expect(railShell).toContain("{rail.collapsed || windowControlsInPage ? switcher : null}");
+    expect(webRailShell).toContain("switcher: <SwitcherBlock />,");
   });
 });
 
@@ -170,9 +204,12 @@ describe("session-first rail density", () => {
         4,
       );
       expect(railShell).toMatch(
-        /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
+        /id=\{`\$\{mobileNavId\}-panel-workspace`\}[\s\S]*?\{mobileWorkspacePanel\}/,
       );
-      expect(railHeader).toMatch(/\{!rail\.collapsed \? <SwitcherBlock \/> : null\}/);
+      expect(webRailShell).toMatch(
+        /mobileWorkspacePanel: \([\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
+      );
+      expect(railHeader).toContain("{showSwitcher && !rail.collapsed ? switcher : null}");
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();

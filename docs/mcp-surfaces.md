@@ -10,7 +10,7 @@ page exists so you pick the right one in one read.
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing Opengeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | Opengeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval choices apply uniformly; capable clients receive durable pending handles for review | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
-| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview |
+| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview. Saved data uses `site.data`/`site.files` over the same bridge, not tools; agents manage it with the first-party `site_data_*` and `site_files_*` tools ([Site Data](site-data.md)). The optional per-Site database is reached only through named queries (`site.sql.run`); owners manage its schema, queries and data with the `site_sql_*` tools (`site_sql_inspect`, `site_sql_enable`, `site_sql_migrate`, `site_sql_define_query`, `site_sql_query`, `site_sql_run`, `site_sql_execute`, `site_sql_export`, `site_sql_import`, `site_sql_reset`; [Site SQL](site-data.md#site-sql-optional-cloudflare-storage)). Site HTTP is limited to the `SITE_OPERATIONS` allowlist. Agents publish Sites to their own hostname with `site_publication_get`, `site_publication_update`, `site_publication_apply_fix` (applies a readiness warning's safe fix) and `site_hostname_check`; on a published host the Sites gateway serves the same bridge over site-runtime ([Published Sites](published-sites.md)) |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated compatibility endpoint; the same Files implementation is also included in the unified gateway | Caller's bearer with `files:read` | A narrowly configured client needs only file materialization |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and hosted Slack MCP support personal or workspace ownership; personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
@@ -284,7 +284,7 @@ authority. `Server-Timing` (`gw-prepare`, `gw-call`) and
 `opengeni_tool_gateway_preparation_duration_seconds` expose the
 preparation/execution split without content.
 
-First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
 For lossless scheduled-task model edits, use
 `scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
@@ -345,15 +345,23 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 ### Recovery from tool-search misses
 
-Progressive discovery uses the same authorized deferred pool on Codex-native,
-OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
-exhaustive. Tools whose exact name (with an underscore) appears in the query
-come first, before the keyword ranking, and the result grows to include all of
-them. Past search results are stored as they were returned and never re-run,
-so this ordering changes new searches only, not any cached prompt. `tool_list` is a query-independent fallback: it returns compact
+Progressive discovery uses the same authorized deferred pool on every transport.
+Field-aware retrieval weights names and capability sentences separately from
+long operational descriptions. Search loads the strongest match per explicit
+query clause; ranking is not certainty. Native Responses routes retain hosted
+client `tool_search` and real loaded function definitions. Generic routes return
+compact alternatives in `suggestions`. Exact ties, operation-only queries and
+no matches return no loaded schemas; generic results still include compact candidates.
+An optional decision model selects from a wider shortlist for ambiguous searches;
+strong lexical matches skip inference. In generic receipts, `schemasLoaded:true`
+means only `tools` have loaded schemas, not `suggestions`. Exact `names` bypasses both ranking and
+inference. Past results and schema snapshots are frozen and
+never rerun, so catalog changes do not alter any earlier prompt item.
+`tool_list({view:"groups"})` returns source/resource groups with counts and examples;
+pass an exact returned `group` to browse its tools. The default tools view returns compact
 names and description previews, with a default page of 20, a maximum of 40,
 and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
-optional literal `namePrefix` filter. An invalid cursor requires restarting
+view, group and optional literal `namePrefix` filter. An invalid cursor requires restarting
 the listing against the current pool. Names and prefixes are display/routing
 keys, never authorization identities.
 
@@ -361,8 +369,9 @@ Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
 listed tool's full schema without keyword ranking. Exact lookup cannot admit
 a tool outside the current pool. Search backfills smaller candidates after
 schema-size exclusions while retaining existing count and byte limits.
-Native disclosure returns the original SDK tool objects; generic dispatch,
-approvals, and invocation continue through the existing runtime. Listing
+Selected schemas remain in native search outputs or are appended after the generic
+result, never added to the first-request tool block. The original SDK tool objects, approvals and invocation
+continue through the existing runtime on every provider. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
 
@@ -500,10 +509,11 @@ First-party Opengeni MCP Knowledge tools:
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).
-A model call to `knowledge_search` or `knowledge_prepare_save` receives a
-compact copy without bookkeeping or repeated preview text, keeping every ID,
-version, status, title, description and excerpt; Codemode and other callers
-receive the exact result. See
+A model call to `knowledge_search` receives small discovery cards (identity,
+title, kind, scope, outcome and a short snippet); `knowledge_get` supplies full
+text and citation/update identifiers. MCP search defaults to five results.
+`knowledge_prepare_save` keeps its lossless projection. Codemode and other
+programmatic callers receive the complete result shape. See
 [model-visible discovery results](knowledge.md#model-visible-discovery-results).
 The retired Memory and reviewed-claim tools are not registered for new work.
 

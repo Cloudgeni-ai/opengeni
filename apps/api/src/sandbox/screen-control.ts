@@ -251,7 +251,7 @@ export async function reconcileScreenControlOnHello(
 }
 
 /** Open one macOS Privacy & Security pane on a connected Mac. Opening a pane
- * grants nothing; the person flips the switch for OpenGeni. */
+ * grants nothing; the person flips the switch for Opengeni. */
 export async function openMachinePrivacySettings(
   services: Services,
   input: {

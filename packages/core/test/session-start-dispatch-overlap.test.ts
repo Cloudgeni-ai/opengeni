@@ -20,21 +20,21 @@ function productionDispatch() {
         node.declarations.some((d) => d.id.type === "Identifier" && d.id.name === name),
     );
   const first = declaration("started")!;
-  const last = declaration("persisted")!;
+  const last = statements.at(-1)!;
   const code = new Bun.Transpiler({ loader: "ts" }).transformSync(
-    source.slice(first.start, last.end),
+    `const dispatch = async () => { ${source.slice(first.start, last.end)} };`,
   );
   // Execute the exact production statements, including atomic initialization,
-  // both post-commit notifications, error handling and response reload.
+  // both post-commit notifications, error handling and authoritative response read.
   return new Function(
     "ports",
     "input",
     "session",
     `return (async () => {
-    const { initializeSessionStartAtomically, publishDurableSessionEvents, requireSession, measureSessionStartPhase } = ports;
+    const { initializeSessionStartAtomically, publishDurableSessionEvents, requireSession, listSessionTurns, measureSessionStartPhase } = ports;
     const initialAutomaticTitleForSessionStart = () => null;
     ${code}
-    return persisted;
+    return dispatch();
   })();`,
   ) as (ports: object, input: object, session: object) => Promise<unknown>;
 }
@@ -85,6 +85,10 @@ function fixture(
       calls.push("reload");
       return holds.reload.promise;
     },
+    listSessionTurns: () => {
+      calls.push("initial_turn");
+      return Promise.resolve([{ id: "retained-turn" }]);
+    },
   };
   const input = {
     db: {},
@@ -101,7 +105,8 @@ function fixture(
     workflowWakeRevision: wakeRevision,
     temporalWorkflowId: "workflow",
     events: [{}],
-    turn: { id: "turn" },
+    turn: { id: "turn" } as { id: string } | null,
+    changed: true,
   };
   const running = productionDispatch()(ports, input, session);
   void running.catch(() => undefined);
@@ -138,11 +143,11 @@ for (const first of ["fanout", "wake"] as const) {
       expect(f.calls).toEqual(["initialize"]);
       f.holds.initialize.resolve(f.started);
       await flush();
-      expect(f.calls).toEqual(["initialize", "fanout", "wake"]);
+      expect(f.calls).toEqual(["initialize", "fanout", "wake", "reload"]);
       f.holds[first].resolve();
       await flush();
       expect(f.settled()).toBe(false);
-      expect(f.calls).not.toContain("reload");
+      expect(f.calls.filter((call) => call === "reload")).toHaveLength(1);
       f.holds[first === "fanout" ? "wake" : "fanout"].resolve();
       await flush();
       expect(f.calls).toEqual(["initialize", "fanout", "wake", "reload"]);
@@ -153,7 +158,7 @@ for (const first of ["fanout", "wake"] as const) {
 }
 
 for (const failed of ["fanout", "wake"] as const) {
-  test(`${failed} failure still joins the held sibling and prevents response reload`, async () => {
+  test(`${failed} failure still joins the held sibling and response read`, async () => {
     const f = fixture();
     const failure = new Error(failed);
     try {
@@ -162,8 +167,11 @@ for (const failed of ["fanout", "wake"] as const) {
       f.holds[failed].reject(failure);
       await flush();
       expect(f.settled()).toBe(false);
-      expect(f.calls).not.toContain("reload");
+      expect(f.calls.filter((call) => call === "reload")).toHaveLength(1);
       f.holds[failed === "fanout" ? "wake" : "fanout"].resolve();
+      await flush();
+      expect(f.settled()).toBe(false);
+      f.holds.reload.resolve({ id: "session" });
       await expect(f.running).rejects.toBe(failure);
     } finally {
       await f.cleanup();
@@ -183,8 +191,9 @@ for (const firstFailed of ["fanout", "wake"] as const) {
       f.holds[firstFailed === "fanout" ? "wake" : "fanout"].reject(
         failures[firstFailed === "fanout" ? "wake" : "fanout"],
       );
+      f.holds.reload.reject(new Error("reload"));
       await expect(f.running).rejects.toBe(failures.fanout);
-      expect(f.calls).not.toContain("reload");
+      expect(f.calls.filter((call) => call === "reload")).toHaveLength(1);
     } finally {
       await f.cleanup();
     }
@@ -220,13 +229,16 @@ test("real best-effort fanout failure remains successful after both notification
   try {
     f.holds.initialize.resolve(f.started);
     await flush();
-    expect(f.calls).toEqual(["initialize", "fanout", "wake"]);
+    expect(f.calls).toEqual(["initialize", "fanout", "wake", "reload"]);
     f.holds.fanout.reject(new Error("transient transport"));
     await flush();
     expect(f.settled()).toBe(false);
     f.holds.wake.resolve();
-    f.holds.reload.resolve("response");
-    expect(await f.running).toBe("response");
+    f.holds.reload.resolve({ id: "response", status: "queued" });
+    expect(await f.running).toEqual({
+      session: { id: "response", status: "queued", initialTurnId: "turn" },
+      changed: true,
+    });
   } finally {
     await f.cleanup();
   }
@@ -238,13 +250,74 @@ for (const failed of ["fanout", "wake"] as const) {
     try {
       f.holds.initialize.resolve(f.started);
       await flush();
-      expect(f.calls).toEqual(["initialize", "fanout", "wake"]);
+      expect(f.calls).toEqual(["initialize", "fanout", "wake", "reload"]);
       expect(f.settled()).toBe(false);
-      expect(f.calls).not.toContain("reload");
+      expect(f.calls.filter((call) => call === "reload")).toHaveLength(1);
       f.holds[failed === "fanout" ? "wake" : "fanout"].resolve();
+      f.holds.reload.resolve({ id: "session" });
       await expect(f.running).rejects.toBe(f.syncError);
     } finally {
       await f.cleanup();
     }
   });
 }
+
+test("response reads finish while both notification transports are held", async () => {
+  const f = fixture();
+  try {
+    f.holds.initialize.resolve(f.started);
+    await flush();
+    expect(f.calls).toEqual(["initialize", "fanout", "wake", "reload"]);
+    f.holds.reload.resolve({ id: "committed", status: "queued", lastSequence: 4 });
+    await flush();
+    expect(f.settled()).toBe(false);
+    f.holds.fanout.resolve();
+    f.holds.wake.resolve();
+    expect(await f.running).toEqual({
+      session: { id: "committed", status: "queued", lastSequence: 4, initialTurnId: "turn" },
+      changed: true,
+    });
+    expect(f.calls).not.toContain("initial_turn");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("response read failure waits for both transports without an unhandled rejection", async () => {
+  const f = fixture();
+  const failure = new Error("response read failed");
+  try {
+    f.holds.initialize.resolve(f.started);
+    await flush();
+    f.holds.reload.reject(failure);
+    await flush();
+    expect(f.settled()).toBe(false);
+    f.holds.fanout.resolve();
+    await flush();
+    expect(f.settled()).toBe(false);
+    f.holds.wake.resolve();
+    await expect(f.running).rejects.toBe(failure);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("deferred and cancelled initialization retain the initial-turn fallback read", async () => {
+  const f = fixture(null);
+  try {
+    f.started.turn = null;
+    f.started.changed = false;
+    f.holds.initialize.resolve(f.started);
+    f.holds.reload.resolve({ id: "session", status: "cancelled" });
+    await flush();
+    expect(f.calls).toEqual(["initialize", "fanout", "reload", "initial_turn"]);
+    expect(f.settled()).toBe(false);
+    f.holds.fanout.resolve();
+    expect(await f.running).toEqual({
+      session: { id: "session", status: "cancelled", initialTurnId: "retained-turn" },
+      changed: false,
+    });
+  } finally {
+    await f.cleanup();
+  }
+});

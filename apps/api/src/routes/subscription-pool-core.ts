@@ -184,7 +184,7 @@ export function coreConnectRefused(
       return new HTTPException(personal ? 409 : 403, {
         message: personal
           ? `a private ${displayName} account is connected from your Personal workspace`
-          : `only an organization administrator can connect a new shared ${displayName} account; workspace administrators can reconnect the accounts their workspace manages`,
+          : `only an administrator of this workspace or of the organization can connect a ${displayName} account here`,
       });
   }
 }
@@ -194,7 +194,7 @@ function disconnectRefused(outcome: SubscriptionCoreDisconnectOutcome, displayNa
     throw new HTTPException(404, { message: `${displayName} account not found` });
   if (outcome === "forbidden")
     throw new HTTPException(403, {
-      message: `only an organization administrator can disconnect a shared ${displayName} account`,
+      message: `only an organization administrator can disconnect this ${displayName} account; a workspace administrator can disconnect only an account that serves just their workspace`,
     });
   if (outcome === "unresolved_redemption")
     throw new HTTPException(409, {

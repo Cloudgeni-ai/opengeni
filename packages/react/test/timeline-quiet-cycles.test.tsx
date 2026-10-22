@@ -4,6 +4,9 @@ import { MessageTimeline } from "../src";
 import { buildTimeline, groupTimeline, type TimelineGroup } from "../src/timeline";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -130,7 +133,7 @@ function opening(): SessionEvent[] {
 }
 
 function readable(events: SessionEvent[]): TimelineGroup[] {
-  return groupTimeline(buildTimeline(events), { readableTurns: true });
+  return groupTimeline(englishText, buildTimeline(englishText, events), { readableTurns: true });
 }
 
 function cycleRows(groups: TimelineGroup[]) {
@@ -194,7 +197,7 @@ describe("quiet wait cycles", () => {
       "notice",
     ]);
     expect(row!.items.filter((item) => item.kind === "tool-call")).toHaveLength(6);
-    const status = readableWorkStatus({ ...row!, work: row!.work! });
+    const status = readableWorkStatus(englishText, { ...row!, work: row!.work! });
     expect(status.kind).toBe("worked");
     expect(status.label).toBe("3 updates over");
     // From the first cycle's work to the end of its last wait.

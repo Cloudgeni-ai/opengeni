@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
 import * as opengeniDb from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createCompactionModelUsageEventState,
   createModelResponseEventState,
@@ -12,6 +12,9 @@ import {
   processSessionTitleModelUsageEvent,
   recordAuthoritativeModelCallFact,
 } from "../src/activities/agent-turn/model-usage";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 // Billing attribution of core Codex model calls (M3 PR 2c): every usage path
 // writes the served core connection into model_call_facts.connection_id.

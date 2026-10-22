@@ -7,7 +7,7 @@ import {
   stampDelegatedHumanAuthorization,
 } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { codexAccountJson } from "../src/routes/codex";
 
@@ -528,6 +528,13 @@ describe("Codex routes with an enabled cutover", () => {
       result = { kind: "refused", reason };
       const refused = await poll();
       expect({ reason, status: refused.status }).toEqual({ reason, status });
+      // A workspace's administrators may connect its own accounts (SUB-OWN-09),
+      // so a refusal on a workspace route names both kinds of administrator.
+      if (reason === "forbidden") {
+        expect(await refused.text()).toContain(
+          "only an administrator of this workspace or of the organization can connect a Codex account here",
+        );
+      }
     }
     // The cutover can change while token exchange is in flight. Re-read it
     // before deciding whether its core writer may still run.
@@ -793,13 +800,16 @@ describe("Codex routes with an enabled cutover", () => {
   test("the session account view and pin use the core binding", async () => {
     cutover("core");
     const sessionId = crypto.randomUUID();
-    mock("getSessionAuthorityProjection", async () => ({
-      sessionId,
-      rootSessionId: sessionId,
-      visibility: "workspace_shared",
-      ownerSubjectId: null,
+    mock("getSessionAuthorizationFacts", async () => ({
+      target: {
+        sessionId,
+        rootSessionId: sessionId,
+        visibility: "workspace_shared",
+        ownerSubjectId: null,
+        slackAccess: null,
+      },
+      caller: null,
     }));
-    mock("getSlackInteractionSessionAccessForSession", async () => null);
     const view = mock("getSubscriptionCoreSessionCodexAccounts", async () => ({
       accounts: [account],
       rotation: projection.rotation,

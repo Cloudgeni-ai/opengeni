@@ -1,14 +1,68 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildAgentCapabilities } from "@opengeni/runtime";
-import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
+import {
+  resolveSandboxRoute,
+  resolveMachineEnrollmentForTurn,
+} from "../src/activities/agent-turn/sandbox-establish";
 import { Agent, Runner, tool, type ModelRequest, type StreamEvent } from "@openai/agents";
-import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing";
+import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import { checkpointHistoryBeforeProviderDispatch } from "../src/activities/agent-turn/provider-dispatch-barrier";
 import { sandboxRouteTransitionCode } from "../src/activities/agent-turn/errors";
 
 describe("sandboxless attempt attachment boundary", () => {
+  test.each(["owner", "member", null])(
+    "an authorized offline personal machine still admits the %s turn",
+    async (subjectId) => {
+      const enrollment = {
+        id: "machine-enrollment",
+        workspaceRoot: "/srv/project",
+        scope: "user",
+      } as never;
+      const resolver = spyOn(db, "resolvePersonalMachineRouteForAttempt").mockResolvedValue({
+        enrollment,
+        liveConnection: null,
+      });
+      const ordinary = spyOn(db, "getEnrollment");
+      const live = spyOn(db, "getLiveEnrollmentConnection");
+      const authority = {
+        accountId: "account",
+        workspaceId: "workspace",
+        sessionId: "session",
+        turnId: "turn",
+        attemptId: "attempt",
+        executionGeneration: 2,
+        subjectId,
+      };
+      const sandbox = {
+        id: "machine",
+        scope: "user",
+        workspaceId: "workspace",
+        enrollmentId: "machine-enrollment",
+      } as never;
+      try {
+        expect(await resolveMachineEnrollmentForTurn({} as never, sandbox, authority)).toEqual({
+          enrollment,
+          liveConnection: null,
+        });
+        expect(resolver).toHaveBeenCalledWith(
+          {},
+          { ...authority, enrollmentId: "machine-enrollment" },
+        );
+        expect(ordinary).not.toHaveBeenCalled();
+        expect(live).not.toHaveBeenCalled();
+        resolver.mockResolvedValue(null);
+        await expect(
+          resolveMachineEnrollmentForTurn({} as never, sandbox, authority),
+        ).rejects.toThrow("was not admitted");
+      } finally {
+        resolver.mockRestore();
+        ordinary.mockRestore();
+        live.mockRestore();
+      }
+    },
+  );
   test.each(["attached before first turn", "attached during prior attempt"])(
     "binds native capabilities when %s",
     async () => {
@@ -18,7 +72,7 @@ describe("sandboxless attempt attachment boundary", () => {
         activeEpoch: 1,
         activeWorkingDir: null,
       } as never);
-      const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
+      const sandbox = spyOn(db, "getSandboxForAttempt").mockResolvedValue({
         id: "machine-1",
         kind: "selfhosted",
         enrollmentId: "enrollment-1",
@@ -27,7 +81,14 @@ describe("sandboxless attempt attachment boundary", () => {
       const eventing = { modelRunSettings: settings };
       try {
         const route = await resolveSandboxRoute({
-          input: { accountId: "account-1", workspaceId: "workspace-1", sessionId: "session-1" },
+          input: {
+            accountId: "account-1",
+            workspaceId: "workspace-1",
+            sessionId: "session-1",
+            attemptId: "attempt-2",
+          },
+          turn: { id: "turn-1", executionGeneration: 2 },
+          fileAuthoritySubjectId: null,
           settings,
           db: {},
           eventing,
@@ -37,6 +98,19 @@ describe("sandboxless attempt attachment boundary", () => {
           logicalSandboxSettings: settings,
         } as never);
         expect(route.machinePrimary).toBe(true);
+        expect(sandbox).toHaveBeenCalledWith(
+          {},
+          {
+            accountId: "account-1",
+            workspaceId: "workspace-1",
+            sessionId: "session-1",
+            attemptId: "attempt-2",
+            turnId: "turn-1",
+            executionGeneration: 2,
+            subjectId: null,
+          },
+          "machine-1",
+        );
         expect(eventing.modelRunSettings.sandboxBackend).toBe("selfhosted");
         expect(settings.sandboxBackend).toBe("none");
         const capabilities = buildAgentCapabilities(eventing.modelRunSettings, []);

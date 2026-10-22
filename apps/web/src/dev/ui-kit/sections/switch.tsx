@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch, type SwitchProps } from "@/components/ui/switch";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch, type SwitchProps } from "@opengeni/react/ui/switch";
 import linearLogo from "../../../../../../data/catalog/logos/linear-app-4b4a9f349c60.png";
 import posthogLogo from "../../../../../../data/catalog/logos/posthog-com-bc08ccdbe582.jpg";
 import { codexWorkspaceAccounts, connectedCapabilities, organization } from "../fixtures";
@@ -293,7 +293,7 @@ export default function SwitchSection() {
         ]}
         avoid={[
           "Inside a form with a Save button: use a checkbox",
-          "Choosing between two named options (Spread work | Primary only): use a segmented control",
+          "Choosing between two named options (Spread work | Primary first): use a segmented control",
           "Anything that needs a confirmation, like Delete or Revoke: use a button",
           "A disabled switch without a reason: say why and who can change it",
         ]}

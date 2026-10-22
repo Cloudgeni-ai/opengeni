@@ -13,11 +13,8 @@
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Context, Hono as HonoApp } from "hono";
 
 setDefaultTimeout(180_000);

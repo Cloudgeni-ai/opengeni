@@ -19,7 +19,9 @@ configuration, the native (no Docker) path, and the web-app walkthrough.
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
-Typecheck runs on the pinned stable TypeScript 7 `tsc`. See
+Typechecking and declaration emission run on exact-pinned `tsrs`, including compiler
+fixtures and packed-consumer checks. TypeScript dependencies remain only where metadata
+or editor/framework compatibility requires them. See
 [`docs/toolchain.md`](docs/toolchain.md) for what runs typecheck/lint/format and why.
 
 ## Checks
@@ -34,7 +36,7 @@ For quick local iteration, run:
 
 ```bash
 bun run typecheck
-bun test
+bun run test:unit
 ```
 
 For broader changes that touch persistence, orchestration, sandboxing, or the web/API boundary, also run:
@@ -47,6 +49,11 @@ bun run test:e2e
 ## Pull Requests
 
 - Keep changes focused.
+- Main merges follow the [merge-batcher runbook](docs/merge-batcher.md): full relevant
+  local suites, independent agent review, exact-head evidence comment, then
+  the configured ready signal after activation. During shadow rollout, the
+  existing reviewed merge process remains in force. Fast batch green is not
+  full-suite/release green; the native queue and vendor drafts stay inactive.
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.
@@ -81,33 +88,130 @@ Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename fi
 
 Release and publishing guidance starts here; executable truth lives in [`package.json`](package.json) and the workflow files under `.github/workflows/`. When publishable packages change, keep changesets, package manifests, and the release workflow expectations aligned.
 
+### Release credential boundary
+
+Store release credentials as **environment secrets**, never repository-wide
+secrets. Configure required human reviewers and disable administrator deployment
+bypass on each credential-bearing environment. Restrict deployment branches to
+`main`; `agent-release` additionally admits the `agent-v*` tag pattern and
+`desktop-release` the `desktop-v*` tag pattern (tag rules, not branch rules).
+Review tagged source before approving its signing job.
+
+| Environment | Secret names | Consumers |
+| --- | --- | --- |
+| `package-release` | `NPM_TOKEN` | Canary, stable, explicit package publication and deprecation |
+| `production-release` | `NPM_TOKEN` | Verified official release |
+| `embedded-release` | `NPM_TOKEN` | Embedded release |
+| `agent-release` | `OPENGENI_AGENT_MINISIGN_KEY`, `APPLE_ASC_KEY`, `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD`, `APPLE_DEVELOPER_ID` | Agent build and publication |
+| `desktop-release` | `APPLE_ASC_KEY`, `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD` | Desktop signing and notarization |
+| `public-release` | `OPENGENI_AGENT_MINISIGN_KEY` | Release candidate and exact-main CI agent bake |
+
+The CI API-image job selects `public-release` only on a `push` to `main`.
+All other CI events select `ci-build`, which must contain **no secrets** and
+requires no release approval. Do not approve a release merely to unblock a PR.
+Other jobs already using `public-release` also inherit its approval requirement.
+Environment approval happens before the job can access its environment secrets;
+the existing repository-level copies must be removed to establish this boundary.
+Repository administrators and organization owners can still change environment
+configuration, so this does not isolate credentials from administrators.
+
+Secret migration must preserve the exact existing values. GitHub does not expose
+them through its read API: use the original secure store, or a reviewed one-time
+transfer that seals each value to the destination environment's public key on the
+runner. Only sealed ciphertext may leave that runner. Verify destination secret
+metadata before deleting source entries, and remove one-time transfer workflows
+and artifacts afterward. Never print values or commit them to Git.
+
 `main` is the daily integration branch. GitHub's default branch stays `main`. `production` is the official source pointer, not a live-cluster deploy. Staging pins already-baked `canary-sha-<commit>` images from a `main` SHA; it does not auto-deploy on merge.
 
 **Promote `main` → `production`:** open a GitHub PR with base `production` and compare `main`. Merge with a **merge commit** (never squash, never GitHub rebase-and-merge: both rewrite SHAs and poison the next promote). The extra merge commit lives only on `production`. The next ship is the same PR shape again. Do not PR `production` back to `main` just because of that merge commit. Do not force-push `production`.
 
-**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies). Then merge `production` → `main` with a merge commit so daily work is not stranded. Squash remains allowed on PRs into `main`.
+**Hotfix:** PR `hotfix/*` into `production` (freeze-head source admission applies).
+Then bring the hotfix back to `main` so daily work is not stranded. Once the main
+queue is enabled, queue that PR with a merge commit. Before activation, follow
+the currently allowed main merge method and the same local-test/review process.
+Production protections and the incident hotfix lane are unchanged.
 
 **Official cut:** dispatch `open-version-pr.yml` on `main` (or set `VERSION_PR_ON_PUSH=true`). Merge the Version PR, promote that SHA to `production`, then `workflow_dispatch` the evidence-bound candidate / acceptance / publication workflows. Do not commit version bumps onto `production`. Official source ancestry is `origin/production`. The `production` pointer already exists; do not recreate it and do not force-push.
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
-**Canary packages:** dispatch `publish-canary.yml` on `main` with `source_sha` equal to that workflow run's exact `main` commit. The workflow, checked-out source, and publisher must all be that commit; an older ancestor is rejected. The workflow uses pinned Bun to build and pack, then the official publishing library under Bun with registry-token authentication and GitHub OIDC provenance. It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. It does not consume changeset files or move `latest`; a new package with no `latest` tag remains without one.
+**Canary packages:** dispatch `publish-canary.yml` on `main` with an exact
+`source_sha`. Selecting the workflow's own commit retains the ordinary publication
+path. An older source must be an ancestor of that frozen controller, an exact
+merged PR commit into protected `main`, and have successful latest exact-source
+main-push CI including Typecheck and unit tests, Deployment artifacts, and Workload
+image builds. PR heads, foreign repositories, unmerged commits, incomplete CI,
+failed/cancelled checks and unprotected branches are refused before source code
+executes. `package-release` environment approval remains in force.
+
+The controller stays at its real GitHub workflow SHA; a separate admitted-source
+worktree supplies the frozen manifests, build scripts and tarballs. Both use the
+same pinned Bun version, with separate frozen-lockfile installs. Current-head
+publication retains automatic npm provenance. Ancestor publication signs a SLSA
+statement with Sigstore, identifying the actual controller and selected source as
+distinct resolved inputs and the exact tarball SHA-512 as subject. The official
+publishing library verifies this supplied bundle before its registry write. Never
+override `GITHUB_SHA`, dispatch an untrusted workflow, or relabel controller bytes
+as source bytes. Source admission evidence and source-named Site pins are retained.
+The successful publisher run's head is the controller, not necessarily the source;
+consumers must select `site-package-versions-<source_sha>`, not infer source from head.
+
+The trusted publisher is bundled from `scripts/publish-canary-node.ts` by Bun,
+then executed by pinned native Node 22.20.0. Build/pack subprocesses still use Bun.
+This is necessary for the official Sigstore/TUF verifier: Bun 1.4.0 rejects the
+default ECDSA digest used by its trust-root signature verification. The offline
+regression verifies the real packaged TUF root and rejects a tampered root; no
+signature checks, keys or thresholds are overridden. Signed source bundles are
+retained in `canary-source-provenance-<source_sha>` and linked by byte count and
+SHA-256 from the V2 custody records before write intent. They are signing evidence,
+not registry acceptance. Sanitized write diagnostics never change `WRITE_UNKNOWN`.
+
+Ancestor source signing permits at most three complete attestation attempts for
+allowlisted transient Rekor transport/HTTP failures, with 1s then 2s backoff and
+the existing 30s per-request timeout. This includes a reset while reading a
+successful HTTP response body, outside Sigstore's own HTTP retry boundary.
+An uncertain Rekor append may already exist; a fresh signature for the identical
+statement may add another log entry. Only the returned, retained bundle passes
+through official verification before npm PUT. Identity, certificate, evidence and
+permanent HTTP failures are not retried. npm writes still have zero retries;
+exhausted signing stops before that package's write intent, without undoing
+earlier acknowledgements or making an incomplete cohort reconcilable. After a
+controller repair, the lifecycle owner may dispatch the normally merged current
+controller with the same admitted `source_sha` and a fresh run/version; do not
+rerun the old controller or replay any partially published version.
+
+It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0`
+publishes `1.0.2-canary.N`, skipping a retired patch), without consuming changesets
+or moving an existing `latest` tag. Registry first-publication behavior is unchanged.
 
 All archives are packed and frozen before the first write. Each topological
 publication retains an intent and a positive library HTTP acknowledgement before
-the next write; write retries are disabled. Receipt visibility is checked afterward
-in one bounded read-only phase, preserving latest, archive integrity, canary tag
-and provenance metadata checks. Site pins appear only after the complete cohort
-matches. Acknowledgements are not independent signed-byte acceptance. An uncertain
-write stops without replay. Bounded safe receipts survive ordinary workflow failure;
-a lost runner can still lose its artifact. Existing versions are never repaired in place.
-The final gate rereads the complete cohort within the original shared deadline,
-read quota and custody caps. These reads do not claim an atomic registry snapshot.
-Post-write receipt polling selects the current dist-tags document and the exact
-immutable version manifest rather than unrelated historical versions. Both GETs
-count toward the same 256-request budget and share one per-observation signal;
-the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
-and occupied-version/stable-tag guards still use their existing metadata path.
+the next write; write retries are disabled. Acknowledgements are not independent
+signed-byte acceptance. An uncertain write stops without replay. Bounded safe
+receipts survive ordinary workflow failure, retained per attempt as
+`canary-publication-receipts-<source_sha>-<attempt>`; a lost runner can still lose
+its artifact. Existing versions are never repaired in place.
+
+npm accepts each write with `202 Accepted` and processes it afterwards; the version
+is unreadable until then. That usually takes 3-10 minutes and has taken more than
+18 minutes for the largest archives. The `publish` job therefore ends after the
+acknowledged write phase and hands its frozen cohort (names, versions, previous
+`latest`, SHA-512 integrity) to the credential-free `confirm` job as a job output.
+`confirm` polls each still-invisible version with backoff (5s doubling to one
+minute) for one 30-minute window, treating timeouts, 429 and 5xx as "not yet".
+Once every version has been seen it rereads the complete cohort, preserving the
+latest, archive integrity, canary tag and provenance checks, and only then uploads
+`site-package-versions-<source_sha>`. A canary tag already moved to a later canary
+is accepted; an older one is still pending. Waiting reads keep one observation
+record each; the final complete-cohort reread retains full response custody in
+`canary-confirmation-receipts-<source_sha>-<attempt>`. If npm needs longer than
+one window, re-run the failed `confirm` job: it reuses the publish job's output,
+publishes nothing and turns the same run green. A moved `latest`, different
+integrity or invalid identity fails immediately. Polling selects the current
+dist-tags document and the exact immutable version manifest rather than unrelated
+historical versions. Pre-write discovery and occupied-version/stable-tag guards
+still use their existing metadata path.
 
 **Receipt-only recovery:** after a failed canary workflow has acknowledged its
 entire cohort, `reconcile-canary-publication.yml` can observe that exact source,
@@ -115,10 +219,24 @@ run and attempt without publishing again. The protected current controller reads
 historical source only as immutable JSON data. It requires the original provider
 failure, absent Site artifact, bounded receipt artifact, complete linked positive
 acknowledgements and zero unknown writes. It verifies actual archive/manifest
-hashes and official GitHub provenance, then runs the unchanged bounded metadata
-poller and final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
-unsupported producer protocols, changed latest or superseded canary tags fail
-closed; this command cannot repair tags, rebuild packages or dispatch another run.
+hashes and official GitHub provenance, then runs the shared metadata poller and
+final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
+unsupported producer protocols, changed latest or a canary tag older than the
+publication fail closed; this command cannot repair tags, rebuild packages or
+dispatch another run. It applies only when the publish job itself failed after
+acknowledging the whole cohort. When only the `confirm` job failed, re-run that
+job instead; reconciliation holds and says so. Every hold records and prints its
+exact reason (`RECONCILIATION_HELD.reason`).
+This verifier supports only same-source receipt protocol V1. Ancestor publication
+records truthful split-source V2 identities; if it fails, retain those receipts and
+stop for a separately reviewed V2 recovery path. Do not feed them to V1 recovery,
+manufacture a failed canonical run, replay unknown writes, or rewrite the source.
+After diagnosis and independent review, an authorized release owner may explicitly
+supersede an incomplete publication with a fresh workflow run and its new unique
+version. That does not repair or relabel the old unknown write, and must not reuse
+its version. There is no automatic retry or continuation of an unknown cohort.
+Its immutable ops producer closure must be explicitly audited and re-pinned when
+publisher/controller code changes; new hashes are never implicitly trusted.
 The new `canary-publication-reconciliation-*` receipt and
 `reconciled-site-package-versions-*` artifact retain both controller and failed
 origin identities and set `promotionEligible: false`. They never replace the

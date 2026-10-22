@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { parseSync } from "oxc-parser";
 
 describe("web management chunk boundary", () => {
@@ -13,19 +14,18 @@ describe("web management chunk boundary", () => {
     expect(group?.[0]).toContain("entriesAwareMergeThreshold: 4 * 1024");
     const formTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
-      const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+      const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
       for (const module of [
-        "components/ui/dialog.tsx",
-        "components/ui/textarea.tsx",
-        "components/settings/organization-workspace-administration.tsx",
+        "packages/react/src/ui/dialog.tsx",
+        "packages/react/src/ui/textarea.tsx",
+        "apps/web/src/components/settings/organization-workspace-administration.tsx",
       ]) {
         expect(formTest.test(moduleId(module))).toBe(true);
       }
       for (const module of [
-        "routes/session.tsx",
-        "routes/workspace-settings.tsx",
-        "components/organization-api-keys-section.tsx",
+        "packages/react/src/app/routes/session.tsx",
+        "apps/web/src/routes/workspace-settings.tsx",
+        "apps/web/src/components/organization-api-keys-section.tsx",
       ]) {
         expect(formTest.test(moduleId(module))).toBe(false);
       }
@@ -45,7 +45,7 @@ describe("web management chunk boundary", () => {
     const settingsTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+        path.posix.join("/repo/apps/web/src", relative).replaceAll("/", separator);
       for (const module of [
         "components/organization-api-keys-section.tsx",
         "routes/workspace-api-keys.tsx",
@@ -54,7 +54,11 @@ describe("web management chunk boundary", () => {
       ]) {
         expect(settingsTest.test(moduleId(module))).toBe(true);
       }
-      for (const module of ["routes/session.tsx", "context.tsx", "lib/permissions.ts"]) {
+      for (const module of [
+        "../../../packages/react/src/app/routes/session.tsx",
+        "context.tsx",
+        "../../../packages/react/src/app/lib/permissions.tsx",
+      ]) {
         expect(settingsTest.test(moduleId(module))).toBe(false);
       }
     }
@@ -101,9 +105,9 @@ describe("web management chunk boundary", () => {
       }
       expect(sharedTest.test(iconId("plus"))).toBe(true);
       for (const module of [
-        "apps/web/src/routes/session.tsx",
-        "apps/web/src/routes/sessions-index.tsx",
-        "apps/web/src/components/credit-required-prompt.tsx",
+        "packages/react/src/app/routes/session.tsx",
+        "packages/react/src/app/routes/sessions-index.tsx",
+        "packages/react/src/app/components/credit-required-prompt.tsx",
         "apps/web/src/components/settings/settings-frame.tsx",
         "apps/web/src/components/organization-api-keys-section.tsx",
         "node_modules/lucide-react/dist/esm/createLucideIcon.mjs",
@@ -128,14 +132,14 @@ describe("web management chunk boundary", () => {
     const managementTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) =>
-        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+        path.posix.join("/repo/apps/web/src", relative).replaceAll("/", separator);
       for (const module of ["diff-view", "revision-history", "error-message"]) {
         expect(managementTest.test(moduleId(`components/ui/${module}.tsx`))).toBe(true);
       }
       for (const module of [
-        "routes/session.tsx",
-        "components/rail/session-header.tsx",
-        "components/common.tsx",
+        "../../../packages/react/src/app/routes/session.tsx",
+        "../../../packages/react/src/app/components/rail/session-header.tsx",
+        "../../../packages/react/src/app/components/common.tsx",
       ]) {
         expect(managementTest.test(moduleId(module))).toBe(false);
       }

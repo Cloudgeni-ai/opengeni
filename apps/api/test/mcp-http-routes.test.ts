@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import * as db from "@opengeni/db";
 import * as core from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { AccessContext } from "@opengeni/contracts";
 import { createApp } from "../src/app";
 import * as gateway from "../src/workspace-tool-gateway";

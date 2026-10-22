@@ -41,7 +41,7 @@ describe("scheduled task Connected Machine dispatch", () => {
     const source = await Bun.file(
       new URL("../src/activities/scheduled-tasks.ts", import.meta.url),
     ).text();
-    const acceptance = source.indexOf("if (generatedTarget && task.agentConfig.machineTarget)");
+    const acceptance = source.indexOf("if (generatedTarget && resolvedMachineTarget)");
     const acceptedExecution = source.indexOf("acceptedExecution", acceptance);
     const sessionCreate = source.indexOf("const sessionInput:", acceptedExecution);
     const sessionInitialize = source.indexOf(

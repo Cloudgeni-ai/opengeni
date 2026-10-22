@@ -43,7 +43,7 @@ or inherited permissions, not zero authority; `firstPartyMcpTools: []` alone
 narrows model visibility, not the permission ceiling.
 
 With an effective permission ceiling of `[]`, tool preparation skips remote
-OpenGeni-delegated MCP servers before token signing, connection, or catalog
+Opengeni-delegated MCP servers before token signing, connection, or catalog
 discovery, including eager and deferred startup. The broad `opengeni` server
 with an empty tool selection is intentionally silent. Requested first-party
 tools, or dedicated first-party `files`/`docs` servers, remain absent from the

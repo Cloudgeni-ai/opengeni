@@ -11,7 +11,7 @@ import {
   type SessionEvent,
   type WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
-import { assertScreenshotPainted } from "@opengeni/testing";
+import { assertScreenshotPainted } from "@opengeni/testing/screenshot";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
 import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";

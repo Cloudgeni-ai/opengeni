@@ -455,6 +455,26 @@ export const browserRevisionComponents = pgTable(
   }),
 );
 
+/** One ended extension connection generation of an attached browser profile.
+ *  `agent` entries carry the machine bridge's own observation; `server`
+ *  entries are inferred when a generation ended without one (an older agent,
+ *  or an agent restart that lost its in-memory record). */
+export type AttachedBrowserConnectionHistoryEntry = {
+  connectionGeneration: string;
+  reason:
+    | "browser_closed_port"
+    | "browser_message_invalid"
+    | "browser_output_failed"
+    | "native_host_lost"
+    | "agent_rejected"
+    | "agent_restarted"
+    | "unreported";
+  detail: string | null;
+  endedAt: string;
+  connectedMs: number | null;
+  source: "agent" | "server";
+};
+
 export const attachedBrowserDevices = pgTable(
   "attached_browser_devices",
   {
@@ -477,6 +497,10 @@ export const attachedBrowserDevices = pgTable(
     }).notNull(),
     tabCount: integer("tab_count").notNull(),
     capabilities: jsonb("capabilities").$type<AttachedBrowserDeviceCapabilities>().notNull(),
+    connectionHistory: jsonb("connection_history")
+      .$type<AttachedBrowserConnectionHistoryEntry[]>()
+      .notNull()
+      .default([]),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
     disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -519,6 +543,12 @@ export const attachedBrowserDevices = pgTable(
         and ${table.tabCount} between 0 and 100000
         and jsonb_typeof(${table.capabilities}) = 'object'
         and octet_length(${table.capabilities}::text) between 2 and 65536`,
+    ),
+    connectionHistoryValid: check(
+      "attached_browser_devices_connection_history_check",
+      sql`jsonb_typeof(${table.connectionHistory}) = 'array'
+        and jsonb_array_length(${table.connectionHistory}) <= 50
+        and octet_length(${table.connectionHistory}::text) <= 65536`,
     ),
   }),
 );
@@ -748,6 +778,31 @@ export const browserSessions = pgTable(
           ${table.lifecycle} not in ('repair_required', 'lost', 'failed')
           and ${table.failureCode} is null
         )`,
+    ),
+  }),
+);
+
+/** A completed browser download published as a workspace file before its
+ * browser's working directory went away (see migration 0819), so it can still
+ * be saved into the task's workspace while the browser is not running. */
+export const browserSessionRetainedDownloads = pgTable(
+  "browser_session_retained_downloads",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    browserSessionId: uuid("browser_session_id").notNull(),
+    downloadId: uuid("download_id").notNull(),
+    download: jsonb("download").$type<Record<string, unknown>>().notNull(),
+    fileId: uuid("file_id").notNull(),
+    uploadId: uuid("upload_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.browserSessionId, table.downloadId] }),
+    file: index("browser_session_retained_downloads_file_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.fileId,
     ),
   }),
 );

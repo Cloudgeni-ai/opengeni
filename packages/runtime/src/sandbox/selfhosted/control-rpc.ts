@@ -22,6 +22,15 @@
 
 import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { CapabilityUnavailableReason } from "@opengeni/contracts";
+import {
+  AGENT_LINK_LOST_HEADER,
+  AGENT_UNANSWERED_HEADER,
+  AgentLinkLostError,
+  ControlConnectionReplacedError,
+  ControlReplyRecovery,
+  NO_WAKE_HEADER,
+  responderWaitExhausted,
+} from "./control-replay";
 
 // Re-export the contracts reason union locally so callers of the mapping below
 // don't have to import from two places. CapabilityUnavailableReason here is the
@@ -50,11 +59,38 @@ export interface ControlRpc {
   request(
     subject: string,
     req: ControlRequest,
-    opts: { timeoutMs: number },
+    opts: {
+      timeoutMs: number;
+      /** Whether the agent connection the subject names is still the
+       * enrollment's live one. A transport asks it after an attempt fails;
+       * false means another agent process holds the connection now, so the
+       * transport stops retrying on the subject and answers with a
+       * connection-replaced AGENT_OFFLINE. That does not prove the old process
+       * exited. Unknown is true. */
+      connectionCurrent?: () => Promise<boolean>;
+      /** A housekeeping request that must never wake a sleeping sandbox (see
+       * `requestWithoutWaking`): one attempt with NO_WAKE_HEADER, no replay,
+       * no redelivery and nothing done on "no responders". When the agent
+       * does not answer it, the response is an AGENT_OFFLINE error carrying
+       * AGENT_UNANSWERED_DETAIL_KEY. */
+      noWake?: boolean;
+    },
   ): Promise<ControlResponse>;
 }
 
 /** The control-plane RPC subject for one exact claimed daemon instance. */
+const AGENT_RPC_SUBJECT = /^agent\.([^.]+)\.([^.]+)\.connection\.([^.]+)\.rpc$/u;
+
+/** The exact agent connection an RPC subject from `subjectFor` addresses. */
+export function parseAgentRpcSubject(
+  subject: string,
+): { workspaceId: string; agentId: string; connectionInstanceId: string } | null {
+  const match = AGENT_RPC_SUBJECT.exec(subject);
+  return match
+    ? { workspaceId: match[1]!, agentId: match[2]!, connectionInstanceId: match[3]! }
+    : null;
+}
+
 export function subjectFor(
   workspaceId: string,
   agentId: string,
@@ -104,6 +140,11 @@ export class SelfhostedControlError extends Error {
    *  (a post-send timeout is ambiguous — at-least-once — and must not be re-sent
    *  unless the op is read-only). Never set for an agent-returned error. */
   readonly neverSent: boolean;
+  /** The agent connection the request was sent to was replaced by another
+   *  agent process, so the transport stopped waiting on its subject. The old
+   *  process may still run what it was running. Only the transport sets it
+   *  (with `neverSent` when the request reached no responder). */
+  readonly connectionReplaced: boolean;
   /** Exact inner control request that produced this failure. Safe opaque
    * correlation only; never a NATS subject, token, or machine credential. */
   readonly controlRequestId: string | null;
@@ -120,6 +161,7 @@ export class SelfhostedControlError extends Error {
     osNotFound?: boolean;
     payloadTooLarge?: boolean;
     neverSent?: boolean;
+    connectionReplaced?: boolean;
     controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
@@ -133,6 +175,7 @@ export class SelfhostedControlError extends Error {
     this.osNotFound = input.osNotFound ?? false;
     this.payloadTooLarge = input.payloadTooLarge ?? false;
     this.neverSent = input.neverSent ?? false;
+    this.connectionReplaced = input.connectionReplaced ?? false;
     this.controlRequestId = input.controlRequestId ?? null;
     this.detail = input.detail ?? {};
   }
@@ -178,6 +221,7 @@ export function agentErrorToControlError(
         retryable: false,
         agentOffline: true,
         neverSent: detail[NEVER_SENT_DETAIL_KEY] === "1",
+        connectionReplaced: detail[CONNECTION_REPLACED_DETAIL_KEY] === "1",
         controlRequestId,
         detail,
       });
@@ -365,11 +409,145 @@ export function execDeadlineHint(seconds: number): string {
  *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
 export const NEVER_SENT_DETAIL_KEY = "_never_sent";
 
+/** The reserved `detail` key the transport sets to "1" when the agent
+ *  connection a request was sent to was replaced by a new one.
+ *  `agentErrorToControlError` reads it into
+ *  `SelfhostedControlError.connectionReplaced`. Reserved (never sent by the agent). */
+export const CONNECTION_REPLACED_DETAIL_KEY = "_connection_replaced";
+
+/** The synthesized AGENT_OFFLINE for a request whose agent connection was
+ *  replaced. Neutral about why: a restart and a second process taking over
+ *  look the same. `neverSent` when it reached no responder. */
+export function connectionReplacedAgentError(neverSent: boolean): AgentError {
+  return {
+    code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    message: neverSent
+      ? "The machine's agent was replaced before this request reached it, so it did not run."
+      : "The machine's agent was replaced while this request was in flight, so its outcome is unknown.",
+    retryable: false,
+    detail: {
+      [CONNECTION_REPLACED_DETAIL_KEY]: "1",
+      ...(neverSent ? { [NEVER_SENT_DETAIL_KEY]: "1" } : {}),
+    },
+  };
+}
+
+/** The reserved `detail` key on a command's outcome-unknown error after its
+ *  agent connection was replaced: "1" when the agent had accepted the
+ *  command's start, "0" when that was never confirmed. Reserved (never sent
+ *  by the agent). */
+export const START_CONFIRMED_DETAIL_KEY = "_start_confirmed";
+
+/** A command whose agent connection was replaced before its outcome was
+ *  known. A new connection does not prove the old agent process is gone, so
+ *  the outcome is unknown. Each clause states only what is known: whether the
+ *  agent had accepted the start, and whether a stop request has actually been
+ *  recorded for it. */
+export function commandOutcomeUnknownAfterReplacementAgentError(options: {
+  startConfirmed: boolean;
+  stopRequested: boolean;
+}): AgentError {
+  const outcome = options.startConfirmed
+    ? "The machine's agent was replaced while this command was running, so its outcome is " +
+      "unknown: it may still be running, or it may have finished."
+    : "The machine's agent was replaced before this command's outcome was known: it may " +
+      "not have started, may still be running, or may have finished.";
+  return {
+    code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    message: options.stopRequested ? `${outcome} A stop has been requested for it.` : outcome,
+    retryable: false,
+    detail: {
+      [CONNECTION_REPLACED_DETAIL_KEY]: "1",
+      [START_CONFIRMED_DETAIL_KEY]: options.startConfirmed ? "1" : "0",
+    },
+  };
+}
+
+/** The reserved `detail` key the transport sets to "1" when a no-responder fault
+ *  comes after it already waited out its reconnect window for that exact process.
+ *  Re-issuing would only wait the same window again. Reserved (never sent by the
+ *  agent). */
+export const RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY = "_responder_wait_exhausted";
+
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
  *  when no agent responds on the subject at all. `neverSent` marks that the request
  *  provably never reached the machine (no connection / no responder), which makes it
  *  safe to re-issue for ANY op kind; leave it false for an AMBIGUOUS transport error
  *  (a connection torn mid-request may have delivered the op). */
+/** Detail key of the error a no-wake request gets when its agent did not
+ * answer it: why ("asleep", "away" or "busy" from a compute host, or
+ * "no_responders", "link_lost", "timeout", "offline" or "transport"). The
+ * request may still have reached the agent, so it never marks never-sent. */
+export const AGENT_UNANSWERED_DETAIL_KEY = "_agent_unanswered";
+
+function notAnsweredControlResponse(requestId: string, reason: string): ControlResponse {
+  return {
+    requestId,
+    error: {
+      code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+      message: "the agent did not answer a request that may not wake its sandbox",
+      retryable: false,
+      detail: {
+        [AGENT_UNANSWERED_DETAIL_KEY]: /^[a-z_]{1,32}$/u.test(reason) ? reason : "unanswered",
+      },
+    },
+    result: undefined,
+  };
+}
+
+/** Why an agent did not answer a no-wake request, or null when it answered.
+ * Only a transport synthesizes AGENT_OFFLINE and TIMEOUT, so from a no-wake
+ * request either means the agent did not answer. */
+export function agentNotAnsweredReason(
+  error: Pick<AgentError, "code" | "detail"> | undefined | null,
+): string | null {
+  if (!error) return null;
+  const reason = error.detail?.[AGENT_UNANSWERED_DETAIL_KEY];
+  if (reason) return reason;
+  if (error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) return "offline";
+  if (error.code === ErrorCode.ERROR_CODE_TIMEOUT) return "timeout";
+  return null;
+}
+
+/** A control failure of a no-wake request whose agent did not answer it. */
+export function isAgentNotAnswered(error: unknown): boolean {
+  return error instanceof SelfhostedControlError && agentNotAnsweredReason(error) !== null;
+}
+
+/** What a housekeeping request got: the agent's answer, or that the agent did
+ * not answer it, and why. Not answered records nothing; the agent's own
+ * operation inventory, sent while it is talking, takes over. */
+export type NoWakeReply =
+  | { answered: true; response: ControlResponse }
+  | { answered: false; reason: string };
+
+/**
+ * Send one housekeeping request that never wakes a sleeping sandbox. A compute
+ * host hands it to the agent only while the sandbox runs and the agent holds
+ * the subscription, and otherwise answers it itself as unanswered; a Connected
+ * Machine's agent simply receives it. It never asks the control service to
+ * wake anything, never replays, and is never retried here.
+ */
+export async function requestWithoutWaking(
+  rpc: ControlRpc,
+  subject: string,
+  req: ControlRequest,
+  opts: { timeoutMs: number },
+): Promise<NoWakeReply> {
+  const response = await rpc.request(subject, req, { timeoutMs: opts.timeoutMs, noWake: true });
+  const reason = agentNotAnsweredReason(response.error);
+  return reason === null ? { answered: true, response } : { answered: false, reason };
+}
+
+/** The same transport with every request sent as a no-wake housekeeping
+ * request (see `requestWithoutWaking`). */
+export function withoutWaking(rpc: ControlRpc): ControlRpc {
+  return {
+    request: async (subject, req, opts) =>
+      await rpc.request(subject, req, { ...opts, noWake: true }),
+  };
+}
+
 export function offlineAgentError(
   message = "no agent responded (offline)",
   neverSent = false,
@@ -404,11 +582,16 @@ export function timeoutAgentError(message = "the agent did not respond in time")
  * surfaces `agent_offline` for every request rather than throwing.
  */
 export interface NatsRequestConnection {
+  /** The transport preserves response headers for wire capability negotiation. */
+  supportsHeaders?: boolean;
   request(
     subject: string,
     payload: Uint8Array,
-    opts: { timeout: number },
-  ): Promise<{ data: Uint8Array }>;
+    /** Only safe probes or immutable journaled deliveries may opt into resend.
+     * `headers` are request headers of a plain request (no `resendOn`), sent
+     * only by a transport that `supportsHeaders`. */
+    opts: { timeout: number; resendOn?: string; headers?: Record<string, string> },
+  ): Promise<{ data: Uint8Array; headers?: { get(name: string): string } }>;
 }
 
 /** A NATS error whose `code` marks "no responder on the subject" (NATS 503). The
@@ -468,12 +651,27 @@ function isRequestTimeoutError(err: unknown): boolean {
  * shape does not change.
  */
 export class NatsControlRpc implements ControlRpc {
+  private readonly recovery: ControlReplyRecovery;
   private readonly connect: () => Promise<NatsRequestConnection | null>;
   private connection: NatsRequestConnection | undefined;
   private connecting: Promise<NatsRequestConnection | null> | undefined;
+  private readonly connectionCurrent: ((subject: string) => Promise<boolean>) | undefined;
 
-  constructor(connect: () => Promise<NatsRequestConnection | null>) {
+  constructor(
+    connect: () => Promise<NatsRequestConnection | null>,
+    options: {
+      /** Transient-failure recovery allowance beyond the operation timeout (default two minutes). */
+      recoveryMs?: number;
+      /** See ControlReplyRecovery: acts on each "no responders" of a replayable
+       * request before the same delivery is retried. */
+      onNoResponders?: (subject: string) => Promise<boolean>;
+      /** The `connectionCurrent` check of a request that brings none. */
+      connectionCurrent?: (subject: string) => Promise<boolean>;
+    } = {},
+  ) {
     this.connect = connect;
+    this.recovery = new ControlReplyRecovery(options.recoveryMs, undefined, options.onNoResponders);
+    this.connectionCurrent = options.connectionCurrent;
   }
 
   private async resolveConnection(): Promise<NatsRequestConnection | null> {
@@ -505,9 +703,24 @@ export class NatsControlRpc implements ControlRpc {
   async request(
     subject: string,
     req: ControlRequest,
-    opts: { timeoutMs: number },
+    requestOpts: {
+      timeoutMs: number;
+      connectionCurrent?: () => Promise<boolean>;
+      noWake?: boolean;
+    },
   ): Promise<ControlResponse> {
+    const fallbackCurrent = this.connectionCurrent;
+    const opts = {
+      timeoutMs: requestOpts.timeoutMs,
+      connectionCurrent:
+        requestOpts.connectionCurrent ??
+        (fallbackCurrent ? async () => await fallbackCurrent(subject) : undefined),
+    };
     const conn = await this.resolveConnection();
+    if (requestOpts.noWake) {
+      if (!conn) return notAnsweredControlResponse(req.requestId, "offline");
+      return await this.requestWithoutWaking(conn, subject, req, requestOpts.timeoutMs);
+    }
     if (!conn) {
       // No NATS configured / not reachable → the agent is unaddressable → offline.
       // The request was never published (no connection) → NEVER SENT: safe to re-issue.
@@ -516,8 +729,24 @@ export class NatsControlRpc implements ControlRpc {
     const payload = ControlRequest.encode(req).finish();
     let reply: { data: Uint8Array };
     try {
-      reply = await conn.request(subject, payload, { timeout: opts.timeoutMs });
+      reply = await this.recovery.request(
+        conn,
+        subject,
+        payload,
+        opts.timeoutMs,
+        opts.connectionCurrent,
+      );
     } catch (err) {
+      // The link that carried it ended unanswered: it may have been
+      // delivered, so this is the same ambiguous blip as a timeout.
+      const lostLink = err instanceof AgentLinkLostError;
+      if (err instanceof ControlConnectionReplacedError) {
+        return {
+          requestId: req.requestId,
+          error: connectionReplacedAgentError(err.neverSent),
+          result: undefined,
+        };
+      }
       const denied = natsAuthorizationFailure(err);
       if (denied) throw denied;
       // The client rejects this before publishing. Keep the healthy connection;
@@ -540,12 +769,32 @@ export class NatsControlRpc implements ControlRpc {
         };
       }
       // Re-allow a future request to re-dial if the cached conn was torn down.
-      if (isNoRespondersError(err)) {
+      const noResponders = isNoRespondersError(err);
+      // A one-shot attempt (no replay) that failed: say so when its connection
+      // was replaced, as the replay retries do.
+      if (
+        (noResponders || lostLink || isRequestTimeoutError(err)) &&
+        opts.connectionCurrent &&
+        !(await opts.connectionCurrent().catch(() => true))
+      ) {
+        return {
+          requestId: req.requestId,
+          error: connectionReplacedAgentError(noResponders),
+          result: undefined,
+        };
+      }
+      if (noResponders) {
         // No subscriber on the subject at all → the request reached no responder and
         // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
-        return offlineControlResponse(req.requestId, true);
+        const offline = offlineControlResponse(req.requestId, true);
+        // The reply recovery already waited its whole window for this process
+        // to come back; say so, so callers do not wait it again.
+        if (responderWaitExhausted(err) && offline.error) {
+          offline.error.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] = "1";
+        }
+        return offline;
       }
-      if (isRequestTimeoutError(err)) {
+      if (lostLink || isRequestTimeoutError(err)) {
         // A responder may exist but the request timed out → a transient blip. AMBIGUOUS
         // (the op may have run and only the reply was lost) — never marked never-sent.
         return timeoutControlResponse(req.requestId);
@@ -555,23 +804,61 @@ export class NatsControlRpc implements ControlRpc {
       this.connection = undefined; // force a re-dial next time
       return offlineControlResponse(req.requestId);
     }
-    // A received but malformed response is not evidence of an offline agent.
-    // Keep decoding outside the transport catch so corruption cannot become a
-    // retryable refresh outage (or license retry of an already-sent operation).
+    return decodeControlReply(req.requestId, reply.data);
+  }
+
+  /** One no-wake attempt: no replay negotiation (its probe is a request too),
+   * no redelivery and no "no responders" hook, so nothing here wakes a
+   * sandbox or waits for one. */
+  private async requestWithoutWaking(
+    conn: NatsRequestConnection,
+    subject: string,
+    req: ControlRequest,
+    timeoutMs: number,
+  ): Promise<ControlResponse> {
+    const payload = ControlRequest.encode(req).finish();
+    let reply: { data: Uint8Array; headers?: { get(name: string): string } };
     try {
-      return ControlResponse.decode(reply.data);
-    } catch {
-      return {
-        requestId: req.requestId,
-        error: {
-          code: ErrorCode.ERROR_CODE_PROTOCOL,
-          message: "The machine returned a malformed control response.",
-          retryable: false,
-          detail: {},
-        },
-        result: undefined,
-      };
+      reply = await conn.request(subject, payload, {
+        timeout: timeoutMs,
+        ...(conn.supportsHeaders ? { headers: { [NO_WAKE_HEADER]: "1" } } : {}),
+      });
+    } catch (err) {
+      const denied = natsAuthorizationFailure(err);
+      if (denied) throw denied;
+      if (isNoRespondersError(err))
+        return notAnsweredControlResponse(req.requestId, "no_responders");
+      if (isRequestTimeoutError(err)) return notAnsweredControlResponse(req.requestId, "timeout");
+      this.connection = undefined; // force a re-dial next time
+      return notAnsweredControlResponse(req.requestId, "transport");
     }
+    if (reply.data.byteLength === 0) {
+      const unanswered = reply.headers?.get(AGENT_UNANSWERED_HEADER);
+      if (unanswered) return notAnsweredControlResponse(req.requestId, unanswered);
+      if (reply.headers?.get(AGENT_LINK_LOST_HEADER) === "1")
+        return notAnsweredControlResponse(req.requestId, "link_lost");
+    }
+    return decodeControlReply(req.requestId, reply.data);
+  }
+}
+
+/** A received but malformed response is not evidence of an offline agent.
+ * Decoding stays outside the transport catch so corruption cannot become a
+ * retryable refresh outage (or license retry of an already-sent operation). */
+function decodeControlReply(requestId: string, data: Uint8Array): ControlResponse {
+  try {
+    return ControlResponse.decode(data);
+  } catch {
+    return {
+      requestId,
+      error: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "The machine returned a malformed control response.",
+        retryable: false,
+        detail: {},
+      },
+      result: undefined,
+    };
   }
 }
 

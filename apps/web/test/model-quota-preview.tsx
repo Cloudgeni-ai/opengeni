@@ -9,10 +9,10 @@ import {
 import { ChatComposer, MessageTimeline, ModelPolicyPicker, useComposer } from "@opengeni/react";
 import type { ClientModel, Session } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../../../packages/react/test/fake-client";
-import { FailedSessionBanner } from "../src/components/session/failed-session-banner";
-import { ModelRecoveryNotice } from "../src/components/session/model-recovery-notice";
-import { Button } from "../src/components/ui/button";
-import { currentModelRecovery } from "../src/lib/model-recovery";
+import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
+import { ModelRecoveryNotice } from "@opengeni/react/app/components/session/model-recovery-notice";
+import { Button } from "@opengeni/react/ui/button";
+import { currentModelRecovery } from "@opengeni/react/app/lib/model-recovery";
 import "../src/styles.css";
 
 // Production components/styles; synthetic provider evidence and retry receipt only.

@@ -2,6 +2,7 @@
 
 import { ChevronRightIcon } from "lucide-react";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { createContext, useContext, type ComponentProps, type Ref } from "react";
 import { cn } from "../lib/cn";
 import {
@@ -14,6 +15,8 @@ import {
 const MENU_MOTION_CLASS =
   "data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
+
+const DropdownMenuContainedPortal = containedPortal(DropdownMenuPrimitive.Portal);
 
 type DropdownMenuSourceContextValue = {
   source: HTMLElement | null;
@@ -62,7 +65,7 @@ function DropdownMenuContent({
   const source = useContext(DropdownMenuSourceContext);
   const portalStyle = usePortalTokenStyle(source?.source ?? null);
   return (
-    <DropdownMenuPrimitive.Portal>
+    <DropdownMenuContainedPortal>
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
@@ -75,7 +78,7 @@ function DropdownMenuContent({
         style={{ ...portalStyle, ...style }}
         {...props}
       />
-    </DropdownMenuPrimitive.Portal>
+    </DropdownMenuContainedPortal>
   );
 }
 

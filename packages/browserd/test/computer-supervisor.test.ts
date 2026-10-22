@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { UnsettledCleanupError } from "../src/cleanup-error";
 import type {
@@ -148,7 +148,8 @@ describe("ComputerSupervisor", () => {
         expect(supervisor.isIdle()).toBe(false);
         startGate.resolve();
         await creating;
-        expect(supervisor.isIdle()).toBe(false);
+        // An open, quiescent session on the physical seat survives a restart.
+        expect(supervisor.isIdle()).toBe(true);
         const closing = supervisor.endSession(options());
         await ending.promise;
         expect(supervisor.listSessions()).toEqual([]);
@@ -164,6 +165,60 @@ describe("ComputerSupervisor", () => {
       }
     },
   );
+
+  test("an admitted command or an isolated virtual seat blocks the update idle proof", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-update-busy-");
+    const dispatched = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let virtualSeat = false;
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      environmentAllocator: {
+        async allocate() {
+          return {
+            seatId: "seat-1",
+            displayId: ":101",
+            rfbPort: virtualSeat ? 5901 : null,
+            environment: { PATH: process.env.PATH ?? "/usr/bin" },
+            async close() {},
+          };
+        },
+      },
+      createDriver: async (context) => {
+        const driver = new FixtureComputerDriver(
+          context.computerSessionId,
+          context.controllerGeneration,
+        );
+        const dispatch = driver.dispatch.bind(driver);
+        driver.dispatch = async () => {
+          dispatched.resolve();
+          await release.promise;
+          return await dispatch();
+        };
+        return driver;
+      },
+    });
+    try {
+      await supervisor.createSession(options());
+      expect(supervisor.isIdle()).toBe(true);
+      const running = supervisor.action(command());
+      await dispatched.promise;
+      expect(supervisor.isIdle()).toBe(false);
+      release.resolve();
+      expect(await running).toMatchObject({ state: "completed" });
+      // The target queue releases its tail just after the receipt settles.
+      await Bun.sleep(1);
+      expect(supervisor.isIdle()).toBe(true);
+      await supervisor.endSession(options());
+      virtualSeat = true;
+      await supervisor.createSession(options());
+      expect(supervisor.isIdle()).toBe(false);
+    } finally {
+      release.resolve();
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
 
   test("hosts workspace sessions and replays durable terminal receipts without redispatch", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-supervisor-");
@@ -224,6 +279,133 @@ describe("ComputerSupervisor", () => {
       await expect(
         access(join(rootDirectory, "computer-sessions", computerSessionId)),
       ).rejects.toBeDefined();
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test.each([false, true])(
+    "keeps a session's batch mode across agent updates (began with batches: %s)",
+    async (initially) => {
+      const rootDirectory = await mkdtemp("/tmp/og-computer-batch-mode-");
+      const open = async (actionBatches: boolean) =>
+        await ComputerSupervisor.open({
+          rootDirectory,
+          environmentAllocator: fixtureEnvironmentAllocator(),
+          createDriver: async (context) => {
+            const driver = new FixtureComputerDriver(
+              context.computerSessionId,
+              context.controllerGeneration,
+            );
+            Object.assign(driver, { capabilities: { ...driver.capabilities, actionBatches } });
+            return driver;
+          },
+        });
+      let supervisor = await open(initially);
+      try {
+        expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(
+          initially,
+        );
+      } finally {
+        await supervisor.close();
+      }
+      // The updated agent reports the other answer; the open session keeps its own.
+      supervisor = await open(!initially);
+      try {
+        expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(
+          initially,
+        );
+        expect(supervisor.listSessions()[0]?.capabilities.actionBatches).toBe(initially);
+        await supervisor.endSession(
+          { computerSessionId, controllerGeneration },
+          { removeState: true },
+        );
+        // A new session takes what the computer supports now.
+        expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(
+          !initially,
+        );
+      } finally {
+        await supervisor.close();
+        await rm(rootDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("a session from before batch modes were recorded keeps running batches one by one", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-batch-legacy-");
+    const open = async () =>
+      await ComputerSupervisor.open({
+        rootDirectory,
+        environmentAllocator: fixtureEnvironmentAllocator(),
+        createDriver: async (context) => {
+          const driver = new FixtureComputerDriver(
+            context.computerSessionId,
+            context.controllerGeneration,
+          );
+          Object.assign(driver, { capabilities: { ...driver.capabilities, actionBatches: true } });
+          return driver;
+        },
+      });
+    let supervisor = await open();
+    try {
+      await supervisor.createSession(options());
+    } finally {
+      await supervisor.close();
+    }
+    // The layout an older controller left: a journal and no batch mode.
+    const sessionDirectory = join(rootDirectory, "computer-sessions", computerSessionId);
+    await rm(join(sessionDirectory, "action-batches.json"));
+    supervisor = await open();
+    try {
+      expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(false);
+      expect(await readFile(join(sessionDirectory, "action-batches.json"), "utf8")).toContain(
+        "false",
+      );
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("a failed resume keeps the session's batch mode and journal", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-batch-resume-");
+    let actionBatches = true;
+    let failCreation = false;
+    const open = async () =>
+      await ComputerSupervisor.open({
+        rootDirectory,
+        environmentAllocator: fixtureEnvironmentAllocator(),
+        createDriver: async (context) => {
+          if (failCreation) throw new Error("transient driver start failure");
+          const driver = new FixtureComputerDriver(
+            context.computerSessionId,
+            context.controllerGeneration,
+          );
+          Object.assign(driver, { capabilities: { ...driver.capabilities, actionBatches } });
+          return driver;
+        },
+      });
+    let supervisor = await open();
+    try {
+      expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(true);
+    } finally {
+      await supervisor.close();
+    }
+    const sessionDirectory = join(rootDirectory, "computer-sessions", computerSessionId);
+    actionBatches = false;
+    failCreation = true;
+    supervisor = await open();
+    try {
+      await expect(supervisor.createSession(options())).rejects.toThrow(
+        "transient driver start failure",
+      );
+      expect(await readFile(join(sessionDirectory, "action-batches.json"), "utf8")).toContain(
+        "true",
+      );
+      expect(await readFile(join(sessionDirectory, "operations.sqlite"))).toBeTruthy();
+      failCreation = false;
+      expect((await supervisor.createSession(options())).capabilities.actionBatches).toBe(true);
     } finally {
       await supervisor.close();
       await rm(rootDirectory, { recursive: true, force: true });
@@ -346,7 +528,7 @@ describe("ComputerSupervisor", () => {
           ...options(),
           computerSessionId: "33333333-3333-4333-8333-333333333333",
         }),
-      ).rejects.toMatchObject({ code: "resource_unavailable", retryable: true });
+      ).rejects.toMatchObject({ code: "capacity_exhausted", retryable: false });
     } finally {
       await supervisor.close();
       await rm(rootDirectory, { recursive: true, force: true });

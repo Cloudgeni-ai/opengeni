@@ -2,6 +2,9 @@
 export { buildMissingSecretAskCard } from "@opengeni/contracts";
 export { isVaultError, VaultError, vaultErrorFromDatabase } from "@opengeni/db";
 export {
+  intersectProviderOperations,
+  providerOperationsForMode,
+  storedProviderOperations,
   toVaultItem,
   toVaultItemSummary,
   toVaultSummary,
@@ -10,6 +13,11 @@ export {
   vaultItemReferences,
   type VaultCallerAuthority,
 } from "./mapping";
+export {
+  effectiveProviderOperations,
+  type ProviderWriteOperation,
+  type ProviderWriteOutcome,
+} from "./provider-writes";
 export {
   chooseSecretCandidate,
   createSecretResolver,

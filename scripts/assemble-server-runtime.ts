@@ -4,10 +4,28 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { copyRuntimeDependencies } from "./copy-runtime-dependencies";
 
-export const API_RUNTIME_EXTERNALS = ["@llamaindex/liteparse", "sharp", "better-auth"];
+// The standalone API always queues Documents parsing through Temporal. Keep
+// LiteParse's native closure only in the worker image. The API npm package still
+// declares it for embedded createApp compositions that use inline indexing.
+// The 1Password SDK stays a real package in both images: its core loads a WASM
+// file from beside its own module, which a bundle cannot carry. The Keeper
+// SDK does too: its adapter reads the installed, hash-pinned build at run time.
+// `ws` is loaded through its installed package file (see @opengeni/network's
+// nodeWebSocketFactory) to bypass Bun's built-in shim, so the bundle never
+// contains it and both images must carry the real package.
+export const API_RUNTIME_EXTERNALS = [
+  "sharp",
+  "better-auth",
+  "@1password/sdk",
+  "@keeper-security/secrets-manager-core",
+  "ws",
+];
 export const WORKER_RUNTIME_EXTERNALS = [
   "@llamaindex/liteparse",
   "sharp",
+  "@1password/sdk",
+  "@keeper-security/secrets-manager-core",
+  "ws",
   "@temporalio/activity",
   "@temporalio/client",
   "@temporalio/worker",
@@ -22,6 +40,45 @@ const databaseCommands = [
   "session-content-compaction",
 ] as const;
 
+/**
+ * Commands whose module is also imported through the DB barrel. With code
+ * splitting, their body moves into a shared chunk where `import.meta.main` is
+ * false, so the bundled entry must call the exported runner explicitly.
+ */
+export const DATABASE_COMMAND_RUNNERS: Readonly<Record<string, string>> = {
+  migrate: "runMigrateCli",
+  "provision-roles": "runProvisionRolesCli",
+  "lifecycle-fact-backfill": "runLifecycleFactBackfillCli",
+  "session-content-compaction": "runSessionContentCompactionCli",
+};
+
+/**
+ * Make a bundled command entry run when executed. A source entry guarded by
+ * `import.meta.main` either keeps that guard in its own output, or has a
+ * registered runner that the entry calls; anything else would silently no-op.
+ */
+export function finalizeCommandEntry(input: {
+  command: string;
+  source: string;
+  output: string;
+  runner?: string;
+}): string {
+  const guarded = input.source.includes("import.meta.main");
+  if (!guarded || input.output.includes("import.meta.main")) return input.output;
+  if (!input.runner) {
+    throw new Error(
+      `Bundled command ${input.command} lost its import.meta.main entry; register an exported runner`,
+    );
+  }
+  const imported = new RegExp(`import\\s*\\{[^}]*\\b${input.runner}\\b[^}]*\\}`);
+  if (!imported.test(input.output)) {
+    throw new Error(`Bundled command ${input.command} does not import its runner ${input.runner}`);
+  }
+  // Keep the source's entry-point guard: importing the bundled module (tests,
+  // image smoke checks, other tools) must never run the command itself.
+  return `${input.output.trimEnd()}\nif (import.meta.main) await ${input.runner}();\n`;
+}
+
 const operatorCommands = [
   "inventory-tenancy",
   "check-tenancy-parity",
@@ -30,6 +87,7 @@ const operatorCommands = [
   "backfill-connection-authority",
   "verify-resource-classification",
   "sweep-organization-retention",
+  "admission-settings",
 ] as const;
 
 export async function assembleServerRuntime(root: string, role: "api" | "worker") {
@@ -74,7 +132,7 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     }
     await writeFile(
       join(destination, "artifact-runtime-doctor.js"),
-      await doctor.outputs[0]!.arrayBuffer(),
+      new Uint8Array(await doctor.outputs[0]!.arrayBuffer()),
     );
     const commands = await Bun.build({
       entrypoints: [
@@ -98,6 +156,24 @@ export async function assembleServerRuntime(root: string, role: "api" | "worker"
     });
     if (!commands.success) {
       throw new Error(`Operator runtime build failed: ${commands.logs.join("\n")}`);
+    }
+    for (const [command, relativePath] of [
+      ...databaseCommands.map((name) => [name, `packages/db/src/${name}.ts`] as const),
+      ...operatorCommands.map((name) => [name, `scripts/${name}.ts`] as const),
+      ["import-integrations-catalog", "scripts/import-integrations-catalog.ts"] as const,
+    ]) {
+      const builtPath = join(destination, relativePath);
+      await writeFile(
+        builtPath,
+        finalizeCommandEntry({
+          command,
+          source: await readFile(join(root, relativePath), "utf8"),
+          output: await readFile(builtPath, "utf8"),
+          ...(DATABASE_COMMAND_RUNNERS[command]
+            ? { runner: DATABASE_COMMAND_RUNNERS[command] }
+            : {}),
+        }),
+      );
     }
     await cp(join(root, "packages/db/drizzle"), join(destination, "packages/db/drizzle"), {
       recursive: true,

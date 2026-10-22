@@ -9,22 +9,22 @@ import {
   type TimelineItem,
 } from "@opengeni/react";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
-import { ConsoleComposer } from "../../src/components/Composer";
+import { ConsoleComposer } from "@opengeni/react/app/components/Composer";
 import {
   ModelPicker,
   SessionToolPicker,
   type SessionToolSelection,
-} from "../../src/components/pickers";
+} from "@opengeni/react/app/components/pickers";
 import {
   FollowUpRepositoryPicker,
   FollowUpRepositoryMenuBody,
-} from "../../src/components/follow-up-repository-picker";
-import { ComposerMobilePlus } from "../../src/components/composer-mobile-plus";
-import { Button } from "../../src/components/ui/button";
-import { TooltipProvider } from "../../src/components/ui/tooltip";
-import type { RepositoryContextPickerProps } from "../../src/components/repository-picker";
-import { PersonalResourceAttachmentControl } from "../../src/components/personal-resource-attachment-control";
-import type { PersonalResourceAttachmentController } from "../../src/lib/use-personal-resource-attachment";
+} from "@opengeni/react/app/components/follow-up-repository-picker";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { Button } from "@opengeni/react/ui/button";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import type { RepositoryContextPickerProps } from "@opengeni/react/app/components/repository-picker";
+import { PersonalResourceAttachmentControl } from "@opengeni/react/app/components/personal-resource-attachment-control";
+import type { PersonalResourceAttachmentController } from "@opengeni/react/app/lib/use-personal-resource-attachment";
 import { fixtureClient } from "./context";
 import "../../src/styles.css";
 

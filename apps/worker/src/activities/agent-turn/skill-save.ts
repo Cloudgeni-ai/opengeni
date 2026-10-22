@@ -1,4 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
+import { z } from "zod";
 import {
   applySkillFileChanges,
   buildPortableSkillArtifact,
@@ -12,6 +13,8 @@ export type SkillSaveRequest = {
   expectedRevisionId: string | null;
   expectedScopeVersion: number;
   files: readonly SkillTextFile[];
+  /** An explicit destination for a new Skill; omitted means this chat's own. */
+  scope?: "personal" | "workspace";
   reason: string;
 };
 
@@ -22,6 +25,28 @@ export type SkillSaveReceipt = {
   outcome: "applied" | "pending" | "preserved";
   replayed: boolean;
 };
+
+const skillSaveArguments = z
+  .object({
+    operationId: z.uuid(),
+    skillId: z.uuid(),
+    expectedRevisionId: z.uuid().nullable(),
+    expectedScopeVersion: z.number().int().nonnegative(),
+    files: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1).max(1024),
+            content: z.string(),
+          })
+          .strict(),
+      )
+      .max(PORTABLE_SKILL_MAX_FILES),
+    deletions: z.array(z.string().min(1).max(1024)).max(PORTABLE_SKILL_MAX_FILES).optional(),
+    scope: z.enum(["personal", "workspace"]).optional(),
+    reason: z.string().min(1).max(2000),
+  })
+  .strict();
 
 /** Persistence owns mode enforcement, replay, and the final compare-and-swap. */
 export function createSkillSaveAttemptToolDefinition(input: {
@@ -41,7 +66,7 @@ export function createSkillSaveAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_save"],
     title: "Save Skill text",
     description:
-      "Create or edit a Skill for reusable procedures or context-specific and personal behavioral preferences, not retrieval-only facts. Put its applicability in the SKILL.md description so the prompt index can guide skill_read; the full body is loaded when relevant. Short always-on workspace rules use instruction_policy_save. Supply only changed UTF-8 text files and explicit deletions; omitted files are preserved. No sandbox is needed. Use the revision and scope version returned by Skill discovery for stale-write protection. For creation choose a new UUID, set expectedRevisionId to null and expectedScopeVersion to 1. The effective Skills setting governs publication: Automatic publishes, Review first saves a pending revision in Knowledge > Needs review while the task continues, and Off prevents agent authoring. Report the actual receipt without asking an approval question. Private chats save personal Skills; shared chats save workspace Skills. Preserve the intended scope; another destination is not a workaround for unavailable scope or learning restrictions.",
+      "Create or edit a Skill for reusable procedures or context-specific and personal behavioral preferences, not retrieval-only facts. Put its applicability in the SKILL.md description so the prompt index can guide skill_read; the full body is loaded when relevant. Short always-on workspace rules use instruction_policy_save. Supply only changed UTF-8 text files and explicit deletions; omitted files are preserved. No sandbox is needed. Use the revision and scope version returned by Skill discovery for stale-write protection. For creation choose a new UUID, set expectedRevisionId to null and expectedScopeVersion to 1. The effective Skills setting governs publication: Automatic publishes, Review first saves a pending revision in Knowledge > Needs review while the task continues, and Off prevents agent authoring. Report the actual receipt without asking an approval question. A new Skill saves where this chat learns: personal in a private chat, workspace in a shared chat. Set scope only when the person wants it elsewhere: workspace for everyone in the workspace, or personal for only the person you act for. An edit keeps the Skill's own scope. Another destination is not a workaround for learning restrictions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -68,6 +93,12 @@ export function createSkillSaveAttemptToolDefinition(input: {
           uniqueItems: true,
           items: { type: "string", minLength: 1, maxLength: 1024 },
         },
+        scope: {
+          type: "string",
+          enum: ["personal", "workspace"],
+          description:
+            "Only to save a new Skill somewhere other than this chat's default. Omit when editing.",
+        },
         reason: { type: "string", minLength: 1, maxLength: 2000 },
       },
       required: [
@@ -91,8 +122,14 @@ export function createSkillSaveAttemptToolDefinition(input: {
     approval: "none",
     execute: async (args) => {
       await input.authorize();
-      const skillId = args.skillId as string;
-      const expectedRevisionId = args.expectedRevisionId as string | null;
+      // Some model calls stringify JSON null. Normalize only this nullable
+      // creation sentinel, then validate before any revision lookup or write.
+      // Missing, empty and malformed IDs must not silently become creation.
+      const request = skillSaveArguments.parse({
+        ...args,
+        expectedRevisionId: args.expectedRevisionId === "null" ? null : args.expectedRevisionId,
+      });
+      const { skillId, expectedRevisionId } = request;
       // Expand the edit against its immutable base, not today's head. The
       // lifecycle can then replay an already committed operation before CAS.
       const current =
@@ -102,17 +139,18 @@ export function createSkillSaveAttemptToolDefinition(input: {
       }
       const files = applySkillFileChanges(
         current?.files ?? [],
-        args.files as SkillTextFile[],
-        (args.deletions ?? []) as string[],
+        request.files,
+        request.deletions ?? [],
       );
       const artifact = buildPortableSkillArtifact(files);
       const output = await input.save({
-        operationId: args.operationId as string,
+        operationId: request.operationId,
         skillId,
         expectedRevisionId,
-        expectedScopeVersion: args.expectedScopeVersion as number,
+        expectedScopeVersion: request.expectedScopeVersion,
         files: artifact.files,
-        reason: args.reason as string,
+        ...(request.scope ? { scope: request.scope } : {}),
+        reason: request.reason,
       });
       return {
         isError: false,

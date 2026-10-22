@@ -15,11 +15,8 @@ import {
   designateSubscriptionCoreCodexApps,
   connectSubscriptionCoreCodexConnection,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -180,6 +177,14 @@ describe("connector tool permissions API", () => {
         if (req.method !== "POST") return new Response(null, { status: 405 });
         const body = (await req.json()) as { id?: string | number; method: string };
         if (body.id === undefined) return new Response(null, { status: 202 });
+        // A 2025-era server: the 2026-07-28 era probe is an unknown method.
+        if (body.method === "server/discover") {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            error: { code: -32601, message: "Method not found" },
+          });
+        }
         const result =
           body.method === "initialize"
             ? {

@@ -1,4 +1,5 @@
 import { signupCreditModelIds } from "@opengeni/config";
+import { ApiHttpError } from "../http/api-error";
 import {
   lookupExternalIdentityForRequest,
   cancelExternalWorkspaceMemberGrantForRequest,
@@ -247,6 +248,15 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
 
 function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
   const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "P0S01") {
+    throw new ApiHttpError(402, {
+      code: "seat_limit_reached",
+      message: "Organization seat limit reached. Upgrade your plan to add people.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { action: { type: "upgrade", href: "/billing" } },
+    });
+  }
   if (sqlState === "54000" && resourceLimitMessage) {
     throw new HTTPException(409, {
       message: resourceLimitMessage,

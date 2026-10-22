@@ -25,10 +25,12 @@ import {
   formatElapsed,
   resolveTurnSummaryFacets,
   selectTurnSummaryFacets,
+  turnSummaryFallbackLabel,
   type TurnSummaryFacetConfiguration,
   type TurnSummaryStatus,
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, formatElapsed };
 export type {
@@ -132,6 +134,8 @@ export type TurnSummaryProps = {
    * chevron and is not a disclosure control. Defaults to true.
    */
   expandable?: boolean | undefined;
+  /** The turn has steps that are not loaded yet (opening the row reads them). */
+  unloadedSteps?: boolean | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
@@ -158,9 +162,11 @@ export function TurnSummary({
   contextCompactionCount,
   status,
   expandable = true,
+  unloadedSteps,
   onOpenStateChange,
   children,
 }: TurnSummaryProps) {
+  const t = useOpenGeniText();
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
@@ -347,13 +353,14 @@ export function TurnSummary({
   const context = useMemo(
     () =>
       createTurnSummaryContext(
+        t,
         items,
         outcome,
         failureText,
         settling || settlePhase ? undefined : durationMs,
         contextCompactionCount ?? 0,
       ),
-    [items, outcome, failureText, durationMs, settling, settlePhase, contextCompactionCount],
+    [items, outcome, failureText, durationMs, settling, settlePhase, contextCompactionCount, t],
   );
   const facetDefinitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -365,7 +372,7 @@ export function TurnSummary({
     [context, facetDefinitions, statusKind],
   );
   // The chip names the failure; recorded technical text stays a hover title.
-  const failure = outcome === "failed" ? presentTurnFailureText(failureText) : null;
+  const failure = outcome === "failed" ? presentTurnFailureText(t, failureText) : null;
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // and quieter until there is an outcome or a settle beat — but still
@@ -377,7 +384,7 @@ export function TurnSummary({
   // Nested chips stay force-open for this window (stable height).
   const settleChrome = settling || settlePhase || nestSuppressLatch;
 
-  const statusLine = status ? turnSummaryStatusLine(status) : null;
+  const statusLine = status ? turnSummaryStatusLine(t, status) : null;
 
   // Copy only on the collapsed chip — when open, per-message copy is enough
   // and a second control on the summary row felt crowded / off.
@@ -464,28 +471,32 @@ export function TurnSummary({
         {statusLine}
         {liveHeader && !open && !status
           ? liveHeader
-          : facets.map(({ facet, result }, index) => (
-              <FacetRenderBoundary key={facet.id}>
-                <>
-                  {index > 0 || statusLine ? " · " : null}
-                  <span aria-label={result.ariaLabel} title={result.title}>
-                    {result.icon ? (
-                      <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                        {result.icon}
-                      </span>
-                    ) : null}
-                    {result.content}
-                  </span>
-                </>
-              </FacetRenderBoundary>
-            ))}
+          : !statusLine && facets.length === 0 && !failure && outcome !== "cancelled"
+            ? turnSummaryFallbackLabel(t, context.items, unloadedSteps)
+            : facets.map(({ facet, result }, index) => (
+                <FacetRenderBoundary key={facet.id}>
+                  <>
+                    {index > 0 || statusLine ? " · " : null}
+                    <span aria-label={result.ariaLabel} title={result.title}>
+                      {result.icon ? (
+                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                          {result.icon}
+                        </span>
+                      ) : null}
+                      {result.content}
+                    </span>
+                  </>
+                </FacetRenderBoundary>
+              ))}
         {failure ? (
           <span className="text-og-status-failed" title={failure.detail}>
             {" "}
             · {failure.summary}
           </span>
         ) : null}
-        {outcome === "cancelled" ? <span className="text-og-fg-subtle"> · interrupted</span> : null}
+        {outcome === "cancelled" ? (
+          <span className="text-og-fg-subtle"> {t("timeline.turnSummary.interrupted")}</span>
+        ) : null}
       </span>
       {/* A settled exchange reads as a separator above its answer. */}
       {status?.kind === "worked" ? (
@@ -494,7 +505,7 @@ export function TurnSummary({
       {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
         <ShrinkIcon
           className="size-3.5 shrink-0"
-          aria-label="Context compacted; expand for details"
+          aria-label={t("timeline.turnSummary.contextCompactedExpandForDetails")}
         />
       ) : null}
     </>
@@ -566,7 +577,11 @@ export function TurnSummary({
         {copyable ? (
           <div className="pointer-events-none absolute top-1.5 right-0 z-10">
             <div className="pointer-events-auto">
-              <CopyButton text={copyText!} label="Copy turn" reveal="group-hover" />
+              <CopyButton
+                text={copyText!}
+                label={t("timeline.turnSummary.copyTurn")}
+                reveal="group-hover"
+              />
             </div>
           </div>
         ) : null}
@@ -579,17 +594,21 @@ export function TurnSummary({
  * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", or "Worked for 4m 10s";
  * null when a settled span is too short to state.
  */
-function turnSummaryStatusLine(status: TurnSummaryStatus): ReactNode {
+function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): ReactNode {
   if (status.kind === "worked") {
     return status.durationMs !== undefined &&
       Number.isFinite(status.durationMs) &&
       status.durationMs >= 1000 ? (
       <span data-og-exchange-status="worked">
-        {status.label ?? "Worked for"} {formatElapsed(status.durationMs)}
+        {status.label ?? t("timeline.turnSummary.workedFor")} {formatElapsed(t, status.durationMs)}
       </span>
     ) : null;
   }
-  const label = status.label ?? (status.kind === "working" ? "Working" : "Waiting");
+  const label =
+    status.label ??
+    (status.kind === "working"
+      ? t("timeline.turnSummary.working")
+      : t("timeline.turnSummary.waiting"));
   return (
     <span data-og-exchange-status={status.kind}>
       <span className={status.kind === "working" ? "og-shimmer-text" : undefined}>{label}</span>
@@ -600,6 +619,7 @@ function turnSummaryStatusLine(status: TurnSummaryStatus): ReactNode {
 
 /** A second-resolution clock; unmounts with the live row. */
 function LiveElapsed({ since }: { since: string }) {
+  const t = useOpenGeniText();
   const startedAt = Date.parse(since);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -608,7 +628,7 @@ function LiveElapsed({ since }: { since: string }) {
   }, []);
   if (!Number.isFinite(startedAt)) return null;
   return (
-    <span className="tabular-nums">{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</span>
+    <span className="tabular-nums">{` · ${formatElapsed(t, Math.max(0, now - startedAt))}`}</span>
   );
 }
 

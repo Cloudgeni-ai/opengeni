@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { acquireSharedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createDb, createSession, getSessionTurnMcpAccountBindings } from "@opengeni/db";
 import { seedSenderConnections } from "../../db/test/sender-connection-fixture";
 import { acceptSessionUserMessageWithOutcome } from "../src/domain/sessions";

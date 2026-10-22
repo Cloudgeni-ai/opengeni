@@ -12,6 +12,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { codeEditorPeers, type CodeEditorLanguage } from "../lib/workbench-peers";
+import { useOpenGeniText } from "../messages/runtime";
 
 // --- Lazy CodeMirror surface ----------------------------------------------
 //
@@ -171,6 +172,7 @@ export function CodeEditor({
   fallback,
   className,
 }: CodeEditorProps) {
+  const msg = useOpenGeniText();
   const [failed, setFailed] = useState(false);
   const [bundle, setBundle] = useState<EditorBundle | null>(null);
   const peerRevision = useSyncExternalStore(
@@ -374,7 +376,13 @@ export function CodeEditor({
             "size-1.5 shrink-0 rounded-full transition-colors",
             readOnly ? "bg-transparent" : dirty ? "bg-og-status-running" : "bg-og-status-idle",
           )}
-          title={readOnly ? "read-only" : dirty ? "unsaved changes" : "saved"}
+          title={
+            readOnly
+              ? msg("codeEditor.readOnly")
+              : dirty
+                ? msg("codeEditor.unsavedChanges")
+                : msg("codeEditor.saved")
+          }
         />
         <span className="truncate font-og-mono text-og-xs text-og-fg-muted">
           {fileName}
@@ -390,10 +398,12 @@ export function CodeEditor({
             </span>
           )}
           {!saveError && savedTick && !dirty && (
-            <span className="text-og-xs text-og-status-idle">Saved</span>
+            <span className="text-og-xs text-og-status-idle">{msg("codeEditor.saved2")}</span>
           )}
           {readOnly ? (
-            <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">Read-only</span>
+            <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">
+              {msg("codeEditor.readOnly2")}
+            </span>
           ) : !saveConflict ? (
             <button
               type="button"
@@ -405,14 +415,14 @@ export function CodeEditor({
                   ? "cursor-default text-og-fg-subtle opacity-60"
                   : "text-og-fg hover:bg-og-accent-soft",
               )}
-              title="Save (⌘/Ctrl+S)"
+              title={msg("codeEditor.saveCtrlS")}
             >
               {saving ? (
                 <Loader2Icon className="size-3 animate-spin" />
               ) : (
                 <SaveIcon className="size-3" />
               )}
-              Save
+              {msg("codeEditor.save")}
             </button>
           ) : null}
         </div>
@@ -424,8 +434,10 @@ export function CodeEditor({
           role="alert"
         >
           <div className="min-w-[12rem] flex-1 text-og-xs text-og-fg-muted">
-            <span className="font-medium text-og-status-failed">File changed on machine.</span>{" "}
-            Reloading discards your edits; overwriting replaces the live version.
+            <span className="font-medium text-og-status-failed">
+              {msg("codeEditor.fileChangedOnMachine")}
+            </span>{" "}
+            {msg("codeEditor.reloadingDiscardsYourEditsOverwriting")}
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             {onReload ? (
@@ -436,7 +448,7 @@ export function CodeEditor({
                 }}
                 className="min-h-8 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-xs font-medium text-og-fg hover:bg-og-surface-2 pointer-coarse:min-h-11"
               >
-                Reload live
+                {msg("codeEditor.reloadLive")}
               </button>
             ) : null}
             {onOverwrite ? (
@@ -446,7 +458,7 @@ export function CodeEditor({
                 disabled={saving}
                 className="min-h-8 rounded-og-sm border border-og-status-failed/40 px-2 text-og-xs font-medium text-og-status-failed hover:bg-og-status-failed/10 disabled:opacity-50 pointer-coarse:min-h-11"
               >
-                Overwrite
+                {msg("codeEditor.overwrite")}
               </button>
             ) : null}
           </div>
@@ -501,6 +513,7 @@ function PlainTextarea({
   onChange: (value: string) => void;
   onSave: () => void;
 }) {
+  const msg = useOpenGeniText();
   return (
     <textarea
       value={value}
@@ -513,12 +526,13 @@ function PlainTextarea({
           onSave();
         }
       }}
-      aria-label="Plain text file editor"
+      aria-label={msg("codeEditor.plainTextFileEditor")}
       className="h-full w-full resize-none bg-transparent p-2 font-og-mono text-og-sm text-og-fg outline-hidden"
     />
   );
 }
 
 function EditorSkeleton() {
-  return <div className="p-3 text-og-sm text-og-fg-subtle">Loading editor…</div>;
+  const msg = useOpenGeniText();
+  return <div className="p-3 text-og-sm text-og-fg-subtle">{msg("codeEditor.loadingEditor")}</div>;
 }

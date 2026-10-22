@@ -22,7 +22,12 @@ import {
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
-import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
+import {
+  createModalSessionWithLifecycle,
+  resumeModalSessionOnSharedClient,
+  type ModalCreateLifecycle,
+  type OpenGeniModalSandboxClientOptions,
+} from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
 import {
@@ -722,12 +727,12 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
 
 export class OpenGeniModalSandboxClient extends ModalSandboxClient {
   readonly #snapshotFilesystemTimeoutMs: number | undefined;
-  readonly #createOptions: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]>;
+  readonly #createOptions: OpenGeniModalSandboxClientOptions;
 
-  constructor(...args: ConstructorParameters<typeof ModalSandboxClient>) {
-    super(...args);
-    this.#snapshotFilesystemTimeoutMs = args[0]?.snapshotFilesystemTimeoutMs;
-    this.#createOptions = { ...args[0] };
+  constructor(options?: OpenGeniModalSandboxClientOptions) {
+    super(options);
+    this.#snapshotFilesystemTimeoutMs = options?.snapshotFilesystemTimeoutMs;
+    this.#createOptions = { ...options };
   }
 
   override async create(
@@ -765,8 +770,15 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
             ...state,
             snapshotFilesystemTimeoutMs: this.#snapshotFilesystemTimeoutMs,
           };
-    const session = await super.resume(effectiveState);
+    const session = await this.resumeOnSharedClient(effectiveState);
     return installOpenGeniModalSnapshotPolicy(session);
+  }
+
+  /** Reattach on the shared process-wide Modal client (see
+   * resumeModalSessionOnSharedClient). Replaces the pinned adapter's resume,
+   * which built a new client for every call. */
+  async resumeOnSharedClient(state: ModalSandboxSessionState): Promise<ModalSandboxSession> {
+    return await resumeModalSessionOnSharedClient(this.#createOptions, state);
   }
 }
 
@@ -838,7 +850,7 @@ export const modalProvider: ProviderRegistration = {
     }
   },
   build({ settings, environment, exposedPorts }) {
-    const options: NonNullable<ConstructorParameters<typeof ModalSandboxClient>[0]> = {
+    const options: OpenGeniModalSandboxClientOptions = {
       appName: settings.modalAppName,
       timeoutMs: settings.modalTimeoutSeconds * 1000,
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
@@ -868,6 +880,9 @@ export const modalProvider: ProviderRegistration = {
     }
     if (settings.modalSandboxMemoryMiB !== undefined) {
       options.memoryMiB = settings.modalSandboxMemoryMiB;
+    }
+    if (settings.modalRegions !== undefined) {
+      options.regions = [...settings.modalRegions];
     }
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;
@@ -1087,9 +1102,11 @@ async function modalCheckpointProviderBindingForClient(
   return resolved.binding;
 }
 
-const modalSessionCheckpointBindings = new WeakMap<
+// Keyed by the authenticated client, not the session: every session on the
+// shared process-wide client has the same identity, so it is looked up once.
+const modalClientCheckpointBindings = new WeakMap<
   object,
-  Promise<{ key: string; binding: ModalCheckpointProviderBinding }>
+  Map<string, Promise<{ key: string; binding: ModalCheckpointProviderBinding }>>
 >();
 
 /**
@@ -1106,8 +1123,6 @@ export async function resolveModalCheckpointProviderBindingForSession(
   if (!session || typeof session !== "object") {
     throw new Error("Modal checkpoint session identity is unavailable");
   }
-  const cached = modalSessionCheckpointBindings.get(session);
-  if (cached) return await cached;
   const modal = (session as { modal?: unknown }).modal as ModalClientLike | undefined;
   if (
     !modal ||
@@ -1117,14 +1132,19 @@ export async function resolveModalCheckpointProviderBindingForSession(
   ) {
     throw new Error("Pinned Modal session no longer exposes its authenticated checkpoint identity");
   }
+  let byEnvironment = modalClientCheckpointBindings.get(modal);
+  if (!byEnvironment) modalClientCheckpointBindings.set(modal, (byEnvironment = new Map()));
+  const environmentKey = settings.modalEnvironment ?? "";
+  const cached = byEnvironment.get(environmentKey);
+  if (cached) return await cached;
   const pending = modalCheckpointProviderBindingForClient(settings, modal).then(
     (binding) => canonicalModalCheckpointProviderBinding(binding)!,
   );
-  modalSessionCheckpointBindings.set(session, pending);
+  byEnvironment.set(environmentKey, pending);
   try {
     return await pending;
   } catch (error) {
-    modalSessionCheckpointBindings.delete(session);
+    if (byEnvironment.get(environmentKey) === pending) byEnvironment.delete(environmentKey);
     throw error;
   }
 }

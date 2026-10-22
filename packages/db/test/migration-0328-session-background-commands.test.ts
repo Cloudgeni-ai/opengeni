@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationUrl = new URL("../drizzle/0328_session_background_commands.sql", import.meta.url);
@@ -83,7 +83,7 @@ describe("migration 0328 session background commands", () => {
 
     const [claim] = await shared.admin<Array<{ definition: string }>>`
       select pg_get_functiondef(
-        'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'::regprocedure
+        'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint,integer)'::regprocedure
       ) as definition`;
     expect(claim?.definition).toContain("session_background_commands");
     expect(claim?.definition).toContain("background_stopping");
@@ -100,23 +100,43 @@ describe("migration 0328 session background commands", () => {
     expect(connectedClaim?.definition).toContain("connection_instance_id");
     expect(connectedClaim?.definition).toContain("reconcile_proof_observed_at");
 
-    const [workspaceDelete] = await shared.admin<
+    const [workspaceDeleteAdmission] = await shared.admin<
       Array<{ security_definer: boolean; definition: string }>
     >`
       select prosecdef as security_definer, pg_get_functiondef(oid) as definition
       from pg_proc
       where oid = 'opengeni_private.prepare_workspace_background_command_deletion(uuid,uuid)'::regprocedure`;
+    expect(workspaceDeleteAdmission?.security_definer).toBe(true);
+    expect(workspaceDeleteAdmission?.definition).toContain(
+      "maintenance_workspace_commands_prepare_inner",
+    );
+    const [workspaceDelete] = await shared.admin<
+      Array<{ security_definer: boolean; definition: string }>
+    >`
+      select prosecdef as security_definer, pg_get_functiondef(oid) as definition
+      from pg_proc
+      where oid = 'opengeni_private.maintenance_workspace_commands_prepare_inner(uuid,uuid)'::regprocedure`;
     expect(workspaceDelete?.security_definer).toBe(true);
     expect(workspaceDelete?.definition).toContain("control_workspace_id");
     expect(workspaceDelete?.definition).toContain("FOR UPDATE NOWAIT");
     expect(workspaceDelete?.definition).not.toContain("DELETE FROM");
 
-    const [workspacePrune] = await shared.admin<
+    const [workspacePruneAdmission] = await shared.admin<
       Array<{ security_definer: boolean; definition: string }>
     >`
       select prosecdef as security_definer, pg_get_functiondef(oid) as definition
       from pg_proc
       where oid = 'opengeni_private.prune_settled_cross_workspace_background_commands(uuid,uuid)'::regprocedure`;
+    expect(workspacePruneAdmission?.security_definer).toBe(true);
+    expect(workspacePruneAdmission?.definition).toContain(
+      "maintenance_workspace_commands_prune_inner",
+    );
+    const [workspacePrune] = await shared.admin<
+      Array<{ security_definer: boolean; definition: string }>
+    >`
+      select prosecdef as security_definer, pg_get_functiondef(oid) as definition
+      from pg_proc
+      where oid = 'opengeni_private.maintenance_workspace_commands_prune_inner(uuid,uuid)'::regprocedure`;
     expect(workspacePrune?.security_definer).toBe(true);
     expect(workspacePrune?.definition).toContain("control_workspace_id");
     expect(workspacePrune?.definition).toContain("DELETE FROM");

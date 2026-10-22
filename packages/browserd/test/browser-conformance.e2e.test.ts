@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserAction,
@@ -14,7 +14,7 @@ import {
 } from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserDownloadStore,
   BrowserWorkspaceFileStager,
   LightpandaRunner,
@@ -85,13 +85,8 @@ e2e(
           binary: lightpandaBinary,
           sessionDirectory: join(directory, "lightpanda"),
         })
-      : await AgentBrowserJsonRunner.create({
-          namespace: `conformance_${randomUUID().slice(0, 8)}`,
-          sessionName: "s",
-          socketDirectory: join(directory, "s"),
+      : await ManagedBrowserRunner.create({
           profileDirectory: join(directory, "profile"),
-          downloadDirectory: downloadStore.filesDirectory,
-          screenshotDirectory: join(directory, "screenshots"),
           headed: false,
           ...(browserExecutablePath ? { browserExecutablePath } : {}),
         });
@@ -334,12 +329,8 @@ e2e(
       page = await act(driver, page, clickRole("button", "Request fixture failure"));
       page = await act(driver, page, clickRole("button", "Throw page error"));
       await Bun.sleep(100);
-      page = await driver.observe(page.target.id);
-      expect(page.diagnostics).toMatchObject({
-        consoleErrorCount: 1,
-        failedRequestCount: 1,
-        pageErrorCount: lightpandaBinary ? 0 : 1,
-      });
+      // Console messages and page errors are read on request (Runtime stays
+      // disabled so pages cannot detect it); observations count them afterwards.
       const diagnostics = await driver.debug(page.target.id);
       expect(diagnostics.entries.map((entry) => entry.kind)).toEqual(
         expect.arrayContaining(
@@ -348,6 +339,12 @@ e2e(
             : ["console", "failed_request", "page_error"],
         ),
       );
+      page = await driver.observe(page.target.id);
+      expect(page.diagnostics).toMatchObject({
+        consoleErrorCount: 1,
+        failedRequestCount: 1,
+        pageErrorCount: lightpandaBinary ? 0 : 1,
+      });
 
       if (!lightpandaBinary) {
         page = await act(driver, page, {
@@ -371,6 +368,13 @@ e2e(
           receivedBytes: expectedDownloadBytes.byteLength,
           sha256: createHash("sha256").update(expectedDownloadBytes).digest("hex"),
         });
+        // Chromium saved it under its own name, as in any downloads folder.
+        expect(await readFile(join(downloadStore.filesDirectory, "fixture-download.txt"))).toEqual(
+          expectedDownloadBytes,
+        );
+        expect(
+          await readFile((await downloadStore.completedFile(completedDownload.id)).path),
+        ).toEqual(expectedDownloadBytes);
         let publishedBytes = Buffer.alloc(0);
         const publicationServer = Bun.serve({
           port: 0,

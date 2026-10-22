@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   SUBSCRIPTION_SETTING_KEYS,
   lockedSettingsWidened,

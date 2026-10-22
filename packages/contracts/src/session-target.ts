@@ -1,22 +1,27 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Conversational context only. Never an authority or an implicit dispatch destination. */
-export const SessionTargetContext = z
-  .object({
-    version: z.number().int().nonnegative(),
-    sessionId: z.string().uuid().nullable(),
-    operationId: z.string().uuid().nullable(),
-  })
-  .strict();
+export const SessionTargetContext = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.number().int().nonnegative(),
+      sessionId: z.string().uuid().nullable(),
+      operationId: z.string().uuid().nullable(),
+    })
+    .strict(),
+);
 export type SessionTargetContext = z.infer<typeof SessionTargetContext>;
 
-export const SetSessionTargetRequest = z
-  .object({
-    sessionId: z.string().uuid().nullable(),
-    expectedVersion: z.number().int().nonnegative(),
-    operationId: z.string().uuid(),
-  })
-  .strict();
+export const SetSessionTargetRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sessionId: z.string().uuid().nullable(),
+      expectedVersion: z.number().int().nonnegative(),
+      operationId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type SetSessionTargetRequest = z.infer<typeof SetSessionTargetRequest>;
 
 export const SESSION_TARGET_CONTEXT_KEY = "conversationTargetV1";

@@ -5,7 +5,7 @@ import {
   acquireSharedTestDatabase,
   acquireOwnerMigratedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -23,12 +23,21 @@ import {
   retireExhaustedScheduledTask,
   updateScheduledTask,
   markScheduledTaskRunFailedIfQueued,
+  reviewScheduledTaskBlockers,
   type Database,
 } from "../src/index";
 import { migrate } from "../src/migrate";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+
+/** Record the owner review of the task's newest run, as the blocker review would. */
+async function reviewed(value: ScheduledTask) {
+  await reviewScheduledTaskBlockers(client.db, value.workspaceId, value.id, (facts) => ({
+    kind: "none",
+    reviewedRunId: facts.runs[0]?.id ?? null,
+  }));
+}
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("exhausted-schedules");
   if (!acquired) throw new Error("Real PostgreSQL is required");
@@ -130,6 +139,9 @@ test("one-shot retirement requires a consumed scheduled occurrence or expired ca
     pending.id,
     "synthetic settled refusal",
   );
+  // A failed last run is reviewed for its owner notice before retirement.
+  expect(await retireExhaustedScheduledTask(client.db, recent.workspaceId, recent.id)).toBe(false);
+  await reviewed(recent);
   expect(await retireExhaustedScheduledTask(client.db, recent.workspaceId, recent.id)).toBe(true);
   expect((await getScheduledTask(client.db, recent.workspaceId, recent.id))?.status).toBe("paused");
   expect(await retireExhaustedScheduledTask(client.db, recent.workspaceId, recent.id)).toBe(false);
@@ -179,6 +191,10 @@ test("interval retirement preserves catch-up, pending runs, future schedules and
   expect(
     (await listExhaustedScheduledTasks(client.db)).some((entry) => entry.id === expired.id),
   ).toBe(true);
+  expect(await retireExhaustedScheduledTask(client.db, expired.workspaceId, expired.id)).toBe(
+    false,
+  );
+  await reviewed(expired);
   expect(await retireExhaustedScheduledTask(client.db, expired.workspaceId, expired.id)).toBe(true);
 }, 30_000);
 

@@ -6,6 +6,9 @@ import {
   organizationsForSubject,
   workspacesInOrg,
 } from "../src/organization-model";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 function workspace(id: string, accountId: string, name: string, kind = "shared"): Workspace {
   return { id, accountId, name, kind } as unknown as Workspace;
@@ -30,12 +33,12 @@ const workspaces = [
 
 describe("organization model", () => {
   test("lists every organization, default first, with admin authority", () => {
-    expect(organizationsForSubject(context, workspaces)).toEqual([
+    expect(organizationsForSubject(englishText, context, workspaces)).toEqual([
       { accountId: "org-b", label: "Zeta", canManage: true },
       { accountId: "org-a", label: "Acme", canManage: false },
       { accountId: "org-c", label: "Org org-c", canManage: false },
     ]);
-    expect(orgLabel("0123456789abcdef", [])).toBe("Org 01234567");
+    expect(orgLabel(englishText, "0123456789abcdef", [])).toBe("Org 01234567");
   });
 
   test("switching lands on the remembered, else first shared, else personal workspace", () => {

@@ -10,6 +10,7 @@ import {
   coalesceSessionEventDeltas,
   coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
+  reasoningDeltaSeparator,
 } from "../src/index";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -37,6 +38,21 @@ function event(
 }
 
 describe("coalesceSessionEventDeltas", () => {
+  test("keeps reasoning summary parts as separate paragraphs, the same as a fragment reader", () => {
+    const parts = ["**One**", "**Two**", " detail", "**Three**"];
+    const result = coalesceSessionEventDeltas(
+      parts.map((text, index) => event(index + 1, "agent.reasoning.delta", { text })),
+    );
+    // A reader that sees each fragment joins them with the same separator.
+    const fragmentReader = parts.reduce(
+      (text, part) => text + reasoningDeltaSeparator(text, part) + part,
+      "",
+    );
+    expect(fragmentReader).toBe("**One**\n\n**Two** detail**Three**");
+    expect(result.map((item) => item.payload)).toEqual([
+      { text: fragmentReader, coalescedUntil: 4 },
+    ]);
+  });
   test("preserves message identities and never coalesces across their boundary", () => {
     const result = coalesceSessionEventDeltas([
       event(1, "agent.message.delta", { text: "calc", messageId: "message-a" }),

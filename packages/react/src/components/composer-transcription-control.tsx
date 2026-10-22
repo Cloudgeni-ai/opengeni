@@ -24,6 +24,7 @@ import { useVoiceInput } from "../hooks/use-voice-input";
 import type { VoiceRecordingStore } from "../voice-recording-store";
 import { useChatComposer } from "./composer";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 function Tip({ tip, children }: { tip: string; children: ReactElement }) {
   return (
@@ -69,39 +70,40 @@ export type ComposerTranscriptionMessages = {
   errorUnknown: string;
 };
 
-const defaultMessages: ComposerTranscriptionMessages = {
-  start: "Start voice input",
-  stop: "Stop and transcribe",
-  cancel: "Stop without transcribing",
-  retry: "Retry voice input",
-  transcribeSaved: "Transcribe saved recording",
-  timeRemaining: "Stops and transcribes in {seconds}s",
-  pauseRetrying: "Pause automatic retry",
-  requestingPermission: "Requesting microphone…",
-  recording: "Recording. Press Escape to stop without transcribing.",
-  saving: "Saving audio locally…",
-  transcribing: "Transcribing…",
-  retrying: "Saved. Retrying transcription…",
-  recovered: "Recording saved on this device.",
-  recoveredTranscript: "Transcript saved. Insert it into your draft?",
-  insertRecoveredTranscript: "Insert saved transcript",
-  discardRecovered: "Discard saved recording",
-  unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
-  unavailable: "Voice input is unavailable for this workspace.",
-  errorPermissionDenied: "Microphone access is blocked. Allow it in site settings, then try again.",
-  errorNotSupported: "Voice input is not supported on this device.",
-  errorUnavailable: "Voice input is not configured.",
-  errorInsufficientCredits:
-    "Voice input needs credits. Recording saved; retry after adding credits.",
-  errorAllowanceExhausted: "Usage limit reached. Recording saved for later.",
-  errorPolicyBlocked: "Voice input isn't allowed for this account or workspace.",
-  errorTooLarge: "Recording is too large. Try a shorter message.",
-  errorInvalidAudio: "The recording could not be read. Try again.",
-  errorStorageUnavailable: "Voice input stopped because audio could not be saved safely.",
-  errorRetryable: "Saved. Transcription failed, retry when ready.",
-  errorHandoffUncertain: "Transcript saved. Check your draft before inserting again.",
-  errorUnknown: "Voice input could not start. Try again.",
-};
+const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
+  start: t("composerTranscriptionControl.startVoiceInput"),
+  stop: t("composerTranscriptionControl.stopAndTranscribe"),
+  cancel: t("composerTranscriptionControl.stopWithoutTranscribing"),
+  retry: t("composerTranscriptionControl.retryVoiceInput"),
+  transcribeSaved: t("composerTranscriptionControl.transcribeSavedRecording"),
+  timeRemaining: t("composerTranscriptionControl.stopsAndTranscribesInSeconds", {
+    seconds: "{seconds}",
+  }),
+  pauseRetrying: t("composerTranscriptionControl.pauseAutomaticRetry"),
+  requestingPermission: t("composerTranscriptionControl.requestingMicrophone"),
+  recording: t("composerTranscriptionControl.recordingPressEscapeToStop"),
+  saving: t("composerTranscriptionControl.savingAudioLocally"),
+  transcribing: t("composerTranscriptionControl.transcribing"),
+  retrying: t("composerTranscriptionControl.savedRetryingTranscription"),
+  recovered: t("composerTranscriptionControl.recordingSavedOnThisDevice"),
+  recoveredTranscript: t("composerTranscriptionControl.transcriptSavedInsertItInto"),
+  insertRecoveredTranscript: t("composerTranscriptionControl.insertSavedTranscript"),
+  discardRecovered: t("composerTranscriptionControl.discardSavedRecording"),
+  unavailableDisabled: t("composerTranscriptionControl.voiceInputIsUnavailableWhile"),
+  unavailable: t("composerTranscriptionControl.voiceInputIsUnavailableFor"),
+  errorPermissionDenied: t("composerTranscriptionControl.microphoneAccessIsBlockedAllow"),
+  errorNotSupported: t("composerTranscriptionControl.voiceInputIsNotSupported"),
+  errorUnavailable: t("composerTranscriptionControl.voiceInputIsNotConfigured"),
+  errorInsufficientCredits: t("composerTranscriptionControl.voiceInputNeedsCreditsRecording"),
+  errorAllowanceExhausted: t("composerTranscriptionControl.usageLimitReachedRecordingSaved"),
+  errorPolicyBlocked: t("composerTranscriptionControl.voiceInputIsnTAllowed"),
+  errorTooLarge: t("composerTranscriptionControl.recordingIsTooLargeTry"),
+  errorInvalidAudio: t("composerTranscriptionControl.theRecordingCouldNotBe"),
+  errorStorageUnavailable: t("composerTranscriptionControl.voiceInputStoppedBecauseAudio"),
+  errorRetryable: t("composerTranscriptionControl.savedTranscriptionFailedRetryWhen"),
+  errorHandoffUncertain: t("composerTranscriptionControl.transcriptSavedCheckYourDraft"),
+  errorUnknown: t("composerTranscriptionControl.voiceInputCouldNotStart"),
+});
 
 export type ComposerTranscriptionControlProps = {
   client?: Pick<OpenGeniClient, "transcribeAudio"> | null | undefined;
@@ -144,8 +146,9 @@ export function ComposerTranscriptionControl({
   createOwnerId,
   suppressed = false,
 }: ComposerTranscriptionControlProps) {
+  const t = useOpenGeniText();
   const composer = useChatComposer();
-  const messages = { ...defaultMessages, ...overrides };
+  const messages = { ...defaultMessages(t), ...overrides };
   const transcription = useVoiceInput({
     client,
     workspaceId,
@@ -443,7 +446,7 @@ export function ComposerTranscriptionControl({
               <button
                 type="button"
                 title={errorMessage}
-                aria-label={`Dismiss: ${errorMessage}`}
+                aria-label={t("composerTranscriptionControl.dismissErrormessage", { errorMessage })}
                 onClick={() => void transcription.discard()}
                 className={cn(
                   "inline-flex min-w-0 items-center gap-1 rounded-og-sm text-left outline-hidden",

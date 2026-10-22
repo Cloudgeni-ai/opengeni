@@ -26,6 +26,7 @@ import {
   type LayoutStorage,
 } from "react-resizable-panels";
 import { cn } from "../lib/cn";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type WorkspaceTab = {
   id: string;
@@ -109,6 +110,9 @@ const useDockLayoutEffect = typeof window === "undefined" ? useEffect : useLayou
  */
 const DOCK_OVERLAY_BREAKPOINT = 1024;
 
+/** The panel group's layout while the dock is closed. */
+const CLOSED_LAYOUT: Layout = { primary: 100, dock: 0 };
+
 /** SSR-safe `(max-width: …)` match; false until mounted, then live. */
 function useIsNarrow(maxWidth: number): boolean {
   const [narrow, setNarrow] = useState(false);
@@ -146,6 +150,7 @@ export function WorkspaceDock({
   maxSize = 70,
   className,
 }: WorkspaceDockProps) {
+  const msg = useOpenGeniText();
   const narrow = useIsNarrow(DOCK_OVERLAY_BREAKPOINT);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const reopenRef = useRef<HTMLButtonElement | null>(null);
@@ -161,6 +166,8 @@ export function WorkspaceDock({
   // dismiss it; standalone usage keeps the thin reopen rail as well.
   const hostControlled = collapsedProp !== undefined;
   const previousCollapsedRef = useRef(collapsed);
+  const collapsedNowRef = useRef(collapsed);
+  collapsedNowRef.current = collapsed;
 
   // Persisted layout (width split) keyed by autoSaveId.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -170,6 +177,11 @@ export function WorkspaceDock({
   });
   const expandedDefaultLayout =
     defaultLayout && (defaultLayout.dock ?? 0) > 1 ? defaultLayout : undefined;
+  // A panel group reads its starting layout once, when it mounts (on first
+  // render, and again whenever the window widens out of the overlay). A
+  // closed dock starts closed, so it never shows its saved width for a frame
+  // or keeps it as an invisible column.
+  const mountLayout = collapsed ? CLOSED_LAYOUT : expandedDefaultLayout;
   const lastExpandedSizeRef = useRef(expandedDefaultLayout?.dock ?? defaultSize);
   const layoutIdentityRef = useRef(autoSaveId);
   if (layoutIdentityRef.current !== autoSaveId) {
@@ -219,6 +231,13 @@ export function WorkspaceDock({
       dockPanelRef.current?.resize(`${lastExpandedSizeRef.current}%`);
     }
   }, [collapsedProp, dockPanelRef]);
+
+  // Widening past the overlay breakpoint mounts a fresh panel group at its
+  // saved split. A closed dock must stay closed there, not hold its old width
+  // as an invisible column beside the chat.
+  useDockLayoutEffect(() => {
+    if (!narrow && collapsedNowRef.current) dockPanelRef.current?.collapse();
+  }, [narrow, dockPanelRef]);
 
   // Treat the narrow overlay like a real modal: remember the external opener,
   // move focus into the selected tab, and restore it on close. The standalone
@@ -376,7 +395,7 @@ export function WorkspaceDock({
           data-workspace-surface
           role="dialog"
           aria-modal="true"
-          aria-label="Workspace"
+          aria-label={msg("workspaceDock.workspace")}
           className="fixed inset-0 z-40 flex flex-col bg-og-bg"
           hidden={collapsed}
           style={{
@@ -396,7 +415,11 @@ export function WorkspaceDock({
             leading={mobileLeadingControl}
             accessory={headerAccessory}
             controls={
-              <ChromeButton onClick={collapse} title="Hide workspace" label="Hide workspace">
+              <ChromeButton
+                onClick={collapse}
+                title={msg("workspaceDock.hideWorkspace")}
+                label={msg("workspaceDock.hideWorkspace")}
+              >
                 <XIcon className="size-4" />
               </ChromeButton>
             }
@@ -407,8 +430,8 @@ export function WorkspaceDock({
             ref={reopenRef}
             type="button"
             onClick={expand}
-            title="Open workspace"
-            aria-label="Open workspace"
+            title={msg("workspaceDock.openWorkspace")}
+            aria-label={msg("workspaceDock.openWorkspace")}
             className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
             style={{ marginTop: "env(safe-area-inset-top)" }}
           >
@@ -424,13 +447,16 @@ export function WorkspaceDock({
       tabs={tabs}
       current={current}
       onTab={setTab}
+      // On the desktop dock the status and window controls sit under the
+      // panel tabs, so every panel starts at the top with its own header.
+      chromePlacement="rail"
       accessory={headerAccessory}
       controls={
         <>
           <ChromeButton
             onClick={() => setMaximized((m) => !m)}
-            title={maximized ? "Restore (Esc)" : "Maximize"}
-            label={maximized ? "Restore dock" : "Maximize dock"}
+            title={maximized ? msg("workspaceDock.restoreEsc") : msg("workspaceDock.maximize")}
+            label={maximized ? msg("workspaceDock.restoreDock") : msg("workspaceDock.maximizeDock")}
           >
             {maximized ? (
               <Minimize2Icon className="size-3.5" />
@@ -439,7 +465,11 @@ export function WorkspaceDock({
             )}
           </ChromeButton>
           {hostControlled && !showCollapseControl ? null : (
-            <ChromeButton onClick={collapse} title="Hide workspace" label="Hide workspace">
+            <ChromeButton
+              onClick={collapse}
+              title={msg("workspaceDock.hideWorkspace")}
+              label={msg("workspaceDock.hideWorkspace")}
+            >
               <PanelRightCloseIcon className="size-3.5" />
             </ChromeButton>
           )}
@@ -453,7 +483,7 @@ export function WorkspaceDock({
       <Group
         orientation="horizontal"
         className="min-h-0 flex-1"
-        {...(expandedDefaultLayout ? { defaultLayout: expandedDefaultLayout } : {})}
+        {...(mountLayout ? { defaultLayout: mountLayout } : {})}
         onLayoutChanged={persistExpandedLayout}
       >
         <Panel id="primary" minSize="30%" className="min-h-0 min-w-0">
@@ -497,7 +527,7 @@ export function WorkspaceDock({
             data-workspace-surface
             role={maximized ? "dialog" : undefined}
             aria-modal={maximized ? true : undefined}
-            aria-label={maximized ? "Workspace" : undefined}
+            aria-label={maximized ? msg("workspaceDock.workspace") : undefined}
             aria-hidden={collapsed ? true : undefined}
             className={cn(
               "flex h-full min-h-0 min-w-0 flex-col bg-og-bg",
@@ -517,7 +547,7 @@ export function WorkspaceDock({
           ref={reopenRef}
           type="button"
           onClick={expand}
-          title="Open workspace"
+          title={msg("workspaceDock.openWorkspace")}
           className="absolute inset-y-0 right-0 flex w-6 shrink-0 items-center justify-center border-l border-og-border bg-og-surface-1 text-og-fg-subtle hover:text-og-fg"
         >
           <ChevronsLeftRightIcon className="size-3.5" />
@@ -557,6 +587,7 @@ function DockChrome({
   current,
   onTab,
   leading,
+  chromePlacement = "header",
   accessory,
   controls,
 }: {
@@ -565,11 +596,17 @@ function DockChrome({
   onTab: (id: string) => void;
   /** Host navigation at the start of mobile overlay chrome. */
   leading?: ReactNode | undefined;
+  /**
+   * `header`: a row above the panels (the phone overlay, with its title and
+   * close). `rail`: under the panel tabs, so no row is spent on it.
+   */
+  chromePlacement?: "header" | "rail" | undefined;
   /** A status accessory (machine chip) between the tab strip and the controls. */
   accessory?: ReactNode | undefined;
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
   controls: ReactNode;
 }) {
+  const msg = useOpenGeniText();
   const chromeRef = useRef<HTMLDivElement | null>(null);
   const [compact, setCompact] = useState(false);
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
@@ -638,76 +675,99 @@ function DockChrome({
       data-compact={compact ? "true" : undefined}
       className="flex h-full min-h-0 min-w-0 flex-col"
     >
-      <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 max-[1023px]:min-h-12">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {leading ?? (
-            <span className="hidden truncate text-og-sm font-semibold text-og-fg max-[1023px]:inline">
-              Workspace
-            </span>
-          )}
+      {chromePlacement === "header" ? (
+        <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-og-border px-2 max-[1023px]:min-h-12">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {leading ?? (
+              <span className="hidden truncate text-og-sm font-semibold text-og-fg max-[1023px]:inline">
+                {msg("workspaceDock.workspace")}
+              </span>
+            )}
+          </div>
+          <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
+          <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
         </div>
-        <div className="min-w-0 shrink text-og-fg-muted">{accessory}</div>
-        <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
-      </div>
+      ) : null}
       <div className="flex min-h-0 min-w-0 flex-1">
         <div
           className={cn(
-            "flex shrink-0 flex-col gap-1 overflow-x-hidden overflow-y-auto border-r border-og-border bg-og-surface-1/45 p-1.5",
+            "flex shrink-0 flex-col border-r border-og-border bg-og-surface-1/45",
             compact ? "w-12" : "w-32 max-[1023px]:w-36",
           )}
-          role="tablist"
-          aria-label="Workspace panels"
-          aria-orientation="vertical"
         >
-          {tabs.map((tab, index) => {
-            const tabName = tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
-            return (
-              <button
-                key={tab.id}
-                ref={(node) => {
-                  tabRefs.current[index] = node;
-                }}
-                id={`${tabsetId}-tab-${index}`}
-                type="button"
-                role="tab"
-                aria-label={compact && tab.icon ? tabName : undefined}
-                title={compact && tab.icon ? tabName : undefined}
-                aria-selected={tab.id === current}
-                aria-controls={`${tabsetId}-panel-${index}`}
-                tabIndex={tab.id === current ? 0 : -1}
-                onClick={() => onTab(tab.id)}
-                onKeyDown={(event) => onTabKeyDown(event, index)}
-                className={cn(
-                  "group relative flex min-h-9 w-full items-center gap-2 rounded-og-md px-2 text-left text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
-                  compact && "justify-center px-1",
-                  tab.id === current
-                    ? "bg-og-accent-soft text-og-fg shadow-[inset_2px_0_0_var(--og-color-accent)]"
-                    : "text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg",
-                )}
-              >
-                {tab.icon ? (
-                  <span
-                    className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4"
-                    aria-hidden
-                  >
-                    {tab.icon}
-                  </span>
-                ) : null}
-                {!compact || !tab.icon ? (
-                  <span data-contrast-audited className="min-w-0 flex-1 truncate">
-                    {tab.label}
-                  </span>
-                ) : null}
-                {tab.badge ? (
-                  <span
-                    className={cn("shrink-0", compact && "absolute -right-0.5 -top-0.5 scale-90")}
-                  >
-                    {tab.badge}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+          <div
+            className="flex min-h-0 flex-1 flex-col gap-1 overflow-x-hidden overflow-y-auto p-1.5"
+            role="tablist"
+            aria-label={msg("workspaceDock.workspacePanels")}
+            aria-orientation="vertical"
+          >
+            {tabs.map((tab, index) => {
+              const tabName = tab.ariaLabel ?? (typeof tab.label === "string" ? tab.label : tab.id);
+              return (
+                <button
+                  key={tab.id}
+                  ref={(node) => {
+                    tabRefs.current[index] = node;
+                  }}
+                  id={`${tabsetId}-tab-${index}`}
+                  type="button"
+                  role="tab"
+                  aria-label={compact && tab.icon ? tabName : undefined}
+                  title={compact && tab.icon ? tabName : undefined}
+                  aria-selected={tab.id === current}
+                  aria-controls={`${tabsetId}-panel-${index}`}
+                  tabIndex={tab.id === current ? 0 : -1}
+                  onClick={() => onTab(tab.id)}
+                  onKeyDown={(event) => onTabKeyDown(event, index)}
+                  className={cn(
+                    "group relative flex min-h-9 w-full items-center gap-2 rounded-og-md px-2 text-left text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
+                    compact && "justify-center px-1",
+                    tab.id === current
+                      ? "bg-og-accent-soft text-og-fg shadow-[inset_2px_0_0_var(--og-color-accent)]"
+                      : "text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg",
+                  )}
+                >
+                  {tab.icon ? (
+                    <span
+                      className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4"
+                      aria-hidden
+                    >
+                      {tab.icon}
+                    </span>
+                  ) : null}
+                  {!compact || !tab.icon ? (
+                    <span data-contrast-audited className="min-w-0 flex-1 truncate">
+                      {tab.label}
+                    </span>
+                  ) : null}
+                  {tab.badge ? (
+                    <span
+                      className={cn("shrink-0", compact && "absolute -right-0.5 -top-0.5 scale-90")}
+                    >
+                      {tab.badge}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          {chromePlacement === "rail" ? (
+            <div
+              data-dock-rail-footer
+              className={cn(
+                "flex shrink-0 border-t border-og-border p-1.5 text-og-fg-subtle",
+                compact
+                  ? // Only the status dot fits; its label stays for assistive tech.
+                    "flex-col items-center gap-0.5 [&_[role=status]]:px-0 [&_[role=status]>span:last-child]:sr-only"
+                  : "flex-wrap items-center justify-between gap-0.5",
+              )}
+            >
+              {accessory ? <div className="min-w-0 text-og-fg-muted">{accessory}</div> : null}
+              <div className={cn("flex shrink-0 items-center gap-0.5", compact && "flex-col")}>
+                {controls}
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           {tabs.length > 0 ? (
@@ -728,7 +788,11 @@ function DockChrome({
               );
             })
           ) : (
-            <div className="h-full min-h-0 min-w-0" aria-label="Workspace" role="tabpanel" />
+            <div
+              className="h-full min-h-0 min-w-0"
+              aria-label={msg("workspaceDock.workspace")}
+              role="tabpanel"
+            />
           )}
         </div>
       </div>

@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -520,6 +517,21 @@ describe("intent-preserving failed-session retry", () => {
         }),
       ),
     ).toBeNull();
+  });
+
+  test("an incompatible frozen Knowledge scope requires a new message, not Retry", async () => {
+    const f = await fixture(false, "completed", "knowledge_learning_scope_changed");
+    const before = await getSessionTurn(client.db, f.workspaceId, f.turnId);
+    const events = await listSessionEvents(client.db, f.workspaceId, f.session.id);
+    await expect(f.retry()).rejects.toMatchObject({
+      code: "RETRY_UNSUPPORTED_FAILURE",
+      message: "Send a new message to continue with this chat's current Knowledge scope",
+    });
+    await expect(f.retry({ model: "another-model" })).rejects.toMatchObject({
+      code: "RETRY_UNSUPPORTED_FAILURE",
+    });
+    expect(await getSessionTurn(client.db, f.workspaceId, f.turnId)).toEqual(before);
+    expect(await listSessionEvents(client.db, f.workspaceId, f.session.id)).toEqual(events);
   });
 
   test("same turn, history, authority and original prompt survive concurrent idempotent retry", async () => {

@@ -1,13 +1,22 @@
-import { ComputerNativeCommand } from "@opengeni/contracts";
+import {
+  ComputerNativeCommand,
+  interactionDriverDiagnostic,
+  type InteractionDriverDiagnostic,
+} from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
+import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
+  BrowserRecordingExportReceipt,
+  BrowserRecordingExportRequest,
+  BrowserRecordingStartRequest,
+  BrowserRecordingSummary,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
   BrowserExternalAuthCommand,
@@ -31,6 +40,10 @@ import {
   CdpTransportError,
 } from "./cdp";
 import { BrowserWorkingRuntimeUnavailableError } from "./working-runtime-journal";
+import {
+  WorkingCopyAdoptionError,
+  type BrowserWorkingCopyAuthorityInput,
+} from "./working-copy-adoption";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -162,7 +175,15 @@ export type BrowserControlServerOptions = {
   allowedOrigins?: readonly string[];
   browserExecutablePath?: string;
   closeSupervisorOnStop?: boolean;
-  onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
+  onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
+};
+
+export type ControllerFailureContext = {
+  method: string;
+  pathname: string;
+  /** `driver_failed`: a driver failure with a code-written message;
+   * `unexpected`: any other error, whose message can be any text. */
+  kind: "unexpected" | "driver_failed";
 };
 
 export class BrowserControlServer {
@@ -176,7 +197,7 @@ export class BrowserControlServer {
   private readonly browserExecutablePath: string | undefined;
   private readonly closeSupervisorOnStop: boolean;
   private readonly onUnexpectedError:
-    | ((error: unknown, context: { method: string; pathname: string }) => void)
+    | ((error: unknown, context: ControllerFailureContext) => void)
     | undefined;
   private readonly authorities = new Map<string, SessionAuthority>();
   private readonly computerAuthorities = new Map<string, ComputerSessionAuthority>();
@@ -339,17 +360,30 @@ export class BrowserControlServer {
       const response = await this.route(request, server);
       return response ? this.withCors(response, normalizedOrigin) : undefined;
     } catch (error) {
-      if (!(error instanceof ProtocolError) && !(error instanceof InteractionControllerError)) {
+      // Unexpected errors and every driver failure are reported for local
+      // diagnosis; the reporter redacts them like the response's diagnostic.
+      let driverFailed = false;
+      const response = protocolResponse(error, () => {
+        driverFailed = true;
+      });
+      const unexpected =
+        !(error instanceof ProtocolError) && !(error instanceof InteractionControllerError);
+      if (unexpected || driverFailed) {
+        const known =
+          error instanceof ProtocolError ||
+          error instanceof InteractionControllerError ||
+          error instanceof InteractionDefiniteDriverError;
         try {
           this.onUnexpectedError?.(error, {
             method: request.method,
             pathname: new URL(request.url).pathname,
+            kind: driverFailed && known ? "driver_failed" : "unexpected",
           });
         } catch {
           // Diagnostics must never alter the controller response contract.
         }
       }
-      return this.withCors(protocolResponse(error), normalizedOrigin);
+      return this.withCors(response, normalizedOrigin);
     } finally {
       this.activeRequests -= 1;
       if (this.activeRequests === 0) {
@@ -360,15 +394,33 @@ export class BrowserControlServer {
   }
 
   private runtimeIdle(): boolean {
+    return this.updateBlockers().length === 0;
+  }
+
+  private updateBlockers(): UpdateBlocker[] {
+    const blockers = [
+      ...this.supervisor.updateBlockers(),
+      ...(this.computerSupervisor?.updateBlockers() ?? []),
+    ];
+    if (this.unsettledProducer) blockers.push({ kind: "controller_cleanup", count: 1 });
+    const requests = Math.max(this.activeRequests, this.server.pendingRequests) - 1;
+    if (requests > 0) blockers.push({ kind: "controller_request", count: requests });
+    if (this.lifecycleTails.size)
+      blockers.push({ kind: "controller_lifecycle", count: this.lifecycleTails.size });
+    if (this.sockets.size) blockers.push({ kind: "controller_stream", count: this.sockets.size });
+    if (this.producers.size)
+      blockers.push({ kind: "controller_producer", count: this.producers.size });
+    return blockers;
+  }
+
+  /** Idle with no browser or computer session at all, retained or not: the
+   * controller holds nothing, so its parent may stop it to reclaim memory and
+   * start a fresh one when the next session needs it. */
+  private runtimeEmpty(): boolean {
     return (
-      !this.unsettledProducer &&
-      this.activeRequests <= 1 &&
-      this.server.pendingRequests <= 1 &&
-      this.lifecycleTails.size === 0 &&
-      this.sockets.size === 0 &&
-      this.producers.size === 0 &&
-      this.supervisor.isIdle() &&
-      (this.computerSupervisor?.isIdle() ?? true)
+      this.runtimeIdle() &&
+      this.supervisor.isEmpty() &&
+      (this.computerSupervisor?.isEmpty() ?? true)
     );
   }
 
@@ -405,6 +457,7 @@ export class BrowserControlServer {
       }
       return success({
         idle: this.runtimeIdle(),
+        empty: this.runtimeEmpty(),
       });
     }
     if (
@@ -426,10 +479,19 @@ export class BrowserControlServer {
         return success({ idle: this.runtimeIdle(), operationId, released: true });
       }
       if (this.updateOperation !== null && this.updateOperation !== operationId)
-        return success({ idle: false, operationId });
-      const idle = this.runtimeIdle();
+        return success({
+          idle: false,
+          operationId,
+          blockers: [{ kind: "controller_previous_update", count: 1 }],
+        });
+      const blockers = this.updateBlockers();
+      const idle = blockers.length === 0;
       if (idle) this.updateOperation = operationId;
-      return success({ idle, operationId });
+      return success({
+        idle,
+        operationId,
+        ...(blockers.length ? { blockers: summarizeUpdateBlockers(blockers) } : {}),
+      });
     }
     if (segments[0] === "v1" && segments[1] === "computer-sessions") {
       if (!this.computerSupervisor) {
@@ -468,6 +530,36 @@ export class BrowserControlServer {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       return await this.captureState(browserSessionId, request);
+    }
+    if (segments.length >= 5 && segments[3] === "working-copy") {
+      this.requireAdmin(request);
+      if (segments.length === 5 && segments[4] === "inspection" && request.method === "POST") {
+        return await this.inspectWorkingCopy(browserSessionId, request);
+      }
+      if (segments.length === 5 && segments[4] === "adoptions" && request.method === "POST") {
+        return await this.adoptWorkingCopy(browserSessionId, request);
+      }
+      if (
+        segments.length === 7 &&
+        segments[4] === "adoptions" &&
+        segments[6] === "revert" &&
+        request.method === "POST"
+      ) {
+        return await this.revertWorkingCopyAdoption(
+          browserSessionId,
+          requireUuid(segments[5], "adoption operation id"),
+          request,
+        );
+      }
+      if (segments.length === 6 && segments[4] === "adoptions" && request.method === "GET") {
+        return success(
+          await this.supervisor.workingCopyAdoptionStatus({
+            browserSessionId,
+            operationId: requireUuid(segments[5], "adoption operation id"),
+          }),
+        );
+      }
+      throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
     if (segments.length === 6 && segments[3] === "targets" && segments[5] === "frames") {
       if (request.method !== "GET") {
@@ -608,6 +700,54 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.passkeySync(sync.data));
+    }
+    if (segments.length === 4 && segments[3] === "recordings") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const start = BrowserRecordingStartRequest.safeParse(await readJson(request));
+      if (!start.success) {
+        throw new ProtocolError("invalid_action", "recording start request is invalid", 400);
+      }
+      return success(
+        BrowserRecordingSummary.parse(
+          await this.supervisor.startRecording(reference, start.data.targetId),
+        ),
+      );
+    }
+    if (segments.length === 5 && segments[3] === "recordings") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      return success(
+        BrowserRecordingSummary.parse(this.supervisor.recordingStatus(reference, recordingId)),
+      );
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "stop") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      return success(
+        BrowserRecordingSummary.parse(await this.supervisor.stopRecording(reference, recordingId)),
+      );
+    }
+    if (segments.length === 6 && segments[3] === "recordings" && segments[5] === "exports") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const recordingId = requireUuid(segments[4], "recording id");
+      const exported = BrowserRecordingExportRequest.safeParse(await readJson(request));
+      if (!exported.success || exported.data.recordingId !== recordingId) {
+        throw new ProtocolError("invalid_action", "recording export authority is invalid", 400);
+      }
+      const receipt = await this.supervisor.exportRecording(
+        reference,
+        recordingId,
+        exported.data.upload,
+      );
+      return success(BrowserRecordingExportReceipt.parse({ recordingId, ...receipt }));
     }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {
@@ -927,6 +1067,15 @@ export class BrowserControlServer {
             : {}),
         };
         const created = await this.supervisor.createSession(sessionOptions);
+        // The tab inventory rides along so the caller can show the opened
+        // browser without another round trip. It is a read-only convenience:
+        // a failed listing leaves the created session intact.
+        const targets = await this.supervisor
+          .listTargets({
+            browserSessionId: created.browserSessionId,
+            controllerGeneration: created.controllerGeneration,
+          })
+          .catch(() => null);
         const rotated = current && body.tokenGeneration > current.tokenGeneration;
         this.authorities.set(body.browserSessionId, {
           browserSessionId: body.browserSessionId,
@@ -937,12 +1086,91 @@ export class BrowserControlServer {
           viewGrants: rotated ? new Map() : (current?.viewGrants ?? new Map()),
         });
         if (rotated) this.closeSessionSockets(body.browserSessionId, 1008, "authorization rotated");
-        return success(created, current ? 200 : 201);
+        return success(targets ? { ...created, targets } : created, current ? 200 : 201);
       });
     } finally {
       body.restore?.dataKey.fill(0);
       body.restore?.aad.fill(0);
     }
+  }
+
+  /** The exact controller authority a working-copy request claims. It must be
+   * the authority the copy's receipt recorded; a different live authority for
+   * this browser on this controller refuses the request. */
+  private workingCopyAuthority(
+    browserSessionId: string,
+    body: Record<string, unknown>,
+  ): BrowserWorkingCopyAuthorityInput {
+    const controllerGeneration = requireGeneration(body.controllerGeneration);
+    const tokenGeneration = requireInteger(
+      body.tokenGeneration,
+      "tokenGeneration",
+      1,
+      MAX_TOKEN_GENERATION,
+    );
+    const controlDigest = tokenDigest(requireToken(body.controlToken, "controlToken"));
+    const viewDigest = tokenDigest(requireToken(body.viewToken, "viewToken"));
+    const current = this.authorities.get(browserSessionId);
+    if (current && current.controllerGeneration !== controllerGeneration) {
+      throw new ProtocolError(
+        "controller_stale",
+        "browser session belongs to another controller generation",
+        409,
+      );
+    }
+    return {
+      browserSessionId,
+      controllerGeneration,
+      authority: {
+        tokenGeneration,
+        placementDigest: this.adminDigest.toString("hex"),
+        controlDigest: controlDigest.toString("hex"),
+        viewDigest: viewDigest.toString("hex"),
+      },
+    };
+  }
+
+  private async inspectWorkingCopy(browserSessionId: string, request: Request) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, ["controllerGeneration", "tokenGeneration", "controlToken", "viewToken"]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.inspectWorkingCopy(input)),
+    );
+  }
+
+  private async adoptWorkingCopy(browserSessionId: string, request: Request) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, [
+      "controllerGeneration",
+      "tokenGeneration",
+      "controlToken",
+      "viewToken",
+      "operationId",
+      "manifestDigest",
+    ]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    const operationId = requireUuid(body.operationId, "adoption operation id");
+    if (typeof body.manifestDigest !== "string" || !/^[0-9a-f]{64}$/u.test(body.manifestDigest)) {
+      throw new ProtocolError("invalid_action", "manifestDigest must be a sha256 hex digest", 400);
+    }
+    const manifestDigest = body.manifestDigest;
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.adoptWorkingCopy({ ...input, operationId, manifestDigest })),
+    );
+  }
+
+  private async revertWorkingCopyAdoption(
+    browserSessionId: string,
+    operationId: string,
+    request: Request,
+  ) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, ["controllerGeneration", "tokenGeneration", "controlToken", "viewToken"]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.revertWorkingCopyAdoption({ ...input, operationId })),
+    );
   }
 
   private async createComputerSession(request: Request): Promise<Response> {
@@ -1181,11 +1409,27 @@ export class BrowserControlServer {
 
   private async endSession(browserSessionId: string, request: Request): Promise<Response> {
     const body = await readJsonObject(request);
-    assertOnlyKeys(body, ["controllerGeneration", "removeState"]);
+    assertOnlyKeys(body, [
+      "controllerGeneration",
+      "removeState",
+      "discardWorkingRuntime",
+      "setAsideInterruptedLaunch",
+    ]);
     const controllerGeneration = requireGeneration(body.controllerGeneration);
     const removeState = requireBoolean(body.removeState, "removeState");
+    const discardWorkingRuntime =
+      body.discardWorkingRuntime === undefined
+        ? false
+        : requireBoolean(body.discardWorkingRuntime, "discardWorkingRuntime");
+    const setAsideInterruptedLaunch =
+      body.setAsideInterruptedLaunch === undefined
+        ? false
+        : requireBoolean(body.setAsideInterruptedLaunch, "setAsideInterruptedLaunch");
     return await this.withLifecycleLock(browserSessionId, async () => {
-      await this.supervisor.endSession({ browserSessionId, controllerGeneration }, { removeState });
+      await this.supervisor.endSession(
+        { browserSessionId, controllerGeneration },
+        { removeState, discardWorkingRuntime, setAsideInterruptedLaunch },
+      );
       // Validate and complete the bound lifecycle transition before disrupting
       // viewers. A stale admin lifecycle request must not close a live session.
       this.closeSessionSockets(browserSessionId, 1001, "browser session ended");
@@ -1981,14 +2225,55 @@ async function browserReadResponse(
   }
 }
 
-function protocolResponse(error: unknown): Response {
+/** The protocol failure for a thrown value. A driver failure also carries an
+ * operator diagnostic beside the error (never inside it, so callers and models
+ * see the same error) and is reported to `onDriverFailure` for local logs. */
+function protocolResponse(
+  error: unknown,
+  onDriverFailure?: (diagnostic: InteractionDriverDiagnostic) => void,
+): Response {
+  const fail = (
+    code: InteractionError["code"],
+    message: string,
+    retryable: boolean,
+    status: number,
+    details?: Record<string, string>,
+  ): Response => {
+    if (code !== "driver_failed") return failureResponse(code, message, retryable, status, details);
+    const diagnostic = interactionDriverDiagnostic(error);
+    try {
+      onDriverFailure?.(diagnostic);
+    } catch {
+      // Diagnostics must never alter the controller response contract.
+    }
+    return failureResponse(code, message, retryable, status, details, diagnostic);
+  };
   if (error instanceof BrowserWorkingRuntimeUnavailableError) {
-    return failure("resource_unavailable", error.message, false, 409);
+    return fail(
+      "resource_unavailable",
+      error.message,
+      false,
+      409,
+      error.reason ? { reason: error.reason } : undefined,
+    );
+  }
+  if (error instanceof WorkingCopyAdoptionError) {
+    return fail(
+      error.reason === "unsupported_platform"
+        ? "unsupported"
+        : error.reason === "operation_conflict"
+          ? "operation_conflict"
+          : "resource_unavailable",
+      error.message,
+      false,
+      error.reason === "unsupported_platform" ? 422 : 409,
+      { reason: error.reason },
+    );
   }
   if (error instanceof ProtocolError)
-    return failure(error.code, error.message, error.retryable, error.status);
+    return fail(error.code, error.message, error.retryable, error.status);
   if (error instanceof InteractionControllerError) {
-    return failure(
+    return fail(
       error.code === "journal_full" ? "resource_unavailable" : error.code,
       error.message,
       error.retryable,
@@ -1996,9 +2281,9 @@ function protocolResponse(error: unknown): Response {
     );
   }
   if (error instanceof InteractionDefiniteDriverError) {
-    return failure(error.code, error.message, false, interactionStatus(error.code));
+    return fail(error.code, error.message, false, interactionStatus(error.code));
   }
-  return failure("driver_failed", "interaction controller request failed", false, 500);
+  return fail("driver_failed", "interaction controller request failed", false, 500);
 }
 
 function success(data: unknown, status = 200): Response {
@@ -2028,6 +2313,18 @@ function failure(
   message: string,
   retryable: boolean,
   status: number,
+  details?: Record<string, string>,
+): Response {
+  return failureResponse(code, message, retryable, status, details);
+}
+
+function failureResponse(
+  code: InteractionError["code"],
+  message: string,
+  retryable: boolean,
+  status: number,
+  details?: Record<string, string>,
+  diagnostic?: InteractionDriverDiagnostic,
 ): Response {
   const headers: Record<string, string> = { "cache-control": "no-store" };
   if (status === 401) headers["www-authenticate"] = "Bearer";
@@ -2036,7 +2333,8 @@ function failure(
     JSON.stringify({
       protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
       ok: false,
-      error: { code, message, retryable },
+      error: { code, message, retryable, ...(details ? { details } : {}) },
+      ...(diagnostic ? { diagnostic } : {}),
     }),
     { status, headers },
   );
@@ -2046,7 +2344,8 @@ function interactionStatus(code: string): number {
   if (code === "resource_not_found" || code === "target_not_found") return 404;
   if (code === "permission_denied") return 403;
   if (code === "machine_locked") return 423;
-  if (code === "tab_not_responding") return 409;
+  if (code === "capacity_exhausted") return 409;
+  if (code === "tab_not_responding" || code === "tab_crashed") return 409;
   if (code.endsWith("_stale") || code === "operation_conflict" || code === "outcome_unknown")
     return 409;
   if (code === "resource_unavailable" || code === "controller_lost" || code === "journal_full")
@@ -2065,6 +2364,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
     segments[3] === "actions" ||
     segments[3] === "external-auth" ||
     (segments[3] === "downloads" && segments[5] === "exports") ||
+    (segments[3] === "recordings" && request.method === "POST") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {
     return true;

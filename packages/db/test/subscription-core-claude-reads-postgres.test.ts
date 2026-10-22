@@ -11,7 +11,7 @@
  * bindings for the whole process.
  */
 import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { CLAUDE_OAUTH_TOKEN_URL, type Settings } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import * as productionRegistry from "../src/subscription-core-providers";

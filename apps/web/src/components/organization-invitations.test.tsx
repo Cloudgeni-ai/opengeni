@@ -10,7 +10,7 @@ const toastError = mock(() => undefined);
 mock.module("sonner", () => ({
   toast: { success: toastSuccess, error: toastError },
 }));
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
     open ? <div>{children}</div> : null,
   DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -18,7 +18,7 @@ mock.module("@/components/ui/dialog", () => ({
   DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenuItem: ({
     children,
     onSelect,

@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as draftPreparation from "../src/application/draft-model-preparation";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   type AccessGrant,
@@ -15,12 +16,9 @@ import {
   type DbClient,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import { createSessionForRequest } from "../src/domain/sessions";
 import {
@@ -83,6 +81,42 @@ const settings = testSettings({
 
 const mcp = (id: string): ToolRef => ({ kind: "mcp", id });
 
+test("only a committed new-chat draft schedules preparation", async () => {
+  if (!available) return;
+  const { grant } = await fixture();
+  const prepare = spyOn(draftPreparation, "prepareDraftModel").mockImplementation(() => {});
+  const input = {
+    expectedRevision: 0,
+    text: "Unsent draft",
+    resources: [],
+    tools: [],
+    model: settings.openaiModel,
+    reasoningEffort: settings.openaiReasoningEffort,
+    latencyMode: "standard",
+    options: {},
+  };
+  try {
+    const deps = { db, settings, objectStorage: null };
+    const saved = await saveActorNewSessionDraft(deps, grant, grant.workspaceId!, input);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare.mock.calls[0]?.[1]).toMatchObject({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    });
+    expect(prepare.mock.calls[0]?.[2]).toMatchObject({
+      revision: saved.revision,
+      text: input.text,
+    });
+    await expect(
+      saveActorNewSessionDraft(deps, grant, grant.workspaceId!, input),
+    ).rejects.toThrow();
+    expect(prepare).toHaveBeenCalledTimes(1);
+  } finally {
+    prepare.mockRestore();
+  }
+}, 180_000);
+
 function draftCreateDeps(): ApiRouteDeps {
   const noop = async () => undefined;
   return {
@@ -107,6 +141,42 @@ function draftCreateDeps(): ApiRouteDeps {
 }
 
 describe("core new-session draft hydration", () => {
+  test("a saved model that left the catalog follows the default; a listed one is kept", async () => {
+    if (!available) return;
+    const { grant, subjectId } = await fixture();
+    const workspaceId = grant.workspaceId;
+    const save = (model: string, expectedRevision: number) =>
+      withWorkspaceSubjectRls(db, workspaceId, subjectId, (scoped) =>
+        saveNewSessionDraftInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          expectedRevision,
+          text: "",
+          resources: [],
+          tools: [],
+          toolsProvided: false,
+          model,
+          modelProvided: true,
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: {},
+        }),
+      );
+    await save("removed-provider/retired-free-model", 0);
+    const removed = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+    expect(removed.modelProvided).toBe(false);
+    expect(removed.model).not.toBe("removed-provider/retired-free-model");
+    expect(removed.model).toBe(settings.openaiModel);
+
+    await save(settings.openaiModel, removed.revision);
+    const listed = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+    expect(listed.modelProvided).toBe(true);
+    expect(listed.model).toBe(settings.openaiModel);
+    expect(listed.reasoningEffort).toBe("low");
+  }, 180_000);
+
   test.each(["organization", "user"] as const)(
     "preserves a visible %s rig selection from another same-organization workspace",
     async (scope) => {

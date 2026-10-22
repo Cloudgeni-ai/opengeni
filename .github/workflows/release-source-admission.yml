@@ -2,6 +2,10 @@ name: Release source admission
 
 # This reusable gate is loaded from the caller's immutable retained controller ref.
 # It executes no release-source bytes and grants no mutation authority.
+# An empty provenance_sha admits source_sha as the exact reviewed merge. A
+# distinct provenance_sha admits source_sha as a fully green first-parent main
+# descendant of that exact Version merge; protected-main history is then fetched
+# as Git objects only so every intervening merge tree is recomputed.
 on:
   workflow_call:
     inputs:
@@ -13,6 +17,11 @@ on:
         description: Exact retained trusted controller running this workflow.
         required: true
         type: string
+      provenance_sha:
+        description: Optional exact Version PR merge SHA that source_sha descends from. Empty selects the exact-source lane.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -23,9 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read
       checks: read
       contents: read
       pull-requests: read
+      statuses: read
     steps:
       - name: Check out exact retained release controller
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -34,9 +45,36 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Restore protected main history as Git data for the descendant merge audit
+        if: ${{ inputs.provenance_sha != '' && inputs.provenance_sha != inputs.source_sha }}
+        shell: bash
+        env:
+          RELEASE_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          PROVENANCE_SHA: ${{ inputs.provenance_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || ! "$PROVENANCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Descendant admission requires exact lowercase source and provenance SHAs"
+            exit 1
+          fi
+          # Objects only: the controller worktree stays checked out and no
+          # release-source file is checked out or executed.
+          git fetch --quiet --no-tags --no-recurse-submodules --unshallow origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          if [ "$(git rev-parse --is-shallow-repository)" != false ] ||
+             [ "$(git rev-parse HEAD)" != "$RELEASE_CONTROLLER_SHA" ]; then
+            echo "::error::Controller checkout or protected main history changed"
+            exit 1
+          fi
+          git cat-file -e "$SOURCE_SHA^{commit}"
+          git cat-file -e "$PROVENANCE_SHA^{commit}"
+
       - name: Verify controller identity and exact reviewed merge provenance
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_CONTROLLER_SHA: ${{ inputs.controller_sha }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_PROVENANCE_SHA: ${{ inputs.provenance_sha }}
+          RELEASE_DESCENDANT_GIT_DIR: ${{ github.workspace }}
         run: node scripts/check-release-pr-automation.mjs verify-approved-merge

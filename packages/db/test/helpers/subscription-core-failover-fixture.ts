@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   claimSessionWorkForAttempt,
   createDb,
@@ -9,6 +10,9 @@ import {
   withSessionRlsActorContext,
   applySessionTurnSettlement,
   requestSessionTurnRecovery,
+  addSessionSystemUpdate,
+  retryFailedSessionInTransaction,
+  listSessionEvents,
 } from "../../src";
 import { withWorkspaceSubjectSessionActivityRls } from "../../src/database";
 import {
@@ -71,6 +75,7 @@ export function failoverFixture(
       allowedModelIds?: string[];
       personal?: boolean;
       generation?: number;
+      scopeKind?: "organization" | "workspaces";
     } = {},
   ) {
     const id = crypto.randomUUID();
@@ -86,7 +91,7 @@ export function failoverFixture(
       allowed_model_ids, label) values
       (${id}::uuid, ${org.accountId}::uuid, ${provider.adapter.provider},
         ${provider.adapter.credentialKind === "api_key" ? "api_key" : "subscription"}, 'fixture-no-secret',
-        ${options.personal ? "personal" : "shared"}, ${options.personal ? "people" : "organization"}, true,
+        ${options.personal ? "personal" : "shared"}, ${options.personal ? "people" : (options.scopeKind ?? "organization")}, true,
         ${id}, ${id}, ${options.personal ? org.membershipId : null}::uuid, ${options.personal ? org.subjectId : null},
         ${options.personal ? authorityId : null}::uuid, ${options.personal ? "subscription_connection" : null},
         ${options.personal ? (options.generation ?? 1) : null},
@@ -120,6 +125,7 @@ export function failoverFixture(
       private?: boolean;
       sessionId?: string;
       metadata?: Record<string, unknown>;
+      causalTurnId?: string;
     } = {},
   ) {
     const model = options.model ?? models[0]!;
@@ -151,42 +157,61 @@ export function failoverFixture(
         )
       ).id;
     const provider = providers.find((value) => value.adapter.provider === model.provider)!;
-    await withSessionRlsActorContext(actor, () =>
-      enqueueSessionTurn(client.db, {
+    const executionPolicy = TurnExecutionPolicyV1.parse({
+      schemaVersion: 1,
+      productModelId: model.id,
+      requestedModelId: null,
+      modelSource: "session",
+      reasoningEffort: "high",
+      reasoningSource: "session",
+      providerId: provider.adapter.modelPolicyProviderId,
+      upstreamModelId: model.upstreamModelId,
+      wireApi: "chat",
+      credentialSource: { kind: "organization_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "organization", metering: "external" },
+      definitionVersion: `sha256:${"a".repeat(64)}`,
+    });
+    if (options.causalTurnId) {
+      await addSessionSystemUpdate(client.db, {
         accountId: org.accountId,
         workspaceId,
         sessionId,
-        triggerEventId: crypto.randomUUID(),
-        temporalWorkflowId: `session-${sessionId}`,
-        source: "user",
-        prompt: "failover",
-        resources: [],
-        tools: [],
-        model: model.id,
-        reasoningEffort: "high",
-        sandboxBackend: "none",
-        initiator: options.ownerless
-          ? { kind: "service", subjectId: actor.subjectId }
-          : { kind: "subject", subjectId: actor.subjectId },
-        metadata: {
-          turnExecutionPolicyV1: {
-            schemaVersion: 1,
-            productModelId: model.id,
-            requestedModelId: null,
-            modelSource: "session",
-            reasoningEffort: "high",
-            reasoningSource: "session",
-            providerId: provider.adapter.modelPolicyProviderId,
-            upstreamModelId: model.upstreamModelId,
-            wireApi: "chat",
-            credentialSource: { kind: "organization_connection", mechanism: "api_key" },
-            billing: { upstreamPayer: "organization", metering: "external" },
-            definitionVersion: `sha256:${"a".repeat(64)}`,
-          },
-          ...options.metadata,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `failover:${crypto.randomUUID()}`,
+        summary: "Child done",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
         },
-      }),
-    );
+        lineage: { parentTurnId: options.causalTurnId },
+      });
+    } else
+      await withSessionRlsActorContext(actor, () =>
+        enqueueSessionTurn(client.db, {
+          accountId: org.accountId,
+          workspaceId,
+          sessionId,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${sessionId}`,
+          source: "user",
+          prompt: "failover",
+          resources: [],
+          tools: [],
+          model: model.id,
+          reasoningEffort: "high",
+          sandboxBackend: "none",
+          initiator: options.ownerless
+            ? { kind: "service", subjectId: actor.subjectId }
+            : { kind: "subject", subjectId: actor.subjectId },
+          metadata: {
+            turnExecutionPolicyV1: executionPolicy,
+            ...options.metadata,
+          },
+        }),
+      );
     const attempt = await claim(workspaceId, sessionId);
     const identity = await readSubscriptionCoreTurnIdentity(client.db, {
       accountId: org.accountId,
@@ -197,6 +222,7 @@ export function failoverFixture(
     if (!identity) throw new Error("Missing turn identity");
     return {
       identity,
+      executionPolicy,
       ...attempt,
       productModelId: model.id,
       reasoningLevel: "high",
@@ -307,6 +333,38 @@ export function failoverFixture(
     if (result.action !== "recovering") throw new Error("Recovery failed");
     return { ...work, ...(await claim(work.identity.workspaceId, work.identity.sessionId)) };
   }
+  async function humanRetry(work: Awaited<ReturnType<typeof turn>>, subjectId: string) {
+    await release(work);
+    const { accountId, workspaceId, sessionId, turnId } = work.identity;
+    const settled = await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId,
+      turnId,
+      attemptId: work.attemptId,
+      triggerEventId: crypto.randomUUID(),
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { code: "db_failure", error: "Original startup failure" } },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    if (settled.action !== "settled") throw new Error("Failure settlement failed");
+    const failure = (await listSessionEvents(client.db, workspaceId, sessionId))
+      .filter((event) => event.type === "turn.failed")
+      .at(-1)!;
+    await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, subjectId, (tx) =>
+      retryFailedSessionInTransaction(tx, {
+        accountId,
+        workspaceId,
+        sessionId,
+        subjectId,
+        request: { clientEventId: crypto.randomUUID(), failureEventId: failure.id },
+        executionPolicy: work.executionPolicy,
+      }),
+    );
+    return { ...work, ...(await claim(workspaceId, sessionId)) };
+  }
   return {
     client,
     admin,
@@ -320,5 +378,6 @@ export function failoverFixture(
     release,
     finish,
     recover,
+    humanRetry,
   };
 }

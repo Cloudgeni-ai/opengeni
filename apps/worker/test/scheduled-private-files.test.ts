@@ -11,12 +11,9 @@ import {
   createSession,
   withSessionRlsActorContext,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {

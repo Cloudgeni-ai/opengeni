@@ -603,12 +603,6 @@ async function finalizeTurnAttemptSteps(
     }
     monitor.enter("tool_close");
     eventing.toolPreparationClosing = true;
-    if (eventing.toolPreparationReady) {
-      await waitForTurnFinalizerStep(
-        eventing.toolPreparationReady.catch(() => undefined),
-        finalizerSignal,
-      );
-    }
     if (eventing.codemodeDispatcher) {
       await waitForTurnFinalizerStep(
         eventing.codemodeDispatcher.close().catch(() => undefined),
@@ -619,6 +613,14 @@ async function finalizeTurnAttemptSteps(
     if (eventing.preparedTools) {
       await waitForTurnFinalizerStep(
         eventing.preparedTools.close().catch(() => undefined),
+        finalizerSignal,
+      );
+    }
+    // Closing owns the never-started case as well as joining active setup.
+    // The closing flag above prevents completion from starting a dispatcher.
+    if (eventing.toolPreparationReady) {
+      await waitForTurnFinalizerStep(
+        eventing.toolPreparationReady.catch(() => undefined),
         finalizerSignal,
       );
     }

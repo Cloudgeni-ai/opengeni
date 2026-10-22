@@ -8,7 +8,7 @@ import type {
   ApiIntegrationInstallationSummary,
   GoogleDriveBrowseResponse,
   IntegrationFacetDefinitionSummary,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const toastError = mock(() => undefined);
 const toastWarning = mock(() => undefined);
@@ -22,7 +22,7 @@ mock.module("sonner", () => ({
   },
 }));
 
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
     open ? <div data-dialog>{children}</div> : null,
   DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,

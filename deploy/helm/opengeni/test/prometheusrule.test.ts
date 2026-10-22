@@ -451,7 +451,7 @@ describe("turn-capacity Prometheus alerts", () => {
     );
   });
 
-  test("tiers OpenGeni-owned dispatch latency tightly and without duplicate incidents", async () => {
+  test("tiers Opengeni-owned dispatch latency tightly and without duplicate incidents", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",

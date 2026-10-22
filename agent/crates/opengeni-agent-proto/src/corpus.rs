@@ -64,6 +64,7 @@ pub fn canonical_control_request() -> v1::ControlRequest {
         resource_policy: None,
         op: Some(v1::control_request::Op::OpStart(v1::OpStart {
             op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                run_as: String::new(),
                 command: vec!["echo".to_string(), "hello".to_string()],
                 shell: false,
                 cwd: "/home/user/repo".to_string(),
@@ -74,6 +75,7 @@ pub fn canonical_control_request() -> v1::ControlRequest {
             window_bytes: 65_536,
             deadline_ms: 1_800_000_000_000,
             origin_id: "session-abc".to_string(),
+            connection_generation: 0,
         })),
     }
 }
@@ -91,6 +93,8 @@ pub fn canonical_hello() -> v1::Hello {
         machine_name: "buildbox".to_string(),
         workspace_root: "/home/user".to_string(),
         capabilities: Some(v1::Capabilities {
+            run_as: false,
+            op_release: false,
             exec: true,
             filesystem: true,
             git: true,
@@ -114,8 +118,10 @@ pub fn canonical_hello() -> v1::Hello {
             operation_resource_policy: false,
             operation_cpu_quota: false,
             transactional_fs_write: false,
+            transactional_fs_write_machine: false,
             credential_renew: false,
             mac_permissions: None,
+            browser_control_http: false,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

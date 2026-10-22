@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type Session, type UserResourceAuthoritySummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
-import { managedSelfContextIdentity } from "./managed-self-context";
+import { managedSelfContextIdentity } from "@opengeni/react/app/lib/managed-self-context";
 import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
@@ -15,7 +15,7 @@ import {
   reconcileNewSessionFixedResources,
   recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
-} from "./personal-resource-attachments";
+} from "@opengeni/react/app/lib/personal-resource-attachments";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -23,6 +23,58 @@ const personalWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const otherRigId = "99999999-9999-4999-8999-999999999999";
 const rigId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const enrollmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+test("optional catalogs request exactly the authorized resource kinds", async () => {
+  const scope = ownerScope()!;
+  for (const rigs of [false, true]) {
+    for (const connectedMachines of [false, true]) {
+      const calls: string[] = [];
+      const client = {
+        listRigs: async () => {
+          calls.push("rigs");
+          return [personalRig()];
+        },
+        listUserResourceAuthorities: async (
+          _id: string,
+          { resourceKind }: { resourceKind: "rig" | "connected_machine" },
+        ) => {
+          calls.push(resourceKind);
+          return {
+            authorities: [authority(resourceKind, resourceKind === "rig" ? rigId : enrollmentId)],
+            nextCursor: null,
+          };
+        },
+      } as unknown as OpenGeniBrowserClient;
+      const catalog = await loadPersonalResourceCatalog(client, scope, { rigs, connectedMachines });
+      expect(calls).toEqual([
+        ...(rigs ? ["rigs", "rig"] : []),
+        ...(connectedMachines ? ["connected_machine"] : []),
+      ]);
+      expect(catalog.rigs).toHaveLength(rigs ? 1 : 0);
+      expect(catalog.connectedMachineAuthorities).toHaveLength(connectedMachines ? 1 : 0);
+      expect(catalog.truncated).toBe(false);
+    }
+  }
+});
+
+test("authorized catalog failures propagate unchanged, including forbidden and transport errors", async () => {
+  for (const cause of [new OpenGeniApiError(403, "forbidden"), new Error("offline")]) {
+    const client = {
+      listRigs: async () => {
+        throw cause;
+      },
+      listUserResourceAuthorities: async () => {
+        throw cause;
+      },
+    } as unknown as OpenGeniBrowserClient;
+    await expect(
+      loadPersonalResourceCatalog(client, ownerScope()!, { rigs: true, connectedMachines: false }),
+    ).rejects.toBe(cause);
+    await expect(
+      loadPersonalResourceCatalog(client, ownerScope()!, { rigs: false, connectedMachines: true }),
+    ).rejects.toBe(cause);
+  }
+});
 
 function personalRig(originWorkspaceId = personalWorkspaceId) {
   return {
@@ -233,7 +285,10 @@ describe("personal resource attachment authority", () => {
       },
     } as unknown as OpenGeniBrowserClient;
 
-    const catalog = await loadPersonalResourceCatalog(client, scope);
+    const catalog = await loadPersonalResourceCatalog(client, scope, {
+      rigs: true,
+      connectedMachines: true,
+    });
     expect(catalog.rigs.map((resource) => resource.name)).toEqual(["Private rig"]);
     expect(catalog.rigAuthorities).toHaveLength(1);
     expect(catalog.rigAuthorities[0]?.originWorkspaceId).toBe(workspaceId);
@@ -251,7 +306,10 @@ describe("personal resource attachment authority", () => {
       }),
     } as unknown as OpenGeniBrowserClient;
 
-    const catalog = await loadPersonalResourceCatalog(client, scope);
+    const catalog = await loadPersonalResourceCatalog(client, scope, {
+      rigs: true,
+      connectedMachines: true,
+    });
     expect(
       personalSelection(catalog, {
         rigId,
@@ -291,7 +349,10 @@ describe("personal resource attachment authority", () => {
       }),
     } as unknown as OpenGeniBrowserClient;
 
-    const catalog = await loadPersonalResourceCatalog(client, scope);
+    const catalog = await loadPersonalResourceCatalog(client, scope, {
+      rigs: true,
+      connectedMachines: true,
+    });
     expect(
       personalSelection(catalog, {
         rigId: null,
@@ -320,7 +381,10 @@ describe("personal resource attachment authority", () => {
       }),
     } as unknown as OpenGeniBrowserClient;
 
-    const catalog = await loadPersonalResourceCatalog(client, scope);
+    const catalog = await loadPersonalResourceCatalog(client, scope, {
+      rigs: true,
+      connectedMachines: true,
+    });
     expect(
       personalSelection(catalog, {
         rigId,
@@ -351,7 +415,10 @@ describe("personal resource attachment authority", () => {
       },
     } as unknown as OpenGeniBrowserClient;
 
-    const catalog = await loadPersonalResourceCatalog(client, scope);
+    const catalog = await loadPersonalResourceCatalog(client, scope, {
+      rigs: true,
+      connectedMachines: true,
+    });
     expect(rigPages).toBe(4);
     expect(catalog.rigAuthoritiesTruncated).toBe(true);
     expect(

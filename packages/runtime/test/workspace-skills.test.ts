@@ -9,7 +9,8 @@ import {
   type SandboxSessionLike,
 } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
-import { testSettings } from "@opengeni/testing";
+import { ErrorCode } from "@opengeni/agent-proto";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { buildAgentCapabilities, repositoryWorkspaceSkillPathsOption } from "../src";
 import {
@@ -18,6 +19,12 @@ import {
   recordModelPreparationMeasurement,
   withModelPreparationObserver,
 } from "../src/model-preparation-diagnostics";
+import {
+  agentErrorToControlError,
+  offlineAgentError,
+  SelfhostedControlError,
+  timeoutAgentError,
+} from "../src/sandbox/selfhosted/control-rpc";
 import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
@@ -559,21 +566,35 @@ description: Prepare a safe release.
     expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 
-  test("fails when the same skill name has different contents", async () => {
+  test("skips all conflicting definitions without resurrecting a third copy", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: First definition.\n---\n",
       ".claude/skills/release/SKILL.md":
         "---\nname: release\ndescription: Different definition.\n---\n",
+      ".third/skills/release/SKILL.md": "---\nname: release\ndescription: First definition.\n---\n",
+      ".agents/skills/good/SKILL.md": "# Valid skill",
     });
-    await expect(
-      discoverWorkspaceSkills(session, [
-        { path: ".agents/skills", source: ".agents/skills" },
-        { path: ".claude/skills", source: ".claude/skills" },
-      ]),
-    ).rejects.toThrow(
-      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
-    );
+    const capability = workspaceSkills([
+      { path: ".agents/skills", source: ".agents/skills" },
+      { path: ".claude/skills", source: ".claude/skills" },
+      { path: ".third/skills", source: ".third/skills" },
+    ]).bind(session);
+    const instructions = await capability.instructions();
+    expect(instructions).toContain('"name":"good"');
+    expect(instructions).not.toContain('"id":"repository:.agents/skills/release/SKILL.md"');
+    expect(instructions).not.toContain('"id":"repository:.third/skills/release/SKILL.md"');
+    expect(instructions).toContain('"code":"conflicting_definitions"');
+    expect(instructions).toContain(".agents/skills/release/SKILL.md");
+    expect(instructions).toContain(".claude/skills/release/SKILL.md");
+    const reader = capability.tools()[0]!;
+    if (reader.type !== "function") throw new Error("missing reader");
+    expect(
+      await reader.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/release/SKILL.md" }),
+      ),
+    ).toContain("Repository Skill is not in this index");
   });
 
   test("same name with identical SKILL.md but different helpers still conflicts", async () => {
@@ -593,12 +614,10 @@ description: Prepare a safe release.
         { path: ".agents/skills", source: ".agents/skills" },
         { path: ".claude/skills", source: ".claude/skills" },
       ]),
-    ).rejects.toThrow(
-      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
-    );
+    ).resolves.toEqual([]);
   });
 
-  test("fails instead of ambiguously shadowing configured skills", async () => {
+  test("skips repository entries instead of shadowing configured skills", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: Repository release instructions.\n---\n",
@@ -609,13 +628,18 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(["release"]),
       ),
-    ).rejects.toThrow('Workspace skill "release" conflicts with a configured Opengeni skill');
+    ).resolves.toEqual([]);
+    const capability = workspaceSkills(
+      [{ path: ".agents/skills", source: "agents" }],
+      ["release"],
+    ).bind(session);
+    expect(await capability.instructions()).toContain('"code":"configured_name_conflict"');
   });
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {
     const session = fakeSession({
-      ".agents/skills/opengeni-documents/SKILL.md":
-        "---\nname: opengeni-documents\ndescription: Repository copy.\n---\n",
+      ".agents/skills/documents/SKILL.md":
+        "---\nname: documents\ndescription: Repository copy.\n---\n",
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: Repository release instructions.\n---\n",
     });
@@ -625,7 +649,7 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(),
         undefined,
-        new Set(["opengeni-documents"]),
+        new Set(["documents"]),
       ),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -633,6 +657,237 @@ description: Prepare a safe release.
         description: "Repository release instructions.",
       }),
     ]);
+  });
+
+  const unreachableFailures: Array<[string, () => SelfhostedControlError]> = [
+    [
+      "no authoritative live runner connection",
+      () =>
+        new SelfhostedControlError({
+          message: "The Connected Machine has no authoritative live runner connection.",
+          code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+          reason: "agent_offline",
+          retryable: false,
+          agentOffline: true,
+        }),
+    ],
+    ["transport offline", () => agentErrorToControlError(offlineAgentError(undefined, true))],
+    ["control request timeout", () => agentErrorToControlError(timeoutAgentError())],
+  ];
+  for (const [label, unreachable] of unreachableFailures) {
+    test(`an unreachable workspace (${label}) degrades repository skills instead of failing instructions`, async () => {
+      const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+      let calls = 0;
+      session.listDir = async () => {
+        calls++;
+        throw unreachable();
+      };
+      const capability = workspaceSkills([
+        { path: ".agents/skills", source: "agents" },
+        { path: ".claude/skills", source: "claude" },
+      ]).bind(session);
+      const instructions = await capability.instructions();
+      expect(instructions).toContain("Repository skills could not be indexed");
+      expect(instructions).not.toContain("repository_skill_read");
+      // The run memoizes the degraded index: later model requests in the same
+      // binding neither re-pay the unreachable cost nor change the prefix.
+      expect(await capability.instructions()).toBe(instructions);
+      expect(calls).toBe(2);
+      const reader = capability.tools()[0]!;
+      if (reader.type !== "function") throw new Error("missing reader");
+      // The SDK renders the reader's refusal into the tool result.
+      expect(
+        await reader.invoke(
+          undefined!,
+          JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
+        ),
+      ).toContain("Repository Skill is not in this index");
+      expect(calls).toBe(2);
+    });
+  }
+
+  for (const offlineIndex of [0, 1]) {
+    for (const offlineSettlesFirst of [true, false]) {
+      test(`a concurrent genuine failure outranks an unreachable one (offline at index ${offlineIndex}, ${offlineSettlesFirst ? "offline" : "genuine"} settles first)`, async () => {
+        const genuine = Object.assign(new Error("permission denied"), { code: "EACCES" });
+        const offline = agentErrorToControlError(offlineAgentError(undefined, true));
+        const pending = new Map<string, (error: unknown) => void>();
+        let bothStarted!: () => void;
+        const started = new Promise<void>((resolve) => (bothStarted = resolve));
+        const session = fakeSession({});
+        session.listDir = ({ path }) =>
+          new Promise((_, reject) => {
+            pending.set(path, reject);
+            if (pending.size === 2) bothStarted();
+          });
+        const paths = ["root0", "root1"];
+        const capability = workspaceSkills(paths.map((path) => ({ path, source: path }))).bind(
+          session,
+        );
+        // Observe the outcome now: it may settle while the reads are released.
+        const outcome = capability.instructions().then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await started;
+        const offlinePath = paths[offlineIndex]!;
+        const genuinePath = paths[1 - offlineIndex]!;
+        const order = offlineSettlesFirst
+          ? [
+              [offlinePath, offline],
+              [genuinePath, genuine],
+            ]
+          : [
+              [genuinePath, genuine],
+              [offlinePath, offline],
+            ];
+        for (const [path, error] of order) {
+          pending.get(path as string)!(error);
+          await Bun.sleep(0);
+        }
+        expect(await outcome).toBe(genuine);
+      });
+    }
+  }
+
+  test("only unreachable failures degrade; the lowest index still wins among genuine ones", async () => {
+    const first = new Error("first");
+    const second = new Error("second");
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw agentErrorToControlError(timeoutAgentError());
+      await Bun.sleep(path === "root1" ? 5 : 1);
+      throw path === "root1" ? first : second;
+    };
+    await expect(
+      discoverWorkspaceSkills(
+        session,
+        ["root0", "root1", "root2"].map((path) => ({ path, source: path })),
+      ),
+    ).rejects.toBe(first);
+  });
+
+  test("an unreachable skill file read mid-discovery also degrades", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    session.readFile = async () => {
+      throw agentErrorToControlError(timeoutAgentError());
+    };
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      session,
+    );
+    expect(await capability.instructions()).toContain("Repository skills could not be indexed");
+  });
+
+  test("a later run discovers repository skills once the workspace is reachable again", async () => {
+    const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+    const listDir = session.listDir!;
+    let offline = true;
+    session.listDir = async (args) => {
+      if (offline) throw agentErrorToControlError(offlineAgentError(undefined, true));
+      return await listDir(args);
+    };
+    const template = workspaceSkills([{ path: ".agents/skills", source: "agents" }]);
+    const first = template.clone().bind(session);
+    expect(await first.instructions()).toContain("Repository skills could not be indexed");
+    offline = false;
+    // The SDK clones and rebinds capabilities for every run; the degraded
+    // result must not carry over as an authoritative empty index.
+    const second = first.clone().bind(session);
+    const instructions = await second.instructions();
+    expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
+    expect(instructions).not.toContain("could not be indexed");
+  });
+
+  const reachableFailures: Array<[string, () => unknown]> = [
+    [
+      "fenced control error",
+      () =>
+        new SelfhostedControlError({
+          message: "fenced",
+          code: ErrorCode.ERROR_CODE_FENCED,
+          reason: null,
+          retryable: true,
+          fenced: true,
+        }),
+    ],
+    [
+      "consent control error",
+      () =>
+        agentErrorToControlError({
+          code: ErrorCode.ERROR_CODE_CONSENT_REQUIRED,
+          message: "consent required",
+          retryable: false,
+          detail: {},
+        }),
+    ],
+    [
+      "OS control error",
+      () =>
+        agentErrorToControlError({
+          code: ErrorCode.ERROR_CODE_OS,
+          message: "permission denied",
+          retryable: false,
+          detail: {},
+        }),
+    ],
+    ["untyped error mentioning offline", () => new Error("agent offline: timed out")],
+    [
+      "untyped error shaped like an offline control error",
+      () => Object.assign(new Error("offline"), { agentOffline: true, reason: "agent_offline" }),
+    ],
+  ];
+  for (const [label, failure] of reachableFailures) {
+    test(`repository skill instructions still fail on a ${label}`, async () => {
+      const error = failure();
+      const session = fakeSession({});
+      session.listDir = async () => {
+        throw error;
+      };
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+        session,
+      );
+      await expect(capability.instructions()).rejects.toBe(error);
+    });
+  }
+
+  test("an invalid repository skill emits a warning even when no valid skills remain", async () => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      fakeSession({ ".agents/skills/bad/SKILL.md": "---\nname: bad name!\n---\n" }),
+    );
+    expect(await capability.instructions()).toContain('"code":"invalid_name"');
+  });
+
+  test.each([
+    "---\nname: [invalid\n---\n",
+    "---\nname: first\nname: duplicate\n---\n",
+    "---\n- not a mapping\n---\n",
+  ])("malformed repository metadata is isolated from valid skills: %s", async (markdown) => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      fakeSession({
+        ".agents/skills/bad/SKILL.md": markdown,
+        ".agents/skills/good/SKILL.md": "# Good",
+      }),
+    );
+    const instructions = await capability.instructions();
+    expect(instructions).toContain('"name":"good"');
+    expect(instructions).toContain('"code":"invalid_metadata"');
+    expect(instructions).toContain(".agents/skills/bad/SKILL.md");
+    expect(instructions).not.toContain("invalid YAML");
+    expect(await capability.instructions()).toBe(instructions);
+  });
+
+  test("managed inline Skill metadata remains fail-closed", () => {
+    expect(() =>
+      buildAgentCapabilities(testSettings(), [
+        sessionActivation(
+          {
+            name: "broken",
+            files: [{ path: "SKILL.md", content: "---\nname: [broken\n---\n" }],
+          },
+          "broken",
+        ),
+      ]),
+    ).toThrow("invalid YAML");
   });
 
   test("deduplicates identical inline session skills and rejects conflicts", () => {

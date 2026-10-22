@@ -11,7 +11,7 @@ import {
   WorkspaceArtifactNotFoundError,
 } from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
@@ -20,6 +20,7 @@ import {
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   requireWorkspaceToolGatewayGrant,
+  requireWorkspaceToolGatewayAuthorization,
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewaySettingsForGrant,
@@ -30,6 +31,12 @@ import {
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const subjectId = "user:workspace-tool-gateway-test";
+
+test("a caller-shaped published Site tool capability is not authenticated authority", () => {
+  expect(() =>
+    requireWorkspaceToolGatewayAuthorization({ kind: "published_site_tools", grant: grant() }),
+  ).toThrow("workspace access authorization is invalid");
+});
 
 describe("Site version tool authorization", () => {
   const context = {

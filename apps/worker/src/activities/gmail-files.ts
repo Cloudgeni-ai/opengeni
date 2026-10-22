@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { GmailFileMaterializationRequest } from "@opengeni/runtime/gmail-rest-mcp";
-import type { ConnectorAttachmentMaterializer } from "@opengeni/runtime";
+import type {
+  ConnectorAttachmentMaterializer,
+  ConnectorFileMaterializationRequest,
+} from "@opengeni/runtime";
 import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 
 /** Use the selected filesystem namespace, retaining descriptor confinement and
@@ -22,20 +25,39 @@ export async function readGmailFileFromChannel(
   return bytes;
 }
 
+type ConnectorFileMaterializationOptions = {
+  workspaceId: string;
+  storage: ObjectStorage;
+  downloadStorage: ObjectStorage;
+  materialize: ConnectorAttachmentMaterializer;
+  onCleanupFailure?: (key: string) => void;
+};
+
 /** Gmail returns base64url JSON, while the exact filesystem importer consumes
  * byte streams. Stage only inside the worker; no URL or bytes reach a tool result. */
 export async function materializeGmailFile(
   request: GmailFileMaterializationRequest,
-  options: {
-    workspaceId: string;
-    storage: ObjectStorage;
-    downloadStorage: ObjectStorage;
-    materialize: ConnectorAttachmentMaterializer;
-    onCleanupFailure?: (key: string) => void;
-  },
+  options: ConnectorFileMaterializationOptions,
+) {
+  return await materializeConnectorFile(
+    {
+      ...request,
+      toolName: request.providerAttachmentId.value.endsWith(":raw")
+        ? "download_message"
+        : "download_attachment",
+    },
+    options,
+  );
+}
+
+/** Connectors that buffer provider bytes stage them privately in object
+ * storage, then import them as exact connector attachments in the sandbox. */
+export async function materializeConnectorFile(
+  request: ConnectorFileMaterializationRequest,
+  options: ConnectorFileMaterializationOptions,
 ) {
   if (!(await request.authorizeProviderRequest()))
-    throw new Error("Gmail file authority is unavailable");
+    throw new Error("Connector file authority is unavailable");
   const hash = createHash("sha256").update(request.bytes).digest("hex");
   const key = `workspaces/${options.workspaceId}/private-connector-transfers/${crypto.randomUUID()}`;
   try {
@@ -48,9 +70,7 @@ export async function materializeGmailFile(
     const source = await options.downloadStorage.createGetUrl({ key, expiresInSeconds: 300 });
     const envelope = await options.materialize({
       serverId: request.serverId,
-      toolName: request.providerAttachmentId.value.endsWith(":raw")
-        ? "download_message"
-        : "download_attachment",
+      toolName: request.toolName,
       operationId: request.operationId,
       connectionId: request.connectionId,
       authorizeProviderRequest: request.authorizeProviderRequest,

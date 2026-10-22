@@ -207,6 +207,10 @@ export class BrowserInteractionController {
     return this.core.journalSnapshot();
   }
 
+  isIdle(): boolean {
+    return this.core.isIdle();
+  }
+
   waitForIdle(): Promise<void> {
     return this.core.waitForIdle();
   }
@@ -421,6 +425,12 @@ export class ComputerInteractionController {
             );
           }
         },
+        assertActionObservationAuthority(observation, command) {
+          // An action that opened a window (a launch, a new document, a
+          // dialog) returns that window, which is not the window the command
+          // named, so any target of this controller.
+          this.assertObservationAuthority(observation, observation.target?.id ?? command.targetId);
+        },
         outcome(observation) {
           return observation.target === null
             ? { state: observation.outcome, error: observation.error }
@@ -476,6 +486,10 @@ export class ComputerInteractionController {
 
   journalSnapshot(): ComputerOperationJournalRecord[] {
     return this.core.journalSnapshot();
+  }
+
+  isIdle(): boolean {
+    return this.core.isIdle();
   }
 
   waitForIdle(): Promise<void> {

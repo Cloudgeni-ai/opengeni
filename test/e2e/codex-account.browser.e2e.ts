@@ -2,7 +2,8 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 let browser: Browser, web: StartedProcess, baseUrl: string;
 const evidence = new URL("../../.agent/evidence/codex-account/", import.meta.url).pathname;
@@ -42,18 +43,20 @@ for (const theme of ["light", "dark"] as const) {
       const context = await browser.newContext({
         viewport: { width, height: 950 },
         colorScheme: theme,
+        locale: "en-US",
       });
       const page = await context.newPage();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       try {
         await page.goto(`${baseUrl}/test/codex-account.html`);
-        await page.getByText("120.50", { exact: true }).waitFor();
+        // The balance is formatted for reading (#4307), not the raw "120.50".
+        await page.getByText("120.5", { exact: true }).waitFor();
         const consent = page.getByRole("switch", {
           name: "Use extra credits on subscription@example.test",
         });
         const allocation = page.getByRole("switch", {
-          name: "Use subscription@example.test for new work",
+          name: "Enable subscription@example.test",
         });
         expect(await consent.getAttribute("aria-checked")).toBe("false");
         expect(await allocation.getAttribute("aria-checked")).toBe("false");

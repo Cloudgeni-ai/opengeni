@@ -1,3 +1,4 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
@@ -12,8 +13,8 @@ import {
   creditsModelForCheckout,
   includedDefaultModel,
   preferredConnectedModelId,
-} from "./model-access-onboarding";
-import { isPaymentRequiredError } from "./model-access";
+} from "@opengeni/react/app/lib/model-access-onboarding";
+import { isPaymentRequiredError } from "@opengeni/react/app/lib/model-access";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,
@@ -358,7 +359,8 @@ describe("credit checkout return", () => {
 });
 
 describe("resolved default in the composer and after a credit purchase", () => {
-  const rows = (models: WorkspaceModelCatalogModel[]) => sortPickerRows(projectPickerRows(models));
+  const rows = (models: WorkspaceModelCatalogModel[]) =>
+    sortPickerRows(projectPickerRows(t, models));
 
   test("the composer fallback takes the server-resolved default first", () => {
     const models = [FREE_DEFAULT, CREDITS_FIRST, CREDITS_SECOND];

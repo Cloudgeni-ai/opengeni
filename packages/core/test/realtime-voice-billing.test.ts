@@ -7,7 +7,7 @@ import {
   realtimeVoiceStartedMinutes,
 } from "@opengeni/config";
 import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createRealtimeVoiceBilling,
   createVoiceInputBilling,
@@ -28,6 +28,16 @@ test("live voice pricing: strict JSON, margin rounds up, every started minute", 
   expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 })).toEqual({
     providerCostMicros: 50_000,
     creditCostMicros: 52_500,
+  });
+  expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 }, 0)).toEqual({
+    providerCostMicros: 50_000,
+    creditCostMicros: 50_000,
+  });
+  expect(
+    realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 }, 1_000),
+  ).toEqual({
+    providerCostMicros: 50_000,
+    creditCostMicros: 55_000,
   });
   expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 3, marginBps: 1 })).toEqual({
     providerCostMicros: 3,
@@ -96,7 +106,7 @@ test("promotional chat-only credits are named, not reported as no credits", () =
     "Promotional credits don't cover live voice. Add credits to use it.",
   );
   expect(voiceInsufficientCreditsMessage("Voice input", "none")).toBe(
-    "Voice input needs Opengeni credits. Add credits to continue.",
+    "Voice input needs credits. Add credits to continue.",
   );
 });
 

@@ -41,12 +41,15 @@ import {
 import { useContext, useState, type ReactNode } from "react";
 import { formatBytes, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
+import { useToolDetails } from "./tool-details";
+import type { ToolCallItem } from "./types";
 import { ConnectorLogoIcon, useToolConnectorLogo } from "./provider-logo";
 import {
   generatedImageReceipt,
   mediaPreviewFact,
   parseToolArgs,
   retainedScreenshotMetadata,
+  retainedToolResultImages,
   unwrapMcpOutput,
   screenshotDataUrl,
 } from "./parsers";
@@ -54,6 +57,7 @@ import {
   createToolRegistry,
   type ToolRegistry,
   type ToolRegistryEntry,
+  type ToolRenderer,
   type ToolRendererProps,
 } from "./registry";
 import {
@@ -74,17 +78,22 @@ import {
   askPresentation,
   execPresentation,
   genericToolIconKind,
-  genericToolPresentation,
   parseDisclosedTools,
   parseSearchHits,
   pathBasename,
   pathDirname,
+  machinePresentation,
   runOnPresentation,
+  plainToolRow,
+  presentedToolKind,
+  presentsToolOutputPreview,
+  toolRowPresentation,
   toolSearchPreview,
   toolSearchQuery,
   truncatePreview,
   webSearchPresentation,
   writeStdinPresentation,
+  type PresentedToolKind,
   type ToolBody,
   type ToolIconKind,
   type ToolPreview,
@@ -94,6 +103,7 @@ import {
 import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers
@@ -215,7 +225,7 @@ function toolIcon(kind: ToolIconKind): LucideIcon {
   }
 }
 
-function presentedPreviewNode(preview: ToolPreview): ReactNode {
+function presentedPreviewNode(msg: OpenGeniText, preview: ToolPreview): ReactNode {
   switch (preview.kind) {
     case "text":
       return preview.running ? <RunningPreview>{preview.text}</RunningPreview> : preview.text;
@@ -224,7 +234,9 @@ function presentedPreviewNode(preview: ToolPreview): ReactNode {
     case "files":
       return (
         <span className="inline-flex items-center gap-2 font-og-mono">
-          <span className="text-og-fg-muted">{preview.count} files</span>
+          <span className="text-og-fg-muted">
+            {msg("timeline.toolRenderers.filesCount", { count: preview.count })}
+          </span>
           <span className="text-og-fg-subtle">
             +{preview.add} −{preview.del}
           </span>
@@ -234,7 +246,7 @@ function presentedPreviewNode(preview: ToolPreview): ReactNode {
       return (
         <span className="inline-flex items-center gap-2 font-og-mono">
           <span className="text-og-fg-muted">{preview.name}</span>
-          <span className="text-og-fg-subtle">malformed V4A</span>
+          <span className="text-og-fg-subtle">{msg("timeline.toolRenderers.malformedPatch")}</span>
         </span>
       );
   }
@@ -295,10 +307,13 @@ function PresentedBody({ body }: { body: ToolBody }) {
       );
     case "web-results":
       return <WebSearchResults results={body.results} />;
+    case "none":
+      return null;
   }
 }
 
 function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
+  const msg = useOpenGeniText();
   const resultOccurrences = new Map<string, number>();
   const keyedResults = results?.map((result) => {
     const contentKey = `${result.domain}\u0000${result.title}\u0000${result.snippet}`;
@@ -307,7 +322,7 @@ function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
     return { key: `${contentKey}\u0000${occurrence}`, result };
   });
   if (!keyedResults || !keyedResults.length) {
-    return <BodyNote>results folded into model context — no list available.</BodyNote>;
+    return <BodyNote>{msg("timeline.toolRenderers.resultsFoldedIntoModelContext")}</BodyNote>;
   }
   return (
     <ul className="flex flex-col gap-2">
@@ -328,13 +343,22 @@ function WebSearchResults({ results }: { results: WebSearchResult[] | null }) {
 
 /** Draw one shared-model row with the web disclosure primitives. */
 function PresentedToolRow({
-  presentation: p,
+  presentation,
+  item,
   logo = null,
 }: {
   presentation: ToolRowPresentation;
+  /** The call the row presents; plain tool details reduce the row from it. */
+  item: ToolCallItem;
   /** A connector's logo, drawn in place of the row's icon. */
   logo?: string | null;
 }) {
+  const msg = useOpenGeniText();
+  const computeLabel = useTimelineComputeLabel();
+  const p =
+    useToolDetails() === "plain"
+      ? plainToolRow(msg, item, presentation, { computeLabel })
+      : presentation;
   const Icon = toolIcon(p.icon);
   return (
     <ActivityDisclosure
@@ -347,7 +371,8 @@ function PresentedToolRow({
       {...(p.chip ? { chip: p.chip } : {})}
       {...(p.failed !== undefined ? { failed: p.failed } : {})}
       {...(p.cancelled !== undefined ? { cancelled: p.cancelled } : {})}
-      preview={p.preview ? presentedPreviewNode(p.preview) : undefined}
+      preview={p.preview ? presentedPreviewNode(msg, p.preview) : undefined}
+      expandable={p.body.kind !== "none"}
     >
       <PresentedBody body={p.body} />
     </ActivityDisclosure>
@@ -355,43 +380,125 @@ function PresentedToolRow({
 }
 
 function ExecRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const computeLabel = useTimelineComputeLabel();
-  return <PresentedToolRow presentation={execPresentation(item, { computeLabel })} />;
+  return (
+    <PresentedToolRow presentation={execPresentation(msg, item, { computeLabel })} item={item} />
+  );
 }
 
 function WriteStdinRenderer({ item }: ToolRendererProps) {
-  return <PresentedToolRow presentation={writeStdinPresentation(item)} />;
+  const msg = useOpenGeniText();
+  return <PresentedToolRow presentation={writeStdinPresentation(msg, item)} item={item} />;
 }
 
 function ApplyPatchRenderer({ item }: ToolRendererProps) {
-  const presentation = applyPatchPresentation(item);
+  const msg = useOpenGeniText();
+  const presentation = applyPatchPresentation(msg, item);
   return presentation ? (
-    <PresentedToolRow presentation={presentation} />
+    <PresentedToolRow presentation={presentation} item={item} />
   ) : (
     <GenericRenderer item={item} />
   );
 }
 
 function WebSearchRenderer({ item }: ToolRendererProps) {
-  return <PresentedToolRow presentation={webSearchPresentation(item)} />;
+  const msg = useOpenGeniText();
+  return <PresentedToolRow presentation={webSearchPresentation(msg, item)} item={item} />;
 }
 
 function AskRenderer({ item }: ToolRendererProps) {
-  return <PresentedToolRow presentation={askPresentation(item)} />;
+  const msg = useOpenGeniText();
+  return <PresentedToolRow presentation={askPresentation(msg, item)} item={item} />;
 }
 
 function RunOnRenderer({ item }: ToolRendererProps) {
-  return <PresentedToolRow presentation={runOnPresentation(item)} />;
+  const msg = useOpenGeniText();
+  return <PresentedToolRow presentation={runOnPresentation(msg, item)} item={item} />;
+}
+
+/**
+ * Finding machines, moving onto one and back, and using its screen. A look at
+ * the screen, or an action on it, shows the screenshot it took.
+ */
+function MachineRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
+  const msg = useOpenGeniText();
+  const presentation = machinePresentation(msg, item);
+  const retained = mcpToolLeaf(item.name).startsWith("computer_")
+    ? retainedScreenshotMetadata(item.output)
+    : null;
+  if (!retained?.available) return <PresentedToolRow presentation={presentation} item={item} />;
+  return (
+    <RetainedSessionImageDisclosure
+      artifact={retained}
+      load={loadRetainedScreenshot}
+      title={presentation.title}
+      caption={presentation.title}
+      noun="screenshot"
+      icon={<CameraIcon className={ICON_SIZE} />}
+      lightboxLabel={msg("timeline.toolRenderers.screenshot")}
+      batched={null}
+      failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
+    />
+  );
 }
 
 /**
  * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
  * status preview (Running… / Done / error snippet). No argument-field sniffing —
  * JSON stays in the expandable body only.
+ *
+ * A tool the shared presenter knows but no dedicated renderer claims (screen
+ * steps such as `cua_get_desktop_state`, `interaction_discover`) still reads
+ * the way the presenter words it, so the web row and other renderers agree.
  */
-function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
+function UnreviewedGenericRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
+  const msg = useOpenGeniText();
+  const details = useToolDetails();
   const logo = useToolConnectorLogo(item.display);
-  return <PresentedToolRow presentation={genericToolPresentation(item)} logo={logo} />;
+  const { images, output } = retainedToolResultImages(item.output);
+  if (images.length === 0 || item.status === "running") {
+    return (
+      <PresentedToolRow presentation={toolRowPresentation(msg, item)} item={item} logo={logo} />
+    );
+  }
+  // A tool that returned images shows them like a viewed image, with its
+  // ordinary result text (and any further images) in the expanded body.
+  const presentation = toolRowPresentation(msg, { ...item, output }, { details });
+  const Icon = toolIcon(presentation.icon);
+  const [first, ...rest] = images;
+  return (
+    <RetainedSessionImageDisclosure
+      artifact={first!}
+      load={loadRetainedScreenshot}
+      title={presentation.title}
+      caption={presentation.title}
+      noun="image"
+      icon={<ConnectorLogoIcon src={logo} fallback={<Icon className={ICON_SIZE} />} />}
+      lightboxLabel={presentation.title}
+      batched={null}
+      failed={presentation.failed ?? false}
+      cancelled={presentation.cancelled ?? false}
+    >
+      <PresentedBody body={presentation.body} />
+      {rest.map((image, index) => (
+        <RetainedSessionImageDisclosure
+          key={image.artifactId}
+          artifact={image}
+          load={loadRetainedScreenshot}
+          title={msg("timeline.toolRenderers.imageIndex", { index: index + 2 })}
+          caption={`${presentation.title}, image ${index + 2}`}
+          noun="image"
+          icon={<ImageIcon className={ICON_SIZE} />}
+          lightboxLabel={presentation.title}
+          batched={null}
+          failed={false}
+          cancelled={false}
+        />
+      ))}
+    </RetainedSessionImageDisclosure>
+  );
 }
 
 /* ---- computer_call --------------------------------------------------------- */
@@ -405,31 +512,34 @@ type ComputerAction = {
   button?: string;
 };
 
-function computerVerb(action: ComputerAction | undefined): string {
+function computerVerb(msg: OpenGeniText, action: ComputerAction | undefined): string {
   if (!action || !action.type) {
-    return "Acted";
+    return msg("timeline.toolRenderers.acted");
   }
   switch (action.type) {
     case "screenshot":
-      return "Screenshot";
+      return msg("timeline.toolRenderers.screenshot");
     case "click":
-      return `Clicked (${action.x}, ${action.y})`;
+      return msg("timeline.toolRenderers.clickedXY", { x: action.x, y: action.y });
     case "double_click":
-      return `Double-clicked (${action.x}, ${action.y})`;
+      return msg("timeline.toolRenderers.doubleClickedXY", { x: action.x, y: action.y });
     case "move":
-      return `Moved (${action.x}, ${action.y})`;
+      return msg("timeline.toolRenderers.movedXY", { x: action.x, y: action.y });
     case "scroll":
-      return "Scrolled";
+      return msg("timeline.toolRenderers.scrolled");
     case "type": {
       const t = action.text ?? "";
-      return `Typed “${t.slice(0, 28)}${t.length > 28 ? "…" : ""}”`;
+      return msg("timeline.toolRenderers.typedSliceValue", {
+        slice: t.slice(0, 28),
+        value: t.length > 28 ? "…" : "",
+      });
     }
     case "keypress":
-      return `Pressed ${(action.keys ?? []).join("+")}`;
+      return msg("timeline.toolRenderers.pressedJoin", { join: (action.keys ?? []).join("+") });
     case "drag":
-      return "Dragged";
+      return msg("timeline.toolRenderers.dragged");
     case "wait":
-      return "Waited";
+      return msg("timeline.toolRenderers.waited");
     default:
       return action.type;
   }
@@ -455,6 +565,7 @@ function asComputerArgs(args: unknown): Partial<ComputerAction> {
 }
 
 function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const raw = (item.raw ?? {}) as {
     action?: ComputerAction;
     actions?: ComputerAction[];
@@ -474,7 +585,7 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
       : undefined;
   const action = raw.action ?? functionAction;
   const actions = raw.actions ?? (action ? [action] : []);
-  const verb = computerVerb(action);
+  const verb = computerVerb(msg, action);
   const out = item.output;
   const running = item.status === "running";
   const rejected = raw.providerData?.approvalStatus === "rejected";
@@ -483,7 +594,7 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
   const retained = retainedScreenshotMetadata(out);
   const omittedMedia = mediaPreviewFact(out);
   const empty = out === "" || out == null;
-  const batched = actions.length > 1 ? actions.map((a) => computerVerb(a)).join(" · ") : null;
+  const batched = actions.length > 1 ? actions.map((a) => computerVerb(msg, a)).join(" · ") : null;
   // Fold the batched-action count into the title (one media affordance per row),
   // rather than a separate "+N more" mono label competing beside the thumbnail.
   const countSuffix = actions.length > 1 ? ` ·${actions.length}` : "";
@@ -504,7 +615,7 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
         running
         media={<MediaSkeleton />}
       >
-        <BodyNote>capturing frame…</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.capturingFrame")}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -518,7 +629,7 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
         chip={{ tone: "bad", text: "read-only" }}
         preview="write actions disabled"
       >
-        <BodyNote tone="error">computer-use is read-only — write actions are disabled.</BodyNote>
+        <BodyNote tone="error">{msg("timeline.toolRenderers.computerUseIsReadOnly")}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -529,9 +640,9 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
         icon={<LockIcon className={ICON_SIZE} />}
         iconTone="muted"
         title={verb}
-        preview="approval rejected — this action did not run"
+        preview={msg("timeline.toolRenderers.approvalRejectedThisActionDid2")}
       >
-        <BodyNote>approval rejected — this action did not run.</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.approvalRejectedThisActionDid")}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -556,7 +667,10 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
           media={<MediaEmpty />}
         >
           <BodyNote tone={isFailed ? "error" : undefined}>
-            Screenshot {state}: {retained.reason.replaceAll("_", " ")}.
+            {msg("timeline.toolRenderers.screenshotStateReplaceall", {
+              state,
+              replaceAll: retained.reason.replaceAll("_", " "),
+            })}
           </BodyNote>
         </ActivityDisclosure>
       );
@@ -569,7 +683,7 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
         caption={`${verb}${countSuffix}`}
         noun="screenshot"
         icon={<CameraIcon className={ICON_SIZE} />}
-        lightboxLabel="Screenshot"
+        lightboxLabel={msg("timeline.toolRenderers.screenshot")}
         batched={batched}
         failed={isFailed}
         cancelled={isCancelled}
@@ -595,7 +709,9 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
         media={<Thumbnail src={shotUrl} caption={caption} />}
       >
         <ScreenshotFigure src={shotUrl} caption={caption} />
-        {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+        {batched ? (
+          <BodyNote>{msg("timeline.toolRenderers.batchedBatched", { batched })}</BodyNote>
+        ) : null}
       </ActivityDisclosure>
     );
   }
@@ -605,17 +721,20 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
       <ActivityDisclosure
         icon={<CameraOffIcon className={ICON_SIZE} />}
         iconTone={isFailed ? "failed" : "muted"}
-        title={`${verb}${countSuffix} · image omitted · not retained`}
+        title={msg("timeline.toolRenderers.verbCountsuffixImageOmittedNot", { verb, countSuffix })}
         failed={isFailed}
         cancelled={isCancelled}
-        preview="inline image omitted · not retained"
+        preview={msg("timeline.toolRenderers.inlineImageOmittedNotRetained")}
         media={<MediaEmpty />}
       >
         <BodyNote>
-          The inline {omittedMedia.mediaType} output was omitted from the audit timeline and its
-          source bytes were not retained.
+          {msg("timeline.toolRenderers.theInlineMediatypeOutputWas", {
+            mediaType: omittedMedia.mediaType,
+          })}
         </BodyNote>
-        {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+        {batched ? (
+          <BodyNote>{msg("timeline.toolRenderers.batchedBatched", { batched })}</BodyNote>
+        ) : null}
       </ActivityDisclosure>
     );
   }
@@ -632,10 +751,10 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
       >
         <BodyNote>
           {isFailed
-            ? "computer_call failed — no image returned."
+            ? msg("timeline.toolRenderers.computerCallFailedNoImage")
             : isCancelled
-              ? "computer_call interrupted — no image returned."
-              : "(no image) — the session returned an empty screenshot."}
+              ? msg("timeline.toolRenderers.computerCallInterruptedNoImage")
+              : msg("timeline.toolRenderers.noImageTheSessionReturned")}
         </BodyNote>
       </ActivityDisclosure>
     );
@@ -659,14 +778,15 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
 
 /** Browser tool images share authenticated screenshot loading, with their own media kind. */
 function BrowserScreenshotRenderer(props: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const { item, loadRetainedScreenshot } = props;
   const leaf = mcpToolLeaf(item.name);
   const title =
     leaf === "browser_observe"
-      ? "Observed browser"
+      ? msg("timeline.toolRenderers.observedBrowser")
       : leaf === "browser_act"
-        ? "Used browser"
-        : "Browser screenshot";
+        ? msg("timeline.toolRenderers.usedBrowser")
+        : msg("timeline.toolRenderers.browserScreenshot");
   const retained = retainedScreenshotMetadata(item.output);
   const isFailed = item.status === "failed";
   const isCancelled = item.status === "cancelled";
@@ -680,7 +800,7 @@ function BrowserScreenshotRenderer(props: ToolRendererProps) {
         running
         media={<MediaSkeleton />}
       >
-        <BodyNote>capturing frame…</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.capturingFrame")}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -702,7 +822,10 @@ function BrowserScreenshotRenderer(props: ToolRendererProps) {
         media={<MediaEmpty />}
       >
         <BodyNote tone={isFailed ? "error" : undefined}>
-          Screenshot {state}: {retained.reason.replaceAll("_", " ")}.
+          {msg("timeline.toolRenderers.screenshotStateReplaceall", {
+            state,
+            replaceAll: retained.reason.replaceAll("_", " "),
+          })}
         </BodyNote>
       </ActivityDisclosure>
     );
@@ -715,7 +838,7 @@ function BrowserScreenshotRenderer(props: ToolRendererProps) {
       caption={title}
       noun="screenshot"
       icon={<CameraIcon className={ICON_SIZE} />}
-      lightboxLabel="Browser screenshot"
+      lightboxLabel={msg("timeline.toolRenderers.browserScreenshot")}
       batched={null}
       failed={isFailed}
       cancelled={isCancelled}
@@ -772,13 +895,14 @@ function LoadedRetainedSessionImageDisclosure({
   defaultOpen,
   children,
 }: RetainedSessionImageDisclosureProps) {
+  const msg = useOpenGeniText();
   const state = useRetainedImageObjectUrl(artifact, load);
   const downloadFilename = filename ?? retainedImageFilename(artifact);
   const figure = {
     src: state.kind === "ready" ? state.url : "",
     caption,
     alt: caption,
-    expandLabel: `Expand ${noun}`,
+    expandLabel: msg("timeline.toolRenderers.expandNoun", { noun }),
     lightboxLabel,
     downloadFilename,
   };
@@ -793,9 +917,9 @@ function LoadedRetainedSessionImageDisclosure({
       cancelled={cancelled}
       preview={
         state.kind === "loading"
-          ? `loading retained ${noun}…`
+          ? msg("timeline.toolRenderers.loadingRetainedNoun", { noun })
           : state.kind === "error"
-            ? `${noun} retrieval failed`
+            ? msg("timeline.toolRenderers.nounRetrievalFailed", { noun })
             : state.kind === "unavailable"
               ? `${noun} ${state.label}`
               : undefined
@@ -811,39 +935,49 @@ function LoadedRetainedSessionImageDisclosure({
       }
     >
       {state.kind === "ready" ? (
-        <ScreenshotFigure {...figure} />
+        <ScreenshotFigure {...figure} showCaption={caption !== title} />
       ) : state.kind === "loading" ? (
-        <BodyNote>Loading the retained {noun}…</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.loadingTheRetainedNoun", { noun })}</BodyNote>
       ) : state.kind === "unavailable" ? (
         <BodyNote>
-          {noun === "screenshot" ? "Screenshot" : "Image"} {state.label}.
+          {noun === "screenshot"
+            ? msg("timeline.toolRenderers.screenshot")
+            : msg("timeline.toolRenderers.image")}{" "}
+          {state.label}.
         </BodyNote>
       ) : (
         <ImageRetrievalError noun={noun} retry={state.retry} />
       )}
-      {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+      {batched ? (
+        <BodyNote>{msg("timeline.toolRenderers.batchedBatched", { batched })}</BodyNote>
+      ) : null}
       {children}
     </ActivityDisclosure>
   );
 }
 
 function ImageRetrievalError({ noun = "image", retry }: { noun?: string; retry: () => void }) {
+  const msg = useOpenGeniText();
   return (
     <BodyNote tone="error">
-      {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed.{" "}
+      {noun === "screenshot"
+        ? msg("timeline.toolRenderers.screenshot")
+        : msg("timeline.toolRenderers.image")}{" "}
+      {msg("timeline.toolRenderers.retrievalFailed")}{" "}
       <button
         type="button"
-        aria-label={`Retry ${noun} retrieval`}
+        aria-label={msg("timeline.toolRenderers.retryNounRetrieval", { noun })}
         onClick={retry}
         className="underline underline-offset-2"
       >
-        Retry
+        {msg("timeline.toolRenderers.retry")}
       </button>
     </BodyNote>
   );
 }
 
 function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const prompt = typeof args.prompt === "string" ? args.prompt : "";
   const raw =
@@ -859,9 +993,13 @@ function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProp
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone="running"
-        title="Generating image"
+        title={msg("timeline.toolRenderers.generatingImage")}
         running
-        preview={<RunningPreview>{truncatePreview(prompt, 72) || "creating…"}</RunningPreview>}
+        preview={
+          <RunningPreview>
+            {truncatePreview(prompt, 72) || msg("timeline.toolRenderers.creating")}
+          </RunningPreview>
+        }
         media={<MediaSkeleton />}
       >
         {prompt ? <BodyNote>{prompt}</BodyNote> : null}
@@ -881,6 +1019,7 @@ function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProp
 }
 
 function GeneratedVideoRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const prompt = typeof args.prompt === "string" ? args.prompt : "";
   const parsedOutput = typeof item.output === "string" ? tryParseJson(item.output) : item.output;
@@ -897,23 +1036,32 @@ function GeneratedVideoRenderer({ item }: ToolRendererProps) {
       icon={<VideoIcon className={ICON_SIZE} />}
       iconTone={failed ? "failed" : running ? "running" : accepted ? "accent" : "muted"}
       title={
-        running ? "Starting video generation" : accepted ? "Generating video" : "Generate video"
+        running
+          ? msg("timeline.toolRenderers.startingVideoGeneration")
+          : accepted
+            ? msg("timeline.toolRenderers.generatingVideo")
+            : msg("timeline.toolRenderers.generateVideo")
       }
       running={running}
       failed={failed}
       cancelled={cancelled}
-      preview={truncatePreview(prompt, 88) || (accepted ? "request accepted" : undefined)}
+      preview={
+        truncatePreview(prompt, 88) ||
+        (accepted ? msg("timeline.toolRenderers.requestAccepted") : undefined)
+      }
     >
       {prompt ? <BodyNote>{prompt}</BodyNote> : null}
       {accepted ? (
-        <BodyNote>The video will appear here when it is ready.</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.theVideoWillAppearHere")}</BodyNote>
       ) : item.output !== undefined ? (
-        <PayloadBlock label="Output" value={item.output} />
+        <PayloadBlock label={msg("timeline.toolRenderers.output")} value={item.output} />
       ) : null}
     </ActivityDisclosure>
   );
 }
 function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRendererProps) {
+  const msg = useOpenGeniText();
+  const plain = useToolDetails() === "plain";
   const { text: output, isError } = unwrapMcpOutput(item.output);
   const receipt = parseSandboxFileArtifactReceipt(output);
   const [downloadState, setDownloadState] = useState<"idle" | "loading" | "error">("idle");
@@ -922,9 +1070,11 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
       <ActivityDisclosure
         icon={<DownloadIcon className={ICON_SIZE} />}
         iconTone="running"
-        title="Publishing file"
+        title={msg("timeline.toolRenderers.publishingFile")}
         running
-        preview={<RunningPreview>retaining workspace bytes…</RunningPreview>}
+        preview={
+          <RunningPreview>{msg("timeline.toolRenderers.retainingWorkspaceBytes")}</RunningPreview>
+        }
       />
     );
   }
@@ -939,12 +1089,14 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
   const openLink = workspaceId ? (
     <a
       href={`/workspaces/${workspaceId}/artifacts/files/${receipt.artifact.artifactId}`}
-      aria-label={`Open ${receipt.filename} in Artifacts`}
+      aria-label={msg("timeline.toolRenderers.openFilenameInArtifacts", {
+        filename: receipt.filename,
+      })}
       className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
-      Open in Artifacts
+      {msg("timeline.toolRenderers.openInArtifacts")}
     </a>
   ) : null;
 
@@ -989,10 +1141,10 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     >
       <DownloadIcon className="size-3.5" />
       {downloadState === "loading"
-        ? "Preparing…"
+        ? msg("timeline.toolRenderers.preparing")
         : downloadState === "error"
-          ? "Retry download"
-          : "Download"}
+          ? msg("timeline.toolRenderers.retryDownload")
+          : msg("timeline.toolRenderers.download")}
     </button>
   );
 
@@ -1001,11 +1153,11 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
       <RetainedSessionImageDisclosure
         artifact={receipt.artifact}
         load={loadRetainedArtifact}
-        title={`Published ${receipt.filename}`}
+        title={msg("timeline.toolRenderers.publishedFilename", { filename: receipt.filename })}
         caption={receipt.filename}
         noun="image"
         icon={<ImageIcon className={ICON_SIZE} />}
-        lightboxLabel="Image"
+        lightboxLabel={msg("timeline.toolRenderers.image")}
         batched={null}
         failed={false}
         cancelled={false}
@@ -1022,13 +1174,13 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     <ActivityDisclosure
       icon={<DownloadIcon className={ICON_SIZE} />}
       iconTone="accent"
-      title={`Published ${receipt.filename}`}
+      title={msg("timeline.toolRenderers.publishedFilename", { filename: receipt.filename })}
       defaultOpen
       preview={formatBytes(receipt.artifact.originalBytes)}
     >
       {downloadButton}
       {openLink}
-      {isPatchFilename(receipt.filename) ? (
+      {plain ? null : isPatchFilename(receipt.filename) ? (
         <PatchApplyCommand
           artifact={receipt.artifact}
           filename={receipt.filename}
@@ -1089,6 +1241,7 @@ const SITE_OPEN_CLASS =
   "inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10";
 
 function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
+  const msg = useOpenGeniText();
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
   // The console route only exists in the Opengeni console; a host decides.
@@ -1102,12 +1255,12 @@ function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
     return (
       <a
         href={destination}
-        aria-label={`Open ${receipt.title}`}
+        aria-label={msg("timeline.toolRenderers.openTitle", { title: receipt.title })}
         className={SITE_OPEN_CLASS}
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => event.stopPropagation()}
       >
-        Open
+        {msg("timeline.toolRenderers.open")}
       </a>
     );
   }
@@ -1116,7 +1269,7 @@ function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
     return (
       <button
         type="button"
-        aria-label={`Open ${receipt.title}`}
+        aria-label={msg("timeline.toolRenderers.openTitle", { title: receipt.title })}
         aria-busy={pending}
         disabled={pending}
         className={SITE_OPEN_CLASS}
@@ -1132,7 +1285,11 @@ function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
         }}
         onKeyDown={(event) => event.stopPropagation()}
       >
-        {pending ? "Opening…" : failed ? "Retry open" : "Open"}
+        {pending
+          ? msg("timeline.toolRenderers.opening")
+          : failed
+            ? msg("timeline.toolRenderers.retryOpen")
+            : msg("timeline.toolRenderers.open")}
       </button>
     );
   }
@@ -1140,6 +1297,7 @@ function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
 }
 
 function SiteArtifactRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const leaf = mcpToolLeaf(item.name);
   const publishingExisting = leaf === "artifacts_publish";
   if (item.status === "running") {
@@ -1147,9 +1305,17 @@ function SiteArtifactRenderer({ item }: ToolRendererProps) {
       <ActivityDisclosure
         icon={<PanelsTopLeftIcon className={ICON_SIZE} />}
         iconTone="running"
-        title={publishingExisting ? "Publishing Site update" : "Publishing Site"}
+        title={
+          publishingExisting
+            ? msg("timeline.toolRenderers.publishingSiteUpdate")
+            : msg("timeline.toolRenderers.publishingSite")
+        }
         running
-        preview={<RunningPreview>retaining source and compiled HTML…</RunningPreview>}
+        preview={
+          <RunningPreview>
+            {msg("timeline.toolRenderers.retainingSourceAndCompiledHtml")}
+          </RunningPreview>
+        }
       />
     );
   }
@@ -1159,12 +1325,18 @@ function SiteArtifactRenderer({ item }: ToolRendererProps) {
     <ActivityDisclosure
       icon={<PanelsTopLeftIcon className={ICON_SIZE} />}
       iconTone="accent"
-      title={publishingExisting ? `Updated ${receipt.title}` : `Published ${receipt.title}`}
+      title={
+        publishingExisting
+          ? msg("timeline.toolRenderers.updatedTitle", { title: receipt.title })
+          : msg("timeline.toolRenderers.publishedTitle", { title: receipt.title })
+      }
       media={<SiteOpenLink receipt={receipt} />}
     >
       <BodyNote>
-        Version {receipt.revision} is live
-        {receipt.replayed ? " (replayed from the original publication)." : "."}
+        {msg("timeline.toolRenderers.versionRevisionIsLive", { revision: receipt.revision })}
+        {receipt.replayed
+          ? ` ${msg("timeline.toolRenderers.replayedFromTheOriginalPublication")}`
+          : "."}
       </BodyNote>
     </ActivityDisclosure>
   );
@@ -1183,10 +1355,18 @@ function GeneratedImageDisclosure({
   failed: boolean;
   cancelled: boolean;
 }) {
+  const msg = useOpenGeniText();
   const state = useRetainedImageObjectUrl(receipt.artifact, load);
   const dimensions = receipt.artifact.dimensions!;
-  const title = failed ? "Image generation failed" : "Generated image";
-  const caption = prompt || `Generated image · ${dimensions.width}×${dimensions.height}`;
+  const title = failed
+    ? msg("timeline.toolRenderers.imageGenerationFailed")
+    : msg("timeline.toolRenderers.generatedImage");
+  const caption =
+    prompt ||
+    msg("timeline.toolRenderers.generatedImageWidthHeight", {
+      width: dimensions.width,
+      height: dimensions.height,
+    });
   return (
     <ActivityDisclosure
       icon={<ImageIcon className={ICON_SIZE} />}
@@ -1197,9 +1377,9 @@ function GeneratedImageDisclosure({
       cancelled={cancelled}
       preview={
         state.kind === "loading"
-          ? "loading image…"
+          ? msg("timeline.toolRenderers.loadingImage")
           : state.kind === "error"
-            ? "image retrieval failed"
+            ? msg("timeline.toolRenderers.imageRetrievalFailed")
             : state.kind === "unavailable"
               ? `image ${state.label}`
               : truncatePreview(prompt, 88) || `${dimensions.width}×${dimensions.height}`
@@ -1210,8 +1390,8 @@ function GeneratedImageDisclosure({
             src={state.url}
             caption={caption}
             alt={caption}
-            expandLabel="Expand generated image"
-            lightboxLabel="Generated image"
+            expandLabel={msg("timeline.toolRenderers.expandGeneratedImage")}
+            lightboxLabel={msg("timeline.toolRenderers.generatedImage")}
           />
         ) : state.kind === "loading" ? (
           <MediaSkeleton />
@@ -1225,13 +1405,13 @@ function GeneratedImageDisclosure({
           src={state.url}
           caption={caption}
           alt={caption}
-          expandLabel="Expand generated image"
-          lightboxLabel="Generated image"
+          expandLabel={msg("timeline.toolRenderers.expandGeneratedImage")}
+          lightboxLabel={msg("timeline.toolRenderers.generatedImage")}
         />
       ) : state.kind === "loading" ? (
-        <BodyNote>Loading the generated image…</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.loadingTheGeneratedImage")}</BodyNote>
       ) : state.kind === "unavailable" ? (
-        <BodyNote>Image {state.label}.</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.imageLabel", { label: state.label })}</BodyNote>
       ) : (
         <ImageRetrievalError retry={state.retry} />
       )}
@@ -1256,15 +1436,17 @@ function retainedImageFilename(artifact: RetainedArtifactReference): string {
 
 /* ---- view_image ------------------------------------------------------------ */
 
-const VIEW_IMAGE_ERRORS = [
-  "was not found",
-  "is not a file",
-  "exceeded the allowed size",
-  "is not a supported image",
-  "unable to read image",
+// Fragments of the tool's own (English) error output; matched, never displayed.
+const VIEW_IMAGE_ERRORS = (msg: OpenGeniText) => [
+  msg("timeline.toolRenderers.wasNotFound"),
+  msg("timeline.toolRenderers.isNotAFile"),
+  msg("timeline.toolRenderers.exceededTheAllowedSize"),
+  msg("timeline.toolRenderers.isNotASupportedImage"),
+  msg("timeline.toolRenderers.unableToReadImage"),
 ];
 
 function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const path = typeof args.path === "string" ? args.path : "";
   const out = item.output;
@@ -1277,12 +1459,12 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone="running"
-        title={`View ${pathBasename(path)}`}
+        title={msg("timeline.toolRenderers.viewPathbasename", { pathBasename: pathBasename(path) })}
         running
-        preview={<RunningPreview>reading…</RunningPreview>}
+        preview={<RunningPreview>{msg("timeline.toolRenderers.reading")}</RunningPreview>}
         media={<MediaSkeleton />}
       >
-        <BodyNote>reading image…</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.readingImage")}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -1291,7 +1473,9 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
   const viewCancelled = item.status === "cancelled";
 
   if (retained) {
-    const title = `Viewed ${pathBasename(path)}`;
+    const title = msg("timeline.toolRenderers.viewedPathbasename", {
+      pathBasename: pathBasename(path),
+    });
     if (!retained.available) {
       const state =
         retained.reason === "expired" || retained.reason === "deleted"
@@ -1308,7 +1492,10 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
           media={<MediaEmpty />}
         >
           <BodyNote tone={viewFailed ? "error" : undefined}>
-            Image {state}: {retained.reason.replaceAll("_", " ")}.
+            {msg("timeline.toolRenderers.imageStateReplaceall", {
+              state,
+              replaceAll: retained.reason.replaceAll("_", " "),
+            })}
           </BodyNote>
         </ActivityDisclosure>
       );
@@ -1321,7 +1508,7 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
         caption={path || title}
         noun="image"
         icon={<ImageIcon className={ICON_SIZE} />}
-        lightboxLabel="Image"
+        lightboxLabel={msg("timeline.toolRenderers.image")}
         batched={null}
         failed={viewFailed}
         cancelled={viewCancelled}
@@ -1329,15 +1516,18 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
     );
   }
 
-  const errMatch = VIEW_IMAGE_ERRORS.find((p) => text.includes(p));
+  const errMatch = VIEW_IMAGE_ERRORS(msg).find((p) => text.includes(p));
   if (errMatch) {
     const tooBig = text.includes("exceeded the allowed size");
     return (
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone="failed"
-        title={`View ${pathBasename(path)}`}
-        chip={{ tone: "bad", text: tooBig ? "too large" : "error" }}
+        title={msg("timeline.toolRenderers.viewPathbasename", { pathBasename: pathBasename(path) })}
+        chip={{
+          tone: "bad",
+          text: tooBig ? msg("timeline.toolRenderers.tooLarge") : msg("timeline.chip.error"),
+        }}
         preview={text}
       >
         <BodyNote tone="error">{text}</BodyNote>
@@ -1349,7 +1539,9 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "muted"}
-        title={`Viewed ${pathBasename(path)}`}
+        title={msg("timeline.toolRenderers.viewedPathbasename", {
+          pathBasename: pathBasename(path),
+        })}
         failed={viewFailed}
         cancelled={viewCancelled}
         preview={path}
@@ -1363,15 +1555,18 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "muted"}
-        title={`Viewed ${pathBasename(path)} · image omitted · not retained`}
+        title={msg("timeline.toolRenderers.viewedPathbasenameImageOmittedNot", {
+          pathBasename: pathBasename(path),
+        })}
         failed={viewFailed}
         cancelled={viewCancelled}
-        preview="inline image omitted · not retained"
+        preview={msg("timeline.toolRenderers.inlineImageOmittedNotRetained")}
         media={<MediaEmpty />}
       >
         <BodyNote>
-          The inline {omittedMedia.mediaType} output was omitted from the audit timeline and its
-          source bytes were not retained.
+          {msg("timeline.toolRenderers.theInlineMediatypeOutputWas", {
+            mediaType: omittedMedia.mediaType,
+          })}
         </BodyNote>
       </ActivityDisclosure>
     );
@@ -1381,17 +1576,19 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "muted"}
-        title={`Viewed ${pathBasename(path)}`}
+        title={msg("timeline.toolRenderers.viewedPathbasename", {
+          pathBasename: pathBasename(path),
+        })}
         failed={viewFailed}
         cancelled={viewCancelled}
-        preview="(no image)"
+        preview={msg("timeline.toolRenderers.noImage")}
       >
         <BodyNote>
           {viewFailed
-            ? "view_image failed — no image data returned."
+            ? msg("timeline.toolRenderers.viewImageFailedNoImage")
             : viewCancelled
-              ? "view_image interrupted."
-              : "(no image) — the sandbox session returned no image data."}
+              ? msg("timeline.toolRenderers.viewImageInterrupted")
+              : msg("timeline.toolRenderers.noImageTheSandboxSession")}
         </BodyNote>
       </ActivityDisclosure>
     );
@@ -1401,7 +1598,9 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
         iconTone={viewFailed ? "failed" : "accent"}
-        title={`Viewed ${pathBasename(path)}`}
+        title={msg("timeline.toolRenderers.viewedPathbasename", {
+          pathBasename: pathBasename(path),
+        })}
         failed={viewFailed}
         cancelled={viewCancelled}
         media={<Thumbnail src={text} caption={path} alt={path} />}
@@ -1415,7 +1614,17 @@ function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) 
 
 /* ---- environment_set_variable (secret-safe, write-only) -------------------- */
 
-function SecretSetRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function SecretSetRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullSecretSetRenderer {...props} />
+  );
+}
+
+function FullSecretSetRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const name = typeof args.name === "string" ? args.name : "variable";
 
@@ -1424,11 +1633,11 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
       <ActivityDisclosure
         icon={<KeyRoundIcon className={ICON_SIZE} />}
         iconTone="running"
-        title={`Set ${name}`}
+        title={msg("timeline.toolRenderers.setName", { name })}
         running
-        preview={<RunningPreview>setting…</RunningPreview>}
+        preview={<RunningPreview>{msg("timeline.toolRenderers.setting")}</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1439,15 +1648,15 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
       <ActivityDisclosure
         icon={<KeyRoundIcon className={ICON_SIZE} />}
         iconTone="failed"
-        title={`Set ${name}`}
+        title={msg("timeline.toolRenderers.setName", { name })}
         failed
-        preview={errorText ?? "variable write failed"}
+        preview={errorText ?? msg("timeline.toolRenderers.variableWriteFailed")}
       >
-        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
         {errorText ? (
-          <PayloadBlock label="Error" value={errorText} failed />
+          <PayloadBlock label={msg("timeline.toolRenderers.error")} value={errorText} failed />
         ) : (
-          <BodyNote tone="error">the tool call failed with no output.</BodyNote>
+          <BodyNote tone="error">{msg("timeline.toolRenderers.theToolCallFailedWith")}</BodyNote>
         )}
       </ActivityDisclosure>
     );
@@ -1457,21 +1666,29 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
     <ActivityDisclosure
       icon={<KeyRoundIcon className={ICON_SIZE} />}
       iconTone="muted"
-      title={`Set ${name}`}
+      title={msg("timeline.toolRenderers.setName", { name })}
       cancelled={item.status === "cancelled"}
       preview="exact value preserved"
     >
-      <PayloadBlock label="Arguments" value={args} />
-      <BodyNote>
-        The configured value is preserved exactly and available through authorized secret reads.
-      </BodyNote>
+      <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
+      <BodyNote>{msg("timeline.toolRenderers.theConfiguredValueIsPreserved")}</BodyNote>
     </ActivityDisclosure>
   );
 }
 
 /* ---- tool_search (progressive MCP disclosure) ------------------------------ */
 
-function ToolSearchRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function ToolSearchRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullToolSearchRenderer {...props} />
+  );
+}
+
+function FullToolSearchRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const query = toolSearchQuery(item);
   const icon = <PackageSearchIcon className={ICON_SIZE} />;
   const running = item.status === "running";
@@ -1482,18 +1699,23 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
       <ActivityDisclosure
         icon={icon}
         iconTone="running"
-        title="Looking up tools"
+        title={msg("timeline.toolRenderers.lookingUpTools")}
         running
         preview={
           queryPreview ? (
             <RunningPreview>{queryPreview}</RunningPreview>
           ) : (
-            <RunningPreview>Matching capabilities…</RunningPreview>
+            <RunningPreview>{msg("timeline.toolRenderers.matchingCapabilities")}</RunningPreview>
           )
         }
       >
-        {query ? <BodyNote>capability query: {query}</BodyNote> : null}
-        <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
+        {query ? (
+          <BodyNote>{msg("timeline.toolRenderers.capabilityQueryQuery", { query })}</BodyNote>
+        ) : null}
+        <PayloadBlock
+          label={msg("timeline.toolRenderers.arguments")}
+          value={parseToolArgs(item.arguments)}
+        />
       </ActivityDisclosure>
     );
   }
@@ -1504,29 +1726,38 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
       <ActivityDisclosure
         icon={icon}
         iconTone="failed"
-        title="Tool lookup failed"
+        title={msg("timeline.toolRenderers.toolLookupFailed")}
         failed
-        preview={truncatePreview(outText, 80) || queryPreview || "Lookup failed"}
+        preview={
+          truncatePreview(outText, 80) || queryPreview || msg("timeline.toolRenderers.lookupFailed")
+        }
       >
-        {query ? <BodyNote>capability query: {query}</BodyNote> : null}
-        <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
-        <PayloadBlock label="Error" value={outText} failed />
+        {query ? (
+          <BodyNote>{msg("timeline.toolRenderers.capabilityQueryQuery", { query })}</BodyNote>
+        ) : null}
+        <PayloadBlock
+          label={msg("timeline.toolRenderers.arguments")}
+          value={parseToolArgs(item.arguments)}
+        />
+        <PayloadBlock label={msg("timeline.toolRenderers.error")} value={outText} failed />
       </ActivityDisclosure>
     );
   }
 
   const tools = parseDisclosedTools(item.output);
-  const preview = toolSearchPreview(tools, item.status === "cancelled");
+  const preview = toolSearchPreview(msg, tools, item.status === "cancelled");
 
   return (
     <ActivityDisclosure
       icon={icon}
       iconTone="muted"
-      title="Looked up tools"
+      title={msg("timeline.toolRenderers.lookedUpTools")}
       cancelled={item.status === "cancelled"}
       preview={preview}
     >
-      {query ? <BodyNote>capability query: {query}</BodyNote> : null}
+      {query ? (
+        <BodyNote>{msg("timeline.toolRenderers.capabilityQueryQuery", { query })}</BodyNote>
+      ) : null}
       {tools && tools.length > 0 ? (
         <ul className="grid gap-1.5">
           {tools.slice(0, 12).map((tool) => (
@@ -1538,26 +1769,45 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
             </li>
           ))}
           {tools.length > 12 ? (
-            <li className="text-og-xs text-og-fg-muted">+{tools.length - 12} more</li>
+            <li className="text-og-xs text-og-fg-muted">
+              +{tools.length - 12} {msg("timeline.toolRenderers.more")}
+            </li>
           ) : null}
         </ul>
       ) : tools && tools.length === 0 ? (
-        <BodyNote>no deferred tools matched this capability query.</BodyNote>
+        <BodyNote>{msg("timeline.toolRenderers.noDeferredToolsMatchedThis")}</BodyNote>
       ) : null}
-      <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
-      {tools == null && outText ? <PayloadBlock label="Result" value={outText} /> : null}
+      <PayloadBlock
+        label={msg("timeline.toolRenderers.arguments")}
+        value={parseToolArgs(item.arguments)}
+      />
+      {tools == null && outText ? (
+        <PayloadBlock label={msg("timeline.toolRenderers.result")} value={outText} />
+      ) : null}
     </ActivityDisclosure>
   );
 }
 
 /* ---- docs / knowledge search ----------------------------------------------- */
 
-function DocsSearchRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function DocsSearchRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullDocsSearchRenderer {...props} />
+  );
+}
+
+function FullDocsSearchRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const query = typeof args.query === "string" ? args.query.trim() : "";
   const title = query
-    ? `Search “${truncatePreview(query, 48)}”`
-    : toolDisplayName(item.name, item.display);
+    ? msg("timeline.toolRenderers.searchTruncatepreview", {
+        truncatePreview: truncatePreview(query, 48),
+      })
+    : toolDisplayName(msg, item.name, item.display);
   const running = item.status === "running";
 
   if (running) {
@@ -1567,9 +1817,9 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
         iconTone="running"
         title={title}
         running
-        preview={<RunningPreview>Searching…</RunningPreview>}
+        preview={<RunningPreview>{msg("timeline.toolRenderers.searching")}</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1582,23 +1832,23 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
         iconTone="failed"
         title={title}
         failed
-        preview={truncatePreview(outText, 80) || "Search failed"}
+        preview={truncatePreview(outText, 80) || msg("timeline.toolRenderers.searchFailed")}
       >
-        <PayloadBlock label="Arguments" value={args} />
-        <PayloadBlock label="Error" value={outText} failed />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.error")} value={outText} failed />
       </ActivityDisclosure>
     );
   }
 
-  const hits = parseSearchHits(outText);
+  const hits = parseSearchHits(msg, outText);
   const preview =
     item.status === "cancelled"
       ? undefined
       : hits
         ? hits.length === 0
-          ? "No hits"
-          : `${hits.length} hit${hits.length === 1 ? "" : "s"}`
-        : "Done";
+          ? msg("timeline.toolRenderers.noHits")
+          : msg("counts.hits", { count: hits.length })
+        : msg("timeline.toolRenderers.done");
 
   return (
     <ActivityDisclosure
@@ -1620,18 +1870,28 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
           ))}
         </ul>
       ) : null}
-      <PayloadBlock label="Arguments" value={args} />
-      <PayloadBlock label="Result" value={outText} />
+      <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
+      <PayloadBlock label={msg("timeline.toolRenderers.result")} value={outText} />
     </ActivityDisclosure>
   );
 }
 
 /* ---- set_session_title / set_other_session_title --------------------------- */
 
-function SetSessionTitleRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function SetSessionTitleRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullSetSessionTitleRenderer {...props} />
+  );
+}
+
+function FullSetSessionTitleRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const titleArg = typeof args.title === "string" ? args.title.trim() : "";
-  const display = toolDisplayName(item.name, item.display);
+  const display = toolDisplayName(msg, item.name, item.display);
   const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
   const icon = <MessagesSquareIcon className={ICON_SIZE} />;
 
@@ -1646,11 +1906,11 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
           previewTitle ? (
             <RunningPreview>{previewTitle}</RunningPreview>
           ) : (
-            <RunningPreview>Setting title…</RunningPreview>
+            <RunningPreview>{msg("timeline.toolRenderers.settingTitle")}</RunningPreview>
           )
         }
       >
-        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1663,10 +1923,10 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
         iconTone="failed"
         title={display}
         failed
-        preview={truncatePreview(outText, 80) || "Rename failed"}
+        preview={truncatePreview(outText, 80) || msg("timeline.toolRenderers.renameFailed")}
       >
-        <PayloadBlock label="Arguments" value={args} />
-        <PayloadBlock label="Error" value={outText} failed />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.error")} value={outText} failed />
       </ActivityDisclosure>
     );
   }
@@ -1691,18 +1951,30 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
       cancelled={item.status === "cancelled"}
       preview={item.status === "cancelled" ? undefined : settledTitle || undefined}
     >
-      <PayloadBlock label="Arguments" value={args} />
-      {outText ? <PayloadBlock label="Result" value={outText} /> : null}
+      <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
+      {outText ? (
+        <PayloadBlock label={msg("timeline.toolRenderers.result")} value={outText} />
+      ) : null}
     </ActivityDisclosure>
   );
 }
 
 /* ---- company memory propose (docs MCP) ------------------------------------- */
 
-function MemoryProposeRenderer({ item }: ToolRendererProps) {
+/** Plain tool details read this tool through the shared row model (no raw detail). */
+function MemoryProposeRenderer(props: ToolRendererProps) {
+  return useToolDetails() === "plain" ? (
+    <UnreviewedGenericRenderer {...props} />
+  ) : (
+    <FullMemoryProposeRenderer {...props} />
+  );
+}
+
+function FullMemoryProposeRenderer({ item }: ToolRendererProps) {
+  const msg = useOpenGeniText();
   const args = parseToolArgs(item.arguments);
   const text = typeof args.text === "string" ? args.text.trim() : "";
-  const title = "Propose memory";
+  const title = msg("timeline.toolRenderers.proposeMemory");
   const running = item.status === "running";
 
   if (running) {
@@ -1712,9 +1984,9 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
         iconTone="running"
         title={title}
         running
-        preview={<RunningPreview>Proposing…</RunningPreview>}
+        preview={<RunningPreview>{msg("timeline.toolRenderers.proposing")}</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={args} />
+        <PayloadBlock label={msg("timeline.toolRenderers.arguments")} value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1727,10 +1999,10 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
         iconTone="failed"
         title={title}
         failed
-        preview={truncatePreview(outText, 80) || "Propose failed"}
+        preview={truncatePreview(outText, 80) || msg("timeline.toolRenderers.proposeFailed")}
       >
         {text ? <BodyNote>{text}</BodyNote> : null}
-        <PayloadBlock label="Error" value={outText} failed />
+        <PayloadBlock label={msg("timeline.toolRenderers.error")} value={outText} failed />
       </ActivityDisclosure>
     );
   }
@@ -1741,10 +2013,10 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
       iconTone="muted"
       title={title}
       cancelled={item.status === "cancelled"}
-      preview={text ? truncatePreview(text, 90) : "Done"}
+      preview={text ? truncatePreview(text, 90) : msg("timeline.toolRenderers.done")}
     >
       {text ? <BodyNote>{text}</BodyNote> : null}
-      <PayloadBlock label="Result" value={outText} />
+      <PayloadBlock label={msg("timeline.toolRenderers.result")} value={outText} />
     </ActivityDisclosure>
   );
 }
@@ -1760,33 +2032,35 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
  * status preview (Running… / Done / error snippet). No argument-field sniffing —
  * JSON stays in the expandable body only.
  */
-function GenericRenderer({ item }: ToolRendererProps) {
-  const reviewed = useHasToolReview(item.callId);
-  if (reviewed && item.callId) return <ReviewedGenericRenderer item={item} />;
-  return <UnreviewedGenericRenderer item={item} />;
+function GenericRenderer(props: ToolRendererProps) {
+  const reviewed = useHasToolReview(props.item.callId);
+  if (reviewed && props.item.callId) return <ReviewedGenericRenderer {...props} />;
+  return <UnreviewedGenericRenderer {...props} />;
 }
 
 /** Settled review states earn one quiet gutter word; success and waiting stay chip-free. */
-const REVIEW_CHIP: Partial<Record<ToolReviewStatus, DisclosureChip>> = {
-  rejected: { tone: "interrupted", text: "declined" },
-  cancelled: { tone: "interrupted", text: "not run" },
-  expired: { tone: "interrupted", text: "expired" },
-  stale: { tone: "interrupted", text: "not run" },
-  revoked: { tone: "interrupted", text: "not run" },
-  blocked: { tone: "interrupted", text: "blocked" },
-  unknown: { tone: "bad", text: "outcome unknown" },
-  partial: { tone: "bad", text: "partly done" },
-  failed: { tone: "bad", text: "failed" },
-};
+const REVIEW_CHIP = (msg: OpenGeniText): Partial<Record<ToolReviewStatus, DisclosureChip>> => ({
+  rejected: { tone: "interrupted", text: msg("timeline.chip.declined") },
+  cancelled: { tone: "interrupted", text: msg("timeline.toolRenderers.notRun") },
+  expired: { tone: "interrupted", text: msg("timeline.chip.expired") },
+  stale: { tone: "interrupted", text: msg("timeline.toolRenderers.notRun") },
+  revoked: { tone: "interrupted", text: msg("timeline.toolRenderers.notRun") },
+  blocked: { tone: "interrupted", text: msg("timeline.chip.blocked") },
+  unknown: { tone: "bad", text: msg("timeline.toolRenderers.outcomeUnknown") },
+  partial: { tone: "bad", text: msg("timeline.toolRenderers.partlyDone") },
+  failed: { tone: "bad", text: msg("timeline.chip.failed") },
+});
 
 /**
  * A call that went through approval keeps the ordinary row shape, titled with
  * what was approved. The expanded body is the saved review plus the result.
  */
-function ReviewedGenericRenderer({ item }: ToolRendererProps) {
+function ReviewedGenericRenderer(props: ToolRendererProps) {
+  const msg = useOpenGeniText();
+  const { item } = props;
   const { review, onViewDetails } = useRecordedToolReview(item.callId);
   const logo = useToolConnectorLogo(item.display);
-  if (!review) return <UnreviewedGenericRenderer item={item} />;
+  if (!review) return <UnreviewedGenericRenderer {...props} />;
   const ReviewIcon = toolIcon(genericToolIconKind(item.name));
   const icon = <ConnectorLogoIcon src={logo} fallback={<ReviewIcon className={ICON_SIZE} />} />;
   const waiting = review.status === "pending";
@@ -1794,10 +2068,12 @@ function ReviewedGenericRenderer({ item }: ToolRendererProps) {
     !waiting &&
     (review.status === "executing" || review.status === "approved") &&
     item.status === "running";
-  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  const { text: outText, isError } = unwrapMcpOutput(retainedToolResultImages(item.output).output);
   const chip =
-    REVIEW_CHIP[review.status] ??
-    (isError && !running && !waiting ? ({ tone: "bad", text: "error" } as const) : undefined);
+    REVIEW_CHIP(msg)[review.status] ??
+    (isError && !running && !waiting
+      ? ({ tone: "bad", text: msg("timeline.chip.error") } as const)
+      : undefined);
   return (
     <ActivityDisclosure
       icon={icon}
@@ -1807,9 +2083,9 @@ function ReviewedGenericRenderer({ item }: ToolRendererProps) {
       chip={chip}
       preview={
         waiting ? (
-          "Waiting for your approval"
+          msg("timeline.toolRenderers.waitingForYourApproval")
         ) : running ? (
-          <RunningPreview>Running…</RunningPreview>
+          <RunningPreview>{msg("timeline.toolRenderers.running")}</RunningPreview>
         ) : item.display?.connector ? (
           // The logo names the connector; only a second account needs words.
           (item.display.accountLabel ?? undefined)
@@ -1825,7 +2101,13 @@ function ReviewedGenericRenderer({ item }: ToolRendererProps) {
           onViewDetails={onViewDetails}
         />
       </div>
-      {outText ? <PayloadBlock label="Result" value={outText} failed={isError} /> : null}
+      {outText ? (
+        <PayloadBlock
+          label={msg("timeline.toolRenderers.result")}
+          value={outText}
+          failed={isError}
+        />
+      ) : null}
     </ActivityDisclosure>
   );
 }
@@ -1889,6 +2171,11 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "exec_command", render: ExecRenderer },
   { match: "name", name: "request_human_input", render: AskRenderer },
   { match: "name", name: "run_on", render: RunOnRenderer },
+  { match: "name", name: "sandboxes_list", render: MachineRenderer },
+  { match: "name", name: "sandbox_swap", render: MachineRenderer },
+  { match: "name", name: "computer_open", render: MachineRenderer },
+  { match: "name", name: "computer_observe", render: MachineRenderer },
+  { match: "name", name: "computer_act", render: MachineRenderer },
   { match: "name", name: "write_stdin", render: WriteStdinRenderer },
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "apply_patch", render: ApplyPatchRenderer },
@@ -1972,6 +2259,31 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     render: SetSessionTitleRenderer,
   },
 ];
+
+/** Built-in renderers that draw their row from the shared presentation. */
+const PRESENTATION_RENDERERS: ReadonlyMap<ToolRenderer, PresentedToolKind> = new Map<
+  ToolRenderer,
+  PresentedToolKind
+>([
+  [ExecRenderer, "exec"],
+  [WriteStdinRenderer, "write_stdin"],
+  [ApplyPatchRenderer, "apply_patch"],
+  [GenericRenderer, "generic"],
+]);
+
+/**
+ * Whether `renderer` can draw `item` while its output is a bounded preview
+ * (see {@link presentsToolOutputPreview}). Every other row (media, receipts,
+ * cards that parse their result, consumer renderers) needs its exact output
+ * before it renders.
+ */
+export function rendersToolOutputPreview(renderer: ToolRenderer, item: ToolCallItem): boolean {
+  if (!item.outputPreview) return true;
+  return (
+    PRESENTATION_RENDERERS.get(renderer) === presentedToolKind(item) &&
+    presentsToolOutputPreview(item)
+  );
+}
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */
 export const defaultToolRegistry: ToolRegistry = createToolRegistry(BASE_ENTRIES, GenericRenderer);

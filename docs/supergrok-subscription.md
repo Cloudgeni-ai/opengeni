@@ -159,7 +159,7 @@ enter session history, events, RunState, model-visible tool arguments, or the
 sandbox environment. A 401 receives one OAuth refresh and one replay of the
 same replayable JSON request. The Responses transport normalizes xAI's stream,
 encrypted reasoning, and hosted web/X search. The model catalog is the static
-OpenGeni-supported product set; the status route uses xAI's model endpoint only
+Opengeni-supported product set; the status route uses xAI's model endpoint only
 to validate a credential. Portable compaction reuses the same provider context. Image generation uses the ordinary
 durable generated-image operation/artifact boundary; xAI video helpers retain
 their existing durable video boundary.

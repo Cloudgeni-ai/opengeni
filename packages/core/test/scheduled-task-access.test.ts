@@ -6,7 +6,7 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { AccessGrantAuthorization } from "../src/access";
 import {
   isScheduledTaskAccessRefreshHuman,

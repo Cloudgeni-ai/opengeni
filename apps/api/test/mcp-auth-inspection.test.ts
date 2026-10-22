@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectMcpAuthentication } from "../src/integrations/oauth-client";
 
 function provider(metadataStatus = 200, malformed = false) {

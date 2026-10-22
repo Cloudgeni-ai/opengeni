@@ -1,0 +1,142 @@
+import { useState, type ReactNode, type RefObject } from "react";
+
+import { Button } from "./button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./dialog";
+
+export function destructiveActionFocusTarget(
+  trigger: HTMLElement | null,
+  fallback: HTMLElement | null,
+): HTMLElement | null {
+  if (focusTargetAvailable(trigger)) return trigger;
+  return focusTargetAvailable(fallback) ? fallback : null;
+}
+
+function focusTargetAvailable(target: HTMLElement | null): target is HTMLElement {
+  return Boolean(
+    target?.isConnected &&
+    !target.matches(":disabled, [aria-disabled='true'], [inert]") &&
+    !target.closest("[inert]"),
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   ConfirmDialog — the one gate for destructive actions (doctrine D5).
+
+   No bare trash icons that fire immediately: irreversible actions open this,
+   with a title that names the object ("Delete environment 'staging'?"), a
+   consequence sentence, and a destructive-styled confirm labeled with the
+   verb + object ("Delete environment"), never "OK"/"Confirm". The typed-name
+   Danger-zone pattern remains the higher bar for workspace deletion.
+   -------------------------------------------------------------------------- */
+
+export function ConfirmDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  children,
+  confirmLabel,
+  confirmDisabled = false,
+  pendingLabel = "Working…",
+  cancelLabel = "Cancel",
+  cancelAutoFocus = false,
+  destructive = true,
+  restoreFocusRef,
+  restoreFocusFallbackRef,
+  onConfirm,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Names the object: "Delete environment 'staging'?" */
+  title: ReactNode;
+  /** One consequence sentence: what is lost, whether it can be undone. */
+  description?: ReactNode | undefined;
+  /** Optional extra content (e.g. an affected-items list). */
+  children?: ReactNode | undefined;
+  /** Verb + object: "Delete environment", "Revoke key". */
+  confirmLabel: string;
+  confirmDisabled?: boolean | undefined;
+  pendingLabel?: string | undefined;
+  cancelLabel?: string | undefined;
+  /** Opt in when the safe/default action must receive initial focus. */
+  cancelAutoFocus?: boolean | undefined;
+  destructive?: boolean | undefined;
+  restoreFocusRef?: RefObject<HTMLElement | null> | undefined;
+  restoreFocusFallbackRef?: RefObject<HTMLElement | null> | undefined;
+  /**
+   * May be async; the dialog shows pending state while it runs. The dialog
+   * closes on success — returning `false` (or throwing) keeps it open so a
+   * failed mutation never reads as a completed one. Handlers that catch their
+   * own errors (to toast) must return `false` on the failure path.
+   */
+  onConfirm: () => void | boolean | Promise<void | boolean>;
+}) {
+  const [pending, setPending] = useState(false);
+
+  const confirm = async () => {
+    if (pending || confirmDisabled) return;
+    setPending(true);
+    try {
+      const result = await onConfirm();
+      if (result !== false) {
+        onOpenChange(false);
+      }
+    } catch {
+      // The handler surfaces its own error (toast/notice); stay open for retry.
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => (pending ? undefined : onOpenChange(next))}>
+      <DialogContent
+        showCloseButton={false}
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          const destination = destructiveActionFocusTarget(
+            restoreFocusRef?.current ?? null,
+            restoreFocusFallbackRef?.current ?? null,
+          );
+          if (!destination) return;
+          event.preventDefault();
+          destination.focus();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle className="text-base">{title}</DialogTitle>
+          {description ? <DialogDescription>{description}</DialogDescription> : null}
+        </DialogHeader>
+        {children}
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="ghost"
+            autoFocus={cancelAutoFocus}
+            className="min-h-11"
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+          >
+            {cancelLabel}
+          </Button>
+          <Button
+            type="button"
+            variant={destructive ? "destructive" : "default"}
+            className="min-h-11"
+            disabled={pending || confirmDisabled}
+            onClick={() => void confirm()}
+          >
+            {pending ? pendingLabel : confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

@@ -1,10 +1,13 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 /**
  * Every user-visible string the native session surfaces draw themselves (the
  * composer, question card and approval strip keep their shared web catalogs).
- * Hosts translate by overriding entries with `NativeTimelineMessagesProvider`
- * or the session screen's `timelineMessages` prop.
+ * The defaults come from the shared Opengeni message catalog (`native.*` keys),
+ * so the host's `OpenGeniMessagesProvider` translates them. Hosts can still
+ * override entries with `NativeTimelineMessagesProvider` or the session
+ * screen's `timelineMessages` prop.
  */
 export interface NativeTimelineMessages {
   backToYourMessage: string;
@@ -97,95 +100,140 @@ export interface NativeTimelineMessages {
   returnToCall: string;
 }
 
-export const defaultNativeTimelineMessages: NativeTimelineMessages = {
-  backToYourMessage: "Back to your message",
-  jumpToLatest: "Jump to latest",
-  copyMessage: "Copy message",
-  showMore: "Show more",
-  showLess: "Show less",
-  loadingEarlier: "Loading earlier messages",
-  messageNotSent: "Message not sent",
+export const defaultNativeTimelineMessages = (t: OpenGeniText): NativeTimelineMessages => ({
+  backToYourMessage: t("native.timeline.messages.backToYourMessage"),
+  jumpToLatest: t("native.timeline.messages.jumpToLatest"),
+  copyMessage: t("native.timeline.messages.copyMessage"),
+  showMore: t("native.timeline.messages.showMore"),
+  showLess: t("native.timeline.messages.showLess"),
+  loadingEarlier: t("native.timeline.messages.loadingEarlierMessages"),
+  messageNotSent: t("native.timeline.messages.messageNotSent"),
   humanInputOutcome: {
-    answered: "You answered",
-    skipped: "Skipped",
-    expired: "Expired",
-    cancelled: "Cancelled",
+    answered: t("native.timeline.messages.youAnswered"),
+    skipped: t("native.timeline.messages.skipped"),
+    expired: t("native.timeline.messages.expired"),
+    cancelled: t("native.timeline.messages.cancelled"),
   },
-  humanInputSecretSaved: (vaultName, itemName) => `Saved to ${vaultName} › ${itemName}`,
-  working: "Working",
-  waiting: "Waiting",
-  thinking: "Thinking",
-  thought: "Thought",
-  workedFor: "Worked for",
-  stillWaiting: "Still waiting for a response…",
-  longerThanUsual: "A little longer than usual…",
+  humanInputSecretSaved: (vaultName, itemName) =>
+    t("native.timeline.messages.savedToVaultnameItemname", { vaultName, itemName }),
+  working: t("native.timeline.messages.working"),
+  waiting: t("native.timeline.messages.waiting"),
+  thinking: t("native.timeline.messages.thinking"),
+  thought: t("native.timeline.messages.thought"),
+  workedFor: t("native.timeline.messages.workedFor"),
+  stillWaiting: t("native.timeline.messages.stillWaitingForAResponse"),
+  longerThanUsual: t("native.timeline.messages.aLittleLongerThanUsual"),
   loadingPhrases: [],
-  command: "Command",
-  output: "Output",
-  startupDetail:
-    "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below.",
-  proposedKnowledge: "Proposed knowledge",
-  knowledgeSaveFailed: "Knowledge save failed",
-  savedToKnowledge: "Saved to knowledge",
-  savedToMemory: "Saved to memory",
-  workerDecision: "Worker decision",
-  typeYourAnswer: "Type your answer...",
-  typeAValue: "Type a value...",
-  copyCode: "Copy code",
-  copyTable: "Copy table",
-  scrollTableHint: "Scroll sideways to see every column",
-  image: "Image",
-  previewUnavailable: (name) => `${name} (preview unavailable)`,
-  loadFailedTitle: "Couldn't load this session",
-  connectionFailed: "Couldn't connect. Check your connection; this retries automatically.",
-  stuckTitle: "Stuck",
-  stuckBody:
-    "This chat couldn't start its next step. Nothing is needed from you, and its work is kept. Try again to continue.",
-  stuckAccessBody:
-    "This chat can't continue until access it needs is restored. Its work is kept; try again once that's sorted.",
-  stuckRetry: "Try again",
-  stuckRetryFailed: "That didn't go through. Try again in a moment.",
-  retry: "Retry",
-  cancel: "Cancel",
-  save: "Save",
-  saving: "Saving…",
-  goal: "Goal",
-  pauseGoal: "Pause goal",
-  resumeGoal: "Resume goal",
-  agents: "Agents",
-  commands: "Commands",
-  running: "Running",
-  stopping: "Stopping",
-  finished: "Finished",
-  stop: "Stop",
-  onMachine: "On a machine",
-  inSandbox: "In the sandbox",
-  chatActions: "Chat actions",
-  rename: "Rename",
-  pin: "Pin",
-  unpin: "Unpin",
-  pinned: "Pinned",
-  pinFailed: (pinned) => `Couldn't ${pinned ? "pin" : "unpin"} this chat.`,
-  renameChat: "Rename chat",
-  chatTitle: "Chat title",
-  renameFailed: (reason) => `Couldn't rename this chat. ${reason ?? "Try again."}`,
-  sendFeedback: "Send feedback",
-  sending: "Sending…",
-  steer: "Steer",
-  steerFirstQueued: "Steer first queued message",
-  queuedPrompts: "Queued prompts",
-  dictate: "Dictate",
-  cancelDictation: "Cancel dictation",
-  transcribing: "Transcribing",
-  recording: (elapsed) => `Recording, ${elapsed}`,
-  recordingSaved: "Your recording is saved.",
-  discard: "Discard",
-  followUpPlaceholder: "Send a follow-up...",
-  startCall: "Start a call",
-  returnToCall: "Return to call",
-};
+  command: t("native.timeline.messages.command"),
+  output: t("native.timeline.messages.output"),
+  startupDetail: t("native.timeline.messages.includesOverlappingSandboxStartupCustom"),
+  proposedKnowledge: t("native.timeline.messages.proposedKnowledge"),
+  knowledgeSaveFailed: t("native.timeline.messages.knowledgeSaveFailed"),
+  savedToKnowledge: t("native.timeline.messages.savedToKnowledge"),
+  savedToMemory: t("native.timeline.messages.savedToMemory"),
+  workerDecision: t("native.timeline.messages.workerDecision"),
+  typeYourAnswer: t("native.timeline.messages.typeYourAnswer"),
+  typeAValue: t("native.timeline.messages.typeAValue"),
+  copyCode: t("native.timeline.messages.copyCode"),
+  copyTable: t("native.timeline.messages.copyTable"),
+  scrollTableHint: t("native.timeline.messages.scrollSidewaysToSeeEvery"),
+  image: t("native.timeline.messages.image"),
+  previewUnavailable: (name) => t("native.timeline.messages.namePreviewUnavailable", { name }),
+  loadFailedTitle: t("native.timeline.messages.couldnTLoadThisSession"),
+  connectionFailed: t("native.timeline.messages.connectionFailed"),
+  stuckTitle: t("native.timeline.messages.stuck"),
+  stuckBody: t("native.timeline.messages.thisChatCouldnTStart"),
+  stuckAccessBody: t("native.timeline.messages.stuckAccessBody"),
+  stuckRetry: t("native.timeline.messages.tryAgain"),
+  stuckRetryFailed: t("native.timeline.messages.thatDidnTGoThrough"),
+  retry: t("native.timeline.messages.retry"),
+  cancel: t("native.timeline.messages.cancel"),
+  save: t("native.timeline.messages.save"),
+  saving: t("native.timeline.messages.saving"),
+  goal: t("native.timeline.messages.goal"),
+  pauseGoal: t("native.timeline.messages.pauseGoal"),
+  resumeGoal: t("native.timeline.messages.resumeGoal"),
+  agents: t("native.timeline.messages.agents"),
+  commands: t("native.timeline.messages.commands"),
+  running: t("native.timeline.messages.running"),
+  stopping: t("native.timeline.messages.stopping"),
+  finished: t("native.timeline.messages.finished"),
+  stop: t("native.timeline.messages.stop"),
+  onMachine: t("native.timeline.messages.onAMachine"),
+  inSandbox: t("native.timeline.messages.inTheSandbox"),
+  chatActions: t("native.timeline.messages.chatActions"),
+  rename: t("native.timeline.messages.rename"),
+  pin: t("native.timeline.messages.pin"),
+  unpin: t("native.timeline.messages.unpin"),
+  pinned: t("native.timeline.messages.pinned"),
+  pinFailed: (pinned) =>
+    pinned
+      ? t("native.timeline.messages.couldNotPinThisChat")
+      : t("native.timeline.messages.couldNotUnpinThisChat"),
+  renameChat: t("native.timeline.messages.renameChat"),
+  chatTitle: t("native.timeline.messages.chatTitle"),
+  renameFailed: (reason) =>
+    t("native.timeline.messages.couldnTRenameThisChat", {
+      reason: reason ?? t("native.timeline.messages.tryAgain2"),
+    }),
+  sendFeedback: t("native.timeline.messages.sendFeedback"),
+  sending: t("native.timeline.messages.sending"),
+  steer: t("native.timeline.messages.steer"),
+  steerFirstQueued: t("native.timeline.messages.steerFirstQueuedMessage"),
+  queuedPrompts: t("native.timeline.messages.queuedPrompts"),
+  dictate: t("native.timeline.messages.dictate"),
+  cancelDictation: t("native.timeline.messages.cancelDictation"),
+  transcribing: t("native.timeline.messages.transcribing"),
+  recording: (elapsed) => t("native.timeline.messages.recordingElapsed", { elapsed }),
+  recordingSaved: t("native.timeline.messages.yourRecordingIsSaved"),
+  discard: t("native.timeline.messages.discard"),
+  followUpPlaceholder: t("native.timeline.messages.sendAFollowUp"),
+  startCall: t("native.timeline.messages.startACall"),
+  returnToCall: t("native.timeline.messages.returnToCall"),
+});
 
-const MessagesContext = createContext<NativeTimelineMessages>(defaultNativeTimelineMessages);
+type NativeTimelineMessageOverrides = Partial<
+  Omit<NativeTimelineMessages, "humanInputOutcome"> & {
+    humanInputOutcome: Partial<NativeTimelineMessages["humanInputOutcome"]>;
+  }
+>;
+
+const OverridesContext = createContext<NativeTimelineMessageOverrides | null>(null);
+
+function mergeMessages<T extends NativeTimelineMessageOverrides>(
+  base: T,
+  overrides: NativeTimelineMessageOverrides,
+): T {
+  return {
+    ...base,
+    ...overrides,
+    humanInputOutcome: { ...base.humanInputOutcome, ...overrides.humanInputOutcome },
+  };
+}
+
+// Rows read these on every render: resolve each (text, overrides) pair once.
+const resolved = new WeakMap<
+  OpenGeniText,
+  { defaults: NativeTimelineMessages; merged: WeakMap<object, NativeTimelineMessages> }
+>();
+
+function resolveMessages(
+  t: OpenGeniText,
+  overrides: NativeTimelineMessageOverrides | null,
+): NativeTimelineMessages {
+  let entry = resolved.get(t);
+  if (!entry) {
+    entry = { defaults: defaultNativeTimelineMessages(t), merged: new WeakMap() };
+    resolved.set(t, entry);
+  }
+  if (!overrides) return entry.defaults;
+  let merged = entry.merged.get(overrides);
+  if (!merged) {
+    merged = mergeMessages(entry.defaults, overrides);
+    entry.merged.set(overrides, merged);
+  }
+  return merged;
+}
 
 /** Override any native timeline strings below this point (nested providers merge). */
 export function NativeTimelineMessagesProvider({
@@ -195,21 +243,15 @@ export function NativeTimelineMessagesProvider({
   messages?: Partial<NativeTimelineMessages> | undefined;
   children: ReactNode;
 }) {
-  const parent = useContext(MessagesContext);
+  const parent = useContext(OverridesContext);
   const value = useMemo(
-    () =>
-      messages
-        ? {
-            ...parent,
-            ...messages,
-            humanInputOutcome: { ...parent.humanInputOutcome, ...messages.humanInputOutcome },
-          }
-        : parent,
+    () => (messages ? (parent ? mergeMessages(parent, messages) : messages) : parent),
     [messages, parent],
   );
-  return <MessagesContext.Provider value={value}>{children}</MessagesContext.Provider>;
+  return <OverridesContext.Provider value={value}>{children}</OverridesContext.Provider>;
 }
 
+/** The native timeline strings: catalog text below the nearest messages provider, plus overrides. */
 export function useNativeTimelineMessages(): NativeTimelineMessages {
-  return useContext(MessagesContext);
+  return resolveMessages(useOpenGeniText(), useContext(OverridesContext));
 }

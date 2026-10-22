@@ -48,6 +48,9 @@ export function sessionAttentionReadThroughSequence(events: readonly SessionEven
     )
       continue;
     if (event.type === "turn.completed") {
+      // A task usage-limit stop is an actionable boundary (only a person can
+      // raise or clear the limit), matching the server's attention predicate.
+      if (payload.segmentLimit === "session_usage_limit") return event.sequence;
       if (Object.hasOwn(payload, "maintenance") || Object.hasOwn(payload, "segmentLimit")) continue;
       const output = payload.output ?? payload.result;
       if ((output == null || output === "") && (payload.reply == null || payload.reply === ""))
@@ -56,4 +59,21 @@ export function sessionAttentionReadThroughSequence(events: readonly SessionEven
     return event.sequence;
   }
   return 0;
+}
+
+/**
+ * Where an open conversation should be acknowledged through, and whether it
+ * needs it: the server says unread, or a newer attention boundary has been
+ * delivered since the session row was read. The frontier never moves for
+ * streaming activity, so a reader writes personal state once per boundary.
+ */
+export function readAcknowledgementFrontier(
+  session: { unread?: boolean | undefined; lastSequence?: number | undefined } | null | undefined,
+  attentionThrough: number,
+): { readThrough: number; unread: boolean } {
+  const lastSequence = session?.lastSequence ?? 0;
+  return {
+    readThrough: Math.max(lastSequence, attentionThrough),
+    unread: Boolean(session?.unread) || attentionThrough > lastSequence,
+  };
 }

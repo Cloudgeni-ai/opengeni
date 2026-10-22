@@ -9,7 +9,7 @@ import {
   toolSearchTool,
   type Tool,
 } from "@openai/agents";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
 import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {
@@ -123,8 +123,7 @@ describe("searchToolPool named tools", () => {
   const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
 
   test("puts a tool named by its short name first", () => {
-    // BM25 alone prefers goal_set: its short description repeats "goal" and "complete".
-    expect(names(bm25RankTools(GOALS, "goal_complete", 1))).toEqual(["opengeni__goal_set"]);
+    // Exact naming takes precedence independently of changes to lexical ranking.
     expect(names(searchToolPool(GOALS, { query: "goal_complete", limit: 1 }))).toEqual([
       "opengeni__goal_complete",
     ]);
@@ -157,6 +156,54 @@ describe("searchToolPool named tools", () => {
 });
 
 describe("searchToolPool disclosure bounds", () => {
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+  function interactionTool(name: string, description: string): Tool {
+    return { ...connectorTool(name, description), name: `interaction__${name}` } as Tool;
+  }
+  const INTERACTION_POOL: Tool[] = [
+    interactionTool("browser_open", "Open or reuse a browser session"),
+    interactionTool("browser_observe", "Read one tab's accessibility view"),
+    interactionTool("browser_act", "Perform one browser action"),
+    interactionTool("browser_screenshot", "Capture tab pixels"),
+    interactionTool("browser_tabs", "Manage browser tabs"),
+    interactionTool("browser_downloads", "List browser downloads"),
+    interactionTool("computer_open", "Open a desktop computer session"),
+    interactionTool("computer_act", "Act on the desktop"),
+    ...POOL,
+  ];
+
+  test("one browser result discloses the browser working set beyond the limit", () => {
+    expect(names(searchToolPool(INTERACTION_POOL, { query: "browser_open", limit: 1 }))).toEqual([
+      "interaction__browser_open",
+      "interaction__browser_observe",
+      "interaction__browser_act",
+      "interaction__browser_screenshot",
+      "interaction__browser_tabs",
+    ]);
+    expect(
+      names(searchToolPool(INTERACTION_POOL, { query: "", names: ["interaction__browser_act"] })),
+    ).toEqual([
+      "interaction__browser_act",
+      "interaction__browser_open",
+      "interaction__browser_observe",
+      "interaction__browser_screenshot",
+      "interaction__browser_tabs",
+    ]);
+  });
+
+  test("family companions come only from the authorized pool and leave other tools alone", () => {
+    const partial = INTERACTION_POOL.filter(
+      (tool) => (tool as { name: string }).name !== "interaction__browser_tabs",
+    );
+    expect(names(searchToolPool(partial, { query: "computer_open", limit: 1 }))).toEqual([
+      "interaction__computer_open",
+      "interaction__computer_act",
+    ]);
+    expect(names(searchToolPool(partial, { query: "gmail_send_email", limit: 1 }))).toEqual([
+      "codex_apps__gmail_send_email",
+    ]);
+  });
+
   test("discloses a rich nested schema admitted by discovery", () => {
     const rich = connectorTool("rich", "Read a record");
     if (rich.type !== "function") throw new Error("expected a function tool");
@@ -512,7 +559,9 @@ describe("tool_search tool wiring", () => {
     });
 
     const tools = await agent.getAllTools(new RunContext());
-    const searchTool = tools.find((tool) => (tool as { name?: string }).name === "tool_search");
+    const searchTool = tools.find(
+      (tool) => tool.type === "hosted_tool" && tool.name === "tool_search",
+    );
     expect(searchTool).toBeDefined();
     const executor = getClientToolSearchExecutor(searchTool as never);
     const result = await executor!({

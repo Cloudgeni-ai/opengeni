@@ -1,8 +1,9 @@
 import { ComputerDriver } from "../computer-driver";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ComputerSupervisorDriverContext } from "../computer-supervisor";
 import { CuaComputerBackend } from "./backend";
-import { createCuaRuntime } from "./sdk";
+import { computerNativeMacWindows } from "./macos-windows";
+import { createCuaRuntime, missingLinuxLibraryError } from "./sdk";
 
 // One physical desktop has one runtime. Separate cursor overlays do not make
 // simultaneous input into the same desktop safe.
@@ -32,8 +33,13 @@ export async function createCuaComputerDriver(
     // Lazy loading keeps the browser engine and normal native backend independent
     // of CUA's Node-API runtime. Never expose CUA browser tools or its raw SDK.
     const environment = { ...context.environment };
-    const sdk = await createCuaRuntime(environment);
+    const sdk = await createCuaRuntime(environment).catch((error: unknown) => {
+      throw (process.platform === "linux" && missingLinuxLibraryError(error)) || error;
+    });
     let closed = false;
+    // The agent installs computer-native beside browserd; on macOS it reads
+    // and restores windows that CUA cannot.
+    const nativeBinary = process.env.OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY;
     const backend = await CuaComputerBackend.open(
       {
         listToolsJson: () => sdk.listToolsJson(),
@@ -51,6 +57,9 @@ export async function createCuaComputerDriver(
         },
       },
       process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
+      process.platform === "darwin" && nativeBinary
+        ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) }
+        : {},
     );
     return new ComputerDriver({
       computerSessionId: context.computerSessionId,

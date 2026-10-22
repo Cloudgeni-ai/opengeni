@@ -7,8 +7,10 @@ import {
   getWorkspaceInteractionRevisionState,
   listSessionEventPage,
   listWorkspaceControlEvents,
+  getWorkspaceControlEvent,
   readSessionEventStorageGapEnd,
   type Database,
+  type SessionListChangeSource,
 } from "@opengeni/db";
 import {
   coalesceSessionEventDeltasWithCoverage,
@@ -20,6 +22,7 @@ import {
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
+import { subscribeSessionListHints } from "./session-list-hints";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
 const SESSION_REPLAY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
@@ -677,7 +680,10 @@ export async function sseWorkspaceControlStream(
         }
       }
     }
-    await writeFrame(formatWorkspaceControlEventSse(event));
+    // The bus is workspace-wide, not an authorization projection. Re-read the
+    // exact durable row under this stream's actor before delivering live data.
+    const visible = await getWorkspaceControlEvent(db, workspaceId, event.id);
+    if (visible) await writeFrame(formatWorkspaceControlEventSse(visible));
     lastSent = event.sequence;
   };
   delivery = createLatestWinsDelivery(send, fail);
@@ -734,6 +740,13 @@ export async function sseWorkspaceControlStream(
 
 export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
   pollIntervalMs?: number | undefined;
+  sessionLists?:
+    | {
+        source: SessionListChangeSource;
+        subjectId: string;
+        authorizeIds: (ids: string[]) => Promise<string[]>;
+      }
+    | undefined;
 };
 
 /**
@@ -782,6 +795,7 @@ export async function sseWorkspaceLiveStream(
   }
   const upstream = new AbortController();
   let stopReauthorization = () => {};
+  let stopSessionListHints = () => {};
   const channel = createByteBoundedSseStream({
     connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
@@ -789,6 +803,7 @@ export async function sseWorkspaceLiveStream(
     onObservation: sseObservationReporter("workspace_interaction", options),
     onStop: () => {
       stopReauthorization();
+      stopSessionListHints();
       signal.removeEventListener("abort", abort);
       upstream.abort();
     },
@@ -819,6 +834,16 @@ export async function sseWorkspaceLiveStream(
     writeTail = pending.catch(() => false);
     return pending;
   };
+  if (options.sessionLists && !channel.stopped()) {
+    stopSessionListHints = subscribeSessionListHints({
+      ...options.sessionLists,
+      workspaceId,
+      intervalMs: options.pollIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS,
+      write: (hint) =>
+        write(`event: workspace.sessions.changed\ndata: ${JSON.stringify(hint)}\n\n`),
+      fail: channel.fail,
+    });
+  }
   const pump = async (response: Response): Promise<void> => {
     if (!response.body) throw new TypeError("workspace live upstream omitted its body");
     const reader = response.body.getReader();

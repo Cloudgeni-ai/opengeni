@@ -8,7 +8,7 @@ import {
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { claimTurnAttempt, type ClaimTurnDeps } from "../src/activities/agent-turn/claim";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import {
@@ -101,13 +101,7 @@ describe("worker accepted-turn credential restriction installation", () => {
       } as Awaited<ReturnType<typeof db.requireSession>>),
       spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(false),
       spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithCodexCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithWorkspaceGatewayCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithWorkspaceOpenRouterCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithWorkspaceOpperCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithOrganizationProviderCredentials").mockResolvedValue(
-        settings,
-      ),
+      spyOn(core, "settingsWithModelProviderCredentials").mockResolvedValue(settings),
       spyOn(db, "installOrReadTurnExecutionPolicyForAttempt").mockImplementation(
         async (_db, input) => {
           expect(input).toMatchObject({

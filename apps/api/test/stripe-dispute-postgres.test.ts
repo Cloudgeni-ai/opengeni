@@ -2,11 +2,8 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import Stripe from "stripe";
 import * as db from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerBillingRoutes } from "../src/routes/billing";
 
 let shared: SharedTestDatabase | null = null;

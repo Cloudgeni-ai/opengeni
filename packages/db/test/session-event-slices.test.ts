@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { acquireSearchTestDatabase } from "./session-message-search-fixture";
 import { bootstrapWorkspace, createDb, createSession, listSessionEventPage } from "../src";
 import { listSessionEventSlices } from "../src/session-event-slices";

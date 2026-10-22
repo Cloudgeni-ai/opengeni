@@ -6,13 +6,13 @@ import {
   KeyboardAvoidingView,
   Modal,
   PanResponder,
-  Platform,
   Pressable,
   View,
   useWindowDimensions,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useNativeTimelineTheme } from "./theme";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 /**
  * A content-sized bottom sheet: dimmed backdrop, grabber, drag or tap outside
@@ -27,6 +27,7 @@ export function BottomSheet(props: {
   maxHeightRatio?: number | undefined;
   children: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
@@ -94,7 +95,9 @@ export function BottomSheet(props: {
       onRequestClose={props.onClose}
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        // Edge-to-edge Android doesn't resize a modal's window for the
+        // keyboard either, so the sheet lifts itself on both platforms.
+        behavior="padding"
         style={{ flex: 1, justifyContent: "flex-end" }}
       >
         <Animated.View
@@ -112,7 +115,7 @@ export function BottomSheet(props: {
             style={{ flex: 1 }}
             onPress={props.onClose}
             accessibilityRole="button"
-            accessibilityLabel="Close"
+            accessibilityLabel={t("native.timeline.sheet.close")}
           />
         </Animated.View>
         <Animated.View

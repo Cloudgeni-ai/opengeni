@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { type SkillActor, type SkillScope, type SkillWriteReceipt } from "@opengeni/contracts";
+import type { SkillActor, SkillScope, SkillWriteReceipt } from "@opengeni/contracts";
+import {
+  type LearningRefusal,
+  withLearningRefusalMeta,
+} from "@opengeni/contracts/learning-refusal";
 import {
   assertSkillReadAttempt,
+  classifyLearningRefusal,
   getActiveSessionFunctionToolResults,
+  learningSaveCorrection,
   skillReviewResolution,
   installPortableSkill,
   replayPortableSkillInstall,
@@ -51,20 +57,82 @@ import {
 import type { SkillFileSystem } from "./skill-transfer";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 
-/** What a refused Skill change means for the agent, in words it can act on. */
-export function skillRefusalMessage(error: SkillLifecycleRefusedError): string {
-  if (error.message === "Skill outside accepted learning scope") {
-    return "Nothing was saved. This Skill is in a different scope (personal or workspace) than this chat's Agent learning saves to, so it can't be changed from this chat. A person can edit it under Skills, or it can be changed from a chat whose learning saves to that scope. Do not copy it into another scope as a workaround.";
-  }
+const TELL_PERSON =
+  "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
+
+/** Plain reasons for the genuine refusals the person is shown. */
+const NOT_PERMITTED_REASONS: ReadonlyMap<string, string> = new Map([
+  [
+    "Skill outside accepted learning scope",
+    "the Skill belongs to another person or the organization, or this chat can't remove it (a private chat removes only personal Skills, a shared chat only workspace Skills)",
+  ],
+  [
+    "Skill scope is not available to this chat",
+    "no person started this chat, so there is no one to save a personal Skill for",
+  ],
+  [
+    "Agents cannot review Skills or install workspace plugins from personal learning",
+    "a private chat can save and edit workspace Skills, but reviewing Skills and installing plugins needs a shared chat",
+  ],
+]);
+
+/**
+ * What a refused Skill change means for the agent, in words it can act on.
+ * `refusal` is the same classification the person's timeline notice uses, so
+ * the agent's account and the notice agree. A correction the agent can make
+ * itself carries no notice and says how to retry.
+ */
+export function skillRefusalMessage(
+  error: SkillLifecycleRefusedError,
+  refusal: LearningRefusal | null = null,
+): string {
   if (error.code === "40001" || error.code === "23505") {
     return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
   }
-  return `Nothing was saved: ${error.message}.`;
+  switch (learningSaveCorrection(error.message)) {
+    case "skill_scope_kept":
+      return "Nothing was saved: an edit keeps the Skill's own scope. Retry without scope, with a new operation ID.";
+    case "reference_unavailable":
+      return "Nothing was saved: this Skill revision is unavailable. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.";
+    case "evidence_not_shared":
+    case null:
+      break;
+  }
+  switch (refusal?.reason) {
+    case "site_agent":
+      return "Nothing was saved under the policy applied to that earlier attempt.";
+    case "learning_off":
+      return `Nothing was saved. Agent learning for Skills is Off where this change would be saved (this chat's, the workspace's or the person's own setting). Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`;
+    case "not_permitted":
+      return `Nothing was saved. This chat isn't allowed to make this Skill change: ${NOT_PERMITTED_REASONS.get(error.message) ?? error.message}. ${TELL_PERSON}`;
+    default:
+      return `Nothing was saved: ${error.message}.`;
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * What an authority refusal of a Skill change means for the person, for the
+ * timeline notice that tells them it was not saved. Null for refusals that
+ * are not a policy decision (a stale edit, invalid files, a transient fence).
+ */
+export function skillLearningRefusal(
+  error: SkillLifecycleRefusedError,
+  args: unknown,
+): LearningRefusal | null {
+  if (error.code !== "42501") return null;
+  const requested =
+    args && typeof args === "object" ? (args as { skillId?: unknown }).skillId : undefined;
+  const skillId = typeof requested === "string" && UUID.test(requested) ? requested : undefined;
+  return classifyLearningRefusal({ destination: "skill", message: error.message, skillId });
 }
 
 /**
  * The lifecycle rolls a refused change back as a whole, so report it as a
- * definite refusal with its reason, not a failure whose outcome is unknown.
+ * definite refusal with its reason, not a failure whose outcome is unknown. An
+ * authority refusal also carries the content-free refusal fact in `_meta`,
+ * which the model never sees, so the person is told it was not saved.
  */
 function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptToolDefinition {
   return {
@@ -74,14 +142,16 @@ function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptTo
         return await definition.execute(args, context);
       } catch (error) {
         if (!(error instanceof SkillLifecycleRefusedError)) throw error;
-        const message = skillRefusalMessage(error);
-        return {
+        const refusal = skillLearningRefusal(error, args);
+        const message = skillRefusalMessage(error, refusal);
+        const result = {
           isError: true,
-          content: [{ type: "text", text: message }],
+          content: [{ type: "text" as const, text: message }],
           structuredContent: {
             error: { code: "skill_change_refused", message, retryable: error.retryable },
           },
         };
+        return refusal ? withLearningRefusalMeta(result, refusal) : result;
       }
     },
   };
@@ -114,6 +184,7 @@ export function createWorkspaceSkillTools(input: {
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
   };
   const authorize = () => assertSkillReadAttempt(input.db, { ...context, actor: input.actor });
+  const authorizeWrite = authorize;
   const selected = new Map(input.selected.map((entry) => [entry.id, entry.artifact]));
   const shadowed = sessionShadowedSkillNames(input.selected);
   // Readable Skills that skill_search returned in this attempt.
@@ -180,7 +251,7 @@ export function createWorkspaceSkillTools(input: {
       ...(reviewResolution ? { reviewResolution } : {}),
     };
   };
-  const save = async (request: SkillSaveRequest) => {
+  const save = async ({ scope, ...request }: SkillSaveRequest) => {
     const artifact = buildPortableSkillArtifact(request.files);
     const base = request.expectedRevisionId
       ? await readSkill(input.db, context, request.skillId, request.expectedRevisionId)
@@ -189,6 +260,9 @@ export function createWorkspaceSkillTools(input: {
       await saveSkill(input.db, {
         ...context,
         ...request,
+        ...(scope
+          ? { scope: scope === "personal" ? ("user" as const) : ("workspace" as const) }
+          : {}),
         actor: input.actor,
         files: [...artifact.files],
         stableKey: base?.stableKey ?? `authored-${request.skillId.replaceAll("-", "")}`,
@@ -197,7 +271,7 @@ export function createWorkspaceSkillTools(input: {
   };
   return [
     createSkillRemoveAttemptToolDefinition({
-      authorize,
+      authorize: authorizeWrite,
       remove: async (request) =>
         withReviewState(
           await removeSkill(input.db, { ...context, ...request, actor: input.actor }),
@@ -255,7 +329,7 @@ export function createWorkspaceSkillTools(input: {
       },
     }),
     createSkillSaveAttemptToolDefinition({
-      authorize,
+      authorize: authorizeWrite,
       save,
       load: async (skillId, revisionId) => {
         const record = await readSkill(input.db, context, skillId, revisionId);
@@ -264,7 +338,7 @@ export function createWorkspaceSkillTools(input: {
       },
     }),
     createSkillInstallAttemptToolDefinition({
-      authorize,
+      authorize: authorizeWrite,
       install: async (request) => {
         const requestIdentity = {
           operation: "skill_install",
@@ -354,7 +428,11 @@ export function createWorkspaceSkillTools(input: {
         return content;
       },
     }),
-    createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
+    createSkillPublishAttemptToolDefinition({
+      authorize: authorizeWrite,
+      filesystem: input.filesystem,
+      save,
+    }),
   ].map(withDefiniteSkillRefusals);
 }
 

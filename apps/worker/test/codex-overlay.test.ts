@@ -12,7 +12,7 @@ import {
   CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
 } from "@opengeni/codex";
 import { buildOpenGeniAgent, compactionThresholdTokens } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Database } from "@opengeni/db";
 import {
   enabledCapabilityMcpToolRefs,

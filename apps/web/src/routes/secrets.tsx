@@ -1,10 +1,11 @@
 // Secrets: vaults of logins, keys, notes and files that agents use by
 // reference. Values are revealed only on request ("use = reveal").
 //
-//   /secrets                      the vault list   ?view=new|connect-1password[&owner=]
-//   /secrets?connection=<id>      a 1Password connection   &view=choose-vaults|replace-token
+//   /secrets                      the vault list   ?view=new|connect|connect-<provider>[&owner=]
+//   /secrets?connection=<id>      a password manager connection   &view=choose-vaults|replace-token
 //   /secrets/$vaultId             a vault's page   ?view=availability|new-item&type=
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
+import { t } from "@opengeni/react/app/lib/console-text";
 import {
   useVault,
   useVaultItem,
@@ -12,27 +13,28 @@ import {
   useVaults,
   type OnePasswordConnectionSummary,
   type ProviderVaultMeta,
+  type VaultAvailability,
+  type VaultItem,
   type VaultSummary,
   type VaultsApi,
 } from "@opengeni/react";
+import type { VaultProviderAvailability } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import type { AvailabilityWorkspace } from "@/components/secrets/availability-editor";
+import { ConnectOnePasswordPage, ReplaceTokenPage } from "@/components/secrets/connect-onepassword";
 import {
-  ChooseVaultsPage,
-  ConnectOnePasswordPage,
-  ReplaceTokenPage,
-  type LinkVaultActions,
-} from "@/components/secrets/connect-onepassword";
+  ConnectPickerPage,
+  ConnectProviderPage,
+  RenewCredentialsPage,
+} from "@/components/secrets/connect-provider";
 import { ItemEditorPage } from "@/components/secrets/item-editor";
-import { ItemPage, ItemPageLoading } from "@/components/secrets/item-page";
+import { ItemPage, ItemPageLoading, type ItemTransfer } from "@/components/secrets/item-page";
 import { MoveItemDialog } from "@/components/secrets/move-item-dialog";
-import {
-  OnePasswordConnectionMissing,
-  OnePasswordConnectionPage,
-} from "@/components/secrets/onepassword-connections";
+import { ConnectionMissing, ConnectionPage } from "@/components/secrets/provider-connections";
+import { ChooseVaultsPage, type LinkVaultActions } from "@/components/secrets/vault-chooser";
 import {
   AvailabilityPage,
   NewVaultPage,
@@ -40,22 +42,41 @@ import {
 } from "@/components/secrets/vault-forms";
 import { SecretsListPage, type SecretsListState } from "@/components/secrets/vault-list";
 import {
-  connectionName,
+  savedCreation,
+  savedTransfer,
   secretsCapabilityOff,
   vaultError,
   vaultsOfConnection,
-} from "@/components/secrets/vault-model";
+} from "@opengeni/react/app/components/secrets/vault-model";
+import {
+  acceptsItem,
+  connectionName,
+  creatableTypes,
+  LEGACY_PROVIDER_OPERATIONS,
+  PROVIDERS,
+  renewalNotice,
+  sourceHome,
+  stillPending,
+  unavailableProviders as providersUnavailable,
+  vaultOperations,
+  type ProviderAvailability,
+  type VaultConnection,
+} from "@/components/secrets/vault-providers";
 import { SecretsMissing, VaultPage, VaultPageLoading } from "@/components/secrets/vault-page";
-import { ContentPage } from "@/components/ui/content-layout";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { useAppContext } from "@/context";
-import { orgLabel } from "@/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
-import type { SecretsConnectOwner } from "@/lib/secrets-route";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  connectViewProvider,
+  type SecretsConnectOwner,
+  type SecretsIndexView,
+} from "@/lib/secrets-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 
-export type SecretsListView = "new" | "connect-1password";
+export type SecretsListView = Exclude<SecretsIndexView, SecretsConnectionView>;
 export type SecretsVaultView = "availability" | "new-item";
 export type SecretsItemView = "edit";
 export type SecretsConnectionView = "choose-vaults" | "replace-token";
@@ -67,37 +88,90 @@ export function parseCreatableType(value: unknown): CreatableType | undefined {
   return CREATABLE_TYPES.includes(value as CreatableType) ? (value as CreatableType) : undefined;
 }
 
-/** True when the workspace's default agent has the Secrets capability off. */
+/**
+ * Who chooses where a vault is available: organization admins for an
+ * organization vault, the owner for their Only-me vaults except the default
+ * one (it is where Only-me saves go, so it stays everywhere).
+ */
+function canEditAvailability(vault: VaultSummary): boolean {
+  if (!vault.canManage) return false;
+  if (vault.ownerKind === "organization") return true;
+  return vault.ownerKind === "user" && !vault.isDefault;
+}
+
+/** Whether a vault still reaches this workspace after its availability changes. */
+function vaultStaysHere(
+  vault: VaultSummary,
+  availability: VaultAvailability,
+  workspaceId: string,
+): boolean {
+  const allowed = availability.allowedWorkspaceIds;
+  if (allowed === null || allowed.includes(workspaceId)) return true;
+  // An Only-me vault always reaches its home (Personal) workspace.
+  return vault.ownerKind === "user" && vault.workspaceId === workspaceId;
+}
 
 /** Wraps a mutation so its error carries the vault copy (UI-9). */
-async function attempt<T>(operation: () => Promise<T>): Promise<T> {
+async function attempt<T>(operation: () => Promise<T>, home?: string): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    throw vaultError(error);
+    throw vaultError(error, undefined, home);
   }
 }
 
-/** The 1Password connections this person can see; none without list access. */
-function useOnePasswordConnections(api: VaultsApi, enabled: boolean) {
+/** A connection from a server that only lists 1Password ones. */
+function fromOnePassword(connection: OnePasswordConnectionSummary): VaultConnection {
+  return {
+    ...connection,
+    provider: "onepassword",
+    operations: LEGACY_PROVIDER_OPERATIONS,
+    available: true,
+  };
+}
+
+function isNotFound(error: unknown): boolean {
+  return (error as { status?: unknown } | null)?.status === 404;
+}
+
+/**
+ * Every password manager connection this person can see; none without list
+ * access, plus which providers this server can connect at all (its catalog,
+ * from the same request). A server without the unified list still lists its
+ * 1Password ones; one without the catalog leaves it undefined.
+ */
+function useVaultConnections(api: VaultsApi, enabled: boolean) {
   const [state, setState] = useState<{
-    connections: OnePasswordConnectionSummary[] | null;
+    connections: VaultConnection[] | null;
+    providers: VaultProviderAvailability[] | undefined;
     loading: boolean;
     error: unknown;
-  }>({ connections: null, loading: enabled, error: null });
+  }>({ connections: null, providers: undefined, loading: enabled, error: null });
   const controller = useRef<AbortController | null>(null);
   const refresh = useCallback(async () => {
     controller.current?.abort();
     if (!enabled) {
-      setState({ connections: null, loading: false, error: null });
+      setState({ connections: null, providers: undefined, loading: false, error: null });
       return;
     }
     const current = new AbortController();
     controller.current = current;
     setState((previous) => ({ ...previous, loading: true }));
     try {
-      const connections = await api.listOnePasswordConnections(current.signal);
-      if (!current.signal.aborted) setState({ connections, loading: false, error: null });
+      const catalog = await api
+        .getVaultProviderCatalog(current.signal)
+        .catch(async (error: unknown) => {
+          if (!isNotFound(error)) throw error;
+          const onePassword = await api.listOnePasswordConnections(current.signal);
+          return { connections: onePassword.map(fromOnePassword), providers: undefined };
+        });
+      if (!current.signal.aborted)
+        setState({
+          connections: catalog.connections,
+          providers: catalog.providers,
+          loading: false,
+          error: null,
+        });
     } catch (error) {
       if (!current.signal.aborted) setState((previous) => ({ ...previous, loading: false, error }));
     }
@@ -142,7 +216,7 @@ export function SecretsRoute({
   const canWriteWorkspace = can("variable-sets:write") || can("secrets:write");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const organizationName = workspace
-    ? orgLabel(workspace.accountId, access.accountGrants)
+    ? orgLabel(t, workspace.accountId, access.accountGrants)
     : "your organization";
   const organizationWorkspaces: AvailabilityWorkspace[] = useMemo(
     () =>
@@ -174,13 +248,14 @@ export function SecretsRoute({
   const refreshVaults = useCallback(async () => {
     await Promise.all([refreshList(), listed ? null : refreshDirect()]);
   }, [refreshList, refreshDirect, listed]);
-  const onePassword = useOnePasswordConnections(api, canList);
-  const connections = onePassword.connections;
-  const refreshConnections = onePassword.refresh;
+  const connectionList = useVaultConnections(api, canList);
+  const connections = connectionList.connections;
+  const refreshConnections = connectionList.refresh;
   const connection = connectionId
     ? connections?.find((candidate) => candidate.id === connectionId)
     : undefined;
-  // Who connected a 1Password account, on its page only.
+  const connectionHome = connection ? PROVIDERS[connection.provider].home : undefined;
+  // Who connected an account, on its page only.
   const personName = usePersonName(workspaceId, Boolean(connectionId) && !vaultId);
 
   /* ------------------------------------------------------------ navigation */
@@ -248,19 +323,29 @@ export function SecretsRoute({
   ];
 
   const linkActions: LinkVaultActions = {
-    link: (meta, mode, ownerKind, linkConnectionId) =>
-      attempt(() =>
-        api.linkProviderVault({
-          provider: "onepassword",
-          connectionId: linkConnectionId,
-          externalVaultId: meta.externalVaultId,
-          ownerKind,
-          mode,
-          name: meta.name,
-        }),
+    link: (meta, mode, ownerKind, linkConnectionId, provider) =>
+      attempt(
+        () =>
+          api.linkProviderVault({
+            provider,
+            connectionId: linkConnectionId,
+            externalVaultId: meta.externalVaultId,
+            ownerKind,
+            mode,
+            name: meta.name,
+          }),
+        PROVIDERS[provider].home,
       ),
     createManaged: (name, ownerKind, linkConnectionId) =>
       attempt(() => api.createManagedProviderVault(linkConnectionId, { name, ownerKind })),
+    refreshVaults: async (linkConnectionId) => {
+      const [providerVaults] = await Promise.all([
+        api.listProviderVaults(linkConnectionId),
+        refreshVaults(),
+        refreshConnections(),
+      ]);
+      return providerVaults;
+    },
     openVault: (linked) => {
       void vaults.refresh();
       openVault(linked.id);
@@ -270,19 +355,34 @@ export function SecretsRoute({
     (signal: AbortSignal): Promise<ProviderVaultMeta[]> =>
       connectionId
         ? api.listProviderVaults(connectionId, signal).catch((error: unknown) => {
-            throw vaultError(error);
+            throw vaultError(error, undefined, connectionHome);
           })
         : Promise.resolve([]),
-    [api, connectionId],
+    [api, connectionId, connectionHome],
   );
+  // A provider this server can't connect: its catalog says so, or else its connections.
+  const catalogProviders = connectionList.providers;
+  const unavailableProviders: ProviderAvailability = useMemo(
+    () => providersUnavailable(catalogProviders, connections),
+    [catalogProviders, connections],
+  );
+  const connectProvider = connectViewProvider(view);
+  // A setup link for a provider this server can't connect opens the picker, which says why.
+  const setupDisabled =
+    (view === "connect-1password" && Boolean(unavailableProviders.onepassword)) ||
+    (connectProvider !== undefined && Boolean(unavailableProviders[connectProvider]));
+  const closeConnect = () => {
+    void Promise.all([vaults.refresh(), refreshConnections()]);
+    openList();
+  };
 
   let page: ReactNode;
   if (!vaultId && connectionId) {
     if (!canList || !connection) {
       page = (
-        <OnePasswordConnectionMissing
-          loading={canList && (onePassword.loading || !connections) && !onePassword.error}
-          error={connections ? null : onePassword.error}
+        <ConnectionMissing
+          loading={canList && (connectionList.loading || !connections) && !connectionList.error}
+          error={connections ? null : connectionList.error}
           onBack={() => openList()}
           onRetry={() => void refreshConnections()}
         />
@@ -309,21 +409,39 @@ export function SecretsRoute({
         />
       );
     } else if (view === "replace-token" && connection.canManage) {
-      page = (
-        <ReplaceTokenPage
-          connection={connection}
-          onClose={() => openConnection(connection.id)}
-          onReplace={async (request) => {
-            await api.replaceOnePasswordToken(connection.id, request);
-            await Promise.all([vaults.refresh(), refreshConnections()]);
-            toast.success("Token replaced");
-            openConnection(connection.id);
-          }}
-        />
-      );
+      const renewing = connection.provider;
+      page =
+        renewing === "onepassword" ? (
+          <ReplaceTokenPage
+            connection={connection}
+            onClose={() => openConnection(connection.id)}
+            onReplace={async (request) => {
+              await api.replaceOnePasswordToken(connection.id, request);
+              await Promise.all([vaults.refresh(), refreshConnections()]);
+              toast.success("Token replaced");
+              openConnection(connection.id);
+            }}
+          />
+        ) : (
+          <RenewCredentialsPage
+            connection={{ ...connection, provider: renewing }}
+            onClose={() => openConnection(connection.id)}
+            onRenew={async (credentials) => {
+              const result = await api.replaceVaultProviderCredentials(connection.id, {
+                credentials,
+              });
+              await Promise.all([vaults.refresh(), refreshConnections()]);
+              // Saved but not checked: the connection page shows Finish connecting.
+              const notice = renewalNotice(renewing, result);
+              if (notice.tone === "success") toast.success(notice.title);
+              else toast.warning(notice.title, { description: notice.description });
+              openConnection(connection.id);
+            }}
+          />
+        );
     } else {
       page = (
-        <OnePasswordConnectionPage
+        <ConnectionPage
           connection={connection}
           vaults={list}
           organizationName={organizationName}
@@ -333,7 +451,12 @@ export function SecretsRoute({
           actions={{
             back: () => openList(),
             chooseVaults: () => openConnection(connection.id, "choose-vaults"),
-            replaceToken: () => openConnection(connection.id, "replace-token"),
+            renew: () => openConnection(connection.id, "replace-token"),
+            finish: async () => {
+              stillPending(await api.verifyVaultProviderConnection(connection.id));
+              await Promise.all([vaults.refresh(), refreshConnections()]);
+              toast.success(`Connected ${connectionName(connection)}`);
+            },
             disconnect: () => setDisconnecting(true),
             openVault: (linked) => openVault(linked.id),
             retry: () => {
@@ -355,6 +478,7 @@ export function SecretsRoute({
           canCreateOrganization={canManageOrganization}
           organizationName={organizationName}
           workspaces={organizationWorkspaces}
+          currentWorkspaceId={workspace?.kind === "shared" ? workspaceId : null}
           onClose={() => openList()}
           onCreate={async (request) => {
             const created = await attempt(() => api.createVault(request));
@@ -364,19 +488,48 @@ export function SecretsRoute({
           }}
         />
       );
+    } else if ((view === "connect" || setupDisabled) && canList && canWrite) {
+      page = (
+        <ConnectPickerPage
+          unavailable={unavailableProviders}
+          onClose={() => openList()}
+          onPick={(provider) =>
+            openList({ view: `connect-${provider === "onepassword" ? "1password" : provider}` })
+          }
+        />
+      );
     } else if (view === "connect-1password" && canList && canWrite) {
       page = (
         <ConnectOnePasswordPage
           owners={owners}
           defaultOwner={owner}
           organizationName={organizationName}
-          onClose={() => {
-            void Promise.all([vaults.refresh(), refreshConnections()]);
-            openList();
-          }}
+          onClose={closeConnect}
           onConnected={() => void refreshConnections()}
           actions={{
-            install: (request) => attempt(() => api.installOnePassword(request)),
+            install: (request) => attempt(() => api.installOnePassword(request), "1Password"),
+            ...linkActions,
+          }}
+        />
+      );
+    } else if (connectProvider && canList && canWrite) {
+      page = (
+        <ConnectProviderPage
+          key={connectProvider}
+          provider={connectProvider}
+          owners={owners}
+          defaultOwner={owner}
+          organizationName={organizationName}
+          onClose={closeConnect}
+          onConnected={() => void refreshConnections()}
+          actions={{
+            install: (request) => api.installVaultProvider(request),
+            verify: (id) => api.verifyVaultProviderConnection(id),
+            // The saved access was refused: new access for this same connection, never a new one.
+            renew: async (id) => {
+              await refreshConnections();
+              openConnection(id, "replace-token");
+            },
             ...linkActions,
           }}
         />
@@ -388,7 +541,7 @@ export function SecretsRoute({
           error={vaults.error}
           vaults={list}
           connections={connections}
-          connectionsLoading={onePassword.loading}
+          connectionsLoading={connectionList.loading}
           canList={canList}
           canCreate={canWrite}
           canConnect={canWrite}
@@ -398,7 +551,7 @@ export function SecretsRoute({
           onOpenVault={(each) => openVault(each.id)}
           onOpenConnection={(each) => openConnection(each.id)}
           onNewVault={() => openList({ view: "new" })}
-          onConnectOnePassword={() => openList({ view: "connect-1password" })}
+          onConnect={() => openList({ view: "connect" })}
           onOpenAgentSettings={() => {
             if (agentSettingsHref) void navigate({ href: agentSettingsHref });
           }}
@@ -426,10 +579,11 @@ export function SecretsRoute({
         canUse={canUse}
         onBack={() => openVault(vault.id)}
         onOpenItem={openItem}
+        onOpenVault={openVault}
         onChanged={refreshVaults}
       />
     );
-  } else if (view === "availability" && vault.canManage && vault.ownerKind === "organization") {
+  } else if (view === "availability" && canEditAvailability(vault)) {
     page = (
       <AvailabilityPage
         vault={vault}
@@ -441,19 +595,41 @@ export function SecretsRoute({
             api.updateVault(vault.id, { expectedGeneration: vault.generation, availability }),
           );
           await vaults.refresh();
+          if (!vaultStaysHere(vault, availability, workspaceId)) {
+            toast.success(`Saved. ${vault.name} is no longer available in this workspace.`);
+            openList();
+            return;
+          }
           toast.success("Saved");
           openVault(vault.id);
         }}
       />
     );
-  } else if (view === "new-item" && vault.canWrite) {
+  } else if (view === "new-item" && creatableTypes(vaultOperations(vault)).length > 0) {
     page = (
       <ItemEditorPage
+        key={`${vault.id}/new`}
         vault={vault}
         initialType={parseCreatableType(type)}
         onClose={() => openVault(vault.id)}
         onCreate={async (request) => {
-          const created = await attempt(() => api.createItem(vault.id, request));
+          let created: VaultItem;
+          try {
+            created = await attempt(() => api.createItem(vault.id, request), sourceHome(vault));
+          } catch (error) {
+            const saved = savedCreation(error, request.name, vault.name);
+            if (!saved) throw error;
+            // The write succeeded, only discovery failed. Leave the form now;
+            // a slow/failed refresh must never turn it back into a retry.
+            toast.warning(saved.title, {
+              description: saved.description,
+              duration: Infinity,
+              closeButton: true,
+            });
+            openVault(vault.id);
+            void refreshVaults();
+            return;
+          }
           await vaults.refresh();
           toast.success(`Saved ${created.name}`);
           openItem(vault.id, created.id);
@@ -468,7 +644,7 @@ export function SecretsRoute({
         key={vault.id}
         vault={vault}
         organizationName={organizationName}
-        canManageAvailability={vault.canManage && vault.ownerKind === "organization"}
+        canManageAvailability={canEditAvailability(vault)}
         providerAccount={(() => {
           const source = vault.providerConnectionId
             ? connections?.find((each) => each.id === vault.providerConnectionId)
@@ -484,13 +660,16 @@ export function SecretsRoute({
           rename: () => setRenaming(true),
           editAvailability: () => openVault(vault.id, { view: "availability" }),
           sync: async () => {
-            await attempt(() => api.syncVault(vault.id));
+            await attempt(() => api.syncVault(vault.id), sourceHome(vault));
             await vaults.refresh();
           },
-          reconnect: () =>
-            vault.providerConnectionId
-              ? openConnection(vault.providerConnectionId, "replace-token")
-              : openList({ view: "connect-1password" }),
+          reconnect: (() => {
+            const source = vault.providerConnectionId
+              ? connections?.find((each) => each.id === vault.providerConnectionId)
+              : undefined;
+            // Only someone who manages the connection can renew it.
+            return source?.canManage ? () => openConnection(source.id, "replace-token") : undefined;
+          })(),
           deleteVault: () => setDeletingVault(true),
           retry: () => void vaults.refresh(),
         }}
@@ -499,6 +678,7 @@ export function SecretsRoute({
   }
 
   const unlinks = vault?.source !== "opengeni";
+  const vaultHome = vault ? sourceHome(vault) : "";
   const disconnectVaults = connection ? vaultsOfConnection(list, connection.id) : [];
 
   return (
@@ -519,15 +699,21 @@ export function SecretsRoute({
             : disconnectVaults.length === 1
               ? `${disconnectVaults[0]!.name} is unlinked, and agents here stop using its items.`
               : `Its ${disconnectVaults.length} vaults are unlinked (${disconnectVaults.map((each) => each.name).join(", ")}), and agents here stop using their items.`,
-          "Opengeni forgets the service account token.",
-          "Nothing is deleted in 1Password. You can connect it again later.",
+          `Opengeni forgets ${connection ? PROVIDERS[connection.provider].credential : "its access"}.`,
+          `Nothing is deleted in ${connectionHome ?? "the password manager"}. You can connect it again later.`,
         ]}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
         onConfirm={async () => {
           if (!connection) return;
           const name = connectionName(connection);
-          await attempt(() => api.disconnectOnePassword(connection.id));
+          await attempt(
+            () =>
+              connection.provider === "onepassword"
+                ? api.disconnectOnePassword(connection.id)
+                : api.disconnectVaultProvider(connection.id),
+            connectionHome,
+          );
           setDisconnecting(false);
           openList();
           toast.success(`Disconnected ${name}`);
@@ -558,7 +744,7 @@ export function SecretsRoute({
             ? unlinks
               ? [
                   "Agents here stop using its items.",
-                  "Nothing is deleted in 1Password.",
+                  `Nothing is deleted in ${vaultHome}.`,
                   "You can link it again later.",
                 ]
               : [
@@ -672,6 +858,7 @@ function ItemRoute({
   canUse,
   onBack,
   onOpenItem,
+  onOpenVault,
   onChanged,
 }: {
   vault: VaultSummary;
@@ -682,13 +869,19 @@ function ItemRoute({
   canUse: boolean;
   onBack: () => void;
   onOpenItem: (vaultId: string, itemId: string, search?: { view?: SecretsItemView }) => void;
+  /** Opens another vault's page, for a moved item that isn't listed there yet. */
+  onOpenVault: (vaultId: string) => void;
   onChanged: () => Promise<void>;
 }) {
   const loaded = useVaultItem(vault.id, itemId);
   const item = loaded.item;
   const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const personName = usePersonName(vault.workspaceId);
+  const operations = vaultOperations(vault);
+  const home = sourceHome(vault);
+  const hosted = vault.source === "opengeni";
 
   if (!item) {
     return loaded.error && !loaded.loading ? (
@@ -698,7 +891,7 @@ function ItemRoute({
     );
   }
 
-  if (view === "edit" && vault.canWrite) {
+  if (view === "edit" && operations.updateItem && item.archivedAt === null) {
     return (
       <ItemEditorPage
         vault={vault}
@@ -706,7 +899,7 @@ function ItemRoute({
         onClose={() => onOpenItem(vault.id, item.id)}
         onCreate={async () => undefined}
         onUpdate={async (request) => {
-          await attempt(() => api.updateItem(vault.id, item.id, request));
+          await attempt(() => api.updateItem(vault.id, item.id, request), home);
           await loaded.refresh();
           await onChanged();
           toast.success("Saved");
@@ -717,7 +910,13 @@ function ItemRoute({
     );
   }
 
-  const archive = async () => {
+  // Copy needs a vault that takes this item; Move also needs this vault to let it go.
+  const targets = vaults.filter((each) => each.id !== vault.id && acceptsItem(each, item));
+  const canMove = operations.archiveItem && operations.archiveKind !== "none";
+  const transfer: ItemTransfer = targets.length === 0 ? null : canMove ? "move" : "copy";
+  const removal = operations.archiveKind === "trash" ? "trash" : "archive";
+
+  const archiveHosted = async () => {
     await attempt(() => api.deleteItem(vault.id, item.id));
     await loaded.refresh();
     await onChanged();
@@ -734,6 +933,18 @@ function ItemRoute({
       },
     });
   };
+  // Over there it can't be undone from here: confirm first, then leave the item.
+  const removeInProvider = async () => {
+    await attempt(() => api.deleteItem(vault.id, item.id), home);
+    setRemoving(false);
+    await onChanged();
+    toast.success(
+      removal === "trash"
+        ? `Moved ${item.name} to trash in ${home}`
+        : `Archived ${item.name} in ${home}`,
+    );
+    onBack();
+  };
 
   return (
     <>
@@ -743,12 +954,16 @@ function ItemRoute({
         api={api}
         canUse={canUse}
         personName={personName}
+        transfer={transfer}
         actions={{
           back: onBack,
           edit: () => onOpenItem(vault.id, item.id, { view: "edit" }),
-          archive,
+          archive: async () => {
+            if (hosted || operations.restoreItem) await archiveHosted();
+            else setRemoving(true);
+          },
           restore: async () => {
-            await attempt(() => api.restoreItem(vault.id, item.id));
+            await attempt(() => api.restoreItem(vault.id, item.id), home);
             await loaded.refresh();
             await onChanged();
             toast.success(`Restored ${item.name}`);
@@ -760,17 +975,71 @@ function ItemRoute({
       />
       <MoveItemDialog
         item={item}
-        vaults={vaults}
+        targets={targets}
+        canMove={canMove}
+        leavesBehind={
+          hosted
+            ? undefined
+            : removal === "trash"
+              ? `A move puts the original in ${home} trash.`
+              : `A move archives the original in ${home}.`
+        }
         open={moving}
         onOpenChange={setMoving}
         onMove={async (request, target) => {
-          const moved = await attempt(() => api.moveItem(vault.id, item.id, request));
+          let moved: VaultItem;
+          try {
+            moved = await api.moveItem(vault.id, item.id, request);
+          } catch (error) {
+            // The copy was saved even though the request failed: close, refresh, never retry.
+            const saved = savedTransfer(error, {
+              mode: request.mode,
+              itemName: item.name,
+              targetName: target.name,
+              source: home ?? vault.name,
+              removal,
+            });
+            if (!saved) throw vaultError(error, undefined, home);
+            await Promise.all([saved.originalRemoved ? undefined : loaded.refresh(), onChanged()]);
+            const copy = saved.copy;
+            toast.warning(saved.title, {
+              description: saved.description,
+              duration: Number.POSITIVE_INFINITY,
+              closeButton: true,
+              ...(copy
+                ? {
+                    action: {
+                      label: "Open copy",
+                      onClick: () => onOpenItem(copy.vaultId, copy.itemId),
+                    },
+                  }
+                : {}),
+            });
+            if (saved.originalRemoved) onOpenVault(target.id);
+            return;
+          }
           await onChanged();
           toast.success(
             request.mode === "move" ? `Moved to ${target.name}` : `Copied to ${target.name}`,
           );
           if (request.mode === "move") onOpenItem(target.id, moved.id);
         }}
+      />
+      <DestructiveConfirm
+        open={removing}
+        onOpenChange={setRemoving}
+        title={
+          removal === "trash"
+            ? `Move ${item.name} to trash in ${home}?`
+            : `Archive ${item.name} in ${home}?`
+        }
+        consequences={[
+          "Agents here stop using it, and references to it stop working.",
+          `To bring it back, restore it in ${home}.`,
+        ]}
+        confirmLabel={removal === "trash" ? "Move to trash" : "Archive item"}
+        pendingLabel={removal === "trash" ? "Moving…" : "Archiving…"}
+        onConfirm={removeInProvider}
       />
       <DestructiveConfirm
         open={deleting}

@@ -1,11 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import {
-  testSettings,
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   AgentEvent,
   AgentUpdateStage,
@@ -16,17 +13,26 @@ import {
 } from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
+  activateBrowserSession,
+  advanceEnrollmentAgentUpdate,
   claimEnrollmentConnection,
+  claimSessionWorkForAttempt,
   beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
   createSandbox,
   createScheduledTask,
+  createSandboxEnrollment,
   createSession,
   getEnrollment,
+  initializeSessionStartAtomically,
   listSandboxes,
+  prepareBrowserSessionCreate,
   revokeEnrollment,
+  recordEnrollmentExpiredCredentials,
+  touchEnrollmentLastSeen,
   setActiveSandbox,
+  transitionSessionVisibility,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -38,7 +44,8 @@ import {
   handleHelloPayload,
   startMetricsIngestion,
 } from "../src/sandbox/metrics-ingestion";
-import { machineUpdateBlockedReason } from "../src/sandbox/machines";
+import { agentVersionState, machineUpdateBlockedReason } from "../src/sandbox/machines";
+import { createAutomaticAgentUpdater } from "../src/sandbox/agent-update";
 
 test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
   for (const version of [null, "development", "0.1.27", "0.1.28", "0.1.29-beta.1"]) {
@@ -110,7 +117,10 @@ function busWithAgent(opts: {
         op?.$case === "ping"
           ? {
               requestId: req.requestId,
-              result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+              result: {
+                $case: "ping",
+                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0", controlReplayTokens: [] },
+              },
             }
           : op?.$case === "agentUpdateApply"
             ? {
@@ -472,14 +482,117 @@ async function seed(opts: SeedOpts = {}) {
   return { accountId, workspaceId, session, enrollment, sandbox, bus };
 }
 
+/** A managed browser bound to its controller on one Connected Machine. */
+async function openManagedBrowser(
+  scope: { accountId: string; workspaceId: string; sessionId: string },
+  sandboxId: string,
+): Promise<string> {
+  const operationId = crypto.randomUUID();
+  const prepared = await prepareBrowserSessionCreate(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    operationId,
+    associatedSessionId: scope.sessionId,
+    actorSubjectId: "user:test",
+    name: "Machine browser",
+    initialUrl: "https://example.com/",
+    placement: { kind: "connected_machine", sandboxId },
+    driverId: "opengeni.cdp.v1",
+    engine: "chromium",
+    headless: false,
+    identityId: null,
+    baseRevisionId: null,
+  });
+  await activateBrowserSession(db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    operationId,
+    browserSessionId: prepared.session.id,
+    controller: {
+      controllerId: "browserd:test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "placement:test",
+    },
+    engineVersion: "151.0.7922.108",
+  });
+  return prepared.session.id;
+}
+
 describe("M10 GET /machines — dashboard list + states + metrics", () => {
+  test("the owner's human move request consents to a running personal-machine route", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      originWorkspaceId,
+      targetWorkspaceId: workspaceId,
+      enrollmentId,
+    } = await seedCrossWorkspaceScopedMachine("user");
+    await admin`insert into session_tenancy_activations(account_id, activation_version, inventory_digest, parity_digest, activated_by)
+      values (${accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'machine-move-test')`;
+    await admin`update enrollments set workspace_root = '/srv/build', connection_lease_expires_at = now() + interval '1 hour'
+      where id = ${enrollmentId}`;
+    const [sandbox] = await admin<
+      Array<{ id: string }>
+    >`select id from sandboxes where enrollment_id = ${enrollmentId}`;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "Run the build",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "user-m10" },
+      subjectId: "user-m10",
+      visibility: "workspace_shared",
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const app = appFor(
+      busWithAgent({ workspaceId: originWorkspaceId, agentId: enrollmentId, online: true }),
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/sessions/${session.id}/active-sandbox`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["sessions:control"])}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ target: sandbox!.id }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ swapped: true, activeSandboxId: sandbox!.id });
+    const receipts = await admin`select consent.consenting_subject_id, binding.attempt_id
+      from session_turn_machine_consents consent join session_attempt_machine_consents binding on binding.consent_id = consent.id
+      where consent.session_id = ${session.id}`;
+    expect([...receipts]).toEqual([{ consenting_subject_id: "user-m10", attempt_id: attemptId }]);
+  }, 120_000);
   test("a backend:none session exposes its machine fleet without a synthetic home", async () => {
     if (!available) return;
     const { accountId, workspaceId, session, sandbox, bus } = await seed({
       sandboxBackend: "none",
     });
     const app = appFor(bus);
-    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
 
     const response = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
@@ -504,7 +617,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     const app = appFor(bus, {
       settings: testSettings({ ...settings, sandboxBackend: "modal" }),
     });
-    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
 
     const response = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
@@ -538,6 +651,52 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
         isSessionGroup: false,
       }),
     );
+  }, 60_000);
+
+  test("a compute session lists its compute group and never its sandbox enrollment", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, sandbox, bus } = await seed({
+      sandboxBackend: "compute",
+    });
+    await createSandboxEnrollment(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      enrollmentId: crypto.randomUUID(),
+      hasDisplay: false,
+      workspaceRoot: "/workspace",
+    });
+    const app = appFor(bus, {
+      settings: testSettings({
+        ...settings,
+        sandboxBackend: "compute",
+        computeApiUrl: "http://control.test",
+        computeApiKey: "control-key",
+        computeLinkUrl: "wss://link.test",
+      }),
+    });
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`;
+    for (const query of [`?sessionId=${session.id}`, ""]) {
+      const response = await app.request(`/v1/workspaces/${workspaceId}/machines${query}`, {
+        headers: { authorization: auth },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        machines: Array<{ sandboxId: string; kind: string; isSessionGroup: boolean }>;
+      };
+      expect(body.machines).toEqual(
+        query
+          ? [
+              expect.objectContaining({
+                sandboxId: session.sandboxGroupId,
+                kind: "compute",
+                isSessionGroup: true,
+              }),
+              expect.objectContaining({ sandboxId: sandbox.id, kind: "selfhosted" }),
+            ]
+          : [expect.objectContaining({ sandboxId: sandbox.id, kind: "selfhosted" })],
+      );
+    }
   }, 60_000);
 
   test("an online machine returns the contract shape with latest metrics; ?sessionId adds the synthetic group + active pointer", async () => {
@@ -605,10 +764,14 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(machine.metrics).not.toBeNull();
     expect(machine.metrics!.cpuPct).toBe(42.5);
 
-    // In-session view: the synthetic Modal group box is prepended.
+    // In-session view additionally requires permission to read the chat.
     const sessRes = await app.request(
       `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
-      { headers: { authorization: auth } },
+      {
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read", "sessions:read"])}`,
+        },
+      },
     );
     expect(sessRes.status).toBe(200);
     const sessBody = (await sessRes.json()) as {
@@ -677,6 +840,31 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(after?.connectionLeaseExpiresAt).not.toBeNull();
     expect(after?.lastSeenAt).not.toBeNull();
   }, 90_000);
+
+  test("machine status projects verified credential expiration and clears it after recovery", async () => {
+    if (!available) throw new Error("authentication status requires PostgreSQL");
+    const { accountId, workspaceId, enrollment, bus } = await seed({ online: false });
+    await admin`UPDATE enrollments SET last_seen_at = NULL, connection_lease_expires_at = NULL WHERE id = ${enrollment.id}`;
+    await recordEnrollmentExpiredCredentials(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    const app = appFor(bus);
+    const authorization = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const read = async () =>
+      (
+        await (
+          await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+            headers: { authorization },
+          })
+        ).json()
+      ).machines[0];
+    expect((await read()).connectionAuthority.authenticationError).toBe("credentials_expired");
+    await touchEnrollmentLastSeen(db, { accountId, workspaceId, enrollmentId: enrollment.id });
+    expect((await read()).connectionAuthority.authenticationError).toBeUndefined();
+  }, 60_000);
 
   test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when last_seen is missing", async () => {
     if (!available) return;
@@ -1089,6 +1277,7 @@ describe("Connected Machine signed self-update orchestration", () => {
           event: {
             $case: "agentUpdateProgress",
             agentUpdateProgress: {
+              blockers: [],
               operationId,
               targetVersion: "0.1.16",
               expectedBinarySha256: targetDigest,
@@ -1236,6 +1425,44 @@ describe("Connected Machine signed self-update orchestration", () => {
       "accepted",
     );
 
+    const privateSessionId = crypto.randomUUID();
+    await bus.emitAgentEvent(
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: {
+              operationId: body.operationId,
+              targetVersion: "0.1.16",
+              stage: AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE,
+              errorCode: "update_busy_interactions",
+              blockers: [
+                { kind: "browser_action", resourceId: privateSessionId, count: 2 },
+                { kind: "browser_action", resourceId: crypto.randomUUID(), count: 1 },
+                ...Array.from({ length: 100 }, (_, index) => ({
+                  kind: `future_${index}`,
+                  count: 1,
+                })),
+                { kind: "invalid path /private", count: 1 },
+              ],
+            },
+          },
+        }),
+      ).finish(),
+    );
+    const waiting = await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate,
+      (value) => value?.status === "waiting_for_idle",
+      `waiting update ${body.operationId}`,
+    );
+    expect(waiting?.blockers?.length).toBeLessThanOrEqual(33);
+    expect(waiting?.blockers).toContainEqual({ kind: "browser_action", count: 3 });
+    expect(waiting?.blockers?.reduce((sum, blocker) => sum + blocker.count, 0)).toBe(103);
+    expect(JSON.stringify(waiting)).not.toContain(privateSessionId);
+    expect(JSON.stringify(waiting)).not.toContain("resourceId");
+
     await bus.emitAgentEvent(
       `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
       AgentEvent.encode({
@@ -1243,6 +1470,7 @@ describe("Connected Machine signed self-update orchestration", () => {
         event: {
           $case: "agentUpdateProgress",
           agentUpdateProgress: {
+            blockers: [],
             operationId: body.operationId,
             targetVersion: "0.1.16",
             expectedBinarySha256: targetDigest,
@@ -1303,6 +1531,84 @@ describe("Connected Machine signed self-update orchestration", () => {
     expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
       "succeeded",
     );
+  }, 90_000);
+
+  test("a successor without an updater receipt settles the old request and reports the installed version", async () => {
+    if (!available) return;
+    for (const [installedVersion, state] of [
+      ["0.1.16", "current"],
+      ["0.1.17", "ahead"],
+      ["0.1.15", "update_failed"],
+    ] as const) {
+      const { accountId, workspaceId, enrollment } = await seed();
+      const live = (await getEnrollment(db, workspaceId, enrollment.id))!;
+      const operationId = crypto.randomUUID();
+      await beginEnrollmentAgentUpdate(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        connectionInstanceId: CONNECTION_INSTANCE_ID,
+        connectionGeneration: live.connectionGeneration,
+        operationId,
+        targetVersion: "0.1.16",
+      });
+      const hello = (instance: string, version: string) =>
+        handleHelloPayload(
+          db,
+          undefined,
+          Hello.encode(
+            Hello.fromPartial({
+              agentId: enrollment.id,
+              workspaceId,
+              agentVersion: version,
+              binarySha256: "ab".repeat(32),
+              updateChannel: "stable",
+              // An installer/restart has no managed-update operation receipt.
+            }),
+          ).finish(),
+          `agent.${workspaceId}.${enrollment.id}.connection.${instance}.hello`,
+        );
+      // A reconnect of the accepting process must not terminate its own update.
+      await hello(CONNECTION_INSTANCE_ID, "0.1.15");
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+        "requested",
+      );
+      await admin`update enrollments set connection_lease_expires_at = now() - interval '1 second'
+        where id = ${enrollment.id}`;
+      const successor = crypto.randomUUID();
+      expect(
+        (
+          await claimEnrollmentConnection(db, {
+            workspaceId,
+            enrollmentId: enrollment.id,
+            credentialGeneration: enrollment.credentialGeneration,
+            connectionInstanceId: successor,
+            leaseMs: 20_000,
+          })
+        ).claimed,
+      ).toBe(true);
+      // Late Hello from the old instance cannot settle anything.
+      await hello(CONNECTION_INSTANCE_ID, installedVersion);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+        "requested",
+      );
+      await hello(successor, installedVersion);
+      const updated = (await getEnrollment(db, workspaceId, enrollment.id))!;
+      expect(updated.agentUpdate).toMatchObject({
+        operationId,
+        status: "failed",
+        errorCode: "accepting_process_replaced",
+        retryable: true,
+        completedAt: expect.any(String),
+      });
+      expect(updated.agentVersion).toBe(installedVersion);
+      expect(agentVersionState(updated.agentVersion, "0.1.16", updated.agentUpdate)).toBe(state);
+      // Repeated Hello does not churn the settled operation or invent success.
+      await hello(successor, installedVersion);
+      expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toEqual(
+        updated.agentUpdate,
+      );
+    }
   }, 90_000);
 
   test("redelivers one unconfirmed operation id instead of reserving a second update", async () => {
@@ -1368,6 +1674,343 @@ describe("Connected Machine signed self-update orchestration", () => {
       operationId,
       status: "accepted",
     });
+  }, 90_000);
+
+  test("does not re-request the installed promoted version after a failed attempt", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const hello = (agentVersion: string) =>
+      handleHelloPayload(
+        db,
+        undefined,
+        Hello.encode(
+          Hello.fromPartial({
+            agentId: enrollment.id,
+            workspaceId,
+            agentVersion,
+            binarySha256: "ab".repeat(32),
+            updateChannel: "stable",
+          }),
+        ).finish(),
+        `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+      );
+    await hello("0.1.15");
+    const live = await getEnrollment(db, workspaceId, enrollment.id);
+    const operationId = crypto.randomUUID();
+    const fence = {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      connectionGeneration: live!.connectionGeneration,
+      operationId,
+    };
+    await beginEnrollmentAgentUpdate(db, { ...fence, targetVersion: "0.1.16" });
+    await advanceEnrollmentAgentUpdate(db, {
+      ...fence,
+      status: "failed",
+      errorCode: "update_busy_work",
+      retryable: true,
+    });
+    // The promoted build arrived another way (installer, a later attempt).
+    await hello("0.1.16");
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      { settings: { ...settings, agentStableVersion: "0.1.16" } },
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+        },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("already runs the promoted version");
+    expect(requests.filter((request) => request.op?.$case === "agentUpdateApply")).toHaveLength(0);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.operationId).toBe(
+      operationId,
+    );
+  }, 90_000);
+
+  test("a live machine behind its promoted build updates from its heartbeat, and a busy postponement is retried", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    let now = Date.now();
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.16",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+      now: () => now,
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    const updateRequests = () =>
+      requests.filter((request) => request.op?.$case === "agentUpdateApply");
+    const status = async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate;
+
+    await heartbeat();
+    const first = await waitForValue(
+      status,
+      (update) => update?.status === "accepted",
+      "the automatic update request",
+    );
+    expect(updateRequests()).toHaveLength(1);
+    expect(updateRequests()[0]!.op).toMatchObject({
+      agentUpdateApply: { targetVersion: "0.1.16", expectedCurrentVersion: "0.1.15" },
+    });
+    // An older agent accepts, then postpones because it is busy.
+    await handleAgentEventPayload(
+      db,
+      undefined,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: {
+              blockers: [],
+              operationId: first!.operationId,
+              stage: AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED,
+              errorCode: "update_busy_work",
+              retryable: true,
+              rolledBack: false,
+            },
+          },
+        }),
+      ).finish(),
+      `${subject}.events`,
+      bus,
+    );
+    expect((await status())?.errorCode).toBe("update_busy_work");
+    // Heartbeats keep arriving; the busy machine is left alone for a while...
+    await heartbeat();
+    await heartbeat();
+    await Bun.sleep(50);
+    expect(updateRequests()).toHaveLength(1);
+    // ...and asked again once the busy backoff has passed.
+    now += 11 * 60_000;
+    await heartbeat();
+    const second = await waitForValue(
+      status,
+      (update) => update?.status === "accepted" && update.operationId !== first!.operationId,
+      "the retried automatic update",
+    );
+    expect(updateRequests()).toHaveLength(2);
+    expect(updateRequests()[1]!.requestId).toBe(second!.operationId);
+    // An accepted update is the runner's to finish; heartbeats do not re-send it.
+    now += 60 * 60_000;
+    await heartbeat();
+    await Bun.sleep(50);
+    expect(updateRequests()).toHaveLength(2);
+  }, 90_000);
+
+  test("an older agent with open managed browsers is not updated automatically until they close", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.57",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    // One live managed browser on this machine, and one saved browser whose
+    // process is already gone.
+    const open = await openManagedBrowser(
+      { accountId, workspaceId, sessionId: session.id },
+      sandbox.id,
+    );
+    const saved = await openManagedBrowser(
+      { accountId, workspaceId, sessionId: session.id },
+      sandbox.id,
+    );
+    await admin`update browser_sessions set lifecycle = 'suspended', controller_id = null,
+      controller_generation = null, placement_instance_id = null, controller_heartbeat_at = null
+      where id = ${saved}`;
+
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    let now = Date.now();
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.58",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+      now: () => now,
+    })!;
+    const heartbeat = () =>
+      handleAgentEventPayload(
+        db,
+        undefined,
+        AgentEvent.encode(
+          AgentEvent.fromPartial({
+            agentId: enrollment.id,
+            event: { $case: "heartbeat", heartbeat: {} },
+          }),
+        ).finish(),
+        `${subject}.events`,
+        bus,
+        updates,
+      );
+    const updateRequests = () =>
+      requests.filter((request) => request.op?.$case === "agentUpdateApply");
+    const status = async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate;
+
+    await heartbeat();
+    const postponed = await waitForValue(
+      status,
+      (update) => update?.status === "failed",
+      "the postponed automatic update",
+    );
+    expect(postponed).toMatchObject({
+      targetVersion: "0.1.58",
+      errorCode: "update_busy_browsers",
+      retryable: true,
+    });
+    expect(updateRequests()).toHaveLength(0);
+
+    // Still open after the busy backoff: postponed again, never requested.
+    now += 11 * 60_000;
+    await heartbeat();
+    // A new operation is recorded before it settles; wait for its postponement.
+    const postponedAgain = await waitForValue(
+      status,
+      (update) => update?.operationId !== postponed!.operationId && update?.status === "failed",
+      "the second postponement",
+    );
+    expect(postponedAgain?.errorCode).toBe("update_busy_browsers");
+    expect(updateRequests()).toHaveLength(0);
+
+    // Once the browser has ended, the next look requests the update.
+    await admin`update browser_sessions set lifecycle = 'ended', controller_id = null,
+      controller_generation = null, placement_instance_id = null, controller_heartbeat_at = null
+      where id = ${open}`;
+    now += 11 * 60_000;
+    await heartbeat();
+    await waitForValue(status, (update) => update?.status === "accepted", "the automatic update");
+    expect(updateRequests()).toHaveLength(1);
+  }, 90_000);
+
+  test("an agent that keeps its browsers across restarts is updated while they are open", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox } = await seed();
+    const subject = `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}`;
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.58",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `${subject}.hello`,
+    );
+    await openManagedBrowser({ accountId, workspaceId, sessionId: session.id }, sandbox.id);
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    const updates = createAutomaticAgentUpdater({
+      db,
+      bus,
+      settings: {
+        ...settings,
+        agentAutoUpdate: true,
+        agentStableVersion: "0.1.59",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+    })!;
+    await handleAgentEventPayload(
+      db,
+      undefined,
+      AgentEvent.encode(
+        AgentEvent.fromPartial({
+          agentId: enrollment.id,
+          event: { $case: "heartbeat", heartbeat: {} },
+        }),
+      ).finish(),
+      `${subject}.events`,
+      bus,
+      updates,
+    );
+    await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate,
+      (update) => update?.status === "accepted",
+      "the automatic update",
+    );
+    expect(requests.filter((request) => request.op?.$case === "agentUpdateApply")).toHaveLength(1);
   }, 90_000);
 });
 
@@ -1757,6 +2400,81 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
       from enrollments where id = ${enrollmentId}`;
     return row!;
   }
+
+  test("session-scoped explanation names a colleague's machine only for authorized chat readers", async () => {
+    if (!available) return;
+    const org = await audienceOrganization();
+    await admin`insert into auth_users(id, name, email) values (${org.owner.slice(5)}, 'Alex', ${`${crypto.randomUUID()}@example.test`})`;
+    const narrowed = await audienceRequest(
+      org,
+      await bearerFor(org, org.owner, ["workspace:admin"]),
+      "PUT",
+      {
+        audience: "only_me",
+        expectedGeneration: (await machineScope(org.enrollmentId)).generation,
+      },
+    );
+    expect(narrowed.status).toBe(200);
+    const session = await createSession(db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+      model: "gpt-test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    expect(
+      await setActiveSandbox(db, {
+        ...org,
+        sessionId: session.id,
+        subjectId: org.owner,
+        targetSandboxId: org.sandboxId,
+        expectedEpoch: session.activeEpoch,
+      }),
+    ).toMatchObject({ swapped: true });
+    const app = appFor(new MemoryEventBus());
+    const request = async (permissions: Permission[], sessionId: string | null = session.id) =>
+      app.request(
+        `/v1/workspaces/${org.workspaceId}/machines${sessionId ? `?sessionId=${sessionId}` : ""}`,
+        { headers: { authorization: await bearerFor(org, org.member, permissions) } },
+      );
+    const response = await request(["enrollments:read", "sessions:read"]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      machines: [],
+      sessionMachineAccess: {
+        sandboxId: org.sandboxId,
+        machineName: "Team build box",
+        ownerName: "Alex",
+        isOwner: false,
+        queuedTurnBlocked: false,
+      },
+    });
+    expect((await request(["enrollments:read"])).status).toBe(403);
+    expect((await request(["enrollments:read", "sessions:read"], "external")).status).toBe(400);
+    expect(await (await request(["enrollments:read"], null)).json()).toMatchObject({
+      machines: [],
+      sessionMachineAccess: null,
+    });
+    expect((await request(["enrollments:read", "sessions:read"], crypto.randomUUID())).status).toBe(
+      404,
+    );
+    await transitionSessionVisibility(db, {
+      workspaceId: org.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: org.owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
+    const hidden = await request(["enrollments:read", "sessions:read"]);
+    expect(hidden.status).toBe(404);
+    expect(await hidden.text()).not.toContain("Alex");
+  }, 90_000);
 
   test("only the would-be owner, or a workspace admin for them, can narrow; sharing needs admin", async () => {
     if (!available) return;

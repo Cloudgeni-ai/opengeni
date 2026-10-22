@@ -12,6 +12,7 @@ import {
 import {
   enqueueSessionWorkflowWakeIfRunnable,
   getSessionGoal,
+  isSessionDefinitivelyDeleted,
   getSessionTurn,
   materializeGoalContinuation,
   requireSession,
@@ -25,6 +26,8 @@ import type {
 import {
   modelFundingForAdmission,
   goalRunBudgetBlocked,
+  goalSessionUsageLimitBlocked,
+  recordSessionUsageLimitEvent,
   resolveGoalModelAdmission,
 } from "@opengeni/core";
 export { goalContinuationModelDecision, goalRunBudgetBlocked } from "@opengeni/core";
@@ -139,9 +142,22 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
             ? { ...turnExecutionPolicy, credentialRestriction }
             : turnExecutionPolicy;
         }
+        // a reached task usage limit pauses the goal with its own
+        // reason before any funding gate; a read failure aborts materialization.
+        const usageLimitBlocked = modelPolicyBlocked
+          ? null
+          : await goalSessionUsageLimitBlocked(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            });
+        if (usageLimitBlocked) {
+          recordSessionUsageLimitEvent(service.observability, "goal", "reached");
+        }
         const budgetBlocked = modelPolicyBlocked
           ? null
-          : await goalRunBudgetBlocked(
+          : (usageLimitBlocked ??
+            (await goalRunBudgetBlocked(
               { ...service, settings, db: tx },
               {
                 accountId: input.accountId,
@@ -149,7 +165,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
                 model: continuationModel,
                 initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
               },
-            );
+            )));
         const pausedReason = modelPolicyBlocked
           ? modelDecision.pausedReason
           : budgetBlocked?.pausedReason;
@@ -185,7 +201,23 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
 
   return {
     enqueueGoalRetryWake,
-    maybeContinueGoal,
+    maybeContinueGoal: async (input: MaybeContinueGoalInput): Promise<MaybeContinueGoalResult> => {
+      try {
+        return await maybeContinueGoal(input);
+      } catch (error) {
+        const { db } = await services();
+        if (
+          await isSessionDefinitivelyDeleted(
+            db,
+            input.workspaceId,
+            input.sessionId,
+            input.accountId,
+          )
+        )
+          return { action: "none" };
+        throw error;
+      }
+    },
   };
 }
 
@@ -260,7 +292,7 @@ export function goalContinuationPrompt(
     "- For every explicit requirement, named artifact, command, test, gate, invariant, and deliverable, identify and inspect the authoritative evidence that would prove it.",
     "- Match verification scope to requirement scope. Treat uncertain, indirect, incomplete, or missing evidence as not achieved and continue working.",
     "- The audit must prove completion, not merely fail to find obvious remaining work.",
-    "- For document report deliverables (a document the user asked for, or a large report meant to be kept or shared), follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, and explicitly requested local-file work remain outside this report contract.",
+    "- For document report deliverables (a document the user asked for, or a report too long for chat), follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, requested Word, Excel, PDF or PowerPoint files, and explicitly requested local-file work remain outside this report contract.",
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
     "Goal evidence is a short proof for the ledger, not the deliverable. After goal_complete succeeds, finish this same turn with the requested user-facing answer, or a concise summary and retained artifact link. Goal completion stops future automatic continuations; it does not send the answer or end this turn. Never compress a report into evidence or omit the final reply.",

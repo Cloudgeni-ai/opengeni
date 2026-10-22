@@ -68,6 +68,11 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: guard
+    environment: agent-release
+    permissions:
+      contents: read
+      # Windows signing signs in to Azure with GitHub's OIDC token.
+      id-token: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -132,11 +137,16 @@ jobs:
           set -euo pipefail
           pip install ziglang
           cargo install --locked cargo-zigbuild
-          rustup target add "${{ matrix.target }}"
+          # computer-native loads the session's libpipewire at runtime for GNOME
+          # Wayland screen capture, which a static musl binary cannot do, so it
+          # is glibc-dynamic like browserd.
+          native_target="${{ matrix.target }}"
+          native_target="${native_target%-musl}-gnu"
+          rustup target add "${{ matrix.target }}" "$native_target"
           cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
-          cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-computer-native
+          cargo zigbuild --release --target "$native_target.2.28" -p opengeni-computer-native
           cp "target/${{ matrix.target }}/release/opengeni-agent" "../${{ matrix.asset }}"
-          cp "target/${{ matrix.target }}/release/opengeni-computer-native" \
+          cp "target/$native_target/release/opengeni-computer-native" \
             "../opengeni-computer-native-${{ matrix.target }}"
           file "../${{ matrix.asset }}"
 
@@ -164,6 +174,9 @@ jobs:
           bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}"
+          # The compiled runtime carries Bun's own root list (see #5314).
+          bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}"
+          bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}"
           interp="$(readelf -l "opengeni-browserd-${{ matrix.target }}" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
           case "$interp" in
             /lib64/ld-linux-x86-64.so.2|/lib/ld-linux-aarch64.so.1) ;;
@@ -176,21 +189,18 @@ jobs:
             echo "::error::linux browserd must not link musl libc" >&2
             exit 1
           fi
-          OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
-          OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
-          OPENGENI_BROWSERD_TARGET_MUSL=false \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}" \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}" .
+          native_interp="$(readelf -l "opengeni-computer-native-${{ matrix.target }}" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
+          if [ "$native_interp" != "$interp" ]; then
+            echo "::error::linux computer-native must use the glibc dynamic linker; got ${native_interp:-<missing>}" >&2
+            exit 1
+          fi
           chmod 0755 \
             "opengeni-browserd-${{ matrix.target }}" \
-            "opengeni-agent-browser-${{ matrix.target }}" \
             "opengeni-computer-native-${{ matrix.target }}"
           (
             cd agent
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-${{ matrix.target }}" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/opengeni-agent-browser-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/opengeni-computer-native-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/$browser_arch/embedded.rs" \
               cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
@@ -238,6 +248,12 @@ jobs:
           bun build --compile --target=bun-darwin-arm64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile opengeni-browserd-arm64
+          # Distrust Bun's embedded emSign roots before any signature is made
+          # over these bytes (see #5314); x64 is re-signed after the rewrite.
+          bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem opengeni-browserd-x64 opengeni-browserd-arm64
+          bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem opengeni-browserd-x64 opengeni-browserd-arm64
+          codesign --force --sign - opengeni-browserd-x64
+          codesign --verify --strict opengeni-browserd-x64
           # Bun 1.4.0's darwin-arm64 compiler emits an invalid ad-hoc signature
           # that macOS 27 rejects at launch. Replace and verify the signature on
           # the exact thin bytes before either lipo or Cargo embeds them; signing
@@ -246,35 +262,20 @@ jobs:
           codesign --verify --strict opengeni-browserd-arm64
           lipo -create opengeni-browserd-x64 opengeni-browserd-arm64 \
             -output "opengeni-browserd-${{ matrix.target }}"
-          OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
-          OPENGENI_BROWSERD_TARGET_ARCH=x64 \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT=opengeni-agent-browser-x64 \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
-          OPENGENI_BROWSERD_TARGET_ARCH=arm64 \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT=opengeni-agent-browser-arm64 \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          lipo -create \
-            packages/browserd/dist/opengeni-agent-browser-x64 \
-            packages/browserd/dist/opengeni-agent-browser-arm64 \
-            -output "opengeni-agent-browser-${{ matrix.target }}"
           bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun packages/browserd/scripts/stage-cua-runtime.ts arm64
           chmod 0755 \
             "opengeni-browserd-${{ matrix.target }}" \
-            "opengeni-agent-browser-${{ matrix.target }}" \
             "opengeni-computer-native-${{ matrix.target }}"
           (
             cd agent
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-x64" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-x64" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/x86_64-apple-darwin/release/opengeni-computer-native" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/x64/embedded.rs" \
               cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-arm64" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-arm64" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/aarch64-apple-darwin/release/opengeni-computer-native" \
             OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/arm64/embedded.rs" \
               cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
@@ -286,6 +287,10 @@ jobs:
 
       # The native macOS runner also executes the workspace tests before the
       # universal artifact is accepted.
+      - name: Install the native transport test broker
+        if: matrix.kind == 'macos'
+        uses: ./.github/actions/setup-agent-test-nats
+
       - name: Intel cargo test (macOS coverage)
         if: matrix.kind == 'macos'
         working-directory: agent
@@ -312,24 +317,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Windows computer use runs CUA's published native runtime in process.
+          bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun build --compile --target=bun-windows-x64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}.exe"
-          OPENGENI_BROWSERD_TARGET_PLATFORM=win32 \
-          OPENGENI_BROWSERD_TARGET_ARCH=x64 \
-          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}.exe" \
-            bun packages/browserd/scripts/stage-agent-browser.ts
-          mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}.exe" .
+          bun docker/distrust-embedded-roots.ts docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}.exe"
+          bun docker/distrust-embedded-roots.ts --check docker/distrusted-roots.pem "opengeni-browserd-${{ matrix.target }}.exe"
           workspace_windows="$(pwd -W)"
           (
             cd agent
             OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
             OPENGENI_EMBEDDED_BROWSERD="$workspace_windows\\opengeni-browserd-${{ matrix.target }}.exe" \
-            OPENGENI_EMBEDDED_AGENT_BROWSER="$workspace_windows\\opengeni-agent-browser-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$workspace_windows\\opengeni-computer-native-${{ matrix.target }}.exe" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$workspace_windows\\packages\\browserd\\dist\\cua\\x64\\embedded.rs" \
               cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
           )
           cp "agent/target/${{ matrix.target }}/release/opengeni-agent.exe" "${{ matrix.asset }}"
+
+      # CI runners have the Visual C++ runtime installed and an ordinary PC does
+      # not, so a binary that imports it passes every test here and then fails to
+      # start for users. Refuse to publish one.
+      - name: Check the Windows binaries run on stock Windows
+        if: matrix.kind == 'windows'
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          shipped=("${{ matrix.asset }}" "opengeni-computer-native-${{ matrix.target }}.exe")
+          for helper in "opengeni-browserd-${{ matrix.target }}.exe"; do
+            if [ -f "$helper" ]; then shipped+=("$helper"); fi
+          done
+          bun scripts/check-windows-binary-imports.ts "${shipped[@]}"
 
       # ---- Detect signing creds in a PRIOR step (so the gates can read them). ----
       # GitHub Actions does NOT expose a step's own `env:` to that step's `if:`, so a
@@ -342,14 +361,14 @@ jobs:
         shell: bash
         env:
           APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
-          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
+          AZURE_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
           MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         run: |
           set -euo pipefail
           # `[ -n "$X" ]` is the env-side presence check; secrets are masked, so this
           # never leaks the value, only its presence as a boolean output.
           if [ -n "${APPLE_DEVELOPER_ID:-}" ]; then echo "has_macos=true" >> "$GITHUB_OUTPUT"; else echo "has_macos=false" >> "$GITHUB_OUTPUT"; fi
-          if [ -n "${AZURE_KEY_VAULT_URL:-}" ]; then echo "has_windows=true" >> "$GITHUB_OUTPUT"; else echo "has_windows=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "${AZURE_SIGNING_CERTIFICATE_PROFILE:-}" ]; then echo "has_windows=true" >> "$GITHUB_OUTPUT"; else echo "has_windows=false" >> "$GITHUB_OUTPUT"; fi
           if [ -n "${MINISIGN_KEY:-}" ]; then echo "has_minisign=true" >> "$GITHUB_OUTPUT"; else echo "has_minisign=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: Require the release signing key
@@ -379,7 +398,7 @@ jobs:
           cargo install --locked apple-codesign
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
-            --code-signature-flags runtime "${{ matrix.asset }}"
+            --code-signature-flags runtime --binary-identifier ai.opengeni.agent "${{ matrix.asset }}"
           echo "$APPLE_ASC_KEY" > /tmp/asc.json
           # Apple's notary service accepts distribution containers, not a raw
           # Mach-O. Submit a temporary ZIP containing the exact signed binary;
@@ -420,7 +439,6 @@ jobs:
           cp "${{ matrix.asset }}" "$APP/Contents/MacOS/opengeni-agent"
           chmod 0755 "$APP/Contents/MacOS/opengeni-agent"
           cp "opengeni-browserd-${{ matrix.target }}" "$APP/Contents/Helpers/opengeni-browserd"
-          cp "opengeni-agent-browser-${{ matrix.target }}" "$APP/Contents/Helpers/agent-browser"
           cp "opengeni-computer-native-${{ matrix.target }}" \
             "$APP/Contents/Helpers/opengeni-computer-native"
           cp agent/install/OpenGeni-Agent.icns "$APP/Contents/Resources/OpenGeni-Agent.icns"
@@ -470,7 +488,6 @@ jobs:
           for executable in \
             "Contents/MacOS/opengeni-agent" \
             "Contents/Helpers/opengeni-browserd" \
-            "Contents/Helpers/agent-browser" \
             "Contents/Helpers/opengeni-computer-native"
           do
             if [ ! -x "$VERIFY_DIR/$APP/$executable" ]; then
@@ -486,40 +503,64 @@ jobs:
           rm -rf "$VERIFY_DIR"
           rm -f /tmp/cert.p12 /tmp/asc.json
 
-      # ---- Windows Authenticode (POLISH, guarded). ----
-      - name: Windows Authenticode (if cert present)
+      # ---- Windows Authenticode with Azure Artifact Signing (guarded). ----
+      # Signs in with GitHub's OIDC token (no stored Azure secret). Repository
+      # variables: AZURE_SIGNING_CLIENT_ID, AZURE_SIGNING_TENANT_ID,
+      # AZURE_SIGNING_SUBSCRIPTION_ID, AZURE_SIGNING_ENDPOINT,
+      # AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_CERTIFICATE_PROFILE and
+      # AZURE_SIGNING_PUBLISHER. The client needs a federated credential for
+      # this repository's agent-release environment and the Artifact Signing
+      # Certificate Profile Signer role on the account.
+      - name: Sign in to Azure for code signing
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
-        env:
-          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
-          AZURE_KEY_VAULT_CERT: ${{ secrets.AZURE_KEY_VAULT_CERT }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+
+      - name: List the Windows binaries to sign
+        id: windows_binaries
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
         shell: pwsh
         run: |
-          Write-Host "Azure Key Vault cert present — Authenticode-signing ${{ matrix.asset }}"
-          dotnet tool install --global AzureSignTool
-          $artifacts = @(
+          $files = @(
             "${{ matrix.asset }}",
             "opengeni-browserd-${{ matrix.target }}.exe",
-            "opengeni-agent-browser-${{ matrix.target }}.exe",
             "opengeni-computer-native-${{ matrix.target }}.exe"
-          ) | Where-Object { Test-Path $_ }
-          foreach ($artifact in $artifacts) {
-            AzureSignTool sign `
-              --azure-key-vault-url "$env:AZURE_KEY_VAULT_URL" `
-              --azure-key-vault-certificate "$env:AZURE_KEY_VAULT_CERT" `
-              --azure-key-vault-client-id "$env:AZURE_CLIENT_ID" `
-              --azure-key-vault-client-secret "$env:AZURE_CLIENT_SECRET" `
-              --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-              --timestamp-rfc3161 "http://timestamp.digicert.com" `
-              --file-digest sha256 `
-              $artifact
+          ) | Where-Object { Test-Path $_ } | ForEach-Object { (Resolve-Path $_).Path }
+          "files=$($files -join ',')" >> $env:GITHUB_OUTPUT
+
+      - name: Windows Authenticode
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ steps.windows_binaries.outputs.files }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows signatures
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
+        shell: pwsh
+        env:
+          FILES: ${{ steps.windows_binaries.outputs.files }}
+          SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
+        run: |
+          foreach ($file in $env:FILES.Split(',')) {
+            $signature = Get-AuthenticodeSignature -FilePath $file
+            if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "CN=`"?$([regex]::Escape($env:SIGNING_PUBLISHER))") {
+              throw "$file is not validly signed by $env:SIGNING_PUBLISHER ($($signature.Status): $($signature.StatusMessage))"
+            }
+            Write-Host "$file signed by $($signature.SignerCertificate.Subject)"
           }
 
       - name: Windows unsigned note (no cert)
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows != 'true'
-        run: echo "::notice::Windows binary is UNSIGNED (no Authenticode cert) — minisign-attested only. SmartScreen warns on a fresh download until signing credentials are configured."
+        run: echo "::notice::Windows binary is UNSIGNED (no Artifact Signing certificate profile configured) — minisign-attested only. SmartScreen warns on a fresh download until signing is configured."
 
       # ---- minisign signature + sha256 (ALWAYS-ON; the trust root for self-update). ----
       - name: minisign-sign + sha256 the artifact
@@ -556,7 +597,6 @@ jobs:
           fi
           for companion in \
             "opengeni-browserd-${{ matrix.target }}"* \
-            "opengeni-agent-browser-${{ matrix.target }}"* \
             "opengeni-computer-native-${{ matrix.target }}"*
           do
             [ -f "$companion" ] || continue
@@ -583,7 +623,6 @@ jobs:
             OpenGeni-Agent.app.zip.sha256
             OpenGeni-Agent.app.zip.minisig
             opengeni-browserd-${{ matrix.target }}*
-            opengeni-agent-browser-${{ matrix.target }}*
             opengeni-computer-native-${{ matrix.target }}*
           if-no-files-found: error
 
@@ -591,6 +630,7 @@ jobs:
   # combined SHA256SUMS, signs the channel manifest, and creates the GH Release with
   # the binaries + the install scripts attached.
   publish:
+    environment: agent-release
     name: Publish release
     needs: [guard, build]
     runs-on: ubuntu-latest
@@ -700,13 +740,15 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: agent-v${{ needs.guard.outputs.version }}
+          # Manual dispatch may publish after main advances; tag the built commit.
+          target_commitish: ${{ github.sha }}
           name: opengeni-agent v${{ needs.guard.outputs.version }}
           body: |
             opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
 
             Install (read the script first — it is short, POSIX, contains no secrets):
-              Linux/macOS: `curl -fsSL https://get.opengeni.ai/install.sh | sh`
-              Windows:     `irm https://get.opengeni.ai/install.ps1 | iex`
+              Linux/macOS: `curl -fsSL https://app.opengeni.ai/install.sh | sh`
+              Windows:     `irm https://app.opengeni.ai/install.ps1 | iex`
 
             Every binary is minisign-signed (verify against the pinned key) + sha256'd.
             macOS/Windows OS-native code-signing is a creds-drop-in (see release notes

@@ -211,16 +211,7 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         CodemodeAction::Show(args) => {
             print!("{}", client.catalog().await?.show_output(&args.tool)?);
         }
-        CodemodeAction::Call(args) => {
-            let full = args.full;
-            let result = client.call(args).await?;
-            let printed = if full {
-                result
-            } else {
-                omit_structured_content_text_duplicates(result)
-            };
-            println!("{}", serde_json::to_string_pretty(&printed)?);
-        }
+        CodemodeAction::Call(args) => run_call(&client, args).await?,
         CodemodeAction::Read { operation_id } => {
             // A GET only. Neither catalog discovery nor submission is needed.
             let operation = client
@@ -245,6 +236,279 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
 /// IEEE-754 safe-integer bound shared with the JavaScript clients.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
+
+const TEMP_IMAGE_PREFIX: &str = "opengeni-codemode-image-";
+
+/// Exit status of a completed call whose image could not be saved; matches
+/// `ogtool call`.
+const IMAGE_SAVE_FAILED_EXIT_CODE: i32 = 4;
+
+/// `codemode call`: run the tool, then write any images to files. A failure
+/// to save an image after the call completed still prints the result, with
+/// `imageSaveError` and the operation ID, and exits with status 4.
+async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(), CodemodeError> {
+    use std::io::Write as _;
+    let full = args.full;
+    let save_image = args.save_image.clone();
+    if let Some(path) = save_image.as_deref() {
+        preflight_image_path(path)?;
+    }
+    let operation_id = Uuid::new_v4().to_string();
+    let result = client.call_as(args, operation_id.clone()).await?;
+    let materialized = if full && save_image.is_none() {
+        Ok(result.clone())
+    } else {
+        materialize_images(result.clone(), save_image.as_deref(), !full)
+    };
+    let error = match materialized {
+        Ok(result) => {
+            let printed = if full {
+                result
+            } else {
+                omit_structured_content_text_duplicates(result)
+            };
+            println!("{}", serde_json::to_string_pretty(&printed)?);
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    let mut printed = if full {
+        result
+    } else {
+        omit_structured_content_text_duplicates(
+            materialize_images(result.clone(), None, true).unwrap_or(result),
+        )
+    };
+    if let Some(object) = printed.as_object_mut() {
+        object.insert(
+            "imageSaveError".to_string(),
+            json!({
+                "operationId": operation_id,
+                "message": error.to_string(),
+                "note": "The call completed; only saving its image failed. Do not repeat the call.",
+            }),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&printed)?);
+    let _ = std::io::stdout().flush();
+    std::process::exit(IMAGE_SAVE_FAILED_EXIT_CODE);
+}
+
+/// Refuse a --save-image path before the tool runs when the file could not be
+/// written anyway, so nothing is called for a screenshot that cannot be kept.
+fn preflight_image_path(path: &std::path::Path) -> Result<(), CodemodeError> {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    if std::fs::symlink_metadata(&absolute).is_ok() {
+        return Err(CodemodeError::InvalidArguments(format!(
+            "--save-image {} already exists; choose a new path (nothing was called)",
+            absolute.display()
+        )));
+    }
+    if let Some(parent) = absolute
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            CodemodeError::InvalidArguments(format!(
+                "--save-image could not create {}: {error} (nothing was called)",
+                parent.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Mirrors `materializeCodemodeImages` in `packages/codemode/src/images.ts`:
+/// write each image block (such as a browser screenshot) to a file and, when
+/// `replace` is set, print `{type, mimeType, path, sizeBytes}` in place of its
+/// base64 pixels so a script's output stays small. `save_to` names the file
+/// for a result with exactly one image and never overwrites; otherwise the
+/// images go to a new private temporary directory.
+fn materialize_images(
+    mut result: Value,
+    save_to: Option<&std::path::Path>,
+    replace: bool,
+) -> Result<Value, CodemodeError> {
+    use base64::Engine as _;
+    let local = |message: String| CodemodeError::InvalidArguments(message);
+    let Some(Value::Array(content)) = result.get_mut("content") else {
+        return match save_to {
+            Some(_) => Err(local("the result has no image to save".to_string())),
+            None => Ok(result),
+        };
+    };
+    let indexes: Vec<usize> = content
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("image"))
+        .map(|(index, _)| index)
+        .collect();
+    if save_to.is_some() && indexes.len() != 1 {
+        return Err(local(format!(
+            "--save-image needs a result with exactly one image; this one has {}",
+            indexes.len()
+        )));
+    }
+    if indexes.is_empty() {
+        return Ok(result);
+    }
+    let directory = if save_to.is_none() {
+        // Same shape as the JavaScript client's mkdtemp directories, so either
+        // client's cleanup removes the other's expired images.
+        let suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(6)
+            .collect();
+        let root = std::env::temp_dir();
+        let directory = root.join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+        create_private_directory(&directory)
+            .map_err(|error| local(format!("could not create an image directory: {error}")))?;
+        prune_expired_private_images(&root, &directory);
+        Some(directory)
+    } else {
+        None
+    };
+    for (position, index) in indexes.iter().enumerate() {
+        let block = &content[*index];
+        let mime_type = block
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let extension = match mime_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            other => return Err(local(format!("unsupported image type {other:?}"))),
+        };
+        let data = block
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| local("the image bytes are invalid".to_string()))?;
+        let path = match (save_to, &directory) {
+            (Some(path), _) => {
+                if let Some(parent) = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        local(format!("could not create {}: {error}", parent.display()))
+                    })?;
+                }
+                path.to_path_buf()
+            }
+            (None, Some(directory)) => directory.join(if indexes.len() == 1 {
+                format!("frame.{extension}")
+            } else {
+                format!("image-{}.{extension}", position + 1)
+            }),
+            (None, None) => unreachable!("a temporary directory exists without save_to"),
+        };
+        write_new_file(&path, &bytes)
+            .map_err(|error| local(format!("could not save {}: {error}", path.display())))?;
+        let absolute = std::path::absolute(&path).unwrap_or(path);
+        if replace {
+            content[*index] = json!({
+                "type": "image",
+                "mimeType": mime_type,
+                "path": absolute.to_string_lossy(),
+                "sizeBytes": bytes.len(),
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn create_private_directory(path: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Best-effort removal of this client's temporary image directories in `root`
+/// (the temporary directory) older than a day. Only private (0700-style)
+/// directories owned by the same user as the directory just created are
+/// removed, as in the JavaScript client. Paths named with --save-image are
+/// never touched.
+#[cfg(unix)]
+fn prune_expired_private_images(root: &std::path::Path, own_directory: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt as _;
+    const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+    let Ok(owner) = std::fs::symlink_metadata(own_directory).map(|metadata| metadata.uid()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(TEMP_IMAGE_PREFIX))
+        else {
+            continue;
+        };
+        if suffix.len() != 6 || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let path = entry.path();
+        if path == own_directory {
+            continue;
+        }
+        // lstat: a symlink with a matching name is never followed.
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let expired = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= MAX_AGE);
+        let private = metadata.mode().trailing_zeros() >= 6;
+        if metadata.is_dir()
+            && metadata.uid() == owner
+            && private
+            && expired
+            && std::fs::remove_dir_all(&path).is_ok()
+        {
+            removed += 1;
+            if removed >= 64 {
+                return;
+            }
+        }
+    }
+}
+
+/// Without Unix ownership and modes there is no safe way to tell this
+/// client's directories from anyone else's, so nothing is pruned.
+#[cfg(not(unix))]
+fn prune_expired_private_images(_root: &std::path::Path, _own_directory: &std::path::Path) {}
+
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
 
 /// Mirrors `omitStructuredContentTextDuplicates` in
 /// `packages/contracts/src/mcp-structured-content.ts` so `codemode call` and
@@ -405,11 +669,21 @@ impl CodemodeClient {
         decode_json_response(response).await
     }
 
+    #[cfg(test)]
     async fn call(&self, args: CodemodeCallArgs) -> Result<Value, CodemodeError> {
-        let arguments = parse_arguments(&args.arguments)?;
+        self.call_as(args, Uuid::new_v4().to_string()).await
+    }
+
+    /// Run one call under the caller-chosen operation ID, so the caller can
+    /// name the completed operation if printing its result fails afterwards.
+    async fn call_as(
+        &self,
+        args: CodemodeCallArgs,
+        operation_id: String,
+    ) -> Result<Value, CodemodeError> {
+        let arguments = read_arguments(&args.arguments).await?;
         let catalog = self.catalog().await?;
         let entry = catalog.resolve(&args.tool)?;
-        let operation_id = Uuid::new_v4().to_string();
         let request = CallRequest {
             operation_id: operation_id.clone(),
             catalog_digest: catalog.digest.clone(),
@@ -541,6 +815,36 @@ fn environment_value(name: &str) -> Option<String> {
 fn nonempty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+async fn read_arguments(source: &str) -> Result<Map<String, Value>, CodemodeError> {
+    let raw = if source == "-" {
+        use tokio::io::AsyncReadExt as _;
+        let mut input = String::new();
+        tokio::io::stdin()
+            .read_to_string(&mut input)
+            .await
+            .map_err(|_| {
+                CodemodeError::InvalidArguments(
+                    "tool arguments could not be read as UTF-8 from stdin".to_string(),
+                )
+            })?;
+        input
+    } else if let Some(path) = source.strip_prefix('@') {
+        if path.is_empty() {
+            return Err(CodemodeError::InvalidArguments(
+                "tool arguments file path is required after @".to_string(),
+            ));
+        }
+        tokio::fs::read_to_string(path).await.map_err(|_| {
+            CodemodeError::InvalidArguments(
+                "tool arguments file could not be read as UTF-8".to_string(),
+            )
+        })?
+    } else {
+        return parse_arguments(source);
+    };
+    parse_arguments(&raw)
 }
 
 fn parse_arguments(raw: &str) -> Result<Map<String, Value>, CodemodeError> {
@@ -978,6 +1282,7 @@ mod tests {
                 tool: "mail.change".to_string(),
                 arguments: "{}".to_string(),
                 full: false,
+                save_image: None,
             }),
         )
         .await
@@ -989,6 +1294,124 @@ mod tests {
         assert!(!receipt.to_string().contains("\"arguments\":"));
         let request = server.await.expect("server");
         assert!(request.contains("\"durableApproval\":true"));
+    }
+
+    #[test]
+    fn images_are_written_to_files_instead_of_printed_as_base64() {
+        // A 1x1 PNG signature-prefixed payload; the client does not re-encode it.
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        let data = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        };
+        let screenshot = json!({
+            "content": [
+                { "type": "text", "text": "frame" },
+                { "type": "image", "data": data, "mimeType": "image/png" }
+            ],
+            "structuredContent": { "kind": "browser_screenshot" }
+        });
+
+        // Default: a private temporary file, and the printed block names it.
+        let printed = materialize_images(screenshot.clone(), None, true).expect("temp image");
+        let block = &printed["content"][1];
+        assert_eq!(block["sizeBytes"], json!(png.len()));
+        assert!(block.get("data").is_none());
+        let path = std::path::PathBuf::from(block["path"].as_str().expect("path"));
+        assert!(path.ends_with("frame.png"));
+        assert_eq!(std::fs::read(&path).expect("written"), png);
+        assert_eq!(
+            printed["content"][0],
+            json!({ "type": "text", "text": "frame" })
+        );
+        std::fs::remove_dir_all(path.parent().expect("dir")).expect("cleanup");
+
+        // --save-image: the exact path, parents created, never overwritten.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("shots").join("home.png");
+        let saved = materialize_images(screenshot.clone(), Some(&target), true).expect("saved");
+        assert_eq!(std::fs::read(&target).expect("saved file"), png);
+        assert_eq!(
+            saved["content"][1]["path"].as_str(),
+            Some(target.to_string_lossy().as_ref())
+        );
+        let again = materialize_images(screenshot.clone(), Some(&target), true);
+        assert!(again.is_err());
+
+        // --full with --save-image keeps the exact base64 and still saves.
+        let full_target = directory.path().join("full.png");
+        let full = materialize_images(screenshot.clone(), Some(&full_target), false).expect("full");
+        assert_eq!(full, screenshot);
+        assert!(full_target.exists());
+
+        // --save-image on a result without exactly one image is refused.
+        let text_only = json!({ "content": [{ "type": "text", "text": "no image" }] });
+        assert!(materialize_images(
+            text_only.clone(),
+            Some(&directory.path().join("x.png")),
+            true
+        )
+        .is_err());
+        assert_eq!(
+            materialize_images(text_only.clone(), None, true).expect("unchanged"),
+            text_only
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_pruning_removes_only_expired_private_directories() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A root of its own: tests writing temporary images prune the shared
+        // temporary directory concurrently. One midway through removing this
+        // test's private directory has unlinked its file, which makes the
+        // directory look new, so this prune skips it and the assertion runs
+        // before that removal finishes.
+        let root = tempfile::Builder::new()
+            .prefix("opengeni-prune-root-")
+            .tempdir()
+            .expect("root");
+        let aged = |mode: u32| {
+            let suffix: String = Uuid::new_v4()
+                .simple()
+                .to_string()
+                .chars()
+                .take(6)
+                .collect();
+            let path = root.path().join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+            std::fs::create_dir(&path).expect("create");
+            std::fs::write(path.join("frame.png"), b"x").expect("file");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+            let old = std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+            std::fs::File::open(&path)
+                .expect("open dir")
+                .set_modified(old)
+                .expect("age");
+            path
+        };
+        let shared = aged(0o755);
+        let private = aged(0o700);
+        let own = tempfile::Builder::new()
+            .prefix("opengeni-prune-owner-")
+            .tempdir_in(root.path())
+            .expect("own");
+        prune_expired_private_images(root.path(), own.path());
+        assert!(shared.exists(), "a non-private directory is never pruned");
+        assert!(!private.exists(), "an expired private directory is pruned");
+        std::fs::remove_dir_all(&shared).expect("cleanup");
+    }
+
+    #[test]
+    fn save_image_preflight_refuses_an_existing_path_before_calling() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let existing = directory.path().join("taken.png");
+        std::fs::write(&existing, b"x").expect("file");
+        let error = preflight_image_path(&existing).expect_err("refused");
+        assert!(error.to_string().contains("already exists"));
+        let nested = directory.path().join("a/b/new.png");
+        preflight_image_path(&nested).expect("allowed");
+        assert!(nested.parent().expect("parent").is_dir());
+        assert!(!nested.exists());
     }
 
     #[test]
@@ -1127,6 +1550,47 @@ mod tests {
             Err(CodemodeError::InvalidArguments(_))
         ));
         assert_eq!(parse_arguments(r#"{"x":1}"#).expect("object")["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn reads_argument_files_with_the_existing_json_parser() {
+        let directory = tempfile::tempdir().expect("input directory");
+        let path = directory.path().join("arguments with spaces.json");
+        let source = format!("@{}", path.display());
+        let content = "UTF-8 ø🙂\n".repeat(100_000);
+        std::fs::write(&path, json!({ "content": content }).to_string()).expect("input file");
+        assert_eq!(
+            read_arguments(&source).await.expect("arguments")["content"],
+            content
+        );
+        for invalid in [
+            "[]",
+            "null",
+            "@another-file",
+            "synthetic-sensitive-content",
+            "",
+        ] {
+            std::fs::write(&path, invalid).expect("invalid input file");
+            let error = read_arguments(&source)
+                .await
+                .expect_err("invalid arguments");
+            assert!(matches!(error, CodemodeError::InvalidArguments(_)));
+            assert!(!error.to_string().contains("synthetic-sensitive-content"));
+        }
+        std::fs::write(&path, [0xff]).expect("invalid UTF-8");
+        assert_eq!(
+            read_arguments(&source).await.unwrap_err().to_string(),
+            "tool arguments file could not be read as UTF-8"
+        );
+        std::fs::remove_file(&path).expect("remove synthetic file");
+        assert_eq!(
+            read_arguments(&source).await.unwrap_err().to_string(),
+            "tool arguments file could not be read as UTF-8"
+        );
+        assert_eq!(
+            read_arguments("@").await.unwrap_err().to_string(),
+            "tool arguments file path is required after @"
+        );
     }
 
     #[test]
@@ -1650,6 +2114,7 @@ mod tests {
                 tool: "demo.lookup".to_string(),
                 arguments: r#"{"query":"hello"}"#.to_string(),
                 full: false,
+                save_image: None,
             })
             .await
             .expect("call");
@@ -1752,6 +2217,7 @@ mod tests {
                 tool: "demo.mutate".to_string(),
                 arguments: "{}".to_string(),
                 full: false,
+                save_image: None,
             })
             .await
             .expect("recovered call");
@@ -1814,6 +2280,7 @@ mod tests {
                     tool: "demo.write".into(),
                     arguments: "{}".into(),
                     full: false,
+                    save_image: None,
                 })
                 .await
                 .unwrap_err();

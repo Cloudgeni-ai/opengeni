@@ -6,6 +6,11 @@ Opengeni credit debits, not tokens, estimated provider expense, or purchased
 seat counts. The organization's credit balance and ordinary execution
 authority remain separate requirements.
 
+Allowances are separate from [task usage limits](session-usage-limits.md),
+which stop one task (a root session and its descendants) at an
+API-equivalent model-usage amount whatever funds it. A task stopped by its own
+limit is never reported as allowance or credit exhaustion.
+
 Start with [product integration](product-integration.md) for organization keys,
 tenant-to-workspace mapping, and explicit external-member onboarding. Typed
 SDK details live in the [SDK reference](../packages/sdk/README.md); the

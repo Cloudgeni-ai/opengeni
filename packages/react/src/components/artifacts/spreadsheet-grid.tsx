@@ -39,6 +39,7 @@ import {
   useSpreadsheetResizing,
   type SpreadsheetDimensionCommit,
 } from "./spreadsheet-resize";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 export type { SpreadsheetDimensionCommit } from "./spreadsheet-resize";
 
@@ -534,9 +535,9 @@ type ParsedSpreadsheetClipboard = Readonly<{
 }>;
 
 /** Bounded RFC-4180-style TSV parser for Excel/Sheets `text/plain` clipboard data. */
-function parseSpreadsheetClipboard(input: string): ParsedSpreadsheetClipboard {
+function parseSpreadsheetClipboard(t: OpenGeniText, input: string): ParsedSpreadsheetClipboard {
   if (new TextEncoder().encode(input).byteLength > MAX_CLIPBOARD_INPUT_BYTES) {
-    throw new Error("Clipboard data is too large to paste");
+    throw new Error(t("artifacts.spreadsheetGrid.clipboardDataIsTooLarge"));
   }
   const records: string[][] = [[]];
   let field = "";
@@ -576,14 +577,14 @@ function parseSpreadsheetClipboard(input: string): ParsedSpreadsheetClipboard {
       endedWithRecordSeparator = false;
     }
   }
-  if (quoted) throw new Error("Clipboard data contains an unterminated quoted cell");
+  if (quoted) throw new Error(t("artifacts.spreadsheetGrid.clipboardDataContainsAnUnterminated"));
   if (endedWithRecordSeparator) records.pop();
   else records.at(-1)!.push(field);
   if (records.length === 0) records.push([""]);
   const columns = Math.max(1, ...records.map((record) => record.length));
   const cellCount = records.length * columns;
   if (cellCount > MAX_CLIPBOARD_CELLS) {
-    throw new Error("Clipboard range is too large to paste");
+    throw new Error(t("artifacts.spreadsheetGrid.clipboardRangeIsTooLarge"));
   }
   const inputs = records.flatMap((record) => [
     ...record,
@@ -713,16 +714,16 @@ function useWorkbookViewState(workbook: Workbook): WorkbookViewState {
   return view;
 }
 
-function nextAvailableSheetName(workbook: Workbook): string {
+function nextAvailableSheetName(t: OpenGeniText, workbook: Workbook): string {
   let index = workbook.worksheets.items.length + 1;
   while (workbook.worksheets.items.some((sheet) => sheet.name === `Sheet${index}`)) index += 1;
-  return `Sheet${index}`;
+  return t("artifacts.spreadsheetGrid.sheetIndex", { index });
 }
 
 /** A reusable workbook shell with first-class sheet switching. */
 export function SpreadsheetArtifactSurface({
   workbook,
-  title = "Workbook",
+  title: titleProp,
   subtitle,
   actions,
   initialSheetId,
@@ -730,6 +731,8 @@ export function SpreadsheetArtifactSurface({
   readOnly = false,
   ...gridProps
 }: SpreadsheetArtifactSurfaceProps) {
+  const t = useOpenGeniText();
+  const title = titleProp === undefined ? t("artifacts.spreadsheetGrid.workbook") : titleProp;
   const { revision } = useWorkbookViewState(workbook);
   const availableSheets = workbook.worksheets.items;
   const initial =
@@ -759,15 +762,15 @@ export function SpreadsheetArtifactSurface({
   );
 
   const addSheet = useCallback(() => {
-    const sheet = workbook.worksheets.add(nextAvailableSheetName(workbook));
+    const sheet = workbook.worksheets.add(nextAvailableSheetName(t, workbook));
     selectSheet(sheet);
-  }, [selectSheet, workbook]);
+  }, [selectSheet, workbook, t]);
 
   const footer = (
     <div
       className="flex min-h-9 items-center gap-1 overflow-x-auto px-2"
       role="tablist"
-      aria-label="Worksheets"
+      aria-label={t("artifacts.spreadsheetGrid.worksheets")}
     >
       {availableSheets.map((sheet) => (
         <button
@@ -790,7 +793,7 @@ export function SpreadsheetArtifactSurface({
         <button
           type="button"
           onClick={addSheet}
-          aria-label="Add worksheet"
+          aria-label={t("artifacts.spreadsheetGrid.addWorksheet")}
           className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg [&>svg]:size-3.5"
         >
           <PlusIcon />
@@ -806,8 +809,8 @@ export function SpreadsheetArtifactSurface({
       subtitle={
         subtitle ??
         (activeSheet
-          ? `${availableSheets.length} sheet${availableSheets.length === 1 ? "" : "s"}`
-          : "Empty workbook")
+          ? t("counts.sheets", { count: availableSheets.length })
+          : t("artifacts.spreadsheetGrid.emptyWorkbook"))
       }
       actions={actions}
       footer={footer}
@@ -826,14 +829,16 @@ export function SpreadsheetArtifactSurface({
           style={{ minHeight: 224 }}
         >
           <div>
-            <p className="text-og-base font-medium text-og-fg">This workbook has no worksheets.</p>
+            <p className="text-og-base font-medium text-og-fg">
+              {t("artifacts.spreadsheetGrid.thisWorkbookHasNoWorksheets")}
+            </p>
             {!readOnly && allowAddSheet ? (
               <button
                 type="button"
                 onClick={addSheet}
                 className="mt-3 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium hover:bg-og-primary-hover"
               >
-                Add worksheet
+                {t("artifacts.spreadsheetGrid.addWorksheet")}
               </button>
             ) : null}
           </div>
@@ -1031,6 +1036,7 @@ export function SpreadsheetProjectionGrid({
   onViewportChange,
   className,
 }: SpreadsheetProjectionGridProps) {
+  const t = useOpenGeniText();
   const { revision, rowCount, columnCount } = projection;
   const editable = !readOnly && commit !== undefined;
   const commandQueue = useSpreadsheetCommandQueue({
@@ -1086,8 +1092,11 @@ export function SpreadsheetProjectionGrid({
   const pendingCommandCount =
     commandQueue.pendingCount + resizing.pendingCount + pendingTransactions;
   const visibleSyncStatus =
-    pendingCommandCount > 0 && (!syncStatus || syncStatus === "Saved" || syncStatus === "Read only")
-      ? "Saving…"
+    pendingCommandCount > 0 &&
+    (!syncStatus ||
+      syncStatus === t("artifacts.editableSpreadsheet.saved") ||
+      syncStatus === t("artifacts.editableSpreadsheet.readOnly"))
+      ? t("artifacts.spreadsheetGrid.saving")
       : syncStatus;
   const runQueuedCommand = commandQueue.run;
   const [viewport, setViewport] = useState<ViewportState>({
@@ -1252,7 +1261,12 @@ export function SpreadsheetProjectionGrid({
     if (typeof document === "undefined") return;
     let active = true;
     void document.fonts?.ready.then(() => {
-      if (active) setCanvasEpoch((value) => value + 1);
+      if (active) {
+        // Loaded glyphs change without changing the computed font-family.
+        // Repaint cached fallback-font tiles, not only the headers/selection.
+        canvasRendererRef.current?.dispose();
+        setCanvasEpoch((value) => value + 1);
+      }
     });
     if (typeof MutationObserver === "undefined") {
       return () => {
@@ -1355,10 +1369,12 @@ export function SpreadsheetProjectionGrid({
   const reportCommandFailure = useCallback(
     (cause: unknown) => {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      setCommandFailure({ message: error.message || "Spreadsheet action failed" });
+      setCommandFailure({
+        message: error.message || t("artifacts.spreadsheetGrid.spreadsheetActionFailed"),
+      });
       onCommandError?.(error);
     },
-    [onCommandError],
+    [onCommandError, t],
   );
 
   const commitDraft = useCallback(
@@ -1483,15 +1499,15 @@ export function SpreadsheetProjectionGrid({
         let prepared: ReturnType<typeof parseSpreadsheetClipboard>;
         let target: SpreadsheetCommandTarget;
         const prepare = () => {
-          prepared = parseSpreadsheetClipboard(clipboardText);
+          prepared = parseSpreadsheetClipboard(t, clipboardText);
           if (
             anchor.row + prepared.rows > rowCount ||
             anchor.col + prepared.columns > columnCount
           ) {
-            throw new Error("Clipboard range does not fit in this worksheet");
+            throw new Error(t("artifacts.spreadsheetGrid.clipboardRangeDoesNotFit"));
           }
           if (!commitRange && prepared.inputs.length !== 1) {
-            throw new Error("This spreadsheet adapter does not support rectangular paste");
+            throw new Error(t("artifacts.spreadsheetGrid.thisSpreadsheetAdapterDoesNot"));
           }
           target = {
             top: anchor.row,
@@ -1563,6 +1579,7 @@ export function SpreadsheetProjectionGrid({
       rowCount,
       runCommand,
       updateSelection,
+      t,
     ],
   );
 
@@ -1574,7 +1591,7 @@ export function SpreadsheetProjectionGrid({
       const columnsToCopy = selected.right - selected.left + 1;
       if (rowsToCopy * columnsToCopy > MAX_CLIPBOARD_CELLS) {
         event.preventDefault();
-        reportCommandFailure(new Error("Selected range is too large to copy"));
+        reportCommandFailure(new Error(t("artifacts.spreadsheetGrid.selectedRangeIsTooLarge")));
         return;
       }
       const coverage = projection.coverage;
@@ -1586,7 +1603,9 @@ export function SpreadsheetProjectionGrid({
           selected.right >= coverage.columnEnd)
       ) {
         event.preventDefault();
-        reportCommandFailure(new Error("Selected cells are still loading; copy again when ready"));
+        reportCommandFailure(
+          new Error(t("artifacts.spreadsheetGrid.selectedCellsAreStillLoading")),
+        );
         return;
       }
       const output: string[] = [];
@@ -1601,7 +1620,7 @@ export function SpreadsheetProjectionGrid({
       event.preventDefault();
       setCommandFailure(null);
     },
-    [editMode, projection, reportCommandFailure],
+    [editMode, projection, reportCommandFailure, t],
   );
 
   const beginEditing = useCallback(
@@ -2018,17 +2037,17 @@ export function SpreadsheetProjectionGrid({
     >
       <div className="flex min-h-9 shrink-0 items-center border-b border-og-border bg-og-surface-1">
         <output
-          aria-label="Selected range"
+          aria-label={t("artifacts.spreadsheetGrid.selectedRange")}
           className="shrink-0 border-r border-og-border px-2 font-mono text-og-xs text-og-fg-muted"
           style={{ width: 96 }}
         >
           {selectionName(selection)}
         </output>
         <span aria-hidden className="px-2 font-og-mono text-og-sm italic text-og-fg-subtle">
-          fx
+          {t("artifacts.spreadsheetGrid.fx")}
         </span>
         <input
-          aria-label="Formula or value"
+          aria-label={t("artifacts.spreadsheetGrid.formulaOrValue")}
           readOnly={!editable}
           aria-invalid={visibleCommandFailure ? "true" : undefined}
           value={draft}
@@ -2049,16 +2068,16 @@ export function SpreadsheetProjectionGrid({
         />
         {visibleSyncStatus ? (
           <output
-            aria-label="Spreadsheet sync status"
+            aria-label={t("artifacts.spreadsheetGrid.spreadsheetSyncStatus")}
             className="shrink-0 px-2 text-og-xs text-og-fg-muted"
           >
-            {visibleCommandFailure ? "Not saved" : visibleSyncStatus}
+            {visibleCommandFailure ? t("artifacts.spreadsheetGrid.notSaved") : visibleSyncStatus}
           </output>
         ) : null}
       </div>
       <div role="status" aria-live="polite" className="sr-only">
         {visibleCommandFailure?.message ??
-          (pendingCommandCount > 0 ? "Saving spreadsheet changes" : "")}
+          (pendingCommandCount > 0 ? t("artifacts.spreadsheetGrid.savingSpreadsheetChanges") : "")}
       </div>
       {visibleCommandFailure ? (
         <div
@@ -2073,7 +2092,7 @@ export function SpreadsheetProjectionGrid({
               onClick={visibleCommandFailure.retry}
               className="shrink-0 rounded-og-xs px-1.5 py-0.5 font-medium outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
             >
-              Retry
+              {t("artifacts.spreadsheetGrid.retry")}
             </button>
           ) : null}
         </div>
@@ -2083,7 +2102,9 @@ export function SpreadsheetProjectionGrid({
         ref={viewportRef}
         role="grid"
         tabIndex={0}
-        aria-label={`${projection.sheetName} spreadsheet`}
+        aria-label={t("artifacts.spreadsheetGrid.sheetnameSpreadsheet", {
+          sheetName: projection.sheetName,
+        })}
         aria-rowcount={rowCount}
         aria-colcount={columnCount}
         aria-multiselectable="true"
@@ -2178,7 +2199,9 @@ export function SpreadsheetProjectionGrid({
                 {!readOnly && resize ? (
                   <SpreadsheetResizeHandle
                     axis="column"
-                    label={`Resize column ${columnName(col)}`}
+                    label={t("artifacts.spreadsheetGrid.resizeColumnColumnname", {
+                      columnName: columnName(col),
+                    })}
                     size={width}
                     {...resizing.handleProps("column", col)}
                   />
@@ -2218,7 +2241,7 @@ export function SpreadsheetProjectionGrid({
                   {!readOnly && resize ? (
                     <SpreadsheetResizeHandle
                       axis="row"
-                      label={`Resize row ${row + 1}`}
+                      label={t("artifacts.spreadsheetGrid.resizeRowRow", { row: row + 1 })}
                       size={height}
                       {...resizing.handleProps("row", row)}
                     />
@@ -2283,7 +2306,7 @@ export function SpreadsheetProjectionGrid({
                       {active && editMode === "cell" ? (
                         <input
                           ref={editorRef}
-                          aria-label={`Edit ${address}`}
+                          aria-label={t("artifacts.spreadsheetGrid.editAddress", { address })}
                           value={draft}
                           onInput={(event) => setDraft(event.currentTarget.value)}
                           onKeyDown={onEditorKeyDown}

@@ -36,7 +36,8 @@ semantic key may be layered at all three tiers:
 Organization writes require the literal `account:admin` permission on the
 unique authenticated account grant matching the workspace grant's account and
 subject; workspace permissions never substitute for that account authority.
-Workspace writes require `workspace:admin`. Personal writes derive the target
+Workspace writes require `documents:manage` (Members hold it; workspace Skills
+are shared team content). Personal writes derive the target
 from the authenticated human and accept no caller-selected subject. A scope change
 requires authorization for both the old and new scopes and advances a
 compare-and-swap scope version. Every lifecycle request carries the expected
@@ -227,7 +228,7 @@ direct human to create and activate an explicit Skill. The full proposal and
 lifecycle API remains available for purpose-built governance clients, but is
 not presented in the default Knowledge UI. Organization controls require
 the matching `account:admin` grant, workspace controls require
-`workspace:admin`, and personal controls remain self-only.
+`documents:manage`, and personal controls remain self-only.
 
 The summary and full-content routes require exact attempt authority. The same
 restriction applies to the first-party MCP tools

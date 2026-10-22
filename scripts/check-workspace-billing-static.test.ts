@@ -15,6 +15,10 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
 
 describe("workspace provider import guard", () => {
   test.each([
+    "apps/api/src/billing-stripe-customer.ts",
+    "apps/api/src/billing-subscriptions.ts",
+    "apps/api/test/billing-subscriptions.test.ts",
+    "apps/api/test/billing-subscriptions-review-postgres.test.ts",
     "apps/api/test/scoped-credit-checkout.test.ts",
     "apps/api/test/scoped-credits-postgres.test.ts",
   ])("permits the billing adapter's Stripe contract fixture: %s", async (file) => {

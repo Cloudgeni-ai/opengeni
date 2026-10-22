@@ -3,14 +3,14 @@ import type { ConnectionMetadata } from "@opengeni/sdk";
 import { PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
 import { useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
-import type { CapabilityCatalogItem } from "@/types";
-import { matchingConnectionAccounts } from "./session-connection-accounts";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
+import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 
 const ACCOUNT_STATUS = {
   active: "connected",

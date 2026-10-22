@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 /**
  * The one password generator shared by agents (`secret_save` with
  * `generate`), the ask card's server-side generate, and the web/mobile UI.
@@ -28,29 +29,31 @@ function isPrintableAscii(value: string): boolean {
   return true;
 }
 
-export const GeneratePasswordSpec = z
-  .object({
-    length: z.number().int().min(8).max(128).default(24),
-    lowercase: z.boolean().default(true),
-    uppercase: z.boolean().default(true),
-    digits: z.boolean().default(true),
-    symbols: z.boolean().default(true),
-    // No quotes, $, `, \, braces, /, &, ; or | by default: generated values
-    // stay safe to paste into shells, URLs and config files.
-    symbolSet: z
-      .string()
-      .min(1)
-      .max(64)
-      .refine(isPrintableAscii, "symbolSet must be printable ASCII without spaces")
-      .default(SECRET_GENERATOR_DEFAULT_SYMBOLS),
-    excludeAmbiguous: z.boolean().default(true),
-    requireEachClass: z.boolean().default(true),
-  })
-  .strict()
-  .refine(
-    (spec) => spec.lowercase || spec.uppercase || spec.digits || spec.symbols,
-    "at least one character class must be enabled",
-  );
+export const GeneratePasswordSpec = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      length: z.number().int().min(8).max(128).default(24),
+      lowercase: z.boolean().default(true),
+      uppercase: z.boolean().default(true),
+      digits: z.boolean().default(true),
+      symbols: z.boolean().default(true),
+      // No quotes, $, `, \, braces, /, &, ; or | by default: generated values
+      // stay safe to paste into shells, URLs and config files.
+      symbolSet: z
+        .string()
+        .min(1)
+        .max(64)
+        .refine(isPrintableAscii, "symbolSet must be printable ASCII without spaces")
+        .default(SECRET_GENERATOR_DEFAULT_SYMBOLS),
+      excludeAmbiguous: z.boolean().default(true),
+      requireEachClass: z.boolean().default(true),
+    })
+    .strict()
+    .refine(
+      (spec) => spec.lowercase || spec.uppercase || spec.digits || spec.symbols,
+      "at least one character class must be enabled",
+    ),
+);
 export type GeneratePasswordSpec = z.infer<typeof GeneratePasswordSpec>;
 export type GeneratePasswordSpecInput = z.input<typeof GeneratePasswordSpec>;
 

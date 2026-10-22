@@ -8,6 +8,7 @@ import type {
   ToolCallItem,
 } from "@opengeni/react/session";
 import type { HumanInputAnswer } from "@opengeni/sdk";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, {
@@ -183,8 +184,10 @@ function groupKey(group: TimelineGroup, index: number): string {
 }
 
 function TimelineRow(props: AgentTimelineProps & { row: Row }) {
+  const t = useOpenGeniText();
   const { row, theme } = props;
-  if (row.kind === "working") return <WorkingLine theme={theme} label="Thinking" />;
+  if (row.kind === "working")
+    return <WorkingLine theme={theme} label={t("native.ui.timeline.thinking")} />;
   if (row.kind === "approval") {
     return (
       <ApprovalCard
@@ -401,26 +404,26 @@ function WorkBlock(
   );
 }
 
-function stepLabel(item: ActivityItem): string {
-  if (item.kind === "tool-call") return toolTitle(item);
-  if (item.kind === "reasoning") return "Thought";
-  if (item.kind === "worker") return "Worker";
-  return "Step";
+function stepLabel(t: OpenGeniText, item: ActivityItem): string {
+  if (item.kind === "tool-call") return toolTitle(t, item);
+  if (item.kind === "reasoning") return t("native.ui.timeline.thought");
+  if (item.kind === "worker") return t("native.ui.timeline.worker");
+  return t("native.ui.timeline.step");
 }
 
-const LIVE_VERBS: Partial<Record<ReturnType<typeof toolIconName>, string>> = {
-  terminal: "Running",
-  search: "Searching",
-  edit: "Editing",
-  globe: "Browsing",
-  rocket: "Deploying",
-};
+const LIVE_VERBS = (t: OpenGeniText): Partial<Record<ReturnType<typeof toolIconName>, string>> => ({
+  terminal: t("native.ui.timeline.running"),
+  search: t("native.ui.timeline.searching"),
+  edit: t("native.ui.timeline.editing"),
+  globe: t("native.ui.timeline.browsing"),
+  rocket: t("native.ui.timeline.deploying"),
+});
 
 /** Present-tense description of a running tool ("Running bun test"). */
-function liveLabel(tool: ToolCallItem): string {
-  const verb = LIVE_VERBS[toolIconName(tool.name)];
+function liveLabel(t: OpenGeniText, tool: ToolCallItem): string {
+  const verb = LIVE_VERBS(t)[toolIconName(tool.name)];
   const detail = toolDetail(tool);
-  if (!verb) return detail ? `${toolTitle(tool)} · ${detail}` : toolTitle(tool);
+  if (!verb) return detail ? `${toolTitle(t, tool)} · ${detail}` : toolTitle(t, tool);
   return detail ? `${verb} ${detail}` : verb;
 }
 
@@ -463,20 +466,26 @@ type StepSummaryProps = {
 };
 
 function FoldSteps(props: StepSummaryProps) {
+  const t = useOpenGeniText();
   const { theme, running } = props;
   const [open, setOpen] = useState(false);
-  const steps = props.toolCount
-    ? `${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}`
-    : "";
+  const steps = props.toolCount ? t("counts.steps", { count: props.toolCount }) : "";
   const label = props.waiting
-    ? "Waiting for you"
+    ? t("native.ui.timeline.waitingForYou")
     : running
       ? props.current
-        ? liveLabel(props.current)
-        : "Working"
+        ? liveLabel(t, props.current)
+        : t("native.ui.timeline.working")
       : props.failed
-        ? `Stopped${steps ? ` after ${steps}` : ""}`
-        : [props.duration ? `Worked for ${props.duration}` : "Worked", steps]
+        ? steps
+          ? t("native.ui.timeline.stoppedAfterSteps", { steps })
+          : t("native.ui.timeline.stopped")
+        : [
+            props.duration
+              ? t("native.ui.timeline.workedForDuration", { duration: props.duration })
+              : t("native.ui.timeline.worked"),
+            steps,
+          ]
             .filter(Boolean)
             .join(" · ");
   return (
@@ -533,6 +542,7 @@ function FoldSteps(props: StepSummaryProps) {
 }
 
 function CompactStep({ item, theme }: { item: ActivityItem; theme: AgentTheme }) {
+  const t = useOpenGeniText();
   const detail =
     item.kind === "tool-call" ? toolDetail(item) : item.kind === "reasoning" ? item.text : null;
   return (
@@ -552,7 +562,7 @@ function CompactStep({ item, theme }: { item: ActivityItem; theme: AgentTheme })
             lineHeight: theme.type.smallLine,
           }}
         >
-          {stepLabel(item)}
+          {stepLabel(t, item)}
         </Text>
         {detail ? (
           <Text
@@ -589,6 +599,7 @@ function RailSteps({
   theme: AgentTheme;
   waiting: boolean;
 }) {
+  const t = useOpenGeniText();
   return (
     <View style={{ paddingLeft: 4 }}>
       {items.map((item, index) => {
@@ -627,7 +638,7 @@ function RailSteps({
                     fontWeight: "500",
                   }}
                 >
-                  {stepLabel(item)}
+                  {stepLabel(t, item)}
                 </Text>
                 {item.kind === "tool-call" && item.status === "running" ? (
                   waiting ? (
@@ -638,7 +649,7 @@ function RailSteps({
                         fontWeight: "600",
                       }}
                     >
-                      Waiting for you
+                      {t("native.ui.timeline.waitingForYou")}
                     </Text>
                   ) : (
                     <Pulse theme={theme} />
@@ -704,25 +715,26 @@ function RailSteps({
 
 /** Field: one bold card stating what is happening now, steps on demand. */
 function CardSteps(props: StepSummaryProps) {
+  const t = useOpenGeniText();
   const { theme, running } = props;
   const [open, setOpen] = useState(false);
   const headline = props.waiting
-    ? "Waiting for you"
+    ? t("native.ui.timeline.waitingForYou")
     : running
       ? props.current
-        ? (LIVE_VERBS[toolIconName(props.current.name)] ?? toolTitle(props.current))
-        : "Working on it"
+        ? (LIVE_VERBS(t)[toolIconName(props.current.name)] ?? toolTitle(t, props.current))
+        : t("native.ui.timeline.workingOnIt")
       : props.failed
-        ? "Couldn't finish"
-        : `Done · ${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}`;
+        ? t("native.ui.timeline.couldnTFinish")
+        : t("native.ui.timeline.doneSteps", { count: props.toolCount });
   const sub = props.waiting
-    ? "Answer below to continue"
+    ? t("native.ui.timeline.answerBelowToContinue")
     : running
       ? props.current
         ? toolDetail(props.current)
         : null
       : props.duration
-        ? `Took ${props.duration}`
+        ? t("native.ui.timeline.tookDuration", { duration: props.duration })
         : null;
   return (
     <Pressable

@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { ATLASSIAN_NATIVE_RETIRED_REASON } from "@opengeni/contracts/atlassian-native-retirement";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import { createKnowledgeSourceSyncActivities } from "../src/activities/knowledge-source-sync";
 import { createKnowledgeSourceAttemptTools } from "../src/activities/agent-turn/knowledge-source-tools";

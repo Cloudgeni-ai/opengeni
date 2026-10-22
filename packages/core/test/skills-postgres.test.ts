@@ -48,7 +48,7 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { SkillSaveInput } from "@opengeni/contracts";
 import { stableJson, skillReviewHumanInput, type SkillReviewReference } from "@opengeni/contracts";
 import {
@@ -1446,7 +1446,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       ),
     ).toEqual([]);
   });
-  test("Automatic is truthful, fences tenancy/generation, and cannot write org/user Skills", async () => {
+  test("Automatic is truthful, fences tenancy/generation, and writes only workspace or the person's own Skills", async () => {
     if (!client) return;
     const f = await fixture("automatic");
     const saved = await saveSkill(client.db, { ...f.input, ...f.agent });
@@ -1487,17 +1487,26 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         operationId: crypto.randomUUID(),
       }),
     ).rejects.toThrow();
-    for (const scope of ["organization", "user"] as const) {
-      await expect(
-        saveSkill(client.db, {
-          ...f.input,
-          ...f.agent,
-          operationId: crypto.randomUUID(),
-          skillId: crypto.randomUUID(),
-          scope,
-        }),
-      ).rejects.toThrow();
-    }
+    await expect(
+      saveSkill(client.db, {
+        ...f.input,
+        ...f.agent,
+        operationId: crypto.randomUUID(),
+        skillId: crypto.randomUUID(),
+        scope: "organization",
+      }),
+    ).rejects.toThrow();
+    // An explicitly chosen personal destination is the initiating person's own Skill.
+    const own = await saveSkill(client.db, {
+      ...f.input,
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      scope: "user",
+    });
+    const owner = { ...f.context, subjectId: f.human.actor.subjectId };
+    expect((await readSkill(client.db, owner, own.skillId))?.scope).toBe("user");
+    expect(await readSkill(client.db, f.context, own.skillId)).toBeNull();
     await shared!
       .admin`update session_turn_attempts set state='closed',outcome='failed',closed_at=now() where id=${f.agent.actor.attemptId}`;
     await expect(

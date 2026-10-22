@@ -1,3 +1,4 @@
+import { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
@@ -170,6 +171,13 @@ export type SessionProxyToolServer = {
    * (unprefixed MCP tool names), or `true` for every tool. Others run directly.
    */
   approvals?: { ask: string[] | true } | undefined;
+  /**
+   * Tools the agent has from the first model request, so everyday reads (for
+   * example search and get-by-id) need no `tool_search` round trip: unprefixed
+   * MCP tool names, or `true` for every tool. Other tools stay searchable. Keep
+   * the list short and stable: every listed schema is part of each request.
+   */
+  eager?: string[] | true | undefined;
   /** Token signing secret. Defaults to `OPENGENI_API_KEY`; `verifyToolRequest` must use the same. */
   secret?: string | undefined;
   /** Token lifetime in seconds. Defaults to 24 hours; refreshed on every message, approval, and answer. */
@@ -230,9 +238,9 @@ export type SessionProxyHandlerOptions = {
   /**
    * Attach your product's MCP tool server to every session the `createSession`
    * hook creates, authenticated as the resolved user. The proxy mints the
-   * token, adds the `mcpServers` entry (plus an eager ref when the hook lists
-   * explicit `tools`), and rotates the token on every send, steer, submit,
-   * approval decision, and human-input answer.
+   * token, adds the `mcpServers` entry (with its `eager` tools, or every tool
+   * when the hook lists explicit `tools`), and rotates the token on every send,
+   * steer, submit, approval decision, and human-input answer.
    */
   toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
@@ -319,6 +327,17 @@ export type SessionProxyHandlerOptions = {
    * Explicit opt-in, default false.
    */
   sites?: boolean | undefined;
+  /**
+   * Let the product's Excel add-in connect the open workbook for the signed-in
+   * user: `POST /v1/workspaces/{ws}/office/workbook-tickets` and
+   * `GET /v1/workspaces/{ws}/office/workbooks`. The workbook belongs to that
+   * user in the resolved workspace; agents working for them there reach it with
+   * `excel_run`. The ticket authenticates the add-in's WebSocket to
+   * `/v1/office/workbooks/live`, which the host passes through to the Opengeni
+   * API itself (see `@opengeni/sdk/office` and docs/excel-addin.md).
+   * Explicit opt-in, default false.
+   */
+  office?: boolean | undefined;
   /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
@@ -423,6 +442,7 @@ export function createSessionProxyHandler(
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const sitesEnabled = options.sites === true;
+  const officeEnabled = options.office === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -664,8 +684,16 @@ export function createSessionProxyHandler(
       // Unknown additive query parameters on allowlisted reads pass through, so a
       // newer browser SDK keeps working; the route and method allowlist is exact.
       const query = Object.fromEntries(url.searchParams);
-      const read = async (path: string) =>
-        json(await client.requestJson("GET", path, undefined, query, call));
+      const read = async (path: string) => {
+        const body = await client.requestJson("GET", path, undefined, query, call);
+        // Keep the projection's read-consistency sequence for the browser hooks.
+        const sequence = observedSessionSequence(body);
+        return json(
+          body,
+          200,
+          sequence === undefined ? {} : { [SESSION_SEQUENCE_HEADER]: String(sequence) },
+        );
+      };
       const [root, ...rest] = segments;
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
@@ -698,7 +726,13 @@ export function createSessionProxyHandler(
             }
           }
           // Upstream proxy capabilities never authorize this host's routes.
-          const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
+          // Task usage limits are set by this host's server, never through the
+          // browser boundary, so the producer capability is not forwarded.
+          const {
+            artifacts: _upstreamArtifacts,
+            sessionUsageLimits: _upstreamUsageLimits,
+            ...conversationConfig
+          } = config;
           const upstreamVoice = config.voiceInput;
           if (upstreamVoice && typeof upstreamVoice === "object") {
             // Only one-shot recordings are forwarded, never resumable chunk uploads.
@@ -784,6 +818,16 @@ export function createSessionProxyHandler(
           reject(403, "control_not_allowed", "Only workspace resume is available.");
         }
         return json(await client.requestJson("POST", `${base}/inference-control`, body));
+      }
+
+      if (area === "office" && officeEnabled && tail.length === 1) {
+        if (tail[0] === "workbook-tickets" && method === "POST") {
+          return json(await client.requestJson("POST", `${base}/office/workbook-tickets`, {}));
+        }
+        if (tail[0] === "workbooks" && method === "GET") {
+          return await read(`${base}/office/workbooks`);
+        }
+        return errorJson(404, "route_not_allowed", "Not found.");
       }
 
       if (area === "files" && filesEnabled && method === "POST") {
@@ -1113,6 +1157,30 @@ export function createSessionProxyHandler(
           }
           return json(await client.requestJson("PATCH", session, { title }));
         }
+        case "PUT attention": {
+          // Only "I have read this", for the resolved user's own read state:
+          // an open conversation acknowledges replies the person watched.
+          const through = body?.acknowledgedThroughSequence;
+          const keys = Object.keys(body ?? {});
+          if (
+            body?.unread !== false ||
+            keys.some((key) => key !== "unread" && key !== "acknowledgedThroughSequence") ||
+            (through !== undefined &&
+              (typeof through !== "number" || !Number.isSafeInteger(through) || through < 0))
+          ) {
+            reject(
+              400,
+              "invalid_body",
+              "Only { unread: false, acknowledgedThroughSequence? } may be set.",
+            );
+          }
+          return json(
+            await client.requestJson("PUT", `${session}/attention`, {
+              unread: false,
+              ...(through !== undefined ? { acknowledgedThroughSequence: through } : {}),
+            }),
+          );
+        }
         case "GET events":
           return await listEvents(client, `${session}/events`, query, call);
         case "GET events/stream":
@@ -1246,7 +1314,12 @@ const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 type RealtimeRoute = "begin" | "connect" | "heartbeat" | "end" | "activate" | "sync";
-const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set(["webrtc", "gateway", "supergrok"]);
+const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set([
+  "webrtc",
+  "websocket",
+  "gateway",
+  "supergrok",
+]);
 /** Ledger entries that become (or join) messages and so accept `modelContext`. */
 const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "delegation_call",
@@ -1337,6 +1410,10 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
   if (ask !== undefined && ask !== true && !(Array.isArray(ask) && ask.every(isToolName))) {
     throw new TypeError("toolServer.approvals.ask must be true or a list of tool names.");
   }
+  const eager = toolServer.eager;
+  if (eager !== undefined && eager !== true && !(Array.isArray(eager) && eager.every(isToolName))) {
+    throw new TypeError("toolServer.eager must be true or a list of tool names.");
+  }
   // Resolve now so a missing secret fails at startup, not on the first chat.
   return {
     ...toolServer,
@@ -1363,6 +1440,12 @@ function withToolServer(
     );
   }
   const ask = toolServer.approvals?.ask;
+  const eager =
+    toolServer.eager === true
+      ? true
+      : toolServer.eager?.length
+        ? [...new Set(toolServer.eager)]
+        : undefined;
   const tools = created.tools;
   return {
     ...created,
@@ -1374,13 +1457,16 @@ function withToolServer(
         url: toolServer.url,
         headers: { Authorization: `Bearer ${token}` },
         ...(ask === true ? { requireApproval: true } : ask?.length ? { requireApproval: ask } : {}),
+        ...(eager !== undefined ? { eager } : {}),
       },
     ],
     // Omitted tools keep workspace defaults; the attachment alone selects the
-    // server. An explicit allow-list gets the server's tools on the first request.
+    // server, and its `eager` marker names the first-request tools. An explicit
+    // allow-list without an `eager` choice gets every server tool on the first
+    // request, as before.
     ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
       ? {
-          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: true }],
+          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: eager ?? true }],
         }
       : {}),
   };
@@ -2004,7 +2090,7 @@ function workspaceLiveStream(
       const event = next.value;
       controller.enqueue(
         encoder.encode(
-          `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+          `${"sequence" in event ? `id: ${event.sequence}\n` : ""}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
         ),
       );
     },

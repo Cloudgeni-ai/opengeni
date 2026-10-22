@@ -3,7 +3,7 @@ import { PRODUCT_LIFECYCLE_FACT_ATTRIBUTES } from "@opengeni/contracts";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import {
@@ -12,6 +12,7 @@ import {
   completeSelfServiceOrganizationSetup,
   createConnection,
   createDb,
+  ensureManagedAccessForUser,
   registerHostExportConsumer,
   revokeConnection,
   type DbClient,
@@ -106,6 +107,23 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
       requestFingerprint: "e".repeat(64),
       trialCreditsEnabled: true,
     });
+    // Current signup writes only a zero-value eligibility receipt (0845).
+    // Preserve historical bonus backfill coverage with an actual legacy grant
+    // instead of depending on new signup to mint a retired bonus.
+    const legacy = await insertAuthUser(signedUpAt);
+    const legacyAccess = await ensureManagedAccessForUser(client.db, {
+      userId: legacy.userId,
+      email: `legacy-${legacy.userId}@example.test`,
+      name: "Legacy bonus owner",
+    });
+    await applyCreditLedgerEntry(client.db, {
+      accountId: legacyAccess.defaultAccountId!,
+      type: "grant",
+      amountMicros: 10_000_000,
+      sourceType: "verified_signup_trial",
+      sourceId: legacy.userId,
+      idempotencyKey: `verified-signup-trial:v1:${legacy.userId}`,
+    });
     await applyCreditLedgerEntry(client.db, {
       accountId: setup.organizationId,
       type: "credit_topup",
@@ -182,13 +200,20 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
     const of = (type: string) => rows.filter((row) => row.event_type === type);
     expect(of("auth.sign_up").map((row) => [row.payload.attribute, row.occurred_at])).toEqual([
       ["google", signedUpAt],
+      ["google", signedUpAt],
     ]);
-    expect(of("auth.email_verified").map((row) => row.occurred_at)).toEqual([signedUpAt]);
+    expect(of("auth.email_verified").map((row) => row.occurred_at)).toEqual([
+      signedUpAt,
+      signedUpAt,
+    ]);
     expect(of("organization.setup").map((row) => row.payload.attribute)).toEqual(["created"]);
     expect(of("credits.purchased")).toHaveLength(1);
     expect(
       of("credits.granted").map((row) => [row.payload.attribute, row.initiator?.subjectId]),
-    ).toEqual([["signup_trial", person.subjectId]]);
+    ).toEqual([["signup_trial", legacy.subjectId]]);
+    expect(of("credits.granted").some((row) => row.account_id === setup.organizationId)).toBe(
+      false,
+    );
     const created = of("connection.created");
     expect(created.map((row) => row.payload.attribute).sort()).toEqual([
       "github",

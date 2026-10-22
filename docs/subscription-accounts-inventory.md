@@ -258,7 +258,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 
 ##### EP-N05 — Realtime model catalog, begin, billing
 - Refs: `apps/api/src/routes/workspaces.ts:1101` GET `/realtime-model-catalog` (availability via `workspaceCodexSubscriptionActive` and `workspaceXaiSubscriptionActive(..., grant.subjectId)` `:1104-1106`); `apps/api/src/routes/sessions.ts:1370` POST `/realtime` (begin; `freezeSessionRealtimeConnectionAccounts` freezes MCP connection accounts only, `packages/core/src/domain/session-connection-accounts.ts:18`); voice billing `packages/core/src/domain/realtime-voice-billing.ts:66` `deploymentRealtimeVoice` returns null for `gpt-live-1-boulder-alpha` and `supergrok/grok-voice-think-fast-2.0`, so subscription voice is never charged (`:256` `admit`).
-- Model setting: ids are constants `CODEX_REALTIME_MODEL_ID` / `SUPERGROK_REALTIME_MODEL_ID` (`packages/config/src/index.ts:3510-3511`); the chosen model is stored per session realtime mode (DB check `packages/db/drizzle/0238_supergrok_realtime_model.sql`). The upstream xAI model is hard-coded `grok-voice-think-fast-2.0` (`apps/api/src/xai-realtime.ts:22`). Client transport is picked by model id (`packages/sdk/src/realtime.ts:58` `sessionRealtimeTransportKind`); the SDK never touches credentials.
+- Model setting: ids are constants `CODEX_REALTIME_MODEL_ID` / `SUPERGROK_REALTIME_MODEL_ID` (`packages/config/src/index.ts:3510-3511`); the chosen model is stored per session realtime mode (DB check `packages/db/drizzle/0238_supergrok_realtime_model.sql`). The upstream xAI model is hard-coded `grok-voice-think-fast-2.0` (`apps/api/src/realtime-websocket.ts:256`). Client transport is picked by model id (`packages/sdk/src/realtime.ts:58` `sessionRealtimeTransportKind`); the SDK never touches credentials.
 - Gaps: catalog availability is computed for the *viewer* (xAI: their live pool; Codex: workspace), not for the session's accepted authority. No Claude realtime model exists.
 
 ##### EP-N06 — Codex realtime WebRTC broker
@@ -272,7 +272,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - **Bypasses shared selection** (own pin→active rule, no lease).
 
 ##### EP-N07 — SuperGrok realtime client-secret broker
-- Refs: `apps/api/src/routes/sessions.ts:1881` POST `/realtime/supergrok`; `apps/api/src/xai-realtime.ts:48` `createXaiRealtimeConnectionSecret`; `:64` live acceptance snapshot for the caller; `:68` reads session pin; `:76` `buildXaiSubscriptionAuthorization` with `shardKey = sessionId`; `:89-127` writes a **policy pin** to the session (rotation on, not manual) and handles a manual-pin race; `:152` `mintXaiClientSecret` (`api.x.ai/v1/realtime/client_secrets`, 120 s TTL).
+- Refs: `apps/api/src/routes/sessions.ts:1881` POST `/realtime/supergrok`; `apps/api/src/realtime-websocket.ts:266` `supergrokProvider` (formerly `createXaiRealtimeConnectionSecret`); `:64` live acceptance snapshot for the caller; `:68` reads session pin; `:76` `buildXaiSubscriptionAuthorization` with `shardKey = sessionId`; `:89-127` writes a **policy pin** to the session (rotation on, not manual) and handles a manual-pin race; `:152` `mintXaiClientSecret` (`api.x.ai/v1/realtime/client_secrets`, 120 s TTL).
 - Authority/pool: **caller's live** pool, not the session's accepted pool. A second member opening voice in a shared session uses (and pins) their own pool's account.
 - Selection: shared `selectXaiCredentialForUse` + pin read/write; no lease (the minted token outlives the call; usage is not fenced).
 - Failure: any selection/auth error → `credential_unavailable` (409); 401 → one refresh; 401/403 after → `credential_unavailable`; other → `provider_error` (502, retryable). Code prefix `SUPERGROK_REALTIME_*` (`sessions.ts:1981-1992`). No `needs_relogin` stamping.
@@ -584,7 +584,7 @@ Note: `subscription-pool-access.ts` registers **no routes**; it only holds the h
 - `personalWorkspacesSupported` true for codex, supergrok **and** claude_subscription (`model-connection-access.ts:191-195`), but the web only offers it for codex and supergrok (EP-S34).
 
 ##### EP-S17 — Realtime account selection (outside turns)
-- SuperGrok: POST `/v1/workspaces/:id/sessions/:sessionId/realtime/supergrok` (`apps/api/src/routes/sessions.ts:1881`) → `createXaiRealtimeConnectionSecret` (`apps/api/src/xai-realtime.ts:48`). Resolves the caller's **live** acceptance snapshot (`:63`), reads/writes the session pin (`policy` pin when rotation is on).
+- SuperGrok: POST `/v1/workspaces/:id/sessions/:sessionId/realtime/supergrok` (`apps/api/src/routes/sessions.ts:1881`) → `supergrokProvider` (`apps/api/src/realtime-websocket.ts:266`; formerly `createXaiRealtimeConnectionSecret`). Resolves the caller's **live** acceptance snapshot (`:63`), reads/writes the session pin (`policy` pin when rotation is on).
 - Codex: `brokerSessionCodexRealtime` (`apps/api/src/codex-realtime.ts:181`) → `selectCodexCredentialId(sessionPinned, active, connected)` from live session state.
 - Claude: no realtime path found.
 - Gap: realtime uses the current person's live scope, not the session's accepted scope.
@@ -686,7 +686,7 @@ Background facts:
 - `useCodexAccounts` (`hooks/use-codex-accounts.ts:145`): workspace or session-scoped Codex accounts, pin, live usage refresh; refetches on `isCodexAccountEvent` (`:19`, Codex events + generic turn/status events). Codex-only.
 - `useSuperGrokAccounts` (`hooks/use-supergrok-accounts.ts:43`): polls workspace list only; no session scope, no pin.
 - No Claude hook in the package.
-- Model policy / picker: `model-policy.ts` billing labels per provider (`:31-33`, `:186-241`); `groupPickerRowsByBillingClass` with `codexOnly` (`:399`, `:510`) and `applyCodexOnly` (`model-picker-model.ts:133`) disable non-Codex rows for `remote_v2` sessions (web passes it at `apps/web/src/routes/session.tsx:2571`, `:3465`).
+- Model policy / picker: `model-policy.ts` billing labels per provider (`:31-33`, `:186-241`); `groupPickerRowsByBillingClass` with `codexOnly` (`:399`, `:510`) and `applyCodexOnly` (`model-picker-model.ts:133`) disable non-Codex rows for `remote_v2` sessions (web passes it at `packages/react/src/app/routes/session.tsx:2571`, `:3465`).
 - Timeline: `codex.capacity.waiting` renders a "waiting" notice (`timeline/projection.ts:1088`); `turn.capacity_waiting` (Claude/SuperGrok) is only treated as execution evidence (`:2491`) and gets **no notice**. Fleet decision rows are Codex-only (`timeline/fleet-decision-row.tsx`).
 - Status label: generic "Waiting for capacity" for `waiting_capacity` (`session-status-model.ts:14`), no provider shown.
 
@@ -699,7 +699,7 @@ Background facts:
 - Portable vs remote_v2 Codex chats: `CodexProviderSwitchRow` (`models/codex-provider-switch-row.tsx:22`), workspace setting `codexCompactionDefault`.
 
 ##### EP-S29 — Web: session account indicator / switcher
-- `CodexAccountIndicator` (`apps/web/src/components/session/codex-account-indicator.tsx:101`) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; component also checks the `codex/` prefix at `:115`). Shows current/waiting account, usage bars, "Retry with" / "Use for next turn" pin menu (`:263-272`).
+- `CodexAccountIndicator` (`packages/react/src/app/components/session/codex-account-indicator.tsx:101`) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; component also checks the `codex/` prefix at `:115`). Shows current/waiting account, usage bars, "Retry with" / "Use for next turn" pin menu (`:263-272`).
 - **Codex-only.** No indicator, switcher or waiting account display for Claude or SuperGrok sessions.
 
 ##### EP-S30 — Web: organization connection access ("Available in")
@@ -770,7 +770,7 @@ Provider-specific:
 | EP-N02 | Codex transcription: active pointer only | `apps/api/src/transcription/providers/codex-subscription.ts:43` |
 | EP-N03 | SuperGrok transcription: shared selection, no lease, per-request shard | `apps/api/src/transcription/providers/xai-subscription.ts:52` |
 | EP-N06 | Codex realtime: own pin→active rule, no capacity checks, no lease | `apps/api/src/codex-realtime.ts:268`, `packages/codex/src/realtime.ts:345` |
-| EP-N07 | SuperGrok realtime: caller's live pool, no lease, writes the session pin | `apps/api/src/xai-realtime.ts:64-127` |
+| EP-N07 | SuperGrok realtime: caller's live pool, no lease, writes the session pin | `apps/api/src/realtime-websocket.ts:266` (formerly `xai-realtime.ts:64-127`) |
 | EP-N14 | Video recovery: frozen token envelope and direct refresh outside the serialized refresh | `apps/worker/src/activities/video-generation-reconciliation.ts:709` |
 | EP-N15–EP-N17 | Codex Apps: designation instead of selection, but token load gated by the model pool condition | `packages/runtime/src/index.ts:7311-7347` |
 | EP-N18 | Reset-credit redemption: explicit account and own ledger (by design) | `apps/api/src/routes/codex.ts:1954`, `:2068` |

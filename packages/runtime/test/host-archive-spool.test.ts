@@ -418,6 +418,95 @@ describe("disk-backed SDK v1 host archive codec", () => {
     }
   });
 
+  test("an abort while re-reading the serialized archive stops at its next chunk", async () => {
+    const source = await fixture();
+    const temporaryBase = await fixture();
+    // About twenty 64 KiB chunks of serialized JSON to re-read and verify.
+    await writeFile(join(source, "large"), Buffer.alloc(1024 * 1024, 3));
+    const previousTemp = process.env.TMPDIR;
+    process.env.TMPDIR = temporaryBase;
+    const abort = new AbortController();
+    const reason = new Error("snapshot budget elapsed");
+    const originalOpen = filesystem.open;
+    let archiveOpens = 0;
+    let archiveReads = 0;
+    let readsAfterAbort = 0;
+    const hook = spyOn(filesystem, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      // The first open writes archive.json; the second re-reads it to verify.
+      if (String(args[0]).endsWith("archive.json") && ++archiveOpens === 2) {
+        const originalRead = handle.read;
+        Object.defineProperty(handle, "read", {
+          value: async (...readArgs: Parameters<typeof originalRead>) => {
+            if (abort.signal.aborted) readsAfterAbort++;
+            const result = await Reflect.apply(originalRead, handle, readArgs);
+            if (++archiveReads === 2) abort.abort(reason);
+            return result;
+          },
+        });
+      }
+      return handle;
+    });
+    try {
+      await expect(captureHostWorkspaceArchive(source, [], undefined, abort.signal)).rejects.toBe(
+        reason,
+      );
+      expect(archiveOpens).toBe(2);
+      expect(archiveReads).toBe(2);
+      expect(readsAfterAbort).toBe(0);
+      expect(await readdir(temporaryBase)).toEqual([]);
+    } finally {
+      hook.mockRestore();
+      if (previousTemp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTemp;
+    }
+  });
+
+  test("an abort while verifying the inventory stops before the next entry", async () => {
+    const source = await fixture();
+    const temporaryBase = await fixture();
+    for (let index = 0; index < 12; index++) {
+      await writeFile(join(source, `file-${index}`), `content-${index}`);
+    }
+    const previousTemp = process.env.TMPDIR;
+    process.env.TMPDIR = temporaryBase;
+    const abort = new AbortController();
+    const reason = new Error("snapshot budget elapsed");
+    const originalUnlink = filesystem.unlink;
+    const originalLstat = filesystem.lstat;
+    let payloadRemoved = false;
+    let lstatsAfterAbort = 0;
+    const unlinkHook = spyOn(filesystem, "unlink").mockImplementation(async (...args) => {
+      await Reflect.apply(originalUnlink, filesystem, args);
+      if (String(args[0]).endsWith("capture-payload")) payloadRemoved = true;
+    });
+    // The first entry check after serialization belongs to the final
+    // inventory verification; abort there.
+    const lstatHook = spyOn(filesystem, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof originalLstat>
+    ) => {
+      // Only workspace entry checks; spool cleanup has its own lstat calls.
+      const entry = /\/file-\d+$/.test(String(args[0]));
+      if (entry && abort.signal.aborted) lstatsAfterAbort++;
+      const result = await Reflect.apply(originalLstat, filesystem, args);
+      if (entry && payloadRemoved && !abort.signal.aborted) abort.abort(reason);
+      return result;
+    }) as typeof originalLstat);
+    try {
+      await expect(captureHostWorkspaceArchive(source, [], undefined, abort.signal)).rejects.toBe(
+        reason,
+      );
+      expect(payloadRemoved).toBe(true);
+      expect(lstatsAfterAbort).toBe(0);
+      expect(await readdir(temporaryBase)).toEqual([]);
+    } finally {
+      unlinkHook.mockRestore();
+      lstatHook.mockRestore();
+      if (previousTemp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTemp;
+    }
+  });
+
   test("an already aborted capture reads nothing", async () => {
     const source = await fixture();
     await writeFile(join(source, "file"), "content");

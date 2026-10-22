@@ -351,6 +351,22 @@ export async function listWorkspaceProviderCustomModelsByKind(
     providerKinds: readonly WorkspaceCustomModelProviderKind[];
   },
 ): Promise<Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]>> {
+  if (input.providerKinds.length === 0)
+    return await listWorkspaceProviderCustomModelsByKindInScope(db, input);
+  return await withRlsContext(db, input, (scopedDb) =>
+    listWorkspaceProviderCustomModelsByKindInScope(scopedDb, input),
+  );
+}
+
+/** Internal reader; the caller owns the tenant scope and its shared fence. */
+export async function listWorkspaceProviderCustomModelsByKindInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKinds: readonly WorkspaceCustomModelProviderKind[];
+  },
+): Promise<Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]>> {
   const models: Record<WorkspaceCustomModelProviderKind, WorkspaceProviderCustomModel[]> = {
     vercel_gateway: [],
     openrouter: [],
@@ -360,26 +376,24 @@ export async function listWorkspaceProviderCustomModelsByKind(
   };
   const providerKinds = [...new Set(input.providerKinds)];
   if (providerKinds.length === 0) return models;
-  return await withRlsContext(db, input, async (scopedDb) => {
-    const queries = providerKinds.map((providerKind) =>
-      workspaceProviderCustomModelsQuery(scopedDb, { ...input, providerKind }),
-    );
-    const [first, second, ...remaining] = queries;
-    // The nonempty provider list guarantees the first query exists. Each branch
-    // keeps its own LIMIT; a global limit could hide another provider's overflow.
-    const bounded = (second ? unionAll(first!, second, ...remaining) : first!).as("models");
-    const rows = await scopedDb
-      .select()
-      .from(bounded)
-      .orderBy(bounded.providerKind, bounded.createdAt, bounded.id);
-    for (const row of rows) models[row.providerKind].push(mapCustomModel(row));
-    for (const providerKind of providerKinds) {
-      if (models[providerKind].length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
-        throw customModelLimitError(providerKind);
-      }
+  const queries = providerKinds.map((providerKind) =>
+    workspaceProviderCustomModelsQuery(scopedDb, { ...input, providerKind }),
+  );
+  const [first, second, ...remaining] = queries;
+  // The nonempty provider list guarantees the first query exists. Each branch
+  // keeps its own LIMIT; a global limit could hide another provider's overflow.
+  const bounded = (second ? unionAll(first!, second, ...remaining) : first!).as("models");
+  const rows = await scopedDb
+    .select()
+    .from(bounded)
+    .orderBy(bounded.providerKind, bounded.createdAt, bounded.id);
+  for (const row of rows) models[row.providerKind].push(mapCustomModel(row));
+  for (const providerKind of providerKinds) {
+    if (models[providerKind].length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
+      throw customModelLimitError(providerKind);
     }
-    return models;
-  });
+  }
+  return models;
 }
 
 export async function listWorkspaceGatewayCustomModels(

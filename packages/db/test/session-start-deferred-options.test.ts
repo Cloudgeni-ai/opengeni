@@ -9,7 +9,7 @@ import {
   listSessionEvents,
   type DbClient,
 } from "../src";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;

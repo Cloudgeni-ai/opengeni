@@ -37,33 +37,43 @@
 
 mod backoff;
 mod browser_bridge;
+mod browser_control_http;
 mod browser_sidecar;
 mod capacity;
 mod cli;
 mod codemode;
+mod compute;
 mod config;
 mod credential_renewal;
 mod dispatch;
 mod embedded_runtime;
 mod engine;
 mod enrollment;
+#[cfg(unix)]
+mod handover;
 mod instance_lock;
+mod inventory;
 mod job;
 mod legacy;
+mod log_file;
 mod metrics;
 mod ops;
 mod overrides;
+mod rpc_replay;
 mod service;
+mod stream_digest;
 mod supervisor;
 mod uninstall;
 mod update;
 mod uploads;
+mod windows_control;
+mod windows_task;
 
 use std::{path::Path, sync::Arc};
 
 use clap::{CommandFactory as _, Parser as _};
 use opengeni_agent_platform::{NativePlatform, Platform};
-use opengeni_agent_stream::{RelayHub, RelayHubConfig};
+use opengeni_agent_stream::{RelayCredential, RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -86,7 +96,7 @@ const CONNECTION_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
 fn main() -> std::process::ExitCode {
     if browser_bridge::is_native_host_invocation() {
-        init_tracing();
+        init_native_host_tracing();
         return match browser_bridge::run_native_host() {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(error) => {
@@ -95,8 +105,23 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
+    // Before any thread or child process exists: commands the previous agent
+    // image handed over must not leak into anything spawned from here on.
+    #[cfg(unix)]
+    let inherited = handover::inherit_from_env();
     let cli = Cli::parse();
-    init_tracing();
+    // Only the long-running agent persists its log; one-shot CLI commands
+    // print to the terminal and must not interleave with the service's file.
+    let persistent = matches!(cli.command, None | Some(Command::Run(_)));
+    init_tracing(persistent);
+    #[cfg(unix)]
+    match inherited {
+        Ok(true) => info!("continuing commands handed over by the previous agent image"),
+        Ok(false) => {}
+        Err(error) => {
+            error!(%error, "commands handed over by the previous agent image could not be continued; they end");
+        }
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -125,13 +150,127 @@ fn main() -> std::process::ExitCode {
 
 /// Initializes structured `tracing` from `$RUST_LOG` (default `info`). Secret
 /// values are NEVER logged; only op labels, counts, and timings.
-fn init_tracing() {
+///
+/// With `persistent`, events also go to the size-bounded `<config>/logs/agent.log`
+/// and panics are recorded there before the default hook runs, so a crashed
+/// agent stays diagnosable on hosts whose service manager keeps no output.
+/// A service definition that captures stderr itself sets
+/// `OPENGENI_AGENT_STDERR_LOG=off` so the same lines are not stored twice.
+fn init_tracing(persistent: bool) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+    let mut file_error = None;
+    let log = if persistent {
+        match config::config_dir() {
+            Ok(dir) => {
+                let directory = log_file::log_directory(&dir);
+                log_file::bound_appended_file(
+                    &directory.join(log_file::AGENT_STDERR_LOG),
+                    log_file::MAX_LOG_BYTES,
+                );
+                match log_file::RotatingLogFile::open(
+                    &directory,
+                    log_file::AGENT_LOG,
+                    log_file::MAX_LOG_BYTES,
+                ) {
+                    Ok(log) => Some(log),
+                    Err(error) => {
+                        file_error = Some(format!("{}: {error}", directory.display()));
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                file_error = Some(error.to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let stderr_enabled = log.is_none()
+        || !std::env::var(opengeni_agent_platform::service::AGENT_STDERR_LOG_ENV)
+            .is_ok_and(|value| value == "off");
+    let console = stderr_enabled.then(|| tracing_subscriber::fmt::layer().with_target(false));
+    let file = log.map(|log| {
+        tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(log)
+    });
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(console)
+        .with(file)
+        .try_init()
+        .is_ok();
+    if let Some(error) = file_error {
+        warn!(%error, "agent log file unavailable; logging to the console only");
+    }
+    if persistent && installed {
+        install_panic_logging();
+    }
+}
+
+/// Records a panic, with its backtrace, through `tracing` before the default
+/// hook prints it. A panic on a worker thread is otherwise only visible on the
+/// console, which a background service usually does not keep.
+fn install_panic_logging() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        error!(
+            thread = thread.name().unwrap_or("unnamed"),
+            panic = %info,
+            %backtrace,
+            "agent panicked"
+        );
+        default_hook(info);
+    }));
+}
+
+/// The Native Messaging host's stdout is Chrome's message channel: a log line
+/// there is read as a frame length and Chrome drops the connection. Its logs go
+/// to stderr without terminal colors, and, because Chrome discards a host's
+/// stderr, also to the size-bounded `<config>/logs/browser-native-host.log`.
+fn init_native_host_tracing() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,opengeni_agent=info"));
+    let log = config::config_dir().ok().and_then(|dir| {
+        log_file::RotatingLogFile::open(
+            &log_file::log_directory(&dir),
+            log_file::NATIVE_HOST_LOG,
+            log_file::MAX_NATIVE_HOST_LOG_BYTES,
+        )
+        .ok()
+    });
+    let file = log.map(|log| {
+        tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(log)
+    });
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(std::io::stderr),
+        )
+        .with(file)
+        .try_init()
+        .is_ok();
+    if installed {
+        install_panic_logging();
+    }
 }
 
 /// Routes a parsed CLI to its handler.
@@ -164,6 +303,13 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         Command::Stop(args) => service::stop(&args).map_err(string_err),
         Command::Status(args) => service::show_status(&args).map_err(string_err),
         Command::Service(args) => service::run(&args).map_err(string_err),
+        Command::Permissions(args) => {
+            if let Some(permission) = args.request {
+                request_permission(permission);
+            }
+            println!("{}", permissions_json());
+            Ok(())
+        }
         Command::Update(args) => {
             // The updater is synchronous (download → verify → swap); run it on a
             // blocking thread so it never stalls the async runtime.
@@ -237,6 +383,19 @@ fn list_connections(api_url: &str) -> anyhow_lite::Result {
             connection.credentials.workspace_id,
             connection.credentials.agent_id
         );
+        match connection.authentication_state {
+            Some(config::AuthenticationState::RenewalRequired) => println!(
+                "    Authentication rejected; transport retries paused while credentials are renewed."
+            ),
+            Some(config::AuthenticationState::ReconnectRequired) => println!(
+                "    Reconnect required; automatic retries stopped. Run `{}` or disconnect this saved connection.",
+                supervisor::rejected_bearer_reconnect_command(
+                    if connection.legacy_origin { None } else { Some(&connection.api_url) },
+                    &connection.credentials.workspace_id,
+                )
+            ),
+            None => {}
+        }
     }
     Ok(())
 }
@@ -275,6 +434,9 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 /// clean SIGINT/SIGTERM stops it.
 #[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
+    if let Some(link_file) = args.compute.clone() {
+        return run_compute(&args, &link_file).await;
+    }
     // Capture before any managed update replaces the running executable inode.
     update::installed_executable().map_err(string_err)?;
     // A verified self-update may have exec'd this new binary from the exact old
@@ -286,6 +448,23 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         Err(error) => warn!(
             %error,
             "could not refresh the managed service definition; continuing without assuming operation-cgroup capability"
+        ),
+    }
+
+    // A service manager may start us at the filesystem root (launchd does for a
+    // LaunchAgent installed before the plist named a WorkingDirectory) or in the
+    // Windows system directory (a Windows service). Neither is a usable
+    // workspace, so work from the user's home instead; the platform below
+    // reports the same directory as the workspace root.
+    match opengeni_agent_platform::adopt_workspace_working_directory() {
+        Ok(Some(directory)) => info!(
+            directory = %directory.display(),
+            "started at the filesystem root or system directory; using the home directory as the workspace"
+        ),
+        Ok(None) => {}
+        Err(error) => warn!(
+            %error,
+            "started at the filesystem root or system directory and could not move to the home directory"
         ),
     }
 
@@ -323,6 +502,20 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // and never blocks the serve loop. No-op on every non-macOS / feature-off build.
     ensure_macos_desktop_grants();
 
+    // A desktop app starts this agent as its own helper. Chrome's attached-browser
+    // bridge then has to point at this copy, since no service install wrote it,
+    // unless the app's people don't use the extension: then this agent leaves the
+    // bridge to the other agents on the computer.
+    if hosted_by_desktop_app() {
+        if hosted_browser_extension_value(
+            std::env::var_os(DESKTOP_BROWSER_EXTENSION_ENV).as_deref(),
+        ) {
+            register_hosted_native_host();
+        } else {
+            release_hosted_native_host();
+        }
+    }
+
     // Connect if we have no persisted connection yet ("connect-if-needed").
     let existing_connections = config::load_connections(api_url).map_err(to_boxed)?;
     let connections = if existing_connections.is_empty() {
@@ -354,18 +547,12 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // land in their own per-op memory leaves. Returns None (a logged, graceful
     // no-op) when that compatible delegated cgroup-v2 topology is unavailable —
     // the agent then serves exactly as before, with no per-op isolation.
-    let op_cgroup_config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
-    let requires_operation_policy = op_cgroup_config.has_limits();
-    let op_cgroups = opengeni_agent_platform::establish_oom_isolation(op_cgroup_config);
-    if requires_operation_policy
-        && op_cgroups
-            .as_ref()
-            .is_none_or(|cgroups| !cgroups.supports_policy(op_cgroup_config))
-    {
-        return Err(to_boxed(std::io::Error::other(
-            "explicit local operation resource policy requires the corresponding delegated Linux cgroup-v2 controllers; refusing to run it unenforced",
-        )));
-    }
+    // Leaves of commands handed over by the previous image stay in place.
+    #[cfg(unix)]
+    let handed_over_cgroups = handover::inherited_cgroup_dirs();
+    #[cfg(not(unix))]
+    let handed_over_cgroups: Vec<std::path::PathBuf> = Vec::new();
+    let op_cgroups = operation_cgroups(&handed_over_cgroups)?;
 
     // Opt-in Xvfb for a headless Linux box (`--virtual-desktop`). Held for the run
     // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.
@@ -383,12 +570,32 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     let (next_platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
     platform = next_platform;
+    // Only the agent holding the instance lock may remove helper generations
+    // that earlier releases left behind; the removal runs off the startup path.
+    if instance_lock_guard.is_some() {
+        std::thread::spawn(|| {
+            let removed = embedded_runtime::prune_stale_generations();
+            if removed > 0 {
+                info!(removed, "removed earlier interaction runtime generations");
+            }
+        });
+    }
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
-    let connection_instance_id = uuid::Uuid::new_v4().to_string();
+    // A successor image keeps its predecessor's connection instance, so the
+    // op subjects of commands it continues stay valid.
+    #[cfg(unix)]
+    let inherited_instance = handover::inherited_connection_instance();
+    #[cfg(not(unix))]
+    let inherited_instance: Option<String> = None;
+    let connection_instance_id =
+        inherited_instance.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
     let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
+    if let (Some(sidecars), Some(bridge)) = (&browser_sidecars, &browser_bridge) {
+        sidecars.observe_attached_inventory(bridge.inventory());
+    }
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
@@ -398,6 +605,21 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
     supervisor = supervisor.with_update_drain(update_drain);
+    #[cfg(unix)]
+    {
+        let inherited = handover::take_inherited();
+        if let Some(dir) = &config_dir {
+            handover::remove_stray_frames(&dir.join("spool"), inherited.as_ref());
+            supervisor = supervisor.with_update_handover(
+                dir.join(handover::MANIFEST_FILE),
+                connection_instance_id.clone(),
+            );
+        }
+        if let Some(inherited) = inherited {
+            supervisor.restore_lost_markers(inherited.lost_markers);
+            supervisor.adopt_handed_over(&platform, inherited.ops);
+        }
+    }
     if let Some(bridge) = &browser_bridge {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
@@ -457,24 +679,189 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         // The running path has already been atomically replaced and health-gated.
         // Release the single-process lock before replacing/spawning the successor.
         drop(instance_lock_guard);
-        restart_after_verified_update()?;
+        #[cfg(unix)]
+        let handover = supervisor.take_pending_handover();
+        #[cfg(not(unix))]
+        let handover = None::<()>;
+        restart_after_verified_update(&handover)?;
     }
     info!("agent stopped");
     Ok(())
 }
 
-fn restart_after_verified_update() -> anyhow_lite::Result {
+/// Per-operation OOM cgroup isolation (issue #345), established BEFORE any
+/// agent-infra child (e.g. Xvfb) is spawned: systemd places the service process
+/// in the generated unit's `supervisor` subgroup, startup verifies that
+/// topology, so children spawned afterward inherit the supervisor leaf and only
+/// host execs land in their own per-op memory leaves. `None` (a logged,
+/// graceful no-op) when that compatible delegated cgroup-v2 topology is
+/// unavailable — the agent then serves exactly as before, with no per-op
+/// isolation — unless an explicit local resource policy demands enforcement.
+fn operation_cgroups(
+    handed_over: &[std::path::PathBuf],
+) -> Result<Option<Arc<opengeni_agent_platform::OpCgroups>>, anyhow_lite::BoxError> {
+    let config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
+    let cgroups = opengeni_agent_platform::establish_oom_isolation(config, handed_over);
+    if config.has_limits()
+        && cgroups
+            .as_ref()
+            .is_none_or(|cgroups| !cgroups.supports_policy(config))
+    {
+        return Err(to_boxed(std::io::Error::other(
+            "explicit local operation resource policy requires the corresponding delegated Linux cgroup-v2 controllers; refusing to run it unenforced",
+        )));
+    }
+    Ok(cgroups)
+}
+
+/// `run --compute`: the agent in an Opengeni compute sandbox, started by the
+/// sandbox's guest init (`compute/docs/agent-link.md`, section 2). It serves
+/// one link, dialed through the sandbox's host with no credential, and keeps
+/// the relay credential the host sends in memory. It reports what it has in
+/// use as the guest's activity file, reconnects at once on `SIGUSR1` (sent
+/// when its host has lost its connections), and never enrolls, renews,
+/// updates itself or installs
+/// a service: Opengeni compute owns the sandbox's enrollment and image.
+async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
+    let link_config = compute::ComputeConfig::load(link_file).map_err(to_boxed)?;
+    std::fs::create_dir_all(&link_config.workspace_root).map_err(to_boxed)?;
+    std::env::set_current_dir(&link_config.workspace_root).map_err(to_boxed)?;
+
+    // One agent serves a sandbox: a second would be a duplicate responder for
+    // the same subjects (see `run`).
+    let _instance_lock = match instance_lock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(instance_lock::LockError::Contended { holder_pid }) => {
+            let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
+            return Err(string_err(format!(
+                "another opengeni-agent (pid {pid}) already serves this sandbox"
+            )));
+        }
+        Err(error) => {
+            warn!(%error, "could not acquire the single-instance lock; continuing without it");
+            None
+        }
+    };
+
+    let op_cgroups = operation_cgroups(&[])?;
+    let _virtual_desktop = maybe_spawn_virtual_desktop(args);
+    // The link file names the root explicitly, `/` included: no fallback to
+    // the home directory as for a working directory a user started in.
+    let mut platform = NativePlatform::with_root(&link_config.workspace_root);
+    if let Some(cgroups) = op_cgroups {
+        platform = platform.with_oom_isolation(cgroups);
+    }
+    let config_dir = config::config_dir().ok();
+    let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
+    let (platform, browser_sidecars) =
+        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
+
+    let credentials = link_config.credentials();
+    let relay = RelayCredential::pending();
+    let hub = RelayHub::new(RelayHubConfig {
+        workspace_id: credentials.workspace_id.clone(),
+        agent_id: credentials.agent_id.clone(),
+        credential: relay.clone(),
+        allow_screen_control: credentials.consented_screen_control,
+    });
+    let streams = hub.activity().clone();
+    let link_platform = Arc::new(platform.with_stream_registry(Arc::new(hub)));
+    let link = SupervisorLink::new(link_config.connection_id(), link_platform, credentials)
+        .with_connection_instance_id(uuid::Uuid::new_v4().to_string())
+        .with_compute(supervisor::ComputeLink { relay });
+    let links = vec![link];
+    let (_keep_links, updates_rx) = tokio::sync::watch::channel(links.clone());
+
+    let mut supervisor = match &config_dir {
+        Some(dir) => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION"))
+            .with_spool_root(dir.join("spool")),
+        None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
+    };
+    supervisor = supervisor.with_update_drain(update_drain);
+    spawn_signal_handler(supervisor.shutdown_handle());
+    spawn_reconnect_handler(supervisor.reconnect_handle());
+
+    let silence = link_config.stream_silence;
+    let work = supervisor.work_in_progress(silence);
+    let activity = tokio::spawn(compute::report_activity(
+        compute::ActivityFile::new(&link_config.activity_dir, std::process::id()),
+        move || work() + streams.moving(silence),
+    ));
+
+    info!(
+        workspace_root = %link_config.workspace_root.display(),
+        "agent online in a compute sandbox"
+    );
+    let supervisor_result = supervisor.run_with_updates(updates_rx).await;
+    activity.abort();
+    // The file goes with the reporter; wait for it so the guest stops counting
+    // this process before it exits.
+    let _ = activity.await;
+    if let Some(sidecars) = browser_sidecars {
+        sidecars.shutdown().await;
+    }
+    supervisor_result.map_err(to_boxed)?;
+    info!("agent stopped");
+    Ok(())
+}
+
+/// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it when
+/// the sandbox's host has no stream for the agent's connections (after a
+/// move, a recovery on another host or a restart of the host agent).
+fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut restored = match signal(SignalKind::user_defined1()) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(%error, "could not install the SIGUSR1 handler; reconnects after the host loses the link wait for back-off");
+                return;
+            }
+        };
+        while restored.recv().await.is_some() {
+            info!("the host lost this sandbox's connections; reconnecting at once");
+            reconnect.request();
+        }
+    });
+    #[cfg(not(unix))]
+    drop(reconnect);
+}
+
+#[cfg(unix)]
+type CarriedHandover = Option<supervisor::PendingHandover>;
+#[cfg(not(unix))]
+type CarriedHandover = Option<()>;
+
+fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Result {
     let executable = update::installed_executable().map_err(string_err)?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     info!(path = %executable.display(), "starting verified self-update successor");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let error = std::process::Command::new(executable).args(&args).exec();
+        let mut command = std::process::Command::new(executable);
+        command.args(&args);
+        if let Some(handover) = handover {
+            // Last step before exec: nothing else spawns from here, so only
+            // the successor image inherits the carried descriptors.
+            for exec in &handover.execs {
+                exec.prepare_exec().map_err(to_boxed)?;
+            }
+            command.env(handover::HANDOVER_ENV, &handover.env_value);
+        }
+        let error = command.exec();
         return Err(to_boxed(error));
     }
     #[cfg(windows)]
     {
+        let _ = handover;
+        // The desktop app supervises this process and starts the replaced file
+        // itself. A detached successor would hold the instance lock outside it.
+        if hosted_by_desktop_app() {
+            info!("verified self-update installed; asking the desktop app to restart the agent");
+            std::process::exit(HOSTED_RESTART_EXIT_CODE);
+        }
         std::process::Command::new(executable)
             .args(&args)
             .spawn()
@@ -485,6 +872,110 @@ fn restart_after_verified_update() -> anyhow_lite::Result {
     Err(string_err(
         "self-update restart is unsupported on this platform".to_string(),
     ))
+}
+
+/// Set by a desktop app that runs this agent as its own helper process. The app
+/// owns the operating-system permission prompts and restarts the agent itself.
+const DESKTOP_HOST_ENV: &str = "OPENGENI_AGENT_HOST";
+
+/// Set to `off` by a desktop app whose people don't use the attached-browser
+/// Chrome extension.
+const DESKTOP_BROWSER_EXTENSION_ENV: &str = "OPENGENI_AGENT_BROWSER_EXTENSION";
+
+/// The screen-control permissions as JSON. A fresh process reads macOS's current
+/// answer; a long-running one can keep seeing a Screen Recording denial that the
+/// person has since changed, until it restarts.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn permissions_json() -> String {
+    let grants = opengeni_agent_platform::desktop_grants();
+    serde_json::json!({
+        "required": true,
+        "screenRecording": grants.screen_recording,
+        "accessibility": grants.accessibility,
+        "inputMonitoring": grants.input_monitoring,
+    })
+    .to_string()
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn request_permission(permission: cli::PermissionRequest) {
+    use opengeni_agent_platform::DesktopPermission;
+    opengeni_agent_platform::request_desktop_permission(match permission {
+        cli::PermissionRequest::ScreenRecording => DesktopPermission::ScreenRecording,
+        cli::PermissionRequest::Accessibility => DesktopPermission::Accessibility,
+        cli::PermissionRequest::InputMonitoring => DesktopPermission::InputMonitoring,
+    });
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn request_permission(_permission: cli::PermissionRequest) {}
+
+/// Other platforms ask for no screen-control permission.
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn permissions_json() -> String {
+    serde_json::json!({ "required": false }).to_string()
+}
+
+/// The exit status that asks a desktop host to start the (updated) agent again.
+#[cfg(windows)]
+const HOSTED_RESTART_EXIT_CODE: i32 = 75;
+
+fn hosted_by_desktop_app() -> bool {
+    hosted_by_desktop_app_value(std::env::var_os(DESKTOP_HOST_ENV).as_deref())
+}
+
+fn hosted_by_desktop_app_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "desktop-app")
+}
+
+fn hosted_browser_extension_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|value| value != "off")
+}
+
+/// Removes a bridge registration an earlier run of this agent wrote, so the
+/// extension reaches the computer's other agent again.
+fn release_hosted_native_host() {
+    let (Ok(binary), Some(home)) = (
+        update::installed_executable(),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .filter(|home| !home.is_empty())
+            .map(std::path::PathBuf::from),
+    ) else {
+        return;
+    };
+    match browser_bridge::remove_native_host_manifests_for(binary, &home) {
+        Ok(removed) => {
+            for manifest in removed {
+                info!(path = %manifest.display(), "removed this agent's Chrome Native Messaging host");
+            }
+        }
+        Err(error) => warn!(%error, "could not remove this agent's attached-browser bridge"),
+    }
+}
+
+fn register_hosted_native_host() {
+    let binary = match update::installed_executable() {
+        Ok(binary) => binary,
+        Err(error) => {
+            warn!(%error, "could not resolve this agent's path for the attached-browser bridge");
+            return;
+        }
+    };
+    let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        warn!("no home directory; the attached-browser bridge is not registered");
+        return;
+    };
+    match browser_bridge::install_native_host_manifests(binary, &home) {
+        Ok(manifests) => {
+            for manifest in manifests {
+                info!(path = %manifest.display(), "registered Chrome Native Messaging host");
+            }
+        }
+        Err(error) => warn!(%error, "could not register the attached-browser bridge"),
+    }
 }
 
 fn attach_browser_controller(
@@ -498,6 +989,8 @@ fn attach_browser_controller(
     match BrowserSidecarManager::discover(directory) {
         Ok(manager) => {
             let manager = Arc::new(manager.with_update_drain(update_drain));
+            manager.spawn_empty_controller_reaper();
+            manager.spawn_detached_browser_sweep();
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),
@@ -536,13 +1029,16 @@ fn supervisor_links(
             let hub = RelayHub::new(RelayHubConfig {
                 workspace_id: credentials.workspace_id.clone(),
                 agent_id: credentials.agent_id.clone(),
-                relay_url: credentials.relay_url.clone(),
-                agent_token: credentials.relay_token.clone(),
+                credential: RelayCredential::fixed(
+                    credentials.relay_url.clone(),
+                    credentials.relay_token.clone(),
+                ),
                 allow_screen_control: credentials.consented_screen_control,
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
             let link =
                 SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+                    .with_authentication_state(connection.authentication_state)
                     .with_connection_instance_id(connection_instance_id);
             if connection.legacy_origin {
                 link
@@ -631,6 +1127,11 @@ fn ensure_macos_desktop_grants() {
 
     let grants = opengeni_agent_platform::desktop_grants();
     if grants.all_granted() {
+        return;
+    }
+    // A desktop host asks for these itself, one at a time with an explanation,
+    // under its own name. Prompts from its helper would arrive unexplained.
+    if hosted_by_desktop_app() {
         return;
     }
     REQUESTED.call_once(|| {
@@ -853,7 +1354,8 @@ fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
     });
 }
 
-/// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix).
+/// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix;
+/// on Windows also a closing console and `opengeni-agent stop`'s pipe request).
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -871,7 +1373,29 @@ async fn wait_for_shutdown_signal() {
             _ = sigterm.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let stop_request = async {
+            match config::config_dir() {
+                Ok(dir) => windows_control::wait_for_stop_request(&dir).await,
+                Err(_) => std::future::pending().await,
+            }
+        };
+        let console_closing = async {
+            match tokio::signal::windows::ctrl_close() {
+                Ok(mut close) => {
+                    close.recv().await;
+                }
+                Err(_) => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = stop_request => {}
+            () = console_closing => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
     }
@@ -892,6 +1416,27 @@ mod anyhow_lite {
     pub type Result = std::result::Result<(), BoxError>;
     /// A handler result returning a value.
     pub type ResultOf<T> = std::result::Result<T, BoxError>;
+}
+
+#[cfg(test)]
+mod desktop_host_tests {
+    use super::{hosted_browser_extension_value, hosted_by_desktop_app_value};
+    use std::ffi::OsStr;
+
+    #[test]
+    fn only_the_exact_desktop_app_value_marks_a_hosted_agent() {
+        assert!(hosted_by_desktop_app_value(Some(OsStr::new("desktop-app"))));
+        assert!(!hosted_by_desktop_app_value(None));
+        assert!(!hosted_by_desktop_app_value(Some(OsStr::new(""))));
+        assert!(!hosted_by_desktop_app_value(Some(OsStr::new("1"))));
+    }
+
+    #[test]
+    fn a_desktop_app_turns_the_browser_extension_bridge_off_explicitly() {
+        assert!(hosted_browser_extension_value(None));
+        assert!(hosted_browser_extension_value(Some(OsStr::new("on"))));
+        assert!(!hosted_browser_extension_value(Some(OsStr::new("off"))));
+    }
 }
 
 #[cfg(test)]
@@ -931,5 +1476,62 @@ mod display_offer_tests {
     #[tokio::test]
     async fn headless_enrollment_still_does_not_offer_screen_control() {
         assert!(!probe_offers_display_with_backend(Box::new(NoDesktop)).await);
+    }
+}
+
+#[cfg(test)]
+mod log_persistence_tests {
+    const CHILD: &str = "OPENGENI_TEST_LOG_PERSISTENCE_CHILD";
+
+    /// Runs the real tracing setup in a child process (a process can install a
+    /// global subscriber and panic hook only once) and checks that its events
+    /// and a worker-thread panic land in the bounded log file, not the console.
+    #[test]
+    fn a_service_agent_keeps_its_log_and_panics_on_disk() {
+        if std::env::var_os(CHILD).is_some() {
+            super::init_tracing(true);
+            tracing::info!("persistent log child started");
+            let worker = std::thread::Builder::new()
+                .name("controller-worker".to_string())
+                .spawn(|| panic!("simulated worker failure"))
+                .unwrap();
+            assert!(worker.join().is_err());
+            return;
+        }
+        let config = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "log_persistence_tests::a_service_agent_keeps_its_log_and_panics_on_disk",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("OPENGENI_CONFIG_DIR", config.path())
+            .env(
+                opengeni_agent_platform::service::AGENT_STDERR_LOG_ENV,
+                "off",
+            )
+            .env("RUST_BACKTRACE", "0")
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        let log = std::fs::read_to_string(config.path().join("logs").join("agent.log"))
+            .expect("the service agent writes its own log file");
+        assert!(log.contains("persistent log child started"), "{log}");
+        assert!(log.contains("agent panicked"), "{log}");
+        assert!(log.contains("simulated worker failure"), "{log}");
+        assert!(log.contains("controller-worker"), "{log}");
+        assert!(log.contains("backtrace="), "{log}");
+        assert!(
+            !log.contains('\u{1b}'),
+            "the file must not contain terminal colors"
+        );
+        assert!(
+            !stdout.contains("persistent log child started"),
+            "a service that captures stderr itself must not store each line twice"
+        );
     }
 }

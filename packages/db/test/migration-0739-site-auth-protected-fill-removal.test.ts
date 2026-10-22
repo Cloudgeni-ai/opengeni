@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -24,6 +24,32 @@ import {
 // whose authorities are all provider-managed survive, with their runs,
 // interventions and operation journal rows.
 const MIGRATION = "0739_vaults.sql";
+const MIGRATIONS_DIR = join(import.meta.dir, "../drizzle");
+
+/** Later migrations that compile against the vault objects 0739 creates. The
+ *  fixture withholds 0739, so it must withhold these too: they would run
+ *  before the vault tables and routines exist. A later migration that uses a
+ *  function one of those creates (0900 on 0897's administrator predicate) is
+ *  withheld with it. */
+async function laterVaultMigrations(): Promise<string[]> {
+  const later = (await readdir(MIGRATIONS_DIR))
+    .filter((file) => file.endsWith(".sql") && file > MIGRATION)
+    .sort();
+  const dependent: string[] = [];
+  const withheldFunctions = new Set<string>();
+  for (const file of later) {
+    const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
+    const usesWithheldFunction = [...withheldFunctions].some((name) =>
+      new RegExp(`\\b${name}\\b`, "u").test(sql),
+    );
+    if (!/\bvaults?\b|vault_/iu.test(sql) && !usesWithheldFunction) continue;
+    dependent.push(file);
+    for (const created of sql.matchAll(/CREATE\s+FUNCTION\s+(?:[\w"]+\.)?"?(\w+)"?\s*\(/giu)) {
+      withheldFunctions.add(created[1]!);
+    }
+  }
+  return dependent;
+}
 /** §C starts at this banner; everything before it is §A (vaults). */
 const SECTION_C =
   "-- ===========================================================================\n-- §C (W4): remove protected-fill site authentication\n";
@@ -140,13 +166,17 @@ describe("migration 0739 §C site-auth protected-fill removal", () => {
     const owner = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
     let app: DbClient | undefined;
     try {
-      // Build the schema as it was before §C (every migration, then 0739 §A),
-      // then apply §C by hand as the non-superuser owner. Production applies
-      // the whole file in one transaction.
+      // Build the schema as it was before §C (every migration except 0739 and
+      // the later ones built on its vaults, then 0739 §A), then apply §C by
+      // hand as the non-superuser owner. Production applies the whole file in
+      // one transaction.
       await owner.unsafe(
         `CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`,
       );
-      await owner`insert into schema_migrations (name) values (${MIGRATION})`;
+      const withheld = [MIGRATION, ...(await laterVaultMigrations())];
+      for (const name of withheld) {
+        await owner`insert into schema_migrations (name) values (${name})`;
+      }
       await migrate(owned.ownerUrl);
       await owner`delete from schema_migrations where name = ${MIGRATION}`;
       await owner.unsafe(`${PREAMBLE}${source.slice(0, sectionC)}`);

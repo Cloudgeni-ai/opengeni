@@ -192,6 +192,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "adoptBrowserSessionWorkingCopy",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
+    "request": [
+      "BrowserWorkingCopyAdoptionRequest"
+    ],
+    "response": [
+      "BrowserWorkingCopyAdoptionResponse"
+    ]
+  },
+  {
     "id": "advanceConnectAttempt",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
@@ -428,6 +439,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "cancelBillingSubscription",
+    "method": "POST",
+    "path": "/v1/billing/subscription/cancel",
+    "request": [
+      "CancelBillingSubscriptionRequest"
+    ],
+    "response": [
+      "BillingSubscriptionChange"
+    ]
+  },
+  {
     "id": "cancelConnectAttempt",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/cancel",
@@ -483,6 +505,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "changeBillingSubscription",
+    "method": "POST",
+    "path": "/v1/billing/subscription/change",
+    "request": [
+      "ChangeBillingSubscriptionRequest"
+    ],
+    "response": [
+      "BillingSubscriptionChange"
+    ]
+  },
+  {
+    "id": "changeMachineAudience",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience",
+    "request": [
+      "ChangeMachineAudienceRequest"
+    ],
+    "response": [
+      "ChangeMachineAudienceResponse"
+    ]
+  },
+  {
     "id": "changePreferenceRegistryScope",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId/scope",
@@ -491,6 +535,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
+    ]
+  },
+  {
+    "id": "checkSiteHostname",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
+    "request": [],
+    "response": [
+      "SiteHostnameAvailability"
     ]
   },
   {
@@ -926,6 +979,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOfficeWorkbookTicket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/office/workbook-tickets",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "createOrganization",
     "method": "POST",
     "path": "/v1/organizations",
@@ -1093,6 +1153,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createSubscriptionCheckout",
+    "method": "POST",
+    "path": "/v1/billing/subscription/checkout",
+    "request": [
+      "CreateSubscriptionCheckoutRequest"
+    ],
+    "response": [
+      "CreateSubscriptionCheckoutResponse"
+    ]
+  },
+  {
+    "id": "createSubscriptionPortalSession",
+    "method": "POST",
+    "path": "/v1/billing/subscription/portal",
+    "request": [
+      "CreateBillingPortalRequest"
+    ],
+    "response": [
+      "CreateBillingPortalResponse"
+    ]
+  },
+  {
     "id": "createTranscriptionRecording",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/transcription-recordings",
@@ -1230,6 +1312,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "defineSiteDataCollection",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
+    "request": [
+      "SiteDataCollectionDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "defineSiteSqlQuery",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlQueryDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1243,7 +1343,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -1251,6 +1354,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -1262,13 +1366,30 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId",
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
     "method": "DELETE",
-    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -1276,6 +1397,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
+    "request": [],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -1439,13 +1583,37 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "deleteSiteDataCollection",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteDataFile",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteSqlQuery",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteWorkspace",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId",
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -1453,6 +1621,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -1672,6 +1841,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "duplicateWorkspaceArtifact",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate",
+    "request": [
+      "DuplicateWorkspaceArtifactRequest"
+    ],
+    "response": [
+      "WorkspaceArtifactMutationResponse"
+    ]
+  },
+  {
     "id": "editQueueItem",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit",
@@ -1744,8 +1924,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "EnsureWorkspaceResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -1753,6 +1936,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -1769,6 +1953,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
+    "id": "executeSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/execute",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "exportCompanyBrainOkf",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-brain/export",
@@ -1777,6 +1970,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CompanyBrainContextReceiptPage",
       "CompanyBrainKnowledgeProposalPage"
     ]
+  },
+  {
+    "id": "exportSiteData",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/export",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "exportSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/export",
+    "request": [
+      "SiteSqlExportFormat"
+    ],
+    "response": []
   },
   {
     "id": "exportWorkspaceState",
@@ -1983,7 +2192,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -1991,6 +2203,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -2001,7 +2214,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -2009,6 +2225,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -2134,13 +2351,23 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -2148,6 +2375,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -2190,13 +2418,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "GET /v1/workspaces/:workspaceId/vaults",
+    "id": "GET /v1/workspaces/:workspaceId/vault-providers/connections",
     "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/vaults",
+    "path": "/v1/workspaces/:workspaceId/vault-providers/connections",
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -2204,6 +2435,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/vaults",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/vaults",
+    "request": [],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -2214,7 +2468,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -2222,6 +2479,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -2251,7 +2509,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
     "request": [],
-    "response": []
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
@@ -2265,7 +2538,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
     "request": [],
-    "response": []
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage/me",
@@ -2336,6 +2624,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "getBillingSubscriptionPlans",
+    "method": "GET",
+    "path": "/v1/billing/subscription/plans",
+    "request": [],
+    "response": [
+      "BillingSubscriptionCatalog"
+    ]
+  },
+  {
     "id": "getBillingUsage",
     "method": "GET",
     "path": "/v1/billing/usage",
@@ -2370,12 +2667,30 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getBrowserRecording",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId",
+    "request": [],
+    "response": [
+      "BrowserRecordingSummary"
+    ]
+  },
+  {
     "id": "getBrowserSession",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId",
     "request": [],
     "response": [
       "BrowserSession"
+    ]
+  },
+  {
+    "id": "getBrowserSessionWorkingCopyAdoption",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
+    "request": [],
+    "response": [
+      "BrowserWorkingCopyAdoptionResponse"
     ]
   },
   {
@@ -2487,7 +2802,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ConnectionMetadata",
       "ConnectionResponse",
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -2495,6 +2813,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -2891,6 +3210,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationSubscriptionUsagePools",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/subscription-usage-pools",
+    "request": [],
+    "response": [
+      "SubscriptionUsagePoolsResponse"
+    ]
+  },
+  {
     "id": "getOrganizationUsageSummary",
     "method": "GET",
     "path": "/v1/billing/usage-summary",
@@ -3120,6 +3448,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionUsageLimit",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+    "request": [],
+    "response": [
+      "SessionUsageLimit"
+    ]
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -3127,6 +3464,45 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SiteAuthConnection"
     ]
+  },
+  {
+    "id": "getSiteData",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getSiteDataFileUrl",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getSiteLimitProfile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [],
+    "response": [
+      "SiteLimitProfile"
+    ]
+  },
+  {
+    "id": "getSitePlatformUsage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-platform-usage",
+    "request": [],
+    "response": [
+      "SitePlatformUsage"
+    ]
+  },
+  {
+    "id": "getSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql",
+    "request": [],
+    "response": []
   },
   {
     "id": "getSlackUserLinkAccess",
@@ -3209,7 +3585,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -3217,6 +3596,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary",
       "Workspace"
     ]
@@ -3321,6 +3701,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getWorkspaceInsightsSiteUsage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/sites",
+    "request": [
+      "InsightsSiteUsageQuery"
+    ],
+    "response": [
+      "InsightsSiteUsageResponse"
+    ]
+  },
+  {
     "id": "getWorkspaceInsightsUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/insights/usage",
@@ -3379,6 +3770,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceStateResponse"
+    ]
+  },
+  {
+    "id": "getWorkspaceSubscriptionUsagePools",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/subscription-usage-pools",
+    "request": [],
+    "response": [
+      "SubscriptionUsagePoolsResponse"
     ]
   },
   {
@@ -3540,7 +3940,21 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "ImportArchivedSessionRequest"
     ],
     "response": [
-      "ImportArchivedSessionResponse"
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "ImportArchivedSessionResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
     ]
   },
   {
@@ -3555,9 +3969,43 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "importSiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/import",
+    "request": [
+      "SiteDataImportRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "importSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/import",
+    "request": [
+      "SiteSqlImportRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "inspectBrowserSessionWorkingCopy",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
+    "request": [],
+    "response": [
+      "BrowserWorkingCopyInspection"
+    ]
+  },
+  {
     "id": "inspectMcpAuthentication",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "inspectSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/inspect",
     "request": [],
     "response": []
   },
@@ -4104,6 +4552,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listOfficeWorkbooks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/office/workbooks",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listOpenGeniSlackChannelRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/channel-routes",
@@ -4428,6 +4883,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listSiteDataFiles",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "listSiteSessionAccess",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listSlackInstallationBindings",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/slack-bot/bindings",
@@ -4661,6 +5130,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "migrateSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/migrations",
+    "request": [
+      "SiteSqlMigrationRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "mintEnrollToken",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/enrollments/token",
@@ -4720,6 +5198,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "GatewayRealtimeConnectResponse"
+    ]
+  },
+  {
+    "id": "negotiateRealtimeWebsocket",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/websocket",
+    "request": [
+      "SessionRealtimeWebsocketRequest"
+    ],
+    "response": [
+      "SessionRealtimeWebsocketResponse"
     ]
   },
   {
@@ -4901,13 +5390,23 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PATCH /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -4915,6 +5414,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5040,7 +5540,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -5048,6 +5551,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5058,7 +5562,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -5066,6 +5573,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5159,6 +5667,45 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/rollback",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
+    "request": [
+      "SitePublishWarningFix"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "request": [
+      "SiteTakedownRequest"
+    ],
     "response": []
   },
   {
@@ -5279,13 +5826,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "POST /v1/workspaces/:workspaceId/vaults",
+    "id": "POST /v1/workspaces/:workspaceId/vault-providers/connections",
     "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/vaults",
-    "request": [],
+    "path": "/v1/workspaces/:workspaceId/vault-providers/connections",
+    "request": [
+      "InstallVaultProviderRequest"
+    ],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -5293,6 +5845,51 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/verify",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/verify",
+    "request": [],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/vaults",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/vaults",
+    "request": [],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5345,7 +5942,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -5353,6 +5953,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5412,6 +6013,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiIntegrationUninstallPreview"
+    ]
+  },
+  {
+    "id": "previewMachineAudience",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview",
+    "request": [
+      "MachineAudiencePreviewRequest"
+    ],
+    "response": [
+      "MachineAudiencePreview"
     ]
   },
   {
@@ -5552,7 +6164,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -5560,6 +6175,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5567,6 +6183,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [
+      "UpsertSitePublicationRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
     "request": [],
     "response": []
   },
@@ -5584,7 +6216,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -5592,6 +6227,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary"
     ]
   },
@@ -5603,11 +6239,50 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/credentials",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/credentials",
+    "request": [
+      "ReplaceVaultProviderCredentialsRequest"
+    ],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
+  },
+  {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
     "request": [],
-    "response": []
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "PUT /v1/workspaces/external/:workspaceSource/:workspaceExternalId/members/:subjectId/allowance",
@@ -5655,6 +6330,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "PutWorkspaceCredentialProviderResponse"
     ]
+  },
+  {
+    "id": "querySiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/query",
+    "request": [
+      "SiteDataQueryRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "querySiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/query",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
   },
   {
     "id": "readBrowserClipboard",
@@ -5963,6 +6656,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "resetSiteDataCollection",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/reset",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "resetSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/reset",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "resolveInteractionIntervention",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",
@@ -6033,6 +6740,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRetryResponse"
+    ]
+  },
+  {
+    "id": "revertBrowserSessionWorkingCopyAdoption",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
+    "request": [],
+    "response": [
+      "BrowserWorkingCopyAdoptionResponse"
     ]
   },
   {
@@ -6228,6 +6944,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "runSiteSqlQuery",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlRunRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "saveAgentLearningSettings",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/agent-learning",
@@ -6256,6 +6981,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BrowserDownloadSaveResponse"
+    ]
+  },
+  {
+    "id": "saveBrowserRecording",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings/:recordingId/save",
+    "request": [
+      "BrowserRecordingSaveRequest"
+    ],
+    "response": [
+      "BrowserRecordingSaveResponse"
     ]
   },
   {
@@ -6479,6 +7215,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setSessionUsageLimit",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+    "request": [
+      "SetSessionUsageLimitRequest"
+    ],
+    "response": [
+      "SessionUsageLimit"
+    ],
+    "browserOnly": "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent"
+  },
+  {
     "id": "setSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
@@ -6548,6 +7296,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "sitePublicationPath",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "startApiIntegrationOAuth",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/oauth/start",
@@ -6567,6 +7322,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AuthRunMutationResponse"
+    ]
+  },
+  {
+    "id": "startBrowserRecording",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/recordings",
+    "request": [],
+    "response": [
+      "BrowserRecordingSummary"
     ]
   },
   {
@@ -7032,6 +7796,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateFileVisibility",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
+    "request": [
+      "UpdateFileVisibilityRequest"
+    ],
+    "response": [
+      "UpdateFileVisibilityResponse"
+    ]
+  },
+  {
     "id": "updateGitHubActionPolicy",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/github/action-policies",
@@ -7484,6 +8259,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSiteLimitProfile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [
+      "SiteLimitProfile"
+    ],
+    "response": [
+      "SiteLimitProfile"
+    ]
+  },
+  {
+    "id": "updateSiteSqlSettings",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/settings",
+    "request": [
+      "SiteSqlSettingsRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "updateSource",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/automations/sources/:sourceId",
@@ -7525,7 +8320,10 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
       "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
       "OnePasswordConnectionSummary",
       "ProviderVaultMeta",
       "RevealVaultFieldResponse",
@@ -7533,6 +8331,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultFieldVersionMeta",
       "VaultItem",
       "VaultItemSummary",
+      "VaultProviderConnectionSummary",
       "VaultSummary",
       "Workspace"
     ]
@@ -7602,6 +8401,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "upgradeBillingSubscription",
+    "method": "POST",
+    "path": "/v1/billing/subscription/upgrade",
+    "request": [
+      "ChangeBillingSubscriptionRequest"
+    ],
+    "response": [
+      "BillingSubscriptionChange"
+    ]
+  },
+  {
     "id": "uploadTranscriptionRecordingChunk",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId/chunks/:chunkNumber",
@@ -7668,5 +8478,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "RigChange"
     ]
+  },
+  {
+    "id": "writeSiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/write",
+    "request": [
+      "SiteDataWriteRequest"
+    ],
+    "response": []
   }
 ];

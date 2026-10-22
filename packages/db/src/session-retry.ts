@@ -13,7 +13,10 @@ import {
   isSubscriptionCoreWaitExhaustedCode,
 } from "./codex-capacity-recovery";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
-import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  sessionAttemptPendingWritersSql,
+  sessionPendingWriterAttemptIdsSql,
+} from "./session-attempt-writers";
 import {
   canonicalSessionCommandHash,
   evaluateSessionControl,
@@ -160,6 +163,16 @@ async function retryFailedSessionInTransaction(
     failurePayload !== null &&
     typeof failurePayload === "object" &&
     !Array.isArray(failurePayload) &&
+    (failurePayload as Record<string, unknown>).code === "knowledge_learning_scope_changed"
+  )
+    throw new SessionRetryConflictError(
+      "RETRY_UNSUPPORTED_FAILURE",
+      "Send a new message to continue with this chat's current Knowledge scope",
+    );
+  if (
+    failurePayload !== null &&
+    typeof failurePayload === "object" &&
+    !Array.isArray(failurePayload) &&
     (failurePayload as Record<string, unknown>).code === "provider_safety_refusal"
   )
     throw new SessionRetryConflictError(
@@ -198,7 +211,8 @@ async function retryFailedSessionInTransaction(
     db,
     sql`select (
     exists (select 1 from session_turn_attempts attempt where attempt.workspace_id = ${workspaceId} and attempt.session_id = ${sessionId}
-      and (attempt.state <> 'closed' or ${sessionAttemptPendingWritersSql(sql`attempt`)}
+      and (attempt.state <> 'closed'
+        or (attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })} and ${sessionAttemptPendingWritersSql(sql`attempt`)})
         or (attempt.quiesced_at is null and exists (select 1 from session_attempt_interruptions interruption where interruption.attempt_id = attempt.id))))
     or exists (select 1 from session_pending_tool_calls pending where pending.workspace_id = ${workspaceId} and pending.session_id = ${sessionId}
       and (pending.turn_id = ${turn.id}

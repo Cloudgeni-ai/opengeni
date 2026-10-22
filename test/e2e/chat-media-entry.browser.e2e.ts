@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 describe("rich chat media entry", () => {

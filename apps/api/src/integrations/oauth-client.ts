@@ -1,12 +1,10 @@
+import { sql } from "drizzle-orm";
 import { safeReturnPath } from "./oauth-return-path";
 import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   findIntegrationsOauthClient,
   parseIntegrationsOauthClientsJson,
@@ -18,7 +16,12 @@ import {
   type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption, integrationKeyForConnectProvider } from "@opengeni/core";
+import {
+  integrationKeyForConnectProvider,
+  legacyMcpClientError,
+  requireEnvironmentEncryption,
+  withMcpStreamableHttpClient,
+} from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -672,28 +675,27 @@ async function startMcpOAuthWithinDeadline(
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const expiresAt = new Date(Date.now() + oauthStateTtlMs);
-  let state = fullState;
-  if (settings.integrationsOauthShortStateEnabled) {
-    const stateId = randomUUID();
-    state = createSignedState(requireIntegrationsStateSecret(settings), {
-      kind: "mcp_oauth_reference",
+  // Providers cap `state` length (Stripe at 1024 characters), so only a short
+  // signed reference leaves; the full context waits encrypted at rest.
+  const stateId = randomUUID();
+  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    kind: "mcp_oauth_reference",
+    id: stateId,
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+  });
+  if (state.length > 512) {
+    throw new Error("MCP OAuth reference state exceeded its provider-safe length");
+  }
+  await deadline.run("state_persist", async () =>
+    storeIntegrationOAuthPendingState(db, {
       id: stateId,
       accountId: context.accountId,
       workspaceId: context.workspaceId,
-    });
-    if (state.length > 512) {
-      throw new Error("MCP OAuth reference state exceeded its provider-safe length");
-    }
-    await deadline.run("state_persist", async () =>
-      storeIntegrationOAuthPendingState(db, {
-        id: stateId,
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        stateEncrypted: encryptEnvironmentValue(key, fullState),
-        expiresAt,
-      }),
-    );
-  }
+      stateEncrypted: encryptEnvironmentValue(key, fullState),
+      expiresAt,
+    }),
+  );
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,
@@ -1036,6 +1038,66 @@ async function completeMcpOAuthCallbackWithinDeadline(
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
     const persist = async (scopedDb: Database) => {
       await requireOAuthCallbackGrant(scopedDb, state!);
+      if (profile?.connectionSelection === "canonical_personal") {
+        const identity = slackOAuthIdentity(metadata);
+        if (identity) {
+          // Serialize callbacks for one exact provider identity, including two
+          // simultaneous Add requests. Different Slack workspaces remain independent.
+          const identityLockKey = JSON.stringify([
+            state.accountId,
+            state.workspaceId,
+            ownerSubjectId,
+            state.mcpUrl,
+            identity,
+          ]);
+          await scopedDb.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-identity:${identityLockKey}`}, 0))`,
+          );
+        }
+        if (state!.connectionId) {
+          const existing = await getConnectionMetadata(
+            scopedDb,
+            state.workspaceId,
+            state.connectionId!,
+            state.subjectId,
+          );
+          const expected = existing ? slackOAuthIdentity(existing.metadata) : null;
+          if (expected && identity !== expected) {
+            throw new OAuthCallbackStageError(
+              "persist",
+              "account_mismatch",
+              new Error(
+                "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity.",
+              ),
+            );
+          }
+        } else if (identity) {
+          const existing = await listConnectionsMetadata(
+            scopedDb,
+            state.workspaceId,
+            state.subjectId,
+          );
+          if (
+            existing.some(
+              (connection) =>
+                connection.subjectId === ownerSubjectId &&
+                connection.providerDomain === state.providerDomain &&
+                connection.kind === "oauth2" &&
+                connection.status !== "revoked" &&
+                connection.metadata.mcpUrl === state.mcpUrl &&
+                slackOAuthIdentity(connection.metadata) === identity,
+            )
+          ) {
+            throw new OAuthCallbackStageError(
+              "persist",
+              "account_already_connected",
+              new Error(
+                "This Slack account is already connected. Reconnect the existing account instead.",
+              ),
+            );
+          }
+        }
+      }
       return state!.connectionId
         ? await updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
@@ -1128,7 +1190,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         ? error
         : new OAuthCallbackStageError("persist", "persist_failed", error);
     logOAuthCallbackFailure(observability, staged, state);
-    if (connectOperation && builtInOAuthProfileFor(state)?.key === "official-gmail") {
+    if (connectOperation) {
       // The external return URL stays exact. Its caller reads the durable
       // attempt result, which must not remain in flight after a rejected grant.
       try {
@@ -1145,11 +1207,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
               error: {
                 code: staged.reason,
                 message:
-                  staged.reason === "offline_access_unavailable"
-                    ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Gmail connection attempt."
-                    : staged.reason === "insufficient_scope"
-                      ? "Google did not grant all required Gmail permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
-                      : "Gmail authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+                  staged.reason === "account_mismatch"
+                    ? "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity."
+                    : staged.reason === "account_already_connected"
+                      ? "This Slack account is already connected. Reconnect the existing account instead."
+                      : staged.reason === "offline_access_unavailable"
+                        ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Gmail connection attempt."
+                        : staged.reason === "insufficient_scope"
+                          ? "Google did not grant all required Gmail permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                          : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
                 retryable: true,
               },
             }),
@@ -1923,6 +1989,16 @@ async function dynamicClientRegistration(
   };
 }
 
+/** Slack user IDs are scoped to the Slack workspace, not globally unique. */
+function slackOAuthIdentity(metadata: Record<string, unknown>): string | null {
+  return typeof metadata.slackTeamId === "string" &&
+    metadata.slackTeamId &&
+    typeof metadata.slackUserId === "string" &&
+    metadata.slackUserId
+    ? JSON.stringify([metadata.slackTeamId, metadata.slackUserId])
+    : null;
+}
+
 async function existingOAuthConnectionForStart(
   db: Database,
   input: {
@@ -1941,11 +2017,6 @@ async function existingOAuthConnectionForStart(
   if (input.newAccount) {
     // A further account always mints its own row; it never refreshes (and so
     // never replaces) an account the caller already holds for this provider.
-    if (input.connectionSelection === "canonical_personal") {
-      throw new HTTPException(409, {
-        message: "this connector supports one account per person; reconnect it instead",
-      });
-    }
     return null;
   }
   if (input.connectionId) {
@@ -1979,6 +2050,14 @@ async function existingOAuthConnectionForStart(
       (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
   );
   if (input.connectionSelection === "canonical_personal") {
+    const identities = new Set(
+      matching.map((connection) => slackOAuthIdentity(connection.metadata) ?? connection.id),
+    );
+    if (identities.size > 1) {
+      throw new HTTPException(409, {
+        message: "Choose the Slack account to reconnect, or add a new account",
+      });
+    }
     return selectCanonicalPersonalSlackConnection(matching);
   }
   return matching.find((connection) => connection.status === "active") ?? null;
@@ -2642,12 +2721,12 @@ async function verifyMcpToolsList(
   token: TokenResponse,
   signal: AbortSignal,
 ): Promise<Array<{ name: string; description?: string }>> {
-  const client = new Client(
-    { name: "opengeni-integration-verify", version: "0.1.0" },
-    { capabilities: {} },
-  );
-  try {
-    const transport = new StreamableHTTPClientTransport(new URL(resource), {
+  const listed = await withMcpStreamableHttpClient(
+    {
+      url: resource,
+      clientName: "opengeni-integration-verify",
+      clientVersion: "0.1.0",
+      timeoutMs: 10_000,
       requestInit: {
         headers: {
           authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
@@ -2658,22 +2737,21 @@ async function verifyMcpToolsList(
           ...init,
           signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         }),
-    });
-    await client.connect(transport as unknown as Transport, {
-      timeout: 10_000,
-      maxTotalTimeout: 10_000,
-    });
-    const listed = await client.listTools(undefined, {
-      timeout: 10_000,
-      maxTotalTimeout: 10_000,
-    });
-    return listed.tools.map((tool) => ({
-      name: tool.name,
-      ...(tool.description ? { description: tool.description } : {}),
-    }));
-  } finally {
-    await client.close().catch(() => undefined);
-  }
+    },
+    (client) =>
+      client
+        .listTools(undefined, {
+          timeout: 10_000,
+          maxTotalTimeout: 10_000,
+        })
+        .catch((error: unknown) => {
+          throw legacyMcpClientError(error);
+        }),
+  );
+  return listed.tools.map((tool) => ({
+    name: tool.name,
+    ...(tool.description ? { description: tool.description } : {}),
+  }));
 }
 
 async function verifyMcpToolsListNonFatal(

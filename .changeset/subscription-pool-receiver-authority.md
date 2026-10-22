@@ -1,5 +1,0 @@
----
-"@opengeni/db": patch
----
-
-Agent messages and Agent Steers now run on the receiving session's Claude and SuperGrok pool instead of the sender's. The new turn keeps the sender's causal human for permissions, but its pool comes from the receiver's execution-context turn, else its latest accepted turn, else its initial snapshot. A personal pool is kept only when its owner is that same human; otherwise the receiver uses its organization or workspace pool (a model served only by that personal pool fails closed), so a personal account never funds another person's session. Prompts from service and operator actors (organization API keys, the Slack bridge), sessions created without a human creator, and internal updates without causal authority now resolve the organization or workspace pool instead of always freezing the workspace pool. Already accepted turns, queued updates and child-result outbox rows keep their frozen snapshots. Codex is unaffected because its allocator source is captured from the receiving workspace at first lease. No migration or configuration change is required.

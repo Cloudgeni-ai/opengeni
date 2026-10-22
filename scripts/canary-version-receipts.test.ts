@@ -3,8 +3,13 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CanaryReceiptStore } from "./canary-publication-receipts";
-import { confirmCanaryCohort, readRegistryPackage } from "./publish-canary";
+import { CANARY_RECEIPT_FILES, CanaryReceiptStore } from "./canary-publication-receipts";
+import {
+  CANARY_VISIBILITY_TIMEOUT_MS,
+  CanaryVisibilityPending,
+  confirmCanaryCohort,
+  readRegistryPackage,
+} from "./publish-canary";
 
 const roots: string[] = [];
 const version = "1.0.1-canary.7";
@@ -61,7 +66,12 @@ test("complete-cohort receipts fit the unchanged custody bound without fetching 
   const records = readdirSync(directory)
     .filter((file) => file.endsWith(".json"))
     .map((file) => JSON.parse(readFileSync(join(directory, file), "utf8")));
-  expect(records.filter((record) => record.kind === "COHORT_READS_MATCHED")[0].reads).toBe(128);
+  const matched = records.filter((record) => record.kind === "COHORT_READS_MATCHED");
+  expect(matched).toHaveLength(1);
+  expect(matched[0].observations).toBe(64);
+  expect(matched[0].freshCompleteCohort).toBe(true);
+  // Only the final complete-cohort reread retains response custody.
+  expect(records.filter((record) => record.kind === "READ_RESPONSE")).toHaveLength(64);
   expect(
     records
       .filter((record) => record.kind === "READ_BODY")
@@ -69,61 +79,112 @@ test("complete-cohort receipts fit the unchanged custody bound without fetching 
   ).toBeLessThan(64 * 1024 * 1024);
 });
 
-test("each actual receipt request shares the original quota, including a version request", async () => {
-  let requests = 0;
+test("waiting reads keep one observation each so a long wait stays within the custody bound", async () => {
+  const root = mkdtempSync(join(tmpdir(), "canary-version-receipts-"));
+  roots.push(root);
+  const directory = join(root, "receipts");
+  const custody = new CanaryReceiptStore(directory, {
+    source: "a".repeat(40),
+    workflowSource: "a".repeat(40),
+    runId: "7",
+    attempt: "2",
+  });
+  const packages = Array.from({ length: 64 }, (_, index) => archive(`@example/package-${index}`));
+  let elapsed = 0;
   const read: typeof readRegistryPackage = (name, _request, _base, options) =>
     readRegistryPackage(
       name,
-      async () => {
-        requests++;
-        return Response.json({ latest: "1.0.0", canary: version });
-      },
+      async (url) =>
+        String(url).includes("/dist-tags")
+          ? Response.json({ latest: "1.0.0", canary: version })
+          : new Response(null, { status: 404 }),
       "https://registry.example.test",
       options,
     );
-  await expect(confirmCanaryCohort([archive()], read, { maxReads: 1 })).rejects.toThrow(
-    "read quota",
-  );
-  expect(requests).toBe(1);
+  await expect(
+    confirmCanaryCohort(packages, read, {
+      custody,
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+    }),
+  ).rejects.toBeInstanceOf(CanaryVisibilityPending);
+  expect(elapsed).toBe(CANARY_VISIBILITY_TIMEOUT_MS);
+  const files = readdirSync(directory);
+  expect(files.filter((file) => file.endsWith(".body"))).toHaveLength(0);
+  expect(files.length).toBeLessThan(CANARY_RECEIPT_FILES);
 });
 
-test("the final cohort cannot borrow another request beyond the original quota", async () => {
-  let requests = 0;
+test("transient registry failures keep waiting; client errors still fail closed", async () => {
+  let elapsed = 0,
+    versionReads = 0;
+  const responses = [
+    () => new Response("unavailable", { status: 503 }),
+    () => new Response("slow down", { status: 429 }),
+    () => {
+      throw new TypeError("synthetic transport failure");
+    },
+  ];
   const read: typeof readRegistryPackage = (name, _request, _base, options) =>
     readRegistryPackage(
       name,
       async (url) => {
-        requests++;
-        return String(url).includes("/dist-tags")
-          ? Response.json({ latest: "1.0.0", canary: version })
-          : Response.json({ name, version, dist });
+        if (String(url).includes("/dist-tags"))
+          return Response.json({ latest: "1.0.0", canary: version });
+        return (responses[versionReads++] ?? (() => Response.json({ name, version, dist })))();
       },
       "https://registry.example.test",
       options,
     );
-  await expect(confirmCanaryCohort([archive()], read, { maxReads: 3 })).rejects.toThrow(
-    "read quota",
-  );
-  expect(requests).toBe(3);
-});
-
-test("later final batches cannot dispatch first requests beyond the shared quota", async () => {
-  let requests = 0;
-  const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+  await confirmCanaryCohort([archive()], read, {
+    now: () => elapsed,
+    sleep: async (ms) => {
+      elapsed += ms;
+    },
+  });
+  expect(versionReads).toBe(5);
+  const forbidden: typeof readRegistryPackage = (name, _request, _base, options) =>
     readRegistryPackage(
       name,
-      async (url) => {
-        requests++;
-        return String(url).includes("/dist-tags")
+      async (url) =>
+        String(url).includes("/dist-tags")
           ? Response.json({ latest: "1.0.0", canary: version })
-          : Response.json({ name, version, dist });
-      },
+          : new Response("forbidden", { status: 403 }),
       "https://registry.example.test",
       options,
     );
-  const packages = Array.from({ length: 8 }, (_, index) => archive(`@example/package-${index}`));
-  await expect(confirmCanaryCohort(packages, read, { maxReads: 24 })).rejects.toThrow();
-  expect(requests).toBe(24);
+  await expect(confirmCanaryCohort([archive()], forbidden)).rejects.toThrow("failed: 403");
+});
+
+test("a later canary publication's tag does not block a re-run confirmation", async () => {
+  for (const [canary, settles] of [
+    ["1.0.1-canary.8", true],
+    ["1.0.2-canary.0", true],
+    ["1.0.1-canary.6", false],
+    ["1.0.1", false],
+  ] as const) {
+    let elapsed = 0;
+    const read: typeof readRegistryPackage = (name, _request, _base, options) =>
+      readRegistryPackage(
+        name,
+        async (url) =>
+          String(url).includes("/dist-tags")
+            ? Response.json({ latest: "1.0.0", canary })
+            : Response.json({ name, version, dist }),
+        "https://registry.example.test",
+        options,
+      );
+    const confirmation = confirmCanaryCohort([archive()], read, {
+      now: () => elapsed,
+      sleep: async (ms) => {
+        elapsed += ms;
+      },
+      timeoutMs: 60_000,
+    });
+    if (settles) await confirmation;
+    else await expect(confirmation).rejects.toThrow("canary_tag_pending");
+  }
 });
 
 test.each(["name", "version"] as const)(
@@ -214,7 +275,7 @@ test("a new package keeps its absent latest tag through both qualification passe
   expect(requests).toBe(4);
 });
 
-test("a large cohort can become visible late without spending its final read reserve", async () => {
+test("a large cohort that becomes visible late qualifies within one window", async () => {
   const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
   let elapsed = 0;
   const requests: number[] = [];
@@ -239,8 +300,9 @@ test("a large cohort can become visible late without spending its final read res
     },
   });
   expect(requests.some((time) => time >= 150_000)).toBe(true);
-  expect(requests.length).toBeLessThanOrEqual(30 * 16);
-  expect(elapsed).toBeLessThan(600_000);
+  // Backoff polls at 0, 5, 15, 35, 75, 135 and 195 seconds, then one final pass.
+  expect(requests.length).toBe(30 * 2 * 8);
+  expect(elapsed).toBe(195_000);
 });
 
 test("early matches are rechecked after delayed packages appear", async () => {
@@ -278,10 +340,9 @@ test("early matches are rechecked after delayed packages appear", async () => {
   expect(firstPackageReads).toBe(2);
   expect(elapsed).toBeGreaterThanOrEqual(150_000);
   expect(elapsed).toBeLessThan(600_000);
-  expect(requests).toBeLessThanOrEqual(30 * 16);
 });
 
-test("a hidden large cohort fails within the deadline and its read quota", async () => {
+test("a hidden large cohort keeps waiting for the whole window, then names what is missing", async () => {
   const packages = Array.from({ length: 30 }, (_, index) => archive(`@example/package-${index}`));
   let elapsed = 0,
     requests = 0;
@@ -304,16 +365,16 @@ test("a hidden large cohort fails within the deadline and its read quota", async
         elapsed += ms;
       },
     }),
-  ).rejects.toThrow("read_limit");
-  expect(elapsed).toBeGreaterThanOrEqual(150_000);
-  expect(elapsed).toBeLessThanOrEqual(600_000);
-  expect(requests).toBeLessThanOrEqual(30 * 16);
+  ).rejects.toThrow("@example/package-29@1.0.1-canary.7 (version_pending) after 1800s");
+  expect(elapsed).toBe(CANARY_VISIBILITY_TIMEOUT_MS);
+  // 5s, 10s, 20s, 40s, then one poll a minute: 33 polls of two GETs each.
+  expect(requests).toBe(30 * 2 * 33);
 });
 
-// Observed registry behavior: after a complete write phase, most selected
-// versions are visible at once, while a few stay 404 for more than four
-// minutes after their write acknowledgement before becoming visible.
-test("a few packages that stay hidden for minutes still qualify within the default bounds", async () => {
+// Observed registry behavior: npm answers each write with 202 and processes it
+// later. Most versions appear within minutes; the largest archives took 10-18
+// minutes in October 2026.
+test("a few packages that stay hidden for many minutes still qualify in one window", async () => {
   const packages = Array.from({ length: 31 }, (_, index) => archive(`@example/package-${index}`));
   const late = new Set([packages[7]!.name, packages[29]!.name]);
   let elapsed = 0,
@@ -325,7 +386,7 @@ test("a few packages that stay hidden for minutes still qualify within the defau
         requests++;
         return String(url).includes("/dist-tags")
           ? Response.json({ latest: "1.0.0", canary: version })
-          : late.has(name) && elapsed < 300_000
+          : late.has(name) && elapsed < 1_080_000
             ? new Response(null, { status: 404 })
             : Response.json({ name, version, dist });
       },
@@ -338,12 +399,12 @@ test("a few packages that stay hidden for minutes still qualify within the defau
       elapsed += ms;
     },
   });
-  expect(elapsed).toBeGreaterThanOrEqual(300_000);
-  expect(elapsed).toBeLessThan(330_000);
-  expect(requests).toBeLessThanOrEqual(31 * 16);
+  // Seen on the first poll after 18 minutes; only the two late packages are polled meanwhile.
+  expect(elapsed).toBe(1_095_000);
+  expect(requests).toBe(31 * 2 + 21 * 2 * 2 + 31 * 2);
 });
 
-test("the largest admitted cohort keeps polls after its first pass and final reserve", async () => {
+test("the largest admitted cohort qualifies after a delayed first appearance", async () => {
   const packages = Array.from({ length: 64 }, (_, index) => archive(`@example/package-${index}`));
   let elapsed = 0,
     requests = 0;
@@ -368,22 +429,21 @@ test("the largest admitted cohort keeps polls after its first pass and final res
     },
   });
   expect(elapsed).toBeGreaterThanOrEqual(60_000);
-  expect(requests).toBeLessThanOrEqual(64 * 16);
+  expect(requests).toBe(64 * 2 * 6);
 });
 
 test.each(
   [
-    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: null },
-    { count: 30, delayMs: 500, maxReads: 256, timeoutRequest: null },
-    { count: 1, delayMs: 4500, maxReads: 6, timeoutRequest: null },
-    { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "tags" },
-    { count: 30, delayMs: 0, maxReads: 256, timeoutRequest: "version" },
-    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "tags" },
-    { count: 30, delayMs: 375, maxReads: 256, timeoutRequest: "version" },
+    { count: 30, delayMs: 375, timeoutRequest: null },
+    { count: 30, delayMs: 500, timeoutRequest: null },
+    { count: 1, delayMs: 4500, timeoutRequest: null },
+    { count: 30, delayMs: 0, timeoutRequest: "tags" },
+    { count: 30, delayMs: 0, timeoutRequest: "version" },
+    { count: 30, delayMs: 375, timeoutRequest: "tags" },
+    { count: 30, delayMs: 375, timeoutRequest: "version" },
     {
       count: 30,
       delayMs: 0,
-      maxReads: 256,
       timeoutRequest: null,
       slowRequest: "tags",
       slowMs: 9000,
@@ -391,7 +451,6 @@ test.each(
     {
       count: 30,
       delayMs: 0,
-      maxReads: 256,
       timeoutRequest: null,
       slowRequest: "version",
       slowMs: 9000,
@@ -399,7 +458,6 @@ test.each(
     {
       count: 30,
       delayMs: 375,
-      maxReads: 256,
       timeoutRequest: null,
       slowRequest: "tags",
       slowMs: 9000,
@@ -407,7 +465,6 @@ test.each(
     {
       count: 30,
       delayMs: 0,
-      maxReads: 256,
       timeoutRequest: null,
       slowRequest: "tags",
       slowMs: 9000,
@@ -416,7 +473,6 @@ test.each(
     {
       count: 30,
       delayMs: 0,
-      maxReads: 256,
       timeoutRequest: null,
       slowRequest: "version",
       slowMs: 9000,
@@ -425,7 +481,6 @@ test.each(
     {
       count: 30,
       delayMs: 0,
-      maxReads: 256,
       timeoutRequest: null,
       slowRequest: "tags",
       slowMs: 9000,
@@ -490,7 +545,6 @@ test.each(
   const confirmation = confirmCanaryCohort(packages, read, {
     now: () => elapsed,
     sleep,
-    maxReads: scenario.maxReads,
   });
   confirmation.then(
     () => {
@@ -513,7 +567,7 @@ test.each(
   await confirmation;
   expect(elapsed).toBeGreaterThanOrEqual(150_000);
   expect(elapsed).toBeLessThan(600_000);
-  expect(requests).toBeLessThanOrEqual(scenario.maxReads);
+  expect(requests).toBeLessThanOrEqual(scenario.count * 2 * 12);
   expect(peak).toBeLessThanOrEqual(4);
   expect(timeouts).toBe(scenario.timeoutRequest === null ? 0 : 1);
   if (scenario.slowRequest !== null) expect(slowReads).toBeGreaterThan(0);
@@ -621,4 +675,47 @@ test("an ignored version request cannot renew the tags request's timeout", async
     ),
   ).rejects.toThrow("timed out");
   expect(requests).toBe(2);
+});
+
+function stagedRead(state: { approved: boolean; requests: number }): typeof readRegistryPackage {
+  return (name, _request, _base, options) =>
+    readRegistryPackage(
+      name,
+      async (url) => {
+        state.requests++;
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith("/dist-tags")) {
+          return Response.json(
+            state.approved ? { latest: "0.0.0-stage", canary: version } : { latest: "0.0.0-stage" },
+          );
+        }
+        return state.approved
+          ? Response.json({ name, version, dist })
+          : new Response(null, { status: 404 });
+      },
+      "https://registry.example.test",
+      options,
+    );
+}
+
+test("a first publication held in npm staged publishing asks for maintainer approval at once", async () => {
+  const state = { approved: false, requests: 0 };
+  const first = { ...archive("@example/new-package"), previousLatest: undefined };
+  await expect(confirmCanaryCohort([first], stagedRead(state))).rejects.toThrow(
+    "npm staged publishing holds the first publication of @example/new-package@1.0.1-canary.7",
+  );
+  expect(state.requests).toBe(2);
+});
+
+test("an approved staged first publication confirms under npm's placeholder latest tag", async () => {
+  const state = { approved: true, requests: 0 };
+  const first = { ...archive("@example/new-package"), previousLatest: undefined };
+  await confirmCanaryCohort([first], stagedRead(state));
+});
+
+test("the staged placeholder never excuses a moved stable tag on an existing package", async () => {
+  const state = { approved: true, requests: 0 };
+  await expect(confirmCanaryCohort([archive()], stagedRead(state))).rejects.toThrow(
+    "Stable tag changed",
+  );
 });

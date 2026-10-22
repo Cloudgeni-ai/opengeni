@@ -1,6 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { readFile } from "node:fs/promises";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";

@@ -12,7 +12,7 @@
  * the before/after acceptance fixture has recorded its legacy source.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import * as realRegistry from "../src/subscription-core-providers";
 import { SUBSCRIPTION_CORE_XAI } from "../src/subscription-core-xai-adapter";

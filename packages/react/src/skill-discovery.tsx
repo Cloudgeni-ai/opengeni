@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { createDiscoveryCache } from "./discovery-cache";
 import { BookOpenIcon } from "lucide-react";
 import { CapabilityCatalogRow, type CapabilityCatalogStatus } from "./capability-catalog-row";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type SkillDiscoveryItem = {
   id: string;
@@ -44,12 +45,19 @@ export type SkillDiscoveryProps = {
 
 /** Host-owned query and import flow; browse presentation is reusable independently. */
 export function SkillDiscovery(props: SkillDiscoveryProps) {
+  const t = useOpenGeniText();
   const query = props.query.trim();
   const discoveryQuery = query || "agent";
   return (
-    <section className="og-skill-discovery" aria-label="Discover skills">
+    <section className="og-skill-discovery" aria-label={t("skillDiscovery.discoverSkills")}>
       <header>
-        <h3>{props.resultLimit ? "Skills" : query ? "Search skills" : "Browse skills"}</h3>
+        <h3>
+          {props.resultLimit
+            ? t("skillDiscovery.skills")
+            : query
+              ? t("skillDiscovery.searchSkills")
+              : t("skillDiscovery.browseSkills")}
+        </h3>
         {!props.resultLimit ? (
           <a
             href="https://skills.sh/"
@@ -57,14 +65,14 @@ export function SkillDiscovery(props: SkillDiscoveryProps) {
             rel="noopener noreferrer"
             className="og-skill-discovery-browse"
           >
-            Browse skills.sh ↗
+            {t("skillDiscovery.browseSkillsSh")}
           </a>
         ) : null}
       </header>
       {!query ? (
-        <p>Popular on skills.sh</p>
+        <p>{t("skillDiscovery.popularOnSkillsSh")}</p>
       ) : query.length < 2 ? (
-        <p>Enter at least two characters to search skills.sh.</p>
+        <p>{t("skillDiscovery.enterAtLeastTwoCharacters")}</p>
       ) : null}
       <DiscoveryResults
         key={`${props.workspaceId}:${discoveryQuery}`}
@@ -94,6 +102,7 @@ function DiscoveryResults({
   formatSource = keepText,
   icon = DEFAULT_ICON,
 }: SkillDiscoveryProps) {
+  const t = useOpenGeniText();
   const cacheKey = JSON.stringify([workspaceId, query]);
   const cached = discoveryCache.peek(client, cacheKey);
   const [result, setResult] = useState<SkillDiscoveryPage | null>(cached ?? null);
@@ -179,7 +188,11 @@ function DiscoveryResults({
                 icon={icon}
                 status={!canManage ? "unavailable" : installed ? "added" : "available"}
                 statusLabel={
-                  !canManage ? "Admin required" : installed ? "Installed" : "Available to add"
+                  !canManage
+                    ? t("skillDiscovery.adminRequired")
+                    : installed
+                      ? t("skillDiscovery.installed")
+                      : t("skillDiscovery.availableToAdd")
                 }
                 onOpen={() => onImport(skill.url)}
               />
@@ -188,20 +201,20 @@ function DiscoveryResults({
       </div>
       {resultLimit && remoteSkills.length + localSkills.length > resultLimit && !loading ? (
         <button className="og-catalog-more" type="button" onClick={onShowMore}>
-          View all skills
+          {t("skillDiscovery.viewAllSkills")}
         </button>
       ) : null}
-      {loading ? <p role="status">Loading skills…</p> : null}
+      {loading ? <p role="status">{t("skillDiscovery.loadingSkills")}</p> : null}
       {error ? (
         <div role="alert" className="og-skill-discovery-error">
-          Could not load skills.
+          {t("skillDiscovery.couldNotLoadSkills")}
           <button type="button" onClick={() => setRetry((value) => value + 1)}>
-            Retry
+            {t("skillDiscovery.retry")}
           </button>
         </div>
       ) : null}
       {result && !remoteSkills.length && !localSkills.length && !loading && !error ? (
-        <p role="status">{`No matches for “${query}”.`}</p>
+        <p role="status">{t("skillDiscovery.noMatchesForQuery", { query })}</p>
       ) : null}
     </div>
   );

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
@@ -60,7 +61,9 @@ describe("production session conditional loading", () => {
       (key) => manifest[key]?.name === "session-conditional-panels",
     )!;
     panelAsset = manifest[panelKey]!.file;
-    attachmentAsset = manifest["src/components/session/message-resource-attachments.tsx"]!.file;
+    attachmentAsset =
+      manifest["../../packages/react/src/app/components/session/message-resource-attachments.tsx"]!
+        .file;
     const filesKey = "../../packages/react/src/components/sandbox-files.tsx";
     workspaceFilesAsset = manifest[filesKey]!.file;
     const eager = new Set<string>();
@@ -70,7 +73,7 @@ describe("production session conditional loading", () => {
       for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
     };
     for (const [key, entry] of Object.entries(manifest))
-      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+      if (entry.isEntry || key === "src/routes/session-route.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
     // Shared conversation state must not pull the embedded view's optional
     // question/command implementations into the direct session's static graph.

@@ -4,12 +4,9 @@
 // same picks would. It never copies the accounts an earlier turn froze.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { McpConnectionAccountSelection } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,

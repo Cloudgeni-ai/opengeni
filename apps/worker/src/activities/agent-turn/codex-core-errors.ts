@@ -1,5 +1,9 @@
 import { CODEX_CREDENTIAL_LEASE_TTL_MS } from "@opengeni/db";
-import type { WaitReason } from "@opengeni/subscriptions";
+import {
+  subscriptionCapacityWaitReasonText,
+  subscriptionCapacityWaitNeedsAction,
+  type WaitReason,
+} from "@opengeni/subscriptions";
 
 /*
  * Failures of a chat turn on the shared subscription core, for any provider.
@@ -65,6 +69,7 @@ export class SubscriptionCoreCodexTurnError extends Error {
 }
 
 const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
+  pinned_account_disabled: `The ${name} account pinned to this chat is turned off. Turn it back on, choose another account, or switch the chat to automatic. Waiting alone will not fix this.`,
   pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. Send a new message once it is available again, or switch the session back to automatic.`,
   pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. Choose another account or switch the session back to automatic.`,
   no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. Send a new message once an account is available again.`,
@@ -73,17 +78,6 @@ const WAIT_COPY = (name: string): Record<WaitReason, string> => ({
     "This session is tied to a provider that has no capacity right now. Send a new message once an account is available again.",
   accepted_authority_unavailable:
     "This work was accepted before the account move and its account access could not be carried. Send it again.",
-});
-
-const WAITING_COPY = (name: string): Record<WaitReason, string> => ({
-  pinned_account_unavailable: `The ${name} account chosen for this session is unavailable right now. This turn continues automatically once it is available again.`,
-  pinned_account_ineligible: `The ${name} account chosen for this session can no longer serve this work. This turn continues once another account is chosen or the session is switched back to automatic.`,
-  no_eligible_capacity: `No ${name} subscription has capacity for this turn right now. It continues automatically when an account is available.`,
-  model_not_allowed: `This model is not allowed for the ${name} subscriptions available here. This turn continues if that changes.`,
-  compaction_provider_locked:
-    "This session is tied to a provider that has no capacity right now. It continues automatically when an account is available.",
-  accepted_authority_unavailable:
-    "This work was accepted before the account move and its account access could not be carried. Send it again to continue.",
 });
 
 /**
@@ -97,9 +91,10 @@ export function subscriptionCoreCapacityWaitPayload(
   displayName: string = DEFAULT_DISPLAY_NAME,
 ): Record<string, unknown> {
   return {
-    error: WAITING_COPY(displayName)[reason],
+    error: subscriptionCapacityWaitReasonText(reason, displayName),
     code: "subscription_capacity_unavailable",
     waitReason: reason,
+    ...(subscriptionCapacityWaitNeedsAction(reason) ? { actionRequired: true } : {}),
     ...(earliestResetAt ? { resetsAt: earliestResetAt.toISOString() } : {}),
   };
 }

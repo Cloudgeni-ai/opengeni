@@ -12,6 +12,7 @@ describe("which workspaces can use a new organization account", () => {
     expect(audiencePolicy(EVERYONE, "codex")).toBeNull();
     expect(audiencePolicy(EVERYONE, "openrouter")).toBeNull();
     expect(audiencePolicy(EVERYONE, "opper")).toBeNull();
+    expect(audiencePolicy(EVERYONE, "azure_openai")).toBeNull();
   });
 
   test("selected workspaces become the account's Available in", () => {
@@ -25,6 +26,7 @@ describe("which workspaces can use a new organization account", () => {
 
   test("organization API keys never claim Personal workspaces", () => {
     expect(personalWorkspacesSupported("vercel_gateway")).toBe(false);
+    expect(personalWorkspacesSupported("azure_openai")).toBe(false);
     expect(
       audiencePolicy(
         { kind: "selected", workspaceIds: ["w1"], personalWorkspaces: true },

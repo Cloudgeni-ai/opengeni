@@ -131,6 +131,7 @@ function upstreamServer() {
         headers: {
           "X-OpenGeni-Has-More": "true",
           "X-OpenGeni-Next-Before": "1",
+          "X-OpenGeni-Conversation-Filter": "2",
           // Upstream's own revision header must stay behind the proxy.
           "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION,
         },
@@ -804,6 +805,12 @@ describe("createSessionProxyHandler", () => {
       ],
       [
         "POST",
+        "realtime/websocket",
+        connect,
+        () => browser.negotiateRealtimeWebsocket(WORKSPACE_ID, SESSION_ID, connect),
+      ],
+      [
+        "POST",
         "realtime/gateway",
         connect,
         () => browser.negotiateGatewayRealtime(WORKSPACE_ID, SESSION_ID, connect),
@@ -1248,6 +1255,8 @@ describe("createSessionProxyHandler", () => {
     expect(page.events.map((event) => event.sequence)).toEqual([1]);
     expect(page.hasMore).toBe(true);
     expect(page.nextBefore).toBe(1);
+    // The conversation-filter announcement reaches the browser.
+    expect(page.conversationFilter).toBe(2);
     const query = upstream.requests[0]!.url.searchParams;
     expect(query.get("before")).toBe("5");
     expect(query.get("payloadMode")).toBe("full");
@@ -1708,6 +1717,40 @@ describe("createSessionProxyHandler", () => {
     expect((await off.browser.getClientConfig()).archive).toBe(false);
   });
 
+  test("an open conversation can mark itself read, and nothing else about attention", async () => {
+    const { upstream, browser } = setup();
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, {
+      unread: false,
+      acknowledgedThroughSequence: 42,
+    });
+    await browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, { unread: false });
+    expect(upstream.requests.map((request) => [request.method, request.url.pathname])).toEqual([
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+      ["PUT", `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/attention`],
+    ]);
+    expect(upstream.requests.map((request) => request.body)).toEqual([
+      { unread: false, acknowledgedThroughSequence: 42 },
+      { unread: false },
+    ]);
+    for (const request of [
+      { unread: true },
+      { activelyWorking: true },
+      { unread: false, activelyWorking: false },
+      { unread: false, expectedVersion: 3 },
+      { unread: false, acknowledgedThroughSequence: -1 },
+      { unread: false, acknowledgedThroughSequence: 1.5 },
+    ]) {
+      expect(
+        (
+          await rejection(
+            browser.updateSessionAttention(WORKSPACE_ID, SESSION_ID, request as never),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(2);
+  });
+
   test("retained media a session produced is served under files, scoped and association-checked", async () => {
     const RETAINED = "44444444-4444-4444-8444-444444444444";
     const OTHER_SESSION = "55555555-5555-4555-8555-555555555555";
@@ -1967,6 +2010,33 @@ describe("createSessionProxyHandler", () => {
     }
     const editable = site.replace("published-artifacts", "editable-artifacts");
     expect((await on.handler(new Request(editable))).status).toBe(404);
+  });
+
+  test("Excel workbook routes are opt-in and act as the resolved user", async () => {
+    const off = setup();
+    await expect(off.browser.createOfficeWorkbookTicket(WORKSPACE_ID)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(off.upstream.requests.some((r) => r.url.pathname.includes("/office/"))).toBe(false);
+
+    const on = setup({ office: true });
+    await on.browser.createOfficeWorkbookTicket(WORKSPACE_ID);
+    const minted = on.upstream.requests.at(-1)!;
+    expect(minted.method).toBe("POST");
+    expect(minted.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbook-tickets`);
+    expect(minted.headers.get("x-opengeni-external-actor")).toContain("u_42");
+    await on.browser.listOfficeWorkbooks(WORKSPACE_ID).catch(() => undefined);
+    const listed = on.upstream.requests.at(-1)!;
+    expect(listed.method).toBe("GET");
+    expect(listed.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/office/workbooks`);
+    // Another workspace and other office paths stay closed.
+    await expect(on.browser.createOfficeWorkbookTicket(OTHER_WORKSPACE_ID)).rejects.toMatchObject({
+      status: 403,
+    });
+    const other = await on.handler(
+      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/office/anything`),
+    );
+    expect(other.status).toBe(404);
   });
 
   test("artifact viewer routes are opt-in, session-scoped, and association-checked", async () => {

@@ -78,6 +78,8 @@ export const authorizeSubscriptionCoreFrozenPersonalCodex =
   core.authorizeSubscriptionCoreFrozenPersonal;
 export const recordSubscriptionCoreCodexQuotaObservation =
   core.recordSubscriptionCoreQuotaObservation;
+export const recordSubscriptionCoreCodexTurnUsageReading =
+  core.recordSubscriptionCoreTurnUsageReading;
 export const applySubscriptionCoreCodexQuotaObservation =
   core.applySubscriptionCoreQuotaObservation;
 export const recordSubscriptionCoreCodexTurnFailure = core.recordSubscriptionCoreTurnFailure;

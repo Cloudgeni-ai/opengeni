@@ -32,41 +32,41 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/dialog";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { EmptyState } from "@/components/ui/empty-state";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
-import { Toolbar } from "@/components/ui/toolbar";
-import { useAppContext } from "@/context";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { secretSaveTargets } from "@/lib/secrets-ui";
-import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/ui/dropdown-menu";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { Switch } from "@opengeni/react/ui/switch";
+import { Toolbar } from "@opengeni/react/ui/toolbar";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
+import { secretSaveTargets } from "@opengeni/react/app/lib/secrets-ui";
+import { hasInbox, isNeedsYouKind, useInbox } from "@opengeni/react/app/lib/inbox";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
   question: "Question",
@@ -232,6 +232,8 @@ function InboxRow(props: {
   when: string;
   actions?: ReactNode;
   menu: ReactNode;
+  /** One-click removal, shown on hover or focus (always on touch). */
+  dismiss?: { label: string; pending: boolean; onDismiss: () => void };
   onOpen: () => void;
   /** False when the person can't open the session (another member's private one). */
   canOpen?: boolean;
@@ -290,7 +292,19 @@ function InboxRow(props: {
             </div>
           ) : null}
         </div>
-        <div className="relative z-10 -mr-1.5 -mt-1 shrink-0 self-start">
+        <div className="relative z-10 -mr-1.5 -mt-1 flex shrink-0 items-center self-start">
+          {props.dismiss ? (
+            <button
+              type="button"
+              aria-label={`${props.dismiss.label}: ${props.title}`}
+              title={props.dismiss.label}
+              disabled={props.dismiss.pending}
+              onClick={props.dismiss.onDismiss}
+              className="grid size-8 place-items-center rounded-[10px] text-fg-subtle opacity-0 transition-[opacity,color,background-color] duration-[120ms] hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand/55 group-hover/row:opacity-100 group-focus-within/row:opacity-100 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11 pointer-coarse:opacity-100"
+            >
+              <XIcon aria-hidden="true" className="size-4" />
+            </button>
+          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -561,6 +575,15 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         actions={control(item)}
         onOpen={() => openSession(item)}
         canOpen={item.sessionAvailable !== false}
+        dismiss={
+          item.kind === "notification" || item.kind === "reply"
+            ? {
+                label: "Dismiss",
+                pending: Boolean(busy[item.id]),
+                onDismiss: () => dismiss(item),
+              }
+            : undefined
+        }
         menu={
           <>
             {item.sessionAvailable !== false ? (

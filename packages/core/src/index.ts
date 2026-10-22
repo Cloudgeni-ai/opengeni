@@ -1,7 +1,12 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
-export { verifyDirectModelAccess } from "./domain/direct-model-provider";
+export {
+  verifyDirectModelAccess,
+  verifyOrganizationAzureOpenAIDeployment,
+  verifyOrganizationDirectModel,
+} from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/mcp-streamable-http-client";
 export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
@@ -40,6 +45,8 @@ export * from "./domain/realtime-voice-billing";
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
 export * from "./domain/vaults/provider-registry";
+export * from "./domain/vaults/external-provider-connections";
+export * from "./domain/vaults/remote-provider-runtime";
 export * from "./domain/vaults/provider-sync";
 export * from "./workflow-wake-contract";
 export * from "./user-presence";
@@ -51,6 +58,7 @@ export * from "./product-usage-metrics";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export { siteMayAccessSession, withConsoleSiteSessionAccess } from "./site-session-access";
 export {
   getManagedAuthRequestActorAbortSignal,
   getManagedAuthRequestActorAdmissionStamp,
@@ -80,7 +88,10 @@ export * from "./default-session-model";
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP
 // fleet tools, the machines REST route, and the rest of the sandbox layer.
+export * from "./sandbox/compute-plane";
+export * from "./sandbox/output-release";
 export * from "./sandbox/fleet";
+export * from "./sandbox/agent-background-commands";
 export * from "./sandbox/routing";
 export * from "./sandbox/runtime-settings";
 
@@ -98,6 +109,7 @@ export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
 export * from "./billing/model-call-admission";
@@ -128,6 +140,7 @@ export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/site-audience";
+export * from "./domain/file-audience";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
@@ -147,6 +160,7 @@ export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
+export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";
@@ -159,7 +173,20 @@ export * from "./editable-artifact-live";
 
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
-export { withSiteSessionOrigin } from "./site-session-origin";
+export {
+  currentSiteSessionOrigin,
+  siteOriginsMatch,
+  siteSessionOriginFromMetadata,
+  withSiteOriginMetadata,
+  withSiteSessionOrigin,
+  type SiteSessionOrigin,
+} from "./site-session-origin";
+
+export {
+  currentHostSessionUsageLimit,
+  withHostSessionUsageLimit,
+  type HostSessionUsageLimit,
+} from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
@@ -170,3 +197,5 @@ export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
 
 export * from "./domain/connector-tool-permissions";
+export * from "./session-usage-limits";
+export * from "./session-usage-limit-metrics";

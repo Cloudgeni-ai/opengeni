@@ -65,6 +65,8 @@ uuid = { workspace = true }
 # Per-channel output digests in the op-stream Exit frame (byte-exact assembly
 # proof, PROTOCOL.md §Wire messages). Already a workspace dep (update cohorting).
 blake3 = { workspace = true }
+# Hex form of carried stream-digest state across an in-place update.
+hex = { workspace = true }
 sha2 = { workspace = true }
 semver = { workspace = true }
 
@@ -74,6 +76,10 @@ hostname = { workspace = true }
 # The M10 disk metric (statvfs of the workspace root) — unix-only, SAFE binding.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+
+# Windows: Chrome finds the attached-browser bridge through the per-user registry.
+[target.'cfg(windows)'.dependencies]
+opengeni-agent-windows-ffi = { path = "../opengeni-agent-windows-ffi" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }

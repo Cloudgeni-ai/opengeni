@@ -5,16 +5,19 @@ import {
 } from "@opengeni/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { SettingRow } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { useAppContext } from "@/context";
-import { builtInMcpCapability, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
+import { Button } from "@opengeni/react/ui/button";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  builtInMcpCapability,
+  sessionCapabilityGroupsFor,
+} from "@opengeni/react/app/lib/session-capabilities";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   type McpServerOption,
-} from "@/lib/session-tools";
+} from "@opengeni/react/app/lib/session-tools";
 
 type Defaults = Required<
   Pick<WorkspaceSessionToolDefaults, "mcpServerIds" | "firstPartyMcpTools">

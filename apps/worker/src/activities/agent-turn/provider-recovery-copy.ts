@@ -49,15 +49,17 @@ export function providerRecoverySubject(input: ProviderRecoveryCopyInput): strin
     case "post_compaction_continuation_empty":
       return `${model} stopped right after compacting the conversation`;
     case "upstream_connectivity_unavailable":
-      return "Opengeni can't reach an upstream service";
+      return "An upstream service can't be reached";
     case "mcp_transport_timeout":
       return "A required MCP server isn't responding";
     case "mcp_transport_unavailable":
       return "A required MCP server is unreachable";
     case "sandbox_command_start_unavailable":
       return "The sandbox isn't ready yet";
+    case "retained_attachment_unavailable":
+      return "An image from earlier in this conversation can't be read from storage";
     case "turn_execution_policy_definition_mismatch":
-      return "Opengeni is applying a configuration update";
+      return "A configuration update is being applied";
     default:
       return "A service this turn depends on is temporarily unavailable";
   }
@@ -68,7 +70,7 @@ export function providerRecoveryExhaustedMessage(
   input: ProviderRecoveryCopyInput & { providerRecoveryCount: number },
 ): string {
   const count = input.providerRecoveryCount;
-  const retried = `Opengeni retried ${count} ${count === 1 ? "time" : "times"} without success.`;
+  const retried = `Retried ${count} ${count === 1 ? "time" : "times"} without success.`;
   const remedy = MODEL_PROVIDER_RECOVERY_CODES.has(input.code ?? "")
     ? "Try again in a few minutes, or switch to another model."
     : "Try again in a few minutes.";

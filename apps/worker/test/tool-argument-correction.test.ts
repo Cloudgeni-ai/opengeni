@@ -14,7 +14,8 @@ import {
   prepareAgentTools,
   runAgentStream,
 } from "@opengeni/runtime";
-import { assistantMessage, functionCall, testSettings } from "@opengeni/testing";
+import { assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 

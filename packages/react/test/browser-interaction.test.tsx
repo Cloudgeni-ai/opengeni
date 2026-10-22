@@ -35,7 +35,7 @@ import { useBrowserSessions } from "../src/hooks/use-browser-sessions";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 const BROWSER_SESSION_ID = "44444444-4444-4444-8444-444444444444";
 const PEER_BROWSER_SESSION_ID = "55555555-5555-4555-8555-555555555555";
@@ -688,9 +688,9 @@ describe("BrowserSession React resources", () => {
   test("uses each completed action observation immediately for the next fence", async () => {
     const calls: Array<{
       targetId: string;
-      expectedTargetGeneration: string;
-      expectedDocumentGeneration: string | null;
-      expectedFrameId: string | null;
+      expectedTargetGeneration: string | undefined;
+      expectedDocumentGeneration: string | null | undefined;
+      expectedFrameId: string | null | undefined;
     }> = [];
     const firstTarget = target();
     const firstObservation = observation(BROWSER_SESSION_ID, firstTarget);
@@ -2747,6 +2747,8 @@ describe("BrowserSession frame stream", () => {
   });
 
   test("keeps grants in protocols, accepts latest frames, and clears on target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeBrowserSocket[] = [];
     const attachCalls: string[] = [];
     const client = fakeClient({
@@ -2795,6 +2797,8 @@ describe("BrowserSession frame stream", () => {
   });
 
   test("accepts a restarted frame sequence after each attachment renewal", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeBrowserSocket[] = [];
     const renewals: Array<() => void> = [];
     const originalSetTimeout = globalThis.setTimeout;
@@ -2862,6 +2866,8 @@ describe("BrowserSession frame stream", () => {
   });
 
   test("rejects a frame from a controller generation outside the attachment", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     let socket: FakeBrowserSocket | null = null;
     const client = fakeClient({
       attachBrowserSession: async (_workspaceId, _browserSessionId, request) =>
@@ -2893,6 +2899,8 @@ describe("BrowserSession frame stream", () => {
   });
 
   test("authenticates a browser relay in-band and unwraps canonical browser frames", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     let socket: FakeBrowserSocket | null = null;
     const client = fakeClient({
       attachBrowserSession: async (_workspaceId, _browserSessionId, request) =>
@@ -2975,6 +2983,8 @@ describe("BrowserSession frame stream", () => {
   });
 
   test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const sockets: FakeBrowserSocket[] = [];
     let release!: (value: ArrayBuffer) => void;
     const delayed = new (class extends Blob {
@@ -3193,6 +3203,8 @@ describe("BrowserViewer", () => {
   });
 
   test("uses the new document frame after history succeeds without an observation", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvas = mockBrowserCanvas();
     let observed = false;
     const fixture = await renderViewerInputFixture(
@@ -3424,6 +3436,8 @@ describe("BrowserViewer", () => {
   );
 
   test("keeps the frame connection warm without AX polling behind another dock tab", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     let observationCalls = 0;
     let inventoryCalls = 0;
     const sockets: FakeBrowserSocket[] = [];
@@ -4271,6 +4285,8 @@ describe("BrowserViewer", () => {
   });
 
   test("shows peer browsers and routes semantic human input through the canonical action API", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const current = browserSession();
     const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Peer browser");
@@ -4374,6 +4390,8 @@ describe("BrowserViewer", () => {
   });
 
   test("fences pointer input to the painted image and discards a decode after navigation", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas(true);
     const fixture = await renderViewerInputFixture();
     try {
@@ -4454,6 +4472,8 @@ describe("BrowserViewer", () => {
   });
 
   test("retains owned keyboard focus after navigation without stealing address or other-tab focus", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture();
     try {
@@ -4506,6 +4526,8 @@ describe("BrowserViewer", () => {
 
   for (const supported of [false, true]) {
     test(`batches queued typing only with a negotiated helper (${supported})`, async () => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockBrowserCanvas();
       let release!: () => void;
       const blocked = new Promise<void>((resolve) => {
@@ -4579,6 +4601,8 @@ describe("BrowserViewer", () => {
   }
 
   test("a live frame does not hide an unavailable browser control channel", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture(async () => {
       throw new OpenGeniApiError(503, "Browser control unavailable");
@@ -4608,6 +4632,8 @@ describe("BrowserViewer", () => {
   });
 
   test("discards buffered typing batches behind an uncertain action without retry", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     let reject!: (error: Error) => void;
     const blocked = new Promise<void>((_resolve, fail) => {
@@ -4639,6 +4665,8 @@ describe("BrowserViewer", () => {
 
   for (const state of ["failed", "outcome_unknown"] as const) {
     test(`retains an HTTP 200 ${state} input notice while frames and polls remain healthy`, async () => {
+      // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+      jest.useRealTimers();
       const canvasMock = mockBrowserCanvas();
       let requests = 0;
       let release!: () => void;
@@ -4833,6 +4861,8 @@ describe("BrowserViewer", () => {
   });
 
   test("preserves a wheel burst across painted frame updates and before a key", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture();
     try {
@@ -4867,6 +4897,8 @@ describe("BrowserViewer", () => {
   });
 
   test("dispatches continuous wheel input within 45 ms without waiting for gesture idle", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture();
     try {
@@ -4929,6 +4961,8 @@ describe("BrowserViewer", () => {
   });
 
   test("routes clipboard events and only committed IME text through causal browser actions", async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const current = browserSession();
     const currentTarget = target();
@@ -6120,6 +6154,10 @@ test("native option input keeps its captured frame fence and rejects a changed t
 });
 
 test("live image updates keep React timing diagnostics independent of screenshot bytes", async () => {
+  // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+  jest.useRealTimers();
+  // This assertion observes React's real Performance API instrumentation.
+  jest.useRealTimers();
   const canvasMock = mockBrowserCanvas();
   const diagnosticSizes: number[] = [];
   const measure = performance.measure.bind(performance);
@@ -6149,6 +6187,8 @@ test("live image updates keep React timing diagnostics independent of screenshot
 
 for (const switchTarget of [false, true]) {
   test(`queued input releases old image buffers (${switchTarget ? "target switch" : "ordered drain"})`, async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvasMock = mockBrowserCanvas();
     const imageBuffers: WeakRef<Uint8Array>[] = [];
     const originalSlice = Uint8Array.prototype.slice;
@@ -6190,7 +6230,7 @@ for (const switchTarget of [false, true]) {
       expect(imageBuffers).toHaveLength(24);
       // WeakRef targets survive their current job. Cross turns before each GC.
       for (let index = 0; index < 4; index++) {
-        await Bun.sleep(0);
+        await flush();
         Bun.gc(true);
       }
       // Current, previous React render, and the in-flight action may remain.
@@ -6286,6 +6326,8 @@ async function clickFixtureCanvas(fixture: Awaited<ReturnType<typeof renderViewe
 
 for (const negotiated of [false, true]) {
   test(`native popup discovery respects the live controller capability (${negotiated})`, async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvas = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture(
       async (request, view) => ({
@@ -6330,6 +6372,8 @@ for (const negotiated of [false, true]) {
 
 for (const negotiated of [false, true]) {
   test(`keyboard Alt+Down opens native options with legacy or current controller (${negotiated})`, async () => {
+    // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+    jest.useRealTimers();
     const canvas = mockBrowserCanvas();
     const fixture = await renderViewerInputFixture(
       async (request, view) => ({
@@ -6378,6 +6422,8 @@ for (const negotiated of [false, true]) {
 }
 
 test("ordinary page input does not show page selection controls", async () => {
+  // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+  jest.useRealTimers();
   const canvas = mockBrowserCanvas();
   const fixture = await renderViewerInputFixture(
     async (request, view) => receipt(view, request.operationId),
@@ -6398,6 +6444,8 @@ test("ordinary page input does not show page selection controls", async () => {
 });
 
 test("late dropdown metadata cannot reopen after newer canvas input", async () => {
+  // Native frame hashing/decoding is real asynchronous work, not a logical timer.
+  jest.useRealTimers();
   const canvas = mockBrowserCanvas();
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {

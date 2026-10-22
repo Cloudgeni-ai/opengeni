@@ -30,8 +30,11 @@ import {
 import { useSandboxGit } from "../src/hooks/use-sandbox-git";
 import { useWorkspaceEdit } from "../src/hooks/use-workspace-edit";
 import { deriveMachineChip } from "../src/hooks/use-machine-chip";
+import { createOpenGeniText } from "../src/messages/runtime";
 
-registerDom();
+const englishText = createOpenGeniText();
+
+registerDom({ clock: "virtual" });
 
 const ctx = { workspaceId: WORKSPACE_ID };
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
@@ -2537,13 +2540,13 @@ describe("deriveMachineChip", () => {
   const NOW = Date.parse("2026-07-08T12:05:00.000Z");
 
   test("only a holder-confirmed warm lease is live", () => {
-    expect(deriveMachineChip({ liveness: "warm" })).toEqual({
+    expect(deriveMachineChip(englishText, { liveness: "warm" })).toEqual({
       state: "live",
       label: "Live",
       asOf: null,
     });
     expect(
-      deriveMachineChip({
+      deriveMachineChip(englishText, {
         liveness: "draining",
         capturedAt: "2026-07-08T12:00:00.000Z",
         now: NOW,
@@ -2556,15 +2559,19 @@ describe("deriveMachineChip", () => {
   });
 
   test("negotiating or wanting-warm → waking", () => {
-    expect(deriveMachineChip({ liveness: "cold", capabilitiesState: "negotiating" }).state).toBe(
+    expect(
+      deriveMachineChip(englishText, { liveness: "cold", capabilitiesState: "negotiating" }).state,
+    ).toBe("waking");
+    expect(deriveMachineChip(englishText, { liveness: "cold", wantsWarm: true }).state).toBe(
       "waking",
     );
-    expect(deriveMachineChip({ liveness: "cold", wantsWarm: true }).state).toBe("waking");
-    expect(deriveMachineChip({ activeMachineState: "reconnecting" }).state).toBe("waking");
+    expect(deriveMachineChip(englishText, { activeMachineState: "reconnecting" }).state).toBe(
+      "waking",
+    );
   });
 
   test("a capability error stays offline-state even when warm intent is retained", () => {
-    const chip = deriveMachineChip({
+    const chip = deriveMachineChip(englishText, {
       liveness: "cold",
       capabilitiesState: "error",
       wantsWarm: true,
@@ -2579,7 +2586,7 @@ describe("deriveMachineChip", () => {
   });
 
   test("managed cold/idle is sleeping with saved-workspace freshness", () => {
-    const chip = deriveMachineChip({
+    const chip = deriveMachineChip(englishText, {
       liveness: "cold",
       capturedAt: "2026-07-08T12:00:00.000Z",
       now: NOW,
@@ -2590,7 +2597,7 @@ describe("deriveMachineChip", () => {
   });
 
   test("self-hosted offline is honest offline even if warm was requested", () => {
-    const chip = deriveMachineChip({
+    const chip = deriveMachineChip(englishText, {
       liveness: "cold",
       activeIsSelfhosted: true,
       activeMachineState: "offline",
@@ -2603,6 +2610,6 @@ describe("deriveMachineChip", () => {
   });
 
   test("managed sleeping with no capture time reads a bare 'Sleeping'", () => {
-    expect(deriveMachineChip({ liveness: "cold" }).label).toBe("Sleeping");
+    expect(deriveMachineChip(englishText, { liveness: "cold" }).label).toBe("Sleeping");
   });
 });

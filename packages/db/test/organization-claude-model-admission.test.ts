@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { bootstrapWorkspace, createDb, type DbClient } from "../src";
 import { withWorkspaceSubjectRls } from "../src/database";
 import { encryptEnvironmentValue } from "../src/environment-crypto";

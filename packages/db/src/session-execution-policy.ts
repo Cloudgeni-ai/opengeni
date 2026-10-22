@@ -1,5 +1,6 @@
-import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
+import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
 
 /** Actual execution evidence, independent of later default-setting commands. */
@@ -16,6 +17,20 @@ export function latestStartedSessionTurnQuery(
  * per-occurrence overrides cannot replace defaults. A later human/API turn can.
  * Original queue admission, not the mutable approval/recovery trigger, orders
  * that choice. Actual latest-started identity is unchanged.
+ *
+ * Cost is bounded by recent history, not session length: the newest
+ * `turn.started` event is found by a backward walk of
+ * session_events_workspace_session_type_sequence_idx that probes each
+ * candidate's turn by primary key and stops at the first eligible one. With a
+ * settings boundary the walk also stops at the boundary, because an eligible
+ * turn was queued after it and so started after it. Joining all start events
+ * to all turns instead would hash the whole session per read.
+ *
+ * The turn check is a scalar subquery, not EXISTS, so the planner cannot
+ * flatten it into a join. A generic plan for a prepared statement does not
+ * know how long the session is; given a join it may drive from every turn of
+ * the session and sort, which costs tens of milliseconds to seconds on a long
+ * session instead of one backward index probe.
  */
 function startedSessionTurnQuery(
   db: Database,
@@ -23,6 +38,42 @@ function startedSessionTurnQuery(
   sessionId: string | SQL,
   respectSettingsBoundary: boolean,
 ) {
+  // Coalesce inside the scalar subquery: the comparison then reads a plain
+  // parameter, which row-level security accepts as an index bound. An outer
+  // COALESCE is not leakproof, so RLS would demote the bound to a filter.
+  const settingsBoundary = sql`(
+    select coalesce(max(boundary.sequence), -1) from ${schema.sessionEvents} boundary
+    where boundary.workspace_id = ${workspaceId}
+      and boundary.session_id = ${sessionId}
+      and boundary.type = 'session.model_settings.updated'
+  )`;
+  const latestStartedTurnId = sql`(
+    select started.turn_id from ${schema.sessionEvents} started
+    where started.workspace_id = ${workspaceId}
+      and started.session_id = ${sessionId}
+      and started.type = 'turn.started'
+      ${respectSettingsBoundary ? sql`and started.sequence > ${settingsBoundary}` : sql``}
+      and (
+        select true from ${schema.sessionTurns} candidate
+        where candidate.workspace_id = started.workspace_id
+          and candidate.session_id = started.session_id
+          and candidate.id = started.turn_id
+          ${
+            respectSettingsBoundary
+              ? sql`and coalesce(case when candidate.source in ('user', 'api') then (
+                  select min(accepted.sequence) from ${schema.sessionEvents} accepted
+                  where accepted.workspace_id = ${workspaceId}
+                    and accepted.session_id = ${sessionId}
+                    and accepted.turn_id = candidate.id
+                    and accepted.type = 'turn.queued'
+                ) end, 0) > ${settingsBoundary}`
+              : sql``
+          }
+        limit 1
+      )
+    order by started.sequence desc
+    limit 1
+  )`;
   return db
     .select({
       id: schema.sessionTurns.id,
@@ -30,39 +81,14 @@ function startedSessionTurnQuery(
       reasoningEffort: schema.sessionTurns.reasoningEffort,
       latencyMode: schema.sessionTurns.latencyMode,
     })
-    .from(schema.sessionEvents)
-    .innerJoin(
-      schema.sessionTurns,
-      and(
-        eq(schema.sessionEvents.workspaceId, schema.sessionTurns.workspaceId),
-        eq(schema.sessionEvents.sessionId, schema.sessionTurns.sessionId),
-        eq(schema.sessionEvents.turnId, schema.sessionTurns.id),
-      ),
-    )
+    .from(schema.sessionTurns)
     .where(
       and(
-        eq(schema.sessionEvents.workspaceId, workspaceId),
-        eq(schema.sessionEvents.sessionId, sessionId),
-        eq(schema.sessionEvents.type, "turn.started"),
-        ...(respectSettingsBoundary
-          ? [
-              sql`coalesce(case when ${schema.sessionTurns.source} in ('user', 'api') then (
-              select min(accepted.sequence) from ${schema.sessionEvents} accepted
-              where accepted.workspace_id = ${workspaceId}
-                and accepted.session_id = ${sessionId}
-                and accepted.turn_id = ${schema.sessionTurns.id}
-                and accepted.type = 'turn.queued'
-            ) end, 0) > coalesce((
-              select max(boundary.sequence) from ${schema.sessionEvents} boundary
-              where boundary.workspace_id = ${workspaceId}
-                and boundary.session_id = ${sessionId}
-                and boundary.type = 'session.model_settings.updated'
-            ), -1)`,
-            ]
-          : []),
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        sql`${schema.sessionTurns.id} = ${latestStartedTurnId}`,
       ),
     )
-    .orderBy(desc(schema.sessionEvents.sequence))
     .limit(1);
 }
 
@@ -81,26 +107,9 @@ export async function withEffectiveSessionPolicy<T extends PolicyRow>(
   rows: readonly T[],
 ): Promise<T[]> {
   if (rows.length === 0) return [];
-  const latest = startedSessionTurnQuery(db, workspaceId, sql`${schema.sessions.id}`, true).as(
-    "latest_started_policy",
-  );
-  const policies = await db
-    .select({
-      id: schema.sessions.id,
-      // Row and event policy share one statement snapshot. A concurrent
-      // settings write must not combine a newer boundary with stale row defaults.
-      model: sql<string>`coalesce(${latest.model}, ${schema.sessions.model})`,
-      reasoningEffort: sql<string>`coalesce(${latest.reasoningEffort}, ${schema.sessions.reasoningEffort})`,
-      latencyMode: sql<string>`coalesce(${latest.latencyMode}, ${schema.sessions.latencyMode})`,
-    })
-    .from(schema.sessions)
-    .leftJoinLateral(latest, sql`true`)
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
-      ),
-    );
+  const policies = await effectiveSessionPolicyQuery(db, workspaceId, [
+    ...new Set(rows.map((row) => row.id)),
+  ]);
   const byId = new Map(policies.map((policy) => [policy.id, policy]));
   return rows.map((row) => {
     const policy = byId.get(row.id);
@@ -113,6 +122,32 @@ export async function withEffectiveSessionPolicy<T extends PolicyRow>(
         }
       : row;
   });
+}
+
+/** The statement behind {@link withEffectiveSessionPolicy}: one bounded
+ * lateral lookup per listed session. Call inside the caller's RLS boundary. */
+export function effectiveSessionPolicyQuery(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+) {
+  const latest = startedSessionTurnQuery(db, workspaceId, sql`${schema.sessions.id}`, true).as(
+    "latest_started_policy",
+  );
+  return db
+    .select({
+      id: schema.sessions.id,
+      // Row and event policy share one statement snapshot. A concurrent
+      // settings write must not combine a newer boundary with stale row defaults.
+      model: sql<string>`coalesce(${latest.model}, ${schema.sessions.model})`,
+      reasoningEffort: sql<string>`coalesce(${latest.reasoningEffort}, ${schema.sessions.reasoningEffort})`,
+      latencyMode: sql<string>`coalesce(${latest.latencyMode}, ${schema.sessions.latencyMode})`,
+    })
+    .from(schema.sessions)
+    .leftJoinLateral(latest, sql`true`)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, [...sessionIds])),
+    );
 }
 
 /** Compact-list model projection with a fixed per-row cost.
@@ -187,7 +222,7 @@ export async function withSessionListModelPolicy<T extends PolicyRow>(
     .where(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
-        inArray(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
+        anyOf(schema.sessions.id, [...new Set(rows.map((row) => row.id))]),
       ),
     );
   const byId = new Map(policies.map((policy) => [policy.id, policy]));

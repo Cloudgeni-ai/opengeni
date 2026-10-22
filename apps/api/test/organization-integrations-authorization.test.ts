@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { AccessContext } from "@opengeni/contracts";
 import { requireAccessContext } from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { requireOrganizationIntegrationAdmin } from "../src/routes/organization-integrations";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";

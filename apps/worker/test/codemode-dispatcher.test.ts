@@ -39,16 +39,14 @@ import {
   submitCodemodeOperation,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
-import {
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   InputWaitYield,
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
+  prepareAgentTools,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 import {
@@ -189,6 +187,72 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("user-message recovery starts deferred tools for a journaled operation before model dispatch", async () => {
+    const { scope, environment } = await fixture(async () => "unused");
+    const caller = `sandbox:${scope.attemptId}`;
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId: crypto.randomUUID(),
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: caller },
+      },
+    });
+    let connects = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        sandboxBackend: "none",
+        mcpServers: [{ id: "docs", url: "https://docs.invalid/mcp" }],
+      }),
+      [{ kind: "mcp", id: "docs" }],
+      {
+        deferNonEagerUntilToolDemand: true,
+        deferredPreparationStart: "provider-dispatch",
+        localMcpServers: [
+          {
+            id: "docs",
+            server: {
+              name: "docs",
+              cacheToolsList: false,
+              async connect() {
+                connects++;
+              },
+              async close() {},
+              async listTools() {
+                return [];
+              },
+              async callTool() {
+                return [];
+              },
+              async invalidateToolsCache() {},
+            },
+          },
+        ],
+      },
+    );
+    try {
+      expect(connects).toBe(0);
+      const resumed = await CodemodeAttemptDispatcher.resumeApproved(
+        client.db,
+        scope,
+        caller,
+        undefined,
+        async () => {
+          prepared.startDeferredPreparation?.();
+          await prepared.ready;
+          return null;
+        },
+      );
+      expect(resumed).toEqual([]);
+      expect(connects).toBe(1);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("first-request recovery joins lazy tool preparation only when stored work must resume", async () => {
     const { scope, environment } = await fixture(async () => "unused");
     const caller = `sandbox:${scope.attemptId}`;
@@ -590,7 +654,9 @@ describe("CodemodeAttemptDispatcher", () => {
       scope,
       undefined,
       1,
-      { claimLeaseMs: 1_000, claimHeartbeatMs: 100 },
+      // The wait below outlasts one whole lease, so only renewal keeps the claim.
+      // A 3 s lease tolerates a slow database on a loaded CI runner.
+      { claimLeaseMs: 3_000, claimHeartbeatMs: 100 },
     );
     dispatcher.start();
     const request = async () =>
@@ -610,7 +676,7 @@ describe("CodemodeAttemptDispatcher", () => {
     try {
       expect(await request()).toBe("accepted");
       await preparationStarted;
-      await Bun.sleep(1_200);
+      await Bun.sleep(3_500);
       expect(await request()).toBe("already_running");
       releasePreparation();
       expect(await waitForTerminal(scope, operationId)).toMatchObject({

@@ -15,7 +15,7 @@ import {
   withSessionRlsActorContext,
   type KnowledgeContext,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { buildFilesMcpServer } from "../src/mcp/files";
 import { buildDocumentsMcpServer } from "../src/mcp/documents";
 

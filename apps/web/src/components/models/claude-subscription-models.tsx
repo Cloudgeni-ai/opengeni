@@ -1,5 +1,6 @@
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
-import { useState } from "react";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { useState, type ReactNode } from "react";
 import {
   ConnectionAccessFormPage,
   useConnectionAccess,
@@ -13,12 +14,20 @@ import {
   subscriptionListedCount,
   type OrganizationSubscriptionRows,
 } from "./subscription-account-rows";
-import { SubscriptionAccountRow, SubscriptionRotationSettingRows } from "./subscription-account-ui";
-import { subscriptionAccountName } from "./use-subscription-account-pool";
+import {
+  SubscriptionAccountRow,
+  SubscriptionRotationSettingRows,
+} from "@/components/models/subscription-account-ui";
+import {
+  managesSubscriptionAccount,
+  subscriptionAccountName,
+} from "./use-subscription-account-pool";
 import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { invalidateSharedQueries } from "@opengeni/react/app/lib/shared-query";
+import { organizationReachLabel } from "@opengeni/react/app/components/models/models-ui";
 import {
   ProviderCustomModels,
   type ProviderConnection,
@@ -36,7 +45,7 @@ export function claudePlan(account: ClaudeSubscriptionAccount) {
 /** The usage cell of a Claude account row, from the usage its listing carries. */
 export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.ReactNode {
   if (account.status !== "active") return null;
-  if (!account.allocatorEnabled) return <StatusBadge status="paused" variant="dot" />;
+  if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
   return (
     <ClaudeUsageReadout
       state={{
@@ -50,6 +59,46 @@ export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.React
     />
   );
 }
+
+// A usage check can discover a disconnected credential. Reload its metadata,
+// not the usage query itself (which would repeat the live check it just made).
+function refreshClaudeAccountMetadata(client: object): Promise<void> {
+  return Promise.all([
+    invalidateSharedQueries(client, ["subscription-pool", "Claude"]),
+    invalidateSharedQueries(client, ["model-settings", "workspace-snapshots"]),
+  ]).then(() => undefined);
+}
+
+/** Row and detail meters observe the same client/scoped live usage query. */
+export function ClaudeAccountUsageReadout({
+  client,
+  scope,
+  scopeId,
+  account,
+  canManage,
+}: {
+  client: OpenGeniBrowserClient;
+  scope: "workspace" | "organization";
+  scopeId: string;
+  account: ClaudeSubscriptionAccount;
+  canManage: boolean;
+}) {
+  const usage = useClaudeUsage({
+    client,
+    scope,
+    scopeId,
+    enabled: account.status === "active" && account.allocatorEnabled,
+    connected: account.status === "active",
+    credentialId: account.id,
+    credentialVersion: account.version,
+    canManage,
+    accountPool: true,
+    onCredentialChanged: () => refreshClaudeAccountMetadata(client),
+  });
+  if (account.status !== "active") return null;
+  if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
+  return <ClaudeUsageReadout state={usage} />;
+}
 export function ClaudeRow({
   claude,
   account,
@@ -61,24 +110,44 @@ export function ClaudeRow({
   account: ClaudeSubscriptionAccount;
   places: ClaudePlaces;
   onOpen: () => void;
-  scopeLabel?: string;
+  scopeLabel?: ReactNode;
 }) {
+  // An organization's own account says where it's available, like Codex and SuperGrok.
+  const access = useConnectionAccess({
+    client: claude.client,
+    organizationId: claude.organizationId,
+    kind: "claude_subscription",
+    connectionId: account.id,
+    enabled: Boolean(claude.organizationId) && scopeLabel === undefined,
+  });
   return (
     <SubscriptionAccountRow
       provider="claude_subscription"
       title={subscriptionAccountName(account)}
       email={account.email}
-      primary={account.id === claude.activeAccountId}
+      primary={claude.accounts.length > 1 && account.id === claude.activeAccountId}
       meta={[
         scopeLabel ??
-          (claude.organizationId || claude.inherited
-            ? places.scope.organization
-            : account.scope === "user"
-              ? places.scope.user
-              : places.scope.workspace),
+          (claude.organizationId
+            ? organizationReachLabel(places.scope, access.data)
+            : claude.inherited || account.scope === "organization"
+              ? places.scope.organization
+              : account.scope === "user"
+                ? places.scope.user
+                : places.scope.workspace),
         claudePlan(account),
       ]}
-      cells={{ usage: claudeUsageCell(account) }}
+      cells={{
+        usage: (
+          <ClaudeAccountUsageReadout
+            client={claude.client}
+            scope={claude.organizationId ? "organization" : "workspace"}
+            scopeId={claude.organizationId ?? claude.workspaceId!}
+            account={account}
+            canManage={managesSubscriptionAccount(claude, account)}
+          />
+        ),
+      }}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }
@@ -143,8 +212,8 @@ function AccountUsage({
     connected: true,
     credentialId: account.id,
     credentialVersion: account.version,
-    canManage: claude.canManageAccounts,
-    onCredentialChanged: claude.refresh,
+    canManage: managesSubscriptionAccount(claude, account),
+    onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
   return <ClaudeUsage state={usage} onReconnect={onReconnect} />;
@@ -178,7 +247,7 @@ export function ClaudeAccountPage({
           claude={claude}
           account={account}
           onReconnect={
-            claude.canManageAccounts && !claude.inherited
+            managesSubscriptionAccount(claude, account)
               ? () => places.openConnect(account.id)
               : undefined
           }
@@ -213,7 +282,7 @@ export function ClaudeAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={!!claude.organizationId}
-      canManage={claude.canManageAccounts}
+      canManage={account ? managesSubscriptionAccount(claude, account) : claude.canManageAccounts}
       name={account ? subscriptionAccountName(account) : "this account"}
       onClose={onClose}
     />

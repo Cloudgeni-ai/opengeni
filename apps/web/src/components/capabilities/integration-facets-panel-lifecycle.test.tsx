@@ -8,7 +8,7 @@ import type {
   ApiIntegrationInstallationSummary,
   IntegrationFacetBindingSummary,
   IntegrationInstanceFacetsResponse,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import type {
   GoogleDriveFacetMutation,
@@ -27,7 +27,7 @@ mock.module("sonner", () => ({
   },
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     title,

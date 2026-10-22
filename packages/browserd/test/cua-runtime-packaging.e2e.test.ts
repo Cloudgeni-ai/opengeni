@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stageCuaRuntime } from "../scripts/stage-cua-runtime";
@@ -7,16 +7,31 @@ import { stageCuaRuntime } from "../scripts/stage-cua-runtime";
 // This can run headless. It does not grant permissions,
 // capture the desktop, discover apps or deliver input.
 test.skipIf(
-  !["darwin", "linux"].includes(process.platform) || process.env.OPENGENI_CUA_PACKAGING_E2E !== "1",
+  !["darwin", "linux", "win32"].includes(process.platform) ||
+    process.env.OPENGENI_CUA_PACKAGING_E2E !== "1",
 )(
   "compiled CUA loads only its adjacent release-contained assets",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-cua-package-"));
+    // Windows runs the published native runtime in process: no worker files.
+    const windows = process.platform === "win32";
     try {
       const staged = dirname(await stageCuaRuntime(process.arch));
-      for (const directory of ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])
+      if (process.platform === "darwin") {
+        const native = join(staged, "node_modules", `@trycua/cua-driver-darwin-${process.arch}`);
+        for (const file of await readdir(native)) {
+          if (!file.endsWith(".dylib") && !file.endsWith(".node")) continue;
+          const child = Bun.spawn(["lipo", "-archs", join(native, file)], { stdout: "pipe" });
+          const architectures = (await new Response(child.stdout).text()).trim();
+          expect(await child.exited).toBe(0);
+          expect(architectures).toBe(process.arch === "arm64" ? "arm64" : "x86_64");
+        }
+      }
+      for (const directory of windows
+        ? ["cua-sdk", "node_modules"]
+        : ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])
         await cp(join(staged, directory), join(root, directory), { recursive: true });
-      const binary = join(root, "probe");
+      const binary = join(root, windows ? "probe.exe" : "probe");
       const run = async (args: string[]) => {
         const child = Bun.spawn(args, {
           cwd: root,
@@ -59,10 +74,12 @@ test.skipIf(
         cursorAvailable: true,
         workerStopped: true,
       });
-      await rm(join(root, "cua-driver"));
-      const missingWorker = await run([binary]);
-      expect(missingWorker.exitCode).not.toBe(0);
-      expect(missingWorker.stderr).toContain("does not contain the CUA worker");
+      if (!windows) {
+        await rm(join(root, "cua-driver"));
+        const missingWorker = await run([binary]);
+        expect(missingWorker.exitCode).not.toBe(0);
+        expect(missingWorker.stderr).toContain("does not contain the CUA worker");
+      }
       await rm(join(root, "cua-sdk"), { recursive: true });
       const absent = await run([binary]);
       expect(absent.exitCode).not.toBe(0);

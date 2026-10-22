@@ -4,8 +4,8 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { OrganizationRecoverySection } from "./organization-recovery";
-import type { OrganizationAdminIdentity } from "@/lib/organization-admin";
-import type { OrganizationRecoveryOverview } from "@/types";
+import type { OrganizationAdminIdentity } from "@opengeni/react/app/lib/organization-admin";
+import type { OrganizationRecoveryOverview } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   try {

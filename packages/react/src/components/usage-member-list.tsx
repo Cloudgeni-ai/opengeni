@@ -9,6 +9,7 @@ import { useId, useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "../lib/cn";
 import { usagePercentLabel } from "../usage/summary";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /** How a member is named in the list. Usage rows carry only a subject id. */
 export type UsageMemberIdentity = {
@@ -70,48 +71,47 @@ export type UsageMemberListLabels = {
   empty: string;
 };
 
-export const DEFAULT_USAGE_MEMBER_LIST_LABELS: UsageMemberListLabels = {
-  listLabel: "Member usage",
+export const DEFAULT_USAGE_MEMBER_LIST_LABELS = (t: OpenGeniText): UsageMemberListLabels => ({
+  listLabel: t("usageMemberList.memberUsage"),
   used: (percent) => `${percent}% used`,
-  noLimitUsed: "No individual limit",
+  noLimitUsed: t("usageMemberList.noIndividualLimit"),
   amounts: (used, limit) => `${used} of ${limit}`,
-  nearLimit: "Near limit",
-  limitReached: "Limit reached",
-  limit: "Limit",
-  defaultEqualShare: (percent) => `Equal share · ${percent}%`,
-  defaultNone: "No individual limit",
-  defaultShare: (percent) => `Default · ${percent}%`,
-  defaultAmount: (amount) => `Default · ${amount}`,
-  share: (percent) => `${percent}% of budget`,
+  nearLimit: t("usageMemberList.nearLimit"),
+  limitReached: t("usageMemberList.limitReached"),
+  limit: t("usageMemberList.limit"),
+  defaultEqualShare: (percent) => t("usageMemberList.equalSharePercent", { percent }),
+  defaultNone: t("usageMemberList.noIndividualLimit"),
+  defaultShare: (percent) => t("usageMemberList.defaultPercent", { percent }),
+  defaultAmount: (amount) => t("usageMemberList.defaultAmount", { amount }),
+  share: (percent) => t("usageMemberList.percentOfBudget", { percent }),
   amount: (amount) => `${amount} fixed`,
-  fixedAmountHidden: "Fixed amount",
-  edit: (name) => `Change limit for ${name}`,
-  editorTitle: (name) => `Limit for ${name}`,
-  optionDefault: "Default",
-  optionShare: "Share of budget",
-  optionAmount: "Fixed amount",
-  fixedAmountHint: "Each period. Doesn't grow when the budget does.",
-  shareSlider: "Share of the workspace budget",
-  shareInput: "Share, percent",
-  amountInput: "Fixed amount",
-  equalShareMultiple: (multiple) => `${multiple}× an equal share`,
-  sameAsEqualShare: "About an equal share",
-  atBudget: (amount) => `About ${amount} at the current budget`,
-  save: "Save",
-  saving: "Saving…",
-  cancel: "Cancel",
-  saveFailed: "Couldn't save the limit. Refresh and try again.",
-  invalidAmount: "Enter an amount of zero or more.",
-  totalWithin: (percent) => `Member limits add up to ${percent}% of the budget.`,
-  totalOver: (percent) => `Member limits add up to ${percent}% of the budget.`,
-  oversubscribedHelp:
-    "That's allowed: limits are ceilings, not reservations. The workspace budget still caps what everyone spends together.",
+  fixedAmountHidden: t("usageMemberList.fixedAmount"),
+  edit: (name) => t("usageMemberList.changeLimitForName", { name }),
+  editorTitle: (name) => t("usageMemberList.limitForName", { name }),
+  optionDefault: t("usageMemberList.default"),
+  optionShare: t("usageMemberList.shareOfBudget"),
+  optionAmount: t("usageMemberList.fixedAmount"),
+  fixedAmountHint: t("usageMemberList.eachPeriodDoesnTGrow"),
+  shareSlider: t("usageMemberList.shareOfTheWorkspaceBudget"),
+  shareInput: t("usageMemberList.sharePercent"),
+  amountInput: t("usageMemberList.fixedAmount"),
+  equalShareMultiple: (multiple) => t("usageMemberList.multipleAnEqualShare", { multiple }),
+  sameAsEqualShare: t("usageMemberList.aboutAnEqualShare"),
+  atBudget: (amount) => t("usageMemberList.aboutAmountAtTheCurrent", { amount }),
+  save: t("usageMemberList.save"),
+  saving: t("usageMemberList.saving"),
+  cancel: t("usageMemberList.cancel"),
+  saveFailed: t("usageMemberList.couldnTSaveTheLimit"),
+  invalidAmount: t("usageMemberList.enterAnAmountOfZero"),
+  totalWithin: (percent) => t("usageMemberList.memberLimitsAddUpTo", { percent }),
+  totalOver: (percent) => t("usageMemberList.memberLimitsAddUpTo", { percent }),
+  oversubscribedHelp: t("usageMemberList.thatSAllowedLimitsAre"),
   unlimitedMembers: (count) =>
     count === 1
       ? "1 member has no individual limit."
-      : `${count} members have no individual limit.`,
-  empty: "No members yet.",
-};
+      : t("usageMemberList.countMembersHaveNoIndividual", { count }),
+  empty: t("usageMemberList.noMembersYet"),
+});
 
 export type UsageMemberListProps = {
   /** The full roster for one period (`getAllUsage` / every `getUsage` page). */
@@ -155,6 +155,7 @@ function formatMultiple(value: number): string {
 
 /** Words for a member's current limit, from their override or the default. */
 export function describeMemberLimit(
+  t: OpenGeniText,
   member: Pick<MemberAllowanceUsage, "rule" | "limit">,
   context: {
     memberDefault: MemberAllowanceDefault | null | undefined;
@@ -163,7 +164,7 @@ export function describeMemberLimit(
     labels?: Partial<UsageMemberListLabels> | undefined;
   },
 ): string {
-  const labels = { ...DEFAULT_USAGE_MEMBER_LIST_LABELS, ...context.labels };
+  const labels = { ...DEFAULT_USAGE_MEMBER_LIST_LABELS(t), ...context.labels };
   const ofBudget = (limit: number | null) =>
     limit !== null && context.shareBase > 0 ? formatPercent(limit / context.shareBase) : "0";
   const rule = member.rule;
@@ -197,7 +198,8 @@ export function UsageMemberList({
   framed = true,
   className,
 }: UsageMemberListProps) {
-  const labels = { ...DEFAULT_USAGE_MEMBER_LIST_LABELS, ...overrides };
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_USAGE_MEMBER_LIST_LABELS(t), ...overrides };
   const base = shareBase(usage);
   const [editing, setEditing] = useState<string | null>(null);
   const name = (member: MemberAllowanceUsage): UsageMemberIdentity =>
@@ -381,10 +383,11 @@ function MemberRow({
   onClose: () => void;
   onSave: ((rule: MemberAllowanceRule) => Promise<void>) | undefined;
 }) {
+  const t = useOpenGeniText();
   const editorId = useId();
   const limited = member.limit !== null;
   const fraction = member.fraction ?? 0;
-  const limitText = describeMemberLimit(member, {
+  const limitText = describeMemberLimit(t, member, {
     memberDefault,
     shareBase: base,
     amounts,
@@ -526,6 +529,7 @@ function MemberLimitEditor({
   onCancel: () => void;
   onSave: (rule: MemberAllowanceRule) => Promise<void>;
 }) {
+  const t = useOpenGeniText();
   const count = Math.max(1, usage.members.length);
   const equal = 1 / count;
   const currentShare =
@@ -549,6 +553,7 @@ function MemberLimitEditor({
   const share = sharePercent / 100;
   const parsedAmount = amounts && mode === "amount" ? amounts.parse(amountText) : null;
   const defaultLimitText = describeMemberLimit(
+    t,
     {
       rule: null,
       limit: member.rule === null ? member.limit : defaultLimitFor(memberDefault, base, count),

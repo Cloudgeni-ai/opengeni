@@ -4,6 +4,7 @@
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
 import type { ActivityItem, TimelineGroup, ToolCallItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 export type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
@@ -65,6 +66,8 @@ export type ReadableWorkOptions = {
  */
 export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptions): boolean {
   if (!group.work) return false;
+  // Steps not loaded yet are work the reader can open, not preparation.
+  if (group.work.steps && group.work.steps.state !== "complete") return false;
   const phases = group.items.filter((item) => item.kind === "startup-phase");
   return (
     !options.startupDetails &&
@@ -91,6 +94,8 @@ export function readableWorkHasDetails(
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
   options: Pick<ReadableWorkOptions, "startupDetails">,
 ): boolean {
+  // Steps not loaded yet are revealed (and loaded) by opening the row.
+  if (group.work.steps && group.work.steps.state !== "complete") return true;
   return group.work.details.some(
     (detail) =>
       options.startupDetails ||
@@ -113,6 +118,7 @@ export function readableWorkHasDetails(
  * wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(
+  t: OpenGeniText,
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
 ): Omit<TurnSummaryStatus, "preview"> & { detail?: string | undefined } {
   const end = group.work.endedAt;
@@ -121,7 +127,12 @@ export function readableWorkStatus(
     const durationMs = durationBetween(group.work.startedAt, end);
     const cycles = group.work.cycles;
     // Folded quiet cycles report their wall-clock span: waits are the point.
-    if (cycles) return { kind: "worked", label: `${cycles.count} updates over`, durationMs };
+    if (cycles)
+      return {
+        kind: "worked",
+        label: t("timeline.workPresentation.countUpdatesOver", { count: cycles.count }),
+        durationMs,
+      };
     return {
       kind: "worked",
       durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
@@ -143,10 +154,16 @@ export function readableWorkStatus(
 
 /** Whether a readable turn's work fold starts expanded. */
 export function readableWorkDefaultOpen(group: ActivityGroup): true | undefined {
-  const phases = group.items.filter((item) => item.kind === "startup-phase");
   return timelineGroupContainsPresentedImage(group) ||
     group.outcome === "failed" ||
-    phases.some((item) => item.status === "failed" || item.status === "cancelled")
+    group.items.some(
+      (item) =>
+        item.kind === "startup-phase" &&
+        (item.status === "failed" ||
+          // A cancelled phase with a blocked reason is an expected wait (for
+          // example compacting the conversation first), not an interruption.
+          (item.status === "cancelled" && !item.blockedReason)),
+    )
     ? true
     : undefined;
 }

@@ -5,12 +5,16 @@ import {
   applySessionPinToLists,
   groupSessionsByProject,
   groupSessionsForRail,
+  homeSessionSections,
   recentSessionModelPresentation,
   recentSessionStatus,
   recentSessionsForHome,
   relativeTimeLabel,
   sessionRepoLabel,
 } from "../src/session-list-model";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const now = new Date("2026-10-03T12:00:00Z");
 
@@ -63,11 +67,17 @@ describe("session-list-model", () => {
   });
 
   test("relative time labels", () => {
-    expect(relativeTimeLabel("2026-10-03T11:59:30Z", now)).toBe("now");
-    expect(relativeTimeLabel("2026-10-03T11:55:00Z", now)).toBe("5m");
-    expect(relativeTimeLabel("2026-10-03T09:00:00Z", now)).toBe("3h");
-    expect(relativeTimeLabel("2026-10-01T12:00:00Z", now)).toBe("2d");
-    expect(relativeTimeLabel("not a date", now)).toBe("");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:30Z", now)).toBe("now");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:10Z", now)).toBe("1m");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:55:00Z", now)).toBe("5m");
+    expect(relativeTimeLabel(englishText, "2026-10-03T09:00:00Z", now)).toBe("3h");
+    expect(relativeTimeLabel(englishText, "2026-10-01T12:00:00Z", now)).toBe("2d");
+    // Calendar days in local time, as the long form counts them: from 20:00
+    // three days back to 12:00 today is 2 days 16 hours, and reads 3d.
+    const localNoon = new Date(2026, 9, 3, 12, 0);
+    const threeEveningsAgo = new Date(2026, 8, 30, 20, 0).toISOString();
+    expect(relativeTimeLabel(englishText, threeEveningsAgo, localNoon)).toBe("3d");
+    expect(relativeTimeLabel(englishText, "not a date", now)).toBe("");
   });
 
   test("home order: pins, then running, then recency", () => {
@@ -75,15 +85,20 @@ describe("session-list-model", () => {
     const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
     const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
     const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
-    const rows = recentSessionsForHome([older, pinned, recent, running], [pinned], 6, now);
+    const rows = recentSessionsForHome(
+      englishText,
+      [older, pinned, recent, running],
+      [pinned],
+      6,
+      now,
+    );
     expect(rows.map((row) => row.id)).toEqual(["p", "r", "a", "b"]);
     expect(
-      recentSessionsForHome([older, recent, running], [], 2, now).map((row) => row.id),
+      recentSessionsForHome(englishText, [older, recent, running], [], 2, now).map((row) => row.id),
     ).toEqual(["r", "a"]);
-    expect(groupSessionsForRail([older, recent], now).grouped.map((group) => group.label)).toEqual([
-      "Today",
-      "Older",
-    ]);
+    expect(
+      groupSessionsForRail(englishText, [older, recent], now).grouped.map((group) => group.label),
+    ).toEqual(["Today", "Older"]);
   });
 
   test("home leaves sub-agents to their parent, so they never crowd out conversations", () => {
@@ -97,10 +112,35 @@ describe("session-list-model", () => {
     );
     const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
     expect(
-      recentSessionsForHome([...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
+      recentSessionsForHome(englishText, [...agents, mine, pinnedAgent], [pinnedAgent], 6, now).map(
         (row) => row.id,
       ),
     ).toEqual(["mine"]);
+  });
+
+  test("phone home sections: every pin, then recent work that pins never crowd out", () => {
+    const pins = Array.from({ length: 7 }, (_, index) =>
+      session(`pin-${index}`, { pinned: true, updatedAt: "2026-10-03T11:40:00Z" }),
+    );
+    const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
+    const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
+    const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
+    const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
+    const agent = session("agent", { status: "running", parentSessionId: "a" });
+    const sections = homeSessionSections(
+      englishText,
+      [older, ...pins, recent, agent, running],
+      [...pins, pinnedAgent],
+      15,
+      now,
+    );
+    expect(sections.pinned.map((row) => row.id)).toEqual(pins.map((pin) => pin.id));
+    expect(sections.recent.map((row) => row.id)).toEqual(["r", "a", "b"]);
+    expect(
+      homeSessionSections(englishText, [older, recent, running], [], 2, now).recent.map(
+        (row) => row.id,
+      ),
+    ).toEqual(["r", "a"]);
   });
 
   test("status dot: background commands read as running", () => {

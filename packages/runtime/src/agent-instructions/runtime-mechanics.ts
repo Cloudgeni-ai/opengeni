@@ -106,9 +106,9 @@ export function renderRuntimeMechanics(context: AgentPromptContext): string {
     "## Tool discovery",
     sentences(
       "Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.",
-      "A tool found with `tool_search` stays callable by its exact name for the rest of the session; search again only if its input schema is no longer in context.",
+      "Describe the action, resource and useful context in `tool_search`; it loads the strongest match, with optional decision-model selection for ambiguous searches. Check the match: ranking is not certainty. Native search returns loaded function definitions directly. In ordinary search receipts, `schemasLoaded: true` means `tools` have loaded schemas but `suggestions` are unloaded alternatives; with `schemasLoaded: false`, load chosen exact names with `tool_search({query: '', names: [...]})` before calling them. Known exact names bypass ranking and inference. Once its schema is in context, call the tool by name or through `tool_invoke` where available; do not rediscover it unless its schema is no longer in context.",
       "When you need several capabilities, search for them in parallel `tool_search` calls in the same response, or load known exact names together with `names`; broad searches with small limits can omit a relevant tool.",
-      "If a search misses, use `tool_list` and follow `nextCursor` until the relevant authorized names are covered, then load exact names with `tool_search`.",
+      "Use `tool_list({view: 'groups'})` for a compact directory, then list an exact returned `group`. If search misses, browse the relevant groups and follow `nextCursor` until covered, then load chosen exact names with `tool_search`.",
       "`namePrefix` is a literal tool-name prefix, not a capability keyword; an empty filtered page does not prove the capability is unavailable.",
       "Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.",
     ),

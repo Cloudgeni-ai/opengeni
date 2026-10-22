@@ -54,13 +54,20 @@ diff --git a/src/connection.js b/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -450,7 +469,14 @@
+@@ -447,10 +466,20 @@
+     socket.removeAllListeners()
+     socket = null
+ 
 -    if (initial)
 +    // Only reconnect transparently before any startup query was dispatched.
 +    if (initial && !query)
        return reconnect()
  
-     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // A socket error rejects only the queries it sees. A caller can still queue
++    // one (a failed transaction's rollback) before close; it never reached a
++    // backend, so reject it instead of replaying it on the next connection.
++    if (query || sent.length) error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
 +    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
@@ -70,7 +77,8 @@ diff --git a/src/connection.js b/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -562,4 +588,9 @@
+@@ -561,7 +590,12 @@
+ 
        if (needsTypes) {
          initial.reserve && (initial = null)
 -        return fetchArrayTypes()
@@ -81,6 +89,8 @@ diff --git a/src/connection.js b/src/connection.js
 +          if (socket === startupSocket) error(err)
 +        })
        }
+ 
+       initial && !initial.reserve && execute(initial)
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
@@ -137,13 +147,20 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -450,7 +469,14 @@
+@@ -447,10 +466,20 @@
+     socket.removeAllListeners()
+     socket = null
+ 
 -    if (initial)
 +    // Only reconnect transparently before any startup query was dispatched.
 +    if (initial && !query)
        return reconnect()
  
-     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
+-    !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // A socket error rejects only the queries it sees. A caller can still queue
++    // one (a failed transaction's rollback) before close; it never reached a
++    // backend, so reject it instead of replaying it on the next connection.
++    if (query || sent.length) error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
 +    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
@@ -153,7 +170,8 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
-@@ -562,4 +588,9 @@
+@@ -561,7 +590,12 @@
+ 
        if (needsTypes) {
          initial.reserve && (initial = null)
 -        return fetchArrayTypes()
@@ -164,10 +182,22 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 +          if (socket === startupSocket) error(err)
 +        })
        }
+ 
+       initial && !initial.reserve && execute(initial)
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js
-@@ -210,6 +210,8 @@
+@@ -202,14 +202,17 @@
+ 
+   async function reserve() {
+     const queue = Queue()
++    // Most recently idle first: see handler().
+     const c = open.length
+-      ? open.shift()
++      ? open.pop()
+       : await new Promise((resolve, reject) => {
+         const query = { reserve: resolve, reject }
+         queries.push(query)
          closed.length && connect(closed.shift(), query)
        })
  
@@ -176,7 +206,7 @@ diff --git a/src/index.js b/src/index.js
      move(c, reserved)
      c.reserved = () => queue.length
        ? c.execute(queue.shift())
-@@ -218,6 +220,8 @@
+@@ -218,6 +221,8 @@
  
      const sql = Sql(handler)
      sql.release = () => {
@@ -185,7 +215,7 @@ diff --git a/src/index.js b/src/index.js
        c.reserved = null
        onopen(c)
      }
-@@ -225,6 +229,7 @@
+@@ -225,6 +230,7 @@
      return sql
  
      function handler(q) {
@@ -193,7 +223,7 @@ diff --git a/src/index.js b/src/index.js
        c.queue === full
          ? queue.push(q)
          : c.execute(q) || move(c, full)
-@@ -236,13 +241,17 @@
+@@ -236,13 +242,17 @@
      const queries = Queue()
      let savepoints = 0
        , connection
@@ -212,7 +242,7 @@ diff --git a/src/index.js b/src/index.js
        ])
      } catch (error) {
        throw error
-@@ -289,6 +298,9 @@
+@@ -289,6 +299,9 @@
        }
  
        function handler(q) {
@@ -222,10 +252,36 @@ diff --git a/src/index.js b/src/index.js
          q.catch(e => uncaughtError || (uncaughtError = e))
          c.queue === full
            ? queries.push(q)
+@@ -330,8 +343,14 @@
+     if (ending)
+       return query.reject(Errors.connection('CONNECTION_ENDED', options, options))
+ 
++    // Reuse the most recently idle connection first. Taking the longest idle one
++    // rotates work across every slot, so no connection ever reaches idle_timeout
++    // and the pool stays at max even when one or two queries are in flight; each
++    // backend then pays its own catalog and plan-cache warmup for every
++    // statement. Most-recent-first keeps a small warm set busy and lets the
++    // surplus close after idle_timeout.
+     if (open.length)
+-      return go(open.shift(), query)
++      return go(open.pop(), query)
+ 
+     if (closed.length)
+       return connect(closed.shift(), query)
 diff --git a/cjs/src/index.js b/cjs/src/index.js
 --- a/cjs/src/index.js
 +++ b/cjs/src/index.js
-@@ -210,6 +210,8 @@
+@@ -202,14 +202,17 @@
+ 
+   async function reserve() {
+     const queue = Queue()
++    // Most recently idle first: see handler().
+     const c = open.length
+-      ? open.shift()
++      ? open.pop()
+       : await new Promise((resolve, reject) => {
+         const query = { reserve: resolve, reject }
+         queries.push(query)
          closed.length && connect(closed.shift(), query)
        })
  
@@ -234,7 +290,7 @@ diff --git a/cjs/src/index.js b/cjs/src/index.js
      move(c, reserved)
      c.reserved = () => queue.length
        ? c.execute(queue.shift())
-@@ -218,6 +220,8 @@
+@@ -218,6 +221,8 @@
  
      const sql = Sql(handler)
      sql.release = () => {
@@ -243,7 +299,7 @@ diff --git a/cjs/src/index.js b/cjs/src/index.js
        c.reserved = null
        onopen(c)
      }
-@@ -225,6 +229,7 @@
+@@ -225,6 +230,7 @@
      return sql
  
      function handler(q) {
@@ -251,7 +307,7 @@ diff --git a/cjs/src/index.js b/cjs/src/index.js
        c.queue === full
          ? queue.push(q)
          : c.execute(q) || move(c, full)
-@@ -236,13 +241,17 @@
+@@ -236,13 +242,17 @@
      const queries = Queue()
      let savepoints = 0
        , connection
@@ -270,7 +326,7 @@ diff --git a/cjs/src/index.js b/cjs/src/index.js
        ])
      } catch (error) {
        throw error
-@@ -289,6 +298,9 @@
+@@ -289,6 +299,9 @@
        }
  
        function handler(q) {
@@ -280,3 +336,151 @@ diff --git a/cjs/src/index.js b/cjs/src/index.js
          q.catch(e => uncaughtError || (uncaughtError = e))
          c.queue === full
            ? queries.push(q)
+@@ -330,8 +343,14 @@
+     if (ending)
+       return query.reject(Errors.connection('CONNECTION_ENDED', options, options))
+ 
++    // Reuse the most recently idle connection first. Taking the longest idle one
++    // rotates work across every slot, so no connection ever reaches idle_timeout
++    // and the pool stays at max even when one or two queries are in flight; each
++    // backend then pays its own catalog and plan-cache warmup for every
++    // statement. Most-recent-first keeps a small warm set busy and lets the
++    // surplus close after idle_timeout.
+     if (open.length)
+-      return go(open.shift(), query)
++      return go(open.pop(), query)
+ 
+     if (closed.length)
+       return connect(closed.shift(), query)
+diff --git a/src/queue.js b/src/queue.js
+--- a/src/queue.js
++++ b/src/queue.js
+@@ -15,6 +15,18 @@
+         : (xs.splice(index, 1), x)
+     },
+     push: (x) => (xs.push(x), x),
++    pop: () => {
++      if (xs.length - index === 0)
++        return undefined
++
++      const out = xs.pop()
++      if (index >= xs.length) {
++        index = 0
++        xs = []
++      }
++
++      return out
++    },
+     shift: () => {
+       const out = xs[index++]
+ 
+diff --git a/src/query.js b/src/query.js
+--- a/src/query.js
++++ b/src/query.js
+@@ -23,8 +23,8 @@
+     this.state = null
+     this.statement = null
+
+-    this.resolve = x => (this.active = false, resolve(x))
+-    this.reject = x => (this.active = false, reject(x))
++    this.resolve = x => (this.settled = true, this.active = false, resolve(x))
++    this.reject = x => (this.settled = true, this.active = false, reject(x))
+
+     this.active = false
+     this.cancelled = null
+@@ -50,7 +50,11 @@
+   }
+
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    if (this.cancelPromise) return this.cancelPromise
++    if (this.settled || !this.canceller) return Promise.resolve()
++    const canceller = this.canceller
++    this.canceller = null
++    return this.cancelPromise = canceller(this)
+   }
+
+   simple() {
+@@ -97,8 +101,8 @@
+               return new Promise(r => prev = r)
+             }
+-            this.resolve = () => (this.active = false, resolve({ done: true }))
+-            this.reject = x => (this.active = false, reject(x))
++            this.resolve = () => (this.settled = true, this.active = false, resolve({ done: true }))
++            this.reject = x => (this.settled = true, this.active = false, reject(x))
+           })
+           this.execute()
+           return promise
+         },
+diff --git a/cjs/src/query.js b/cjs/src/query.js
+--- a/cjs/src/query.js
++++ b/cjs/src/query.js
+@@ -23,8 +23,8 @@
+     this.state = null
+     this.statement = null
+
+-    this.resolve = x => (this.active = false, resolve(x))
+-    this.reject = x => (this.active = false, reject(x))
++    this.resolve = x => (this.settled = true, this.active = false, resolve(x))
++    this.reject = x => (this.settled = true, this.active = false, reject(x))
+
+     this.active = false
+     this.cancelled = null
+@@ -50,7 +50,11 @@
+   }
+
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    if (this.cancelPromise) return this.cancelPromise
++    if (this.settled || !this.canceller) return Promise.resolve()
++    const canceller = this.canceller
++    this.canceller = null
++    return this.cancelPromise = canceller(this)
+   }
+
+   simple() {
+@@ -97,8 +101,8 @@
+               return new Promise(r => prev = r)
+             }
+-            this.resolve = () => (this.active = false, resolve({ done: true }))
+-            this.reject = x => (this.active = false, reject(x))
++            this.resolve = () => (this.settled = true, this.active = false, resolve({ done: true }))
++            this.reject = x => (this.settled = true, this.active = false, reject(x))
+           })
+           this.execute()
+           return promise
+         },
+diff --git a/types/index.d.ts b/types/index.d.ts
+--- a/types/index.d.ts
++++ b/types/index.d.ts
+@@ -605,7 +605,7 @@
+     writable(): Promise<Writable>;
+
+     execute(): this;
+-    cancel(): void;
++    cancel(): Promise<void>;
+
+     /**
+      * @deprecated `.stream` has been renamed to `.forEach`
+diff --git a/cjs/src/queue.js b/cjs/src/queue.js
+--- a/cjs/src/queue.js
++++ b/cjs/src/queue.js
+@@ -15,6 +15,18 @@
+         : (xs.splice(index, 1), x)
+     },
+     push: (x) => (xs.push(x), x),
++    pop: () => {
++      if (xs.length - index === 0)
++        return undefined
++
++      const out = xs.pop()
++      if (index >= xs.length) {
++        index = 0
++        xs = []
++      }
++
++      return out
++    },
+     shift: () => {
+       const out = xs[index++]
+ 

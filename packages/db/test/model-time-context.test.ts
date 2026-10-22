@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,
@@ -9,6 +9,7 @@ import {
   getActiveSessionHistoryItems,
   listSessionSystemUpdatesForTurn,
   requestSessionTurnRecovery,
+  markSessionTurnModelTransportHttpOnly,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
@@ -28,7 +29,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close();
   await shared?.release();
-}, 60_000);
+}, 180_000);
 
 // Independent oracle for the rendered wall clock: minute-precision UTC plus
 // the English weekday, computed without the production formatter.
@@ -121,7 +122,22 @@ describe("time context in durable model history", () => {
       ],
     });
 
-    // A replacement attempt reuses the persisted row byte for byte.
+    const transportIdentity = {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId: turn.id,
+      executionGeneration: turn.executionGeneration,
+      attemptId: turn.activeAttemptId!,
+    };
+    expect(
+      await markSessionTurnModelTransportHttpOnly(client.db, {
+        ...transportIdentity,
+        attemptId: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+    expect(await markSessionTurnModelTransportHttpOnly(client.db, transportIdentity)).toBe(true);
+    // A replacement attempt inherits refusal even when a generic recovery
+    // (including worker replacement/failover) knows nothing about transport.
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId, {
       sessionId: session.id,
       turnId: turn.id,
@@ -133,6 +149,8 @@ describe("time context in durable model history", () => {
     const replacement = await claim(grant.workspaceId, session.id);
     expect(replacement.id).toBe(turn.id);
     expect(replacement.executionGeneration).toBe(turn.executionGeneration + 1);
+    expect(replacement.metadata.persistentModelTransportHttpOnly).toBe(true);
+    expect(await markSessionTurnModelTransportHttpOnly(client.db, transportIdentity)).toBe(false);
     expect(await getActiveSessionHistoryItems(client.db, grant.workspaceId, session.id)).toEqual(
       history,
     );
@@ -159,6 +177,7 @@ describe("time context in durable model history", () => {
 
     const turn = await claim(grant.workspaceId, session.id);
     expect(turn.source).toBe("system");
+    expect(turn.metadata.persistentModelTransportHttpOnly).toBeUndefined();
     const [delivered] = await listSessionSystemUpdatesForTurn(
       client.db,
       grant.workspaceId,

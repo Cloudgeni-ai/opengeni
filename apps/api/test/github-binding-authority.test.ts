@@ -14,11 +14,8 @@ import {
   readSignedState,
   stateMaxAgeSeconds,
 } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   githubBindingStatus,

@@ -1,3 +1,4 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { useNavigate } from "@tanstack/react-router";
 
 import {
@@ -6,11 +7,11 @@ import {
   useLearningDefaults,
 } from "@/components/knowledge/knowledge-learning";
 import { useReviewQueue } from "@/components/knowledge/knowledge-review";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { orgLabel } from "@/lib/org";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import { organizationSettingsAccess } from "@/lib/organization-settings-access";
-import { canManageWorkspaceSettings } from "@/lib/permissions";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 
 /**
  * Settings > Agent learning: what agents may change on their own in this
@@ -23,7 +24,7 @@ export function AgentLearningSettingsPage({ workspaceId }: { workspaceId: string
   const workspace = context.workspaces.find((each) => each.id === workspaceId) ?? null;
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   const organizationName = workspace?.accountId
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, workspace.accountId, context.accessContext.accountGrants)
     : null;
   const canManageWorkspace = canManageWorkspaceSettings(
     context.accessContext,

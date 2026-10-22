@@ -10,9 +10,9 @@ import {
   readArtifactLibraryPosition,
   rememberArtifactLibraryPosition,
   useArtifactLibraryPosition,
-} from "./artifact-library-navigation";
-import { defaultArtifactFilters } from "./artifact-catalog";
-import { artifactReturnSearch } from "./routes";
+} from "@opengeni/react/app/lib/artifact-library-navigation";
+import { defaultArtifactFilters } from "@opengeni/react/app/lib/artifact-catalog";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -93,7 +93,7 @@ test("restoration waits for rows, happens once per query and retains pagination"
     loading: boolean;
     count: number;
     pages: number;
-    query?: string;
+    query?: string | undefined;
   }) {
     const position = useArtifactLibraryPosition(client, query, loading, count, pages);
     return <div {...position} />;

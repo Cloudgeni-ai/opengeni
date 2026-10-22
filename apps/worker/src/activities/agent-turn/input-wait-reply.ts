@@ -102,9 +102,16 @@ export async function latestDurableTurnMessageText(
   return null;
 }
 
-/** Tool error the model receives when it waits before answering a person. */
+/**
+ * Tool error the model receives when it waits before answering a person.
+ *
+ * Models with extended thinking often draft the reply inside their thinking
+ * and believe it was sent, then retry the wait unchanged and conclude that a
+ * wait cannot be armed at all. The text therefore names thinking explicitly and
+ * says the reply may share the wait call's response.
+ */
 export const INPUT_WAIT_REPLY_REFUSAL =
-  "wait_for_input was not registered: this turn answers a person's message and you have not written a visible reply yet. Your reasoning is not shown to them. Write your answer to their message as normal assistant text now, then call wait_for_input again. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
+  "wait_for_input was not registered: this turn answers a person's message and you have not written a visible reply yet. Your reasoning is not shown to them: text inside a thinking or reasoning block does not count, even when it is written as an answer. Write your answer to their message as a normal assistant text block (it may be in the same response, before the wait_for_input call), then call wait_for_input again. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
 
 /**
  * Refusals per turn attempt (one worker activity); a resumed or retried

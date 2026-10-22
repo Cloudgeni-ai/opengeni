@@ -152,7 +152,77 @@ describe("local Site Codemode handler", () => {
       ],
     ]);
   });
-  test("forwards configuration and control routes for normal API authorization", async () => {
+  test("forwards only Site operations from the page, marked as a preview frame", async () => {
+    const forwarded: string[] = [];
+    const frames: Array<{ marker: string | null; frameId: string | null }> = [];
+    const client = new CodemodeClient({
+      baseUrl: "http://upstream.test",
+      token: "test",
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        forwarded.push(String(input));
+        const headers = new Headers(init?.headers);
+        frames.push({
+          marker: headers.get("x-opengeni-site-frame"),
+          frameId: headers.get("x-opengeni-site-frame-id"),
+        });
+        return Response.json({ ok: true });
+      }) as typeof fetch,
+    });
+    const handler = createCodemodeSiteRequestHandler(client);
+    for (const [method, path] of [
+      ["PUT", "/v1/workspaces/site-host/sessions/one/tool-policy"],
+      ["PUT", "/v1/workspaces/site-host/sessions/one/visibility"],
+      ["POST", "/v1/workspaces/site-host/sessions/one/forks"],
+      ["GET", "/v1/workspaces/site-host/api-keys"],
+      ["POST", "/v1/workspaces/site-host/scheduled-tasks"],
+      ["POST", "/v1/workspaces/site-host/scheduled-tasks/task/trigger"],
+      ["POST", "/v1/workspaces/site-host/automations/sources"],
+      ["POST", "/v1/workspaces/site-host/connect/attempts"],
+      ["GET", "/v1/workspaces/site-host/sessions"],
+      ["GET", "/v1/workspaces/site-host/published-artifacts/current/data"],
+    ] as const) {
+      const response = await handler(
+        new Request(`http://localhost/__opengeni/site-tools/sdk${path}`, {
+          method,
+          ...(method === "GET" ? {} : { body: "{}" }),
+        }),
+      );
+      expect(response.status).toBe(404);
+    }
+    expect(forwarded).toHaveLength(0);
+    for (const [method, path] of [
+      ["POST", "/v1/workspaces/site-host/sessions/one/steer"],
+      ["POST", "/v1/workspaces/site-host/sessions/one/control"],
+      ["POST", "/v1/workspaces/site-host/sessions/one/events"],
+    ] as const) {
+      const response = await handler(
+        new Request(`http://localhost/__opengeni/site-tools/sdk${path}`, {
+          method,
+          body: "{}",
+          // A page cannot choose its own frame identity.
+          headers: { "x-opengeni-site-frame-id": "forged", "x-opengeni-site-id": "forged" },
+        }),
+      );
+      expect(response.status).toBe(200);
+      expect(forwarded.at(-1)).toBe(`http://upstream.test/sdk${path}`);
+    }
+    expect(forwarded).toHaveLength(3);
+    const allowed = await handler(
+      new Request(
+        "http://localhost/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions?originSiteId=current",
+      ),
+    );
+    expect(allowed.status).toBe(200);
+    expect(forwarded.at(-1)).toBe(
+      "http://upstream.test/sdk/v1/workspaces/site-host/sessions?originSiteId=current",
+    );
+    expect(new Set(frames.map((frame) => frame.marker))).toEqual(new Set(["preview"]));
+    const frameIds = new Set(frames.map((frame) => frame.frameId));
+    expect(frameIds.size).toBe(1);
+    expect([...frameIds][0]).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  test("an agent's own SDK requests keep the workspace prefix boundary", async () => {
     const forwarded: string[] = [];
     const client = new CodemodeClient({
       baseUrl: "http://upstream.test",
@@ -162,30 +232,16 @@ describe("local Site Codemode handler", () => {
         return Response.json({ ok: true });
       }) as typeof fetch,
     });
-    const handler = createCodemodeSiteRequestHandler(client);
-    for (const [method, path] of [
-      ["PUT", "/v1/workspaces/site-host/sessions/one/tool-policy"],
-      ["PUT", "/v1/workspaces/site-host/sessions/one/visibility"],
-      ["POST", "/v1/workspaces/site-host/sessions/one/forks"],
-      ["POST", "/v1/workspaces/site-host/sessions/one/steer"],
-      ["POST", "/v1/workspaces/site-host/sessions/one/control"],
-      ["GET", "/v1/workspaces/site-host/api-keys"],
-    ] as const) {
-      const response = await handler(
-        new Request(`http://localhost/__opengeni/site-tools/sdk${path}`, {
-          method,
-          ...(method === "GET" ? {} : { body: "{}" }),
-        }),
-      );
-      expect(response.status).toBe(200);
-      expect(forwarded.at(-1)).toBe(`http://upstream.test/sdk${path}`);
-    }
-    expect(forwarded).toHaveLength(6);
-    const allowed = await handler(
-      new Request("http://localhost/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions"),
-    );
-    expect(allowed.status).toBe(200);
-    expect(forwarded.at(-1)).toBe("http://upstream.test/sdk/v1/workspaces/site-host/sessions");
+    await client.sessionRequest("/v1/workspaces/site-host/connect/attempts", {
+      method: "POST",
+      body: "{}",
+    });
+    expect(forwarded).toEqual([
+      "http://upstream.test/sdk/v1/workspaces/site-host/connect/attempts",
+    ]);
+    await expect(
+      client.sessionRequest("/v1/workspaces/other/sessions", { method: "GET" }),
+    ).rejects.toThrow("Unsupported");
   });
 
   test("SDK event streams deliver before completion and retain cancellation", async () => {

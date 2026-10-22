@@ -5,14 +5,18 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, isValidElement } from "react";
 import { createRoot } from "react-dom/client";
 
-import { Sheet } from "@/components/ui/sheet";
-import type { AccessContext, ConnectionMetadata, SlackInstallationBinding } from "@/types";
+import { Sheet } from "@opengeni/react/ui/sheet";
+import type {
+  AccessContext,
+  ConnectionMetadata,
+  SlackInstallationBinding,
+} from "@opengeni/react/app/types";
 import { IntegrationSheetBody } from "./integration-sheet";
 import type {
   IntegrationChoiceOption,
   IntegrationToggleOption,
   IntegrationViewModel,
-} from "./integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
@@ -20,7 +24,7 @@ const PERSONAL_CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 
 // The adapter reads everything through the app context; swap it per case.
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => {
     const client = mutableContext.current.client as Record<string, unknown>;
     client.listAvailableOpenGeniSlackBots ??= async () => ({
@@ -44,7 +48,7 @@ mock.module("@/context", () => ({
 
 // Radix portals do not mount under happy-dom; render dialog frames inline so
 // the reaction-channel dialog's real body can be exercised.
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open?: boolean; children?: React.ReactNode }) =>
     open ? <div data-dialog>{children}</div> : null,
   DialogContent: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
@@ -214,7 +218,7 @@ function optionById(model: IntegrationViewModel, id: string) {
 
 test("an organization administrator can explicitly share the installed bot", async () => {
   const { bot, binding } = installedBot();
-  const permissions = ["connections:read", "connections:write"];
+  const permissions = ["connections:read", "connections:write", "capabilities:manage"];
   const context = appContext(permissions);
   const access = accessContext(permissions);
   access.accountGrants = [
@@ -282,7 +286,7 @@ test("workspace administrators can see organization sharing but cannot change it
 test("an organization administrator can disable sharing while the bot needs reconnecting", async () => {
   const { bot, binding } = installedBot();
   bot.status = "needs_reauth";
-  const permissions = ["connections:read", "connections:write"];
+  const permissions = ["connections:read", "connections:write", "capabilities:manage"];
   const context = appContext(permissions);
   const access = accessContext(permissions);
   access.accountGrants = [
@@ -501,43 +505,28 @@ describe("useSlackIntegration model selection and gating", () => {
     }
   });
 
-  test("connections:write member sees the bot model with admin-only options disabled", async () => {
+  test("connections:write Member gets their own Slack view, not the workspace bot", async () => {
     const { bot, binding } = installedBot();
     const rendered = await renderAdapter({
-      permissions: ["connections:write"],
+      permissions: ["connections:read", "connections:write"],
       connections: [bot],
       bindings: [binding],
     });
     try {
       const { model } = rendered;
-      // The bot model, not the personal one: install/reconnect/disconnect need
-      // only connection management permission.
-      expect(model.connection.some((fact) => fact.value.includes("CloudGeni"))).toBe(true);
-      expect(model.chip.label).toBe("Connected");
-      expect(model.footer.kind).toBe("connected");
-      if (model.footer.kind === "connected") {
-        expect(model.footer.reconnectDisabled).toBeFalsy();
-        expect(model.footer.disconnectDisabled).toBeFalsy();
-      }
-      const reaction = optionById(model, "slack-reaction") as IntegrationToggleOption;
-      expect(reaction.disabled).toBe(true);
-      expect(reaction.action).toBeUndefined();
-      const destination = optionById(
-        model,
-        "slack-knowledge-destination",
-      ) as IntegrationChoiceOption;
-      expect(destination.disabled).toBe(true);
-      const publication = optionById(model, "slack-publication") as IntegrationToggleOption;
-      expect(publication.disabled).toBe(true);
-      expect(publication.action).toBeUndefined();
+      // Installing, reconnecting or disconnecting the workspace bot is integration
+      // administration (capabilities:manage); a Member connects their own account.
+      expect(model.chip.label).not.toBe("Connected");
+      expect(model.footer.kind).not.toBe("connected");
+      expect(model.options).toHaveLength(0);
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("connections:write member without a bot can install it", async () => {
+  test("integration manager without a bot can install it", async () => {
     const rendered = await renderAdapter({
-      permissions: ["connections:write"],
+      permissions: ["connections:write", "capabilities:manage"],
       connections: [],
       bindings: [],
     });

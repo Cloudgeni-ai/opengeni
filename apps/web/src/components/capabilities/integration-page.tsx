@@ -9,23 +9,24 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { integrationDisclosureElementId } from "@/components/capabilities/integration-sheet";
-import { ConnectorToolPermissions } from "./connector-tool-permissions";
+import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {
   INTEGRATION_LOCKED_SENTENCE,
   type IntegrationAccess,
   type IntegrationFooter,
   type IntegrationOption,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Select } from "@opengeni/react/ui/select";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    The page for an integration Opengeni runs itself (Slack bot, GitHub, Google
@@ -45,7 +46,11 @@ export function IntegrationPage({
   onBack,
   backLabel,
   setupLabel,
+  compactSettings = false,
+  children,
 }: {
+  children?: ReactNode;
+  compactSettings?: boolean;
   model: IntegrationViewModel;
   onBack: () => void;
   backLabel?: string;
@@ -79,7 +84,10 @@ export function IntegrationPage({
           items={
             about
               ? [
-                  { label: "Connected to", value: about.title },
+                  {
+                    label: compactSettings ? "Slack workspace" : "Connected to",
+                    value: about.title,
+                  },
                   ...model.connection
                     .filter((fact) => fact.label === "Installed")
                     .map((fact) => ({ label: fact.label, value: fact.value })),
@@ -143,9 +151,10 @@ export function IntegrationPage({
         ) : null}
       </DetailSection>
 
+      {children}
       {model.presentation?.routing ? (
         <DetailSection
-          title="Where work starts"
+          title={compactSettings ? "Work started from Slack" : "Where work starts"}
           description={model.presentation.routing.description}
           action={
             model.presentation.routing.action ? (
@@ -171,13 +180,23 @@ export function IntegrationPage({
       ) : null}
 
       {model.options.length > 0 ? (
-        <DetailSection title="Settings">
-          <SettingRowGroup className="-my-3">
-            {model.options.map((option) => (
-              <OptionRow key={option.id} option={option} />
-            ))}
-          </SettingRowGroup>
-        </DetailSection>
+        compactSettings ? (
+          <Disclosure title="More settings">
+            <SettingRowGroup>
+              {model.options.map((option) => (
+                <OptionRow key={option.id} option={option} />
+              ))}
+            </SettingRowGroup>
+          </Disclosure>
+        ) : (
+          <DetailSection title="Settings">
+            <SettingRowGroup className="-my-3">
+              {model.options.map((option) => (
+                <OptionRow key={option.id} option={option} />
+              ))}
+            </SettingRowGroup>
+          </DetailSection>
+        )
       ) : null}
 
       {model.disclosures && model.disclosures.length > 0 ? (
@@ -428,7 +447,7 @@ function AccessSection({ access }: { access: IntegrationAccess }) {
   );
 }
 
-function OptionRow({ option }: { option: IntegrationOption }) {
+export function OptionRow({ option }: { option: IntegrationOption }) {
   let control: ReactNode = null;
   if (option.kind === "toggle") {
     control = (

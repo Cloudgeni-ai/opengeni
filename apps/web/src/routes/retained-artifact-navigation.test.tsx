@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -14,12 +15,16 @@ const sessionId = "cf39f8d3-673f-43c0-9f98-c2787fdcf84e";
 const artifactId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const context = {
   accessKeyVersion: 0,
+  // The file page reads the workspace to show who can open the file.
+  workspaces: [{ id: workspaceId, accountId: "account", kind: "shared", name: "Design" }],
+  managedSelfContext: null,
+  accessContext: null,
   client: {
     getRetainedArtifact: async () => ({ artifactId, available: true, contentType: "text/plain" }),
     getFile: async () => ({ id: artifactId, workspaceId, filename: "notes.txt" }),
   },
 };
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 beforeAll(() => {
   GlobalRegistrator.register({ url: "https://example.test" });
   (
@@ -30,7 +35,7 @@ afterAll(() => GlobalRegistrator.unregister());
 
 for (const fromSession of [undefined, sessionId]) {
   test(`real retained route back link preserves return context ${fromSession ?? "absent"}`, async () => {
-    const { RetainedArtifactRoute } = await import("./retained-artifact");
+    const { RetainedArtifactRoute } = await import("@opengeni/react/app/routes/retained-artifact");
     const route = createRootRoute({
       component: () => (
         <RetainedArtifactRoute
@@ -53,6 +58,8 @@ for (const fromSession of [undefined, sessionId]) {
         root.render(<RouterProvider router={router} />);
       });
       expect(container.textContent).toContain("notes.txt");
+      // Nothing to look at: a link opens the file's page, where Download is.
+      expect(document.body.querySelector("[data-artifact-fullscreen]")).toBeNull();
       const links = [...container.querySelectorAll("a")].filter(
         (link) => link.textContent?.trim() === "Artifacts",
       );

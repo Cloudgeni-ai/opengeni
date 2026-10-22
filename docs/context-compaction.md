@@ -369,6 +369,12 @@ rewrite of the chat transcript. The React timeline projects a first-class
 | `session.context.compacted` | `compacted` with optional `~before → ~after estimated history tokens` |
 | `session.context.compaction.skipped` | `skipped` with a short reason |
 
+A `skipped` landmark with `reason="interrupted"` means the attempt itself was
+cancelled while the checkpoint request was in flight (typically a worker
+draining during a deploy). It renders as "Compaction interrupted" with retry
+copy rather than as a failure; the recovered attempt compacts again if the
+history still needs it.
+
 Start and finish for the same turn settle in place (one landmark). The landmark
 is a turn boundary, so mid-turn auto-compact stays visible between collapsed
 pre/post activity instead of vanishing inside a chevron. Copy always reminds
@@ -424,6 +430,12 @@ with silently trimmed input and does not install a mechanical fallback summary.
 Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,
 and an explicit `/compact` request remains pending for that same-turn retry.
+The attempt's own cancellation (worker shutdown or another activity
+cancellation) is neither: it records
+`session.context.compaction.skipped(reason="interrupted")` when the attempt can
+still write, keeps any `/compact` request pending, and propagates the
+cancellation to the ordinary same-turn recovery path (see
+[`run-lifecycle.md`](run-lifecycle.md)).
 When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that

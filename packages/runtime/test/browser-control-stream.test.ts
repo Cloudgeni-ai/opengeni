@@ -141,6 +141,51 @@ test("oversized request is rejected before command execution", () => {
   ).toThrow("input is too large");
 });
 
+test("a Windows machine gets a PowerShell relay to the system curl, with no POSIX shell or /tmp", async () => {
+  const request = controllerStreamRequest({
+    method: "POST",
+    url: "http://127.0.0.1:1234/fixture",
+    token,
+    body: "{}",
+    timeoutMs: 1000,
+    maxBytes: 100,
+    host: "windows",
+  });
+  expect(request.shell).toBe("powershell");
+  // One argv element on a Windows command line: double quotes are not
+  // reliably preserved there, and authority stays on stdin.
+  expect(request.cmd).not.toContain('"');
+  expect(request.cmd).not.toContain(token);
+  expect(request.cmd).toContain("curl.exe");
+  expect(request.cmd).toContain(request.marker);
+  expect(Buffer.from(request.stdin).toString()).toContain(`Bearer ${token}`);
+
+  const seen: Array<{ shell: string; workdir: string }> = [];
+  const client = new BrowserControlClient(
+    {
+      controllerHostOs: () => "windows",
+      async ensureBrowserControl() {
+        return { port: 12345 };
+      },
+      async execWithInput(args) {
+        seen.push({ shell: args.shell, workdir: args.workdir });
+        return {
+          stdout: frame(
+            "HTTP/1.1 200 OK\r\n\r\n",
+            Buffer.from('{"protocolVersion":1,"ok":true,"data":7}'),
+            "0",
+            request.marker,
+          ),
+          exitCode: 0,
+        };
+      },
+    },
+    { adminToken: token, nativeAuthority: { scopeId: "synthetic", scopeGeneration: "generation" } },
+  );
+  expect(await client.requestForSession({ method: "GET", path: "/fixture", token })).toBe(7);
+  expect(seen).toEqual([{ shell: "powershell", workdir: "." }]);
+});
+
 test("reconstructed transport accepts the original command's retained output", () => {
   const input = {
     method: "GET",

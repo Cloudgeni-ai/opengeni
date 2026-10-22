@@ -22,7 +22,7 @@
 //      function owner - the FORCE-RLS no-op trap that a
 //      superuser-migrating harness cannot otherwise catch.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   backfillOrganizationSessionOwnership,

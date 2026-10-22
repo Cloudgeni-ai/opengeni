@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
@@ -27,6 +27,8 @@ describe("migration 0189 retained session image formats", () => {
         from pg_constraint
         where conrelid = 'retained_screenshot_artifacts'::regclass
           and conname like 'retained_screenshot_artifacts_media_type%'
+          -- PostgreSQL 18 also lists column NOT NULL constraints here.
+          and contype <> 'n'
         order by conname`;
       expect([...constraints]).toEqual([
         {

@@ -1,5 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   directTreeManifest,
   verifyHistoricalSourceAdmission,
@@ -56,6 +59,23 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
       "Typecheck and unit tests",
       "Deployment artifacts",
       "Workload image builds",
+    ]),
+    // A tested-descendant release additionally binds the push run's landed
+    // merge-tree audit and full-green publication jobs to the released tip.
+    fullGreenJobs: Object.freeze(["Verify landed merge content", "Publish fully green main SHA"]),
+    fullGreenStatus: "Full CI",
+  }),
+  // Tested-descendant admission: a Version provenance merge plus a later fully
+  // green first-parent main tip that contains it. Bounds fail closed rather than
+  // truncating evidence; choose a nearer green tip or cut a new Version instead.
+  descendant: Object.freeze({
+    maximumInterveningMerges: 100,
+    maximumComparedCommits: 2000,
+    fullGreenArtifactPrefix: "full-green-main-",
+    canaryImageArtifactPrefix: "canary-images-",
+    supportedProvenanceMergeMethods: Object.freeze([
+      "merge",
+      "provider-verified-moving-main-merge",
     ]),
   }),
 });
@@ -171,6 +191,37 @@ function githubClient(fetchImpl, token) {
     return { status: response.status, value: await response.json() };
   };
   return {
+    artifactBytes: async (id) => {
+      const path = repositoryPath(
+        `/actions/artifacts/${assertPositiveInteger(id, "artifact ID")}/zip`,
+      );
+      let response = await fetchImpl(`${RELEASE_AUTOMATION_CONTRACT.apiUrl}${path}`, {
+        redirect: "manual",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "opengeni-release-pr-automation",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      });
+      if (response.status === 302) {
+        const location = new URL(
+          assertString(response.headers.get("location"), "artifact download location"),
+        );
+        invariant(location.protocol === "https:", "artifact download must use HTTPS");
+        // The signed storage URL must never receive the GitHub credential.
+        response = await fetchImpl(location.href, { redirect: "error" });
+      }
+      invariant(response.ok === true && response.body, "artifact download failed");
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of response.body) {
+        size += chunk.byteLength;
+        invariant(size <= 2 * 1024 * 1024, "release receipt archive exceeds 2 MiB");
+        chunks.push(Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    },
     get: async (path) => (await request("GET", path)).value,
     getOptional: async (path) => {
       const result = await request("GET", path, undefined, [404]);
@@ -2040,9 +2091,10 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     };
   }
 
+  const queuedMerge = source.parents.length === 2 && source.parents[1] === pullIdentity.headSha;
   invariant(
-    source.parents.length === 1,
-    "release source tree differs from the exact reviewed head and is not a single-parent moving-main squash",
+    source.parents.length === 1 || queuedMerge,
+    "release source tree differs from the exact reviewed head and is not a moving-main squash or exact-head merge",
   );
   const integrationBaseSha = source.parents[0];
   invariant(
@@ -2085,7 +2137,9 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     "release source tree differs from the exact reviewed moving-main composition",
   );
   return {
-    mergeMethod: "provider-verified-moving-main-squash",
+    mergeMethod: queuedMerge
+      ? "provider-verified-moving-main-merge"
+      : "provider-verified-moving-main-squash",
     sourceComposition: {
       type: "exact-reviewed-delta-on-moving-main",
       integrationBaseSha,
@@ -2096,7 +2150,7 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
   };
 }
 
-function releaseApprovalContext(env, suppliedSourceSha) {
+function releaseApprovalContext(env, suppliedSourceSha, suppliedProvenanceSha) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
     "GITHUB_EVENT_NAME",
@@ -2136,14 +2190,26 @@ function releaseApprovalContext(env, suppliedSourceSha) {
     "release workflow is not running from the retained controller ref",
   );
   invariant(controllerSha !== sourceSha, "release controller must differ from release source");
-  return { controllerSha, sourceSha, token: env.GITHUB_TOKEN };
+  // The Version provenance SHA is explicit and separate from the released
+  // candidate SHA. Omitted or equal means the established exact-source lane.
+  const suppliedProvenance = suppliedProvenanceSha ?? env.RELEASE_PROVENANCE_SHA ?? "";
+  invariant(typeof suppliedProvenance === "string", "Version provenance SHA is invalid");
+  const provenanceSha =
+    suppliedProvenance === "" ? sourceSha : assertSha(suppliedProvenance, "Version provenance SHA");
+  invariant(
+    controllerSha !== provenanceSha,
+    "release controller must differ from the Version provenance",
+  );
+  return {
+    controllerSha,
+    sourceSha,
+    provenanceSha,
+    descendant: provenanceSha !== sourceSha,
+    token: env.GITHUB_TOKEN,
+  };
 }
 
-export async function verifyApprovedMerge(options = {}) {
-  const env = options.env ?? process.env;
-  const logger = options.logger ?? console;
-  const context = releaseApprovalContext(env, options.sourceSha);
-  const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
+async function readRetainedReleaseController(api, context) {
   const controllerTag = releaseHeadTagName(context.controllerSha);
   const [initialMain, controllerValue, controllerRef, controllerReleaseValue] = await Promise.all([
     api.get(repositoryPath("/git/ref/heads/main")),
@@ -2151,6 +2217,8 @@ export async function verifyApprovedMerge(options = {}) {
     api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
     api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
   ]);
+  // The released source (the exact source or the tested descendant tip) must be
+  // retained on protected main before any provenance is trusted.
   const initialMainSha = await assertReleaseMainRef(
     api,
     initialMain,
@@ -2164,28 +2232,34 @@ export async function verifyApprovedMerge(options = {}) {
   );
   assertReleaseHeadRef(controllerRef, context.controllerSha);
   const controllerRelease = assertReleaseHeadRelease(controllerReleaseValue, context.controllerSha);
+  return { initialMainSha, controller, controllerRelease };
+}
+
+// Binds one provider merge result to exactly one merged pull request, its
+// detail projection and its single provider merge event.
+async function readMergedReleasePull(api, mergeSha, label = "release source") {
   const source = assertCommit(
-    await api.get(repositoryPath(`/git/commits/${context.sourceSha}`)),
-    context.sourceSha,
-    "release source commit",
+    await api.get(repositoryPath(`/git/commits/${mergeSha}`)),
+    mergeSha,
+    `${label} commit`,
   );
 
   const pulls = await paginatedArray(
     api,
-    repositoryPath(`/commits/${context.sourceSha}/pulls`),
+    repositoryPath(`/commits/${mergeSha}/pulls`),
     "associated pull requests",
   );
-  invariant(pulls.length === 1, "release source is not associated with exactly one pull request");
+  invariant(pulls.length === 1, `${label} is not associated with exactly one pull request`);
   const associatedPull = record(pulls[0], "associated pull request");
   const pullNumber = assertPositiveInteger(associatedPull.number, "associated pull-request number");
   invariant(
-    associatedPull.merge_commit_sha === context.sourceSha,
+    associatedPull.merge_commit_sha === mergeSha,
     "associated pull summary merge SHA changed",
   );
   const pull = record(await api.get(repositoryPath(`/pulls/${pullNumber}`)), "pull-request detail");
   const pullIdentity = assertMergedPull(pull, {
     pullNumber,
-    sourceSha: context.sourceSha,
+    sourceSha: mergeSha,
   });
   invariant(
     associatedPull.base?.sha === pullIdentity.baseSha &&
@@ -2197,7 +2271,858 @@ export async function verifyApprovedMerge(options = {}) {
     repositoryPath(`/issues/${pullNumber}/timeline`),
     "pull-request timeline",
   );
-  assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
+  assertProviderMergeEvent(timeline, mergeSha, pullIdentity);
+  return { source, pull, pullNumber, pullIdentity };
+}
+
+function mergedSourceReview(pullNumber, sourceSha, pullIdentity) {
+  const reviewUrl =
+    `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+    `/pull/${pullNumber}`;
+  return {
+    type: "merged-source",
+    id: pullNumber,
+    url: reviewUrl,
+    evidenceSha256: canonicalSha256({
+      version: 1,
+      kind: "merged-source",
+      repository: RELEASE_AUTOMATION_CONTRACT.repository,
+      pullRequestNumber: pullNumber,
+      sourceSha,
+      reviewedBaseSha: pullIdentity.baseSha,
+      reviewedHeadSha: pullIdentity.headSha,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tested-descendant release admission.
+//
+// The in-house merge batcher lands one true merge commit per PR and fast-forwards
+// main to the exact tested candidate tip. A Version PR is its own singleton
+// batch, but its own push CI may be coalesced or fail transiently, so a later
+// fully green main tip that contains the Version merge must be releasable.
+// The Version provenance SHA (the Version PR's own merge commit) keeps every
+// exact reviewed-head/base/source-admission/topology proof; the released
+// candidate SHA owns all CI, image and artifact evidence. Nothing proven for
+// one commit is substituted for the other.
+// ---------------------------------------------------------------------------
+
+function assertVersionProvenancePull(pull) {
+  assertIdentity(
+    pull?.user,
+    RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+    "Version provenance pull-request author",
+  );
+  invariant(
+    pull?.head?.ref === RELEASE_AUTOMATION_CONTRACT.versionBranch,
+    "Version provenance pull request is not from the Version branch",
+  );
+  invariant(
+    pull?.head?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "Version provenance pull request is not from the base repository",
+  );
+}
+
+function descendantCommit(value, index) {
+  const sha = assertSha(value?.sha, `descendant commit ${index}`);
+  invariant(Array.isArray(value?.parents), `descendant commit ${sha} parents are missing`);
+  return {
+    sha,
+    treeSha: assertSha(value?.commit?.tree?.sha, `descendant commit ${sha} tree SHA`),
+    parents: value.parents.map((parent, parentIndex) =>
+      assertSha(parent?.sha, `descendant commit ${sha} parent ${parentIndex}`),
+    ),
+  };
+}
+
+// Complete provider ancestry for provenance..candidate in bounded pages. The
+// first-parent walk from the candidate must reach the provenance commit through
+// true two-parent merges only: direct pushes, squashes, octopus merges and a
+// provenance reachable only through a side branch all fail closed.
+async function readDescendantFirstParentMerges(api, provenanceSha, candidateSha) {
+  const limits = RELEASE_AUTOMATION_CONTRACT.descendant;
+  const maximumComparePages = Math.ceil(limits.maximumComparedCommits / recordsPerPage);
+  const commits = [];
+  let totalCommits;
+  for (let page = 1; page <= maximumComparePages; page += 1) {
+    const value = await api.get(
+      repositoryPath(
+        `/compare/${provenanceSha}...${candidateSha}?per_page=${recordsPerPage}&page=${page}`,
+      ),
+    );
+    invariant(
+      value?.status === "ahead",
+      "release candidate is not strictly ahead of the Version provenance",
+    );
+    invariant(
+      value?.base_commit?.sha === provenanceSha && value?.merge_base_commit?.sha === provenanceSha,
+      "release candidate does not retain the Version provenance as its exact ancestor",
+    );
+    invariant(value?.behind_by === 0, "release candidate is behind the Version provenance");
+    invariant(
+      Number.isSafeInteger(value?.total_commits) &&
+        value.total_commits > 0 &&
+        value.ahead_by === value.total_commits,
+      "descendant ancestry comparison is incomplete",
+    );
+    invariant(
+      value.total_commits <= limits.maximumComparedCommits,
+      `release candidate is more than ${limits.maximumComparedCommits} commits beyond the Version provenance; choose a nearer fully green tip`,
+    );
+    totalCommits ??= value.total_commits;
+    invariant(
+      value.total_commits === totalCommits,
+      "descendant ancestry comparison changed during pagination",
+    );
+    invariant(Array.isArray(value.commits), "descendant ancestry commits are missing");
+    commits.push(...value.commits);
+    if (commits.length >= totalCommits) break;
+    invariant(
+      value.commits.length === recordsPerPage,
+      "descendant ancestry comparison is incomplete",
+    );
+  }
+  invariant(
+    commits.length === totalCommits,
+    "descendant ancestry comparison does not contain the complete commit range",
+  );
+  const bySha = new Map();
+  for (const [index, value] of commits.entries()) {
+    const commit = descendantCommit(value, index);
+    invariant(!bySha.has(commit.sha), "descendant ancestry comparison has a duplicate commit");
+    bySha.set(commit.sha, commit);
+  }
+  invariant(
+    !bySha.has(provenanceSha) && bySha.has(candidateSha),
+    "descendant ancestry comparison does not terminate at the release candidate",
+  );
+  const chain = [];
+  for (let current = candidateSha; current !== provenanceSha;) {
+    const commit = bySha.get(current);
+    invariant(
+      commit !== undefined,
+      "Version provenance is not on the release candidate's first-parent main history",
+    );
+    invariant(
+      commit.parents.length === 2,
+      `intervening first-parent commit ${current} is not a two-parent merge`,
+    );
+    chain.push(commit);
+    invariant(
+      chain.length <= limits.maximumInterveningMerges,
+      `release candidate is more than ${limits.maximumInterveningMerges} merges beyond the Version provenance; choose a nearer fully green tip`,
+    );
+    current = commit.parents[0];
+  }
+  return chain.reverse();
+}
+
+// Every intervening merge must be the provider merge result of exactly one PR
+// merged into main whose exact head is the merge's second parent. A newer
+// Version PR in the range makes the requested provenance stale.
+async function verifyInterveningMergePull(api, merge) {
+  const pulls = await paginatedArray(
+    api,
+    repositoryPath(`/commits/${merge.sha}/pulls`),
+    "intervening merge associated pull requests",
+  );
+  invariant(
+    pulls.length === 1,
+    `intervening merge ${merge.sha} is not associated with exactly one pull request`,
+  );
+  const pull = record(pulls[0], "intervening merge pull request");
+  const number = assertPositiveInteger(pull.number, "intervening pull-request number");
+  invariant(
+    pull.merge_commit_sha === merge.sha,
+    `intervening merge ${merge.sha} is not the provider merge result of PR #${number}`,
+  );
+  invariant(pull.state === "closed", `intervening PR #${number} is not closed`);
+  assertTimestamp(pull.merged_at, `intervening PR #${number} merge timestamp`);
+  invariant(
+    pull.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
+      pull.base?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    `intervening PR #${number} did not merge into protected main`,
+  );
+  invariant(
+    pull.head?.sha === merge.parents[1],
+    `intervening merge ${merge.sha} does not retain PR #${number}'s exact head`,
+  );
+  invariant(
+    pull.head?.ref !== RELEASE_AUTOMATION_CONTRACT.versionBranch,
+    `intervening merge ${merge.sha} lands competing Version PR #${number}; release that newer Version provenance instead`,
+  );
+  return Object.freeze({
+    sha: merge.sha,
+    treeSha: merge.treeSha,
+    parents: Object.freeze([...merge.parents]),
+    pullRequestNumber: number,
+    headSha: merge.parents[1],
+  });
+}
+
+const pendingChangesetPattern = /^\.changeset\/[^/]+\.md$/;
+
+// Released bytes must still carry the exact reviewed Version content: every
+// path the Version PR changed keeps its reviewed leaf, and no later changeset
+// makes the Version stale.
+async function verifyVersionContentRetained(api, base, head, candidate) {
+  const [baseTree, headTree, candidateTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${base.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${candidate.treeSha}?recursive=1`)),
+  ]);
+  const reviewed = directTreeManifest(
+    canonicalReleaseLeafMap(baseTree, base.treeSha, "reviewed Version base tree"),
+    canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed Version head tree"),
+  );
+  invariant(reviewed.length > 0, "reviewed Version tree delta is empty");
+  const released = canonicalReleaseLeafMap(
+    candidateTree,
+    candidate.treeSha,
+    "release candidate tree",
+  );
+  for (const entry of reviewed) {
+    invariant(
+      JSON.stringify(released.get(entry.path) ?? null) === JSON.stringify(entry.after),
+      `release candidate changes reviewed Version content at ${entry.path}`,
+    );
+  }
+  for (const path of released.keys()) {
+    invariant(
+      !pendingChangesetPattern.test(path) || path === ".changeset/README.md",
+      `release candidate has a pending changeset after the Version provenance: ${path}`,
+    );
+  }
+  return Object.freeze({
+    reviewedPathCount: reviewed.length,
+    reviewedManifestSha256: treeManifestSha256(reviewed),
+  });
+}
+
+function gitAuditCommand(gitDir, args) {
+  const result = spawnSync("git", args, {
+    cwd: gitDir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_NO_REPLACE_OBJECTS: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_OPTIONAL_LOCKS: "0",
+      LC_ALL: "C",
+    },
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 120_000,
+  });
+  invariant(result.error === undefined, `git ${args[0]} could not run`);
+  return { status: result.status, stdout: result.stdout.trim() };
+}
+
+function gitAuditOutput(gitDir, args, message) {
+  const result = gitAuditCommand(gitDir, args);
+  invariant(result.status === 0, message);
+  return result.stdout;
+}
+
+/**
+ * Independently recompute every first-parent merge from the Version provenance
+ * through the released candidate with `git merge-tree`, using local Git objects
+ * fetched as data. Hand-resolved, conflicting, single-parent or octopus commits
+ * and a provenance off the candidate's first-parent chain fail closed.
+ */
+export function auditDescendantMergeContent({
+  gitDir,
+  provenanceSha,
+  candidateSha,
+  maximumMerges = RELEASE_AUTOMATION_CONTRACT.descendant.maximumInterveningMerges,
+}) {
+  assertString(gitDir, "descendant Git directory");
+  assertSha(provenanceSha, "Version provenance SHA");
+  assertSha(candidateSha, "release candidate SHA");
+  invariant(provenanceSha !== candidateSha, "release candidate equals the Version provenance");
+  invariant(
+    gitAuditOutput(
+      gitDir,
+      ["rev-parse", "--is-shallow-repository"],
+      "descendant Git history is unavailable",
+    ) === "false",
+    "descendant Git history is shallow",
+  );
+  for (const sha of [provenanceSha, candidateSha]) {
+    invariant(
+      gitAuditOutput(gitDir, ["cat-file", "-t", sha], `descendant Git object ${sha} is missing`) ===
+        "commit",
+      `descendant Git object ${sha} is not a commit`,
+    );
+  }
+  invariant(
+    gitAuditCommand(gitDir, ["merge-base", "--is-ancestor", provenanceSha, candidateSha]).status ===
+      0,
+    "release candidate does not contain the Version provenance commit",
+  );
+  const descendants = gitAuditOutput(
+    gitDir,
+    ["rev-list", "--first-parent", "--reverse", `${provenanceSha}..${candidateSha}`],
+    "descendant first-parent history is unavailable",
+  )
+    .split("\n")
+    .filter(Boolean);
+  invariant(
+    descendants.length > 0 && descendants.length <= maximumMerges,
+    "descendant first-parent history length is outside the admitted bound",
+  );
+  invariant(
+    descendants.at(-1) === candidateSha,
+    "descendant history does not end at the candidate",
+  );
+  const merges = [];
+  let expectedFirstParent = null;
+  for (const sha of [provenanceSha, ...descendants]) {
+    assertSha(sha, "descendant first-parent commit");
+    const parents = gitAuditOutput(
+      gitDir,
+      ["rev-list", "--parents", "-n", "1", sha],
+      `descendant commit ${sha} parents are unavailable`,
+    )
+      .split(" ")
+      .slice(1);
+    invariant(
+      parents.length === 2,
+      `descendant first-parent commit ${sha} is not a two-parent merge`,
+    );
+    if (expectedFirstParent !== null) {
+      invariant(
+        parents[0] === expectedFirstParent,
+        "Version provenance is not on the release candidate's first-parent main history",
+      );
+    }
+    const recomputed = gitAuditCommand(gitDir, [
+      "merge-tree",
+      "--write-tree",
+      "--no-messages",
+      parents[0],
+      parents[1],
+    ]);
+    invariant(
+      recomputed.status === 0,
+      `landed merge ${sha} cannot be recomputed without conflict resolution`,
+    );
+    const expectedTree = recomputed.stdout.split("\n")[0];
+    const treeSha = gitAuditOutput(
+      gitDir,
+      ["rev-parse", `${sha}^{tree}`],
+      `descendant commit ${sha} tree is unavailable`,
+    );
+    invariant(
+      expectedTree === treeSha,
+      `landed merge content mismatch at ${sha}: expected ${expectedTree}, got ${treeSha}`,
+    );
+    merges.push({ sha, parents, treeSha });
+    expectedFirstParent = sha;
+  }
+  return { schemaVersion: 1, provenanceSha, candidateSha, merges };
+}
+
+function mergeListSha256(merges) {
+  const text = merges
+    .map(({ sha, parents, treeSha }) => `${sha}\t${parents.join(",")}\t${treeSha}`)
+    .join("\n");
+  return createHash("sha256").update(`${text}\n`).digest("hex");
+}
+
+// The local merge-tree audit must describe exactly the provider-proven chain.
+function verifyMergeContentAudit(value, provenance, interveningMerges, candidateSha) {
+  const audit = record(value, "descendant merge-content audit");
+  invariant(audit.schemaVersion === 1, "descendant merge-content audit schema changed");
+  invariant(
+    audit.provenanceSha === provenance.sha && audit.candidateSha === candidateSha,
+    "descendant merge-content audit covers another range",
+  );
+  invariant(Array.isArray(audit.merges), "descendant merge-content audit merges are missing");
+  const expected = [provenance, ...interveningMerges];
+  invariant(
+    audit.merges.length === expected.length,
+    "descendant merge-content audit differs from provider first-parent history",
+  );
+  for (const [index, merge] of expected.entries()) {
+    const audited = record(audit.merges[index], "descendant merge-content audit entry");
+    invariant(
+      audited.sha === merge.sha &&
+        audited.treeSha === merge.treeSha &&
+        Array.isArray(audited.parents) &&
+        audited.parents.length === merge.parents.length &&
+        audited.parents.every((parent, parentIndex) => parent === merge.parents[parentIndex]),
+      `descendant merge-content audit differs from provider evidence at ${merge.sha}`,
+    );
+  }
+  return Object.freeze({
+    method: "git-merge-tree-write-tree",
+    auditedMergeCount: expected.length,
+    mergesSha256: mergeListSha256(expected),
+  });
+}
+
+function fullGreenAttemptUrl(runId, runAttempt) {
+  return (
+    `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+    `/actions/runs/${runId}/attempts/${runAttempt}`
+  );
+}
+
+// The fully green receipt is the GitHub Actions bot's `Full CI` commit status
+// linking the exact authoritative push-run attempt. Queue/batch readiness never
+// substitutes, and a foreign or conflicting `Full CI` status fails closed.
+async function verifyFullGreenStatus(api, sha, runId, runAttempt) {
+  const context = RELEASE_AUTOMATION_CONTRACT.checks.fullGreenStatus;
+  const statuses = await paginatedArray(
+    api,
+    repositoryPath(`/commits/${sha}/statuses`),
+    "commit statuses",
+  );
+  const selected = statuses.filter((status) => status?.context === context);
+  invariant(selected.length > 0, `${context} status is missing on ${sha}`);
+  const runPrefix = `${fullGreenAttemptUrl(runId, "")}`;
+  const parsed = selected.map((status) => {
+    const creator = assertIdentity(
+      status?.creator,
+      RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+      `${context} status creator`,
+    );
+    invariant(
+      creator.login === RELEASE_AUTOMATION_CONTRACT.versionAuthor.login,
+      `${context} status was not created by the GitHub Actions bot`,
+    );
+    const targetUrl = assertString(status?.target_url, `${context} status target URL`);
+    invariant(
+      targetUrl.startsWith(runPrefix) &&
+        positiveIntegerPattern.test(targetUrl.slice(runPrefix.length)),
+      `${context} status references another workflow run`,
+    );
+    return {
+      id: assertPositiveInteger(status?.id, `${context} status ID`),
+      state: status?.state,
+      targetUrl,
+      createdAt: assertTimestamp(status?.created_at, `${context} status timestamp`),
+    };
+  });
+  parsed.sort((left, right) => right.createdAt - left.createdAt || right.id - left.id);
+  const latest = parsed[0];
+  invariant(
+    latest.state === "success" && latest.targetUrl === fullGreenAttemptUrl(runId, runAttempt),
+    `latest ${context} status is not a success for the exact authoritative run attempt`,
+  );
+  return Object.freeze({
+    context,
+    id: latest.id,
+    targetUrl: latest.targetUrl,
+    createdAt: new Date(latest.createdAt).toISOString(),
+  });
+}
+
+function readReceiptArchive(bytes, digest, receiptFile) {
+  invariant(
+    `sha256:${createHash("sha256").update(bytes).digest("hex")}` === digest,
+    "downloaded receipt archive digest differs from GitHub metadata",
+  );
+  const directory = mkdtempSync(join(tmpdir(), "opengeni-release-receipt-"));
+  try {
+    const archive = join(directory, "receipt.zip");
+    writeFileSync(archive, bytes);
+    const list = spawnSync("unzip", ["-Z1", archive], {
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 128 * 1024,
+    });
+    invariant(list.status === 0, "cannot inspect release receipt ZIP");
+    const names = list.stdout.trim().split("\n");
+    const allowed =
+      receiptFile === "canary-images.json" ? [receiptFile, "canary-images.sha256"] : [receiptFile];
+    invariant(
+      names.length === allowed.length &&
+        new Set(names).size === names.length &&
+        names.every((name) => allowed.includes(name)),
+      "release receipt ZIP has unexpected or duplicate members",
+    );
+    const read = (name) => {
+      const result = spawnSync("unzip", ["-p", archive, name], {
+        timeout: 10000,
+        maxBuffer: 128 * 1024,
+      });
+      invariant(result.status === 0, "cannot read release receipt ZIP member");
+      return result.stdout;
+    };
+    const body = read(receiptFile);
+    const receiptSha256 = createHash("sha256").update(body).digest("hex");
+    if (receiptFile === "canary-images.json") {
+      invariant(
+        read("canary-images.sha256").toString("utf8").trim() ===
+          `${receiptSha256}  canary-images.json`,
+        "canary image receipt checksum differs",
+      );
+    }
+    return { receipt: record(JSON.parse(body.toString("utf8")), receiptFile), receiptSha256 };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function verifyReceiptBody(receipt, file, sha, runId, runAttempt) {
+  invariant(receipt.schemaVersion === 1, `${file} schema changed`);
+  if (file === "full-green-main.json") {
+    invariant(
+      receipt.sha === sha && receipt.mode === "full",
+      "full-green receipt names another source or mode",
+    );
+    invariant(
+      assertPositiveInteger(receipt.runId, "full-green receipt run ID") === runId &&
+        assertPositiveInteger(receipt.runAttempt, "full-green receipt attempt") === runAttempt &&
+        receipt.url === fullGreenAttemptUrl(runId, runAttempt),
+      "full-green receipt names another run attempt",
+    );
+    return;
+  }
+  invariant(
+    receipt.source?.sha === sha &&
+      receipt.source?.repository === RELEASE_AUTOMATION_CONTRACT.repository &&
+      receipt.source?.ref === "refs/heads/main",
+    "canary receipt names another source",
+  );
+  invariant(
+    receipt.producer?.workflow === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath &&
+      assertPositiveInteger(receipt.producer?.runId, "canary receipt run ID") === runId &&
+      assertPositiveInteger(receipt.producer?.runAttempt, "canary receipt attempt") === runAttempt,
+    "canary receipt names another run attempt",
+  );
+  invariant(receipt.imageTag === `canary-sha-${sha}`, "canary image tag names another source");
+  assertString(receipt.chartVersion, "canary receipt chart version");
+  for (const role of [
+    "api",
+    "worker",
+    "web",
+    "sandbox",
+    "relay",
+    "artifact-materializer",
+    "artifact-outbox-dispatcher",
+    "desktop",
+  ]) {
+    const image = record(receipt.images?.[role], `canary ${role} image`);
+    invariant(
+      image.repository === `ghcr.io/cloudgeni-ai/opengeni-${role}` &&
+        /^sha256:[0-9a-f]{64}$/.test(image.digest ?? ""),
+      `canary ${role} image identity is invalid`,
+    );
+  }
+}
+
+async function verifyFullGreenArtifacts(api, sha, runId, runAttempt) {
+  const limits = RELEASE_AUTOMATION_CONTRACT.descendant;
+  const attempt = await api.get(repositoryPath(`/actions/runs/${runId}/attempts/${runAttempt}`));
+  invariant(
+    attempt.id === runId &&
+      attempt.run_attempt === runAttempt &&
+      attempt.head_sha === sha &&
+      attempt.status === "completed" &&
+      attempt.conclusion === "success",
+    "receipt attempt identity changed",
+  );
+  const startedAt = assertTimestamp(attempt.run_started_at, "receipt attempt start");
+  const artifacts = [];
+  let totalCount;
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const value = await api.get(
+      repositoryPath(`/actions/runs/${runId}/artifacts?per_page=${recordsPerPage}&page=${page}`),
+    );
+    invariant(
+      Array.isArray(value?.artifacts) && Number.isSafeInteger(value?.total_count),
+      "full-green workflow artifact listing is invalid",
+    );
+    totalCount ??= value.total_count;
+    invariant(value.total_count === totalCount, "full-green artifact listing changed");
+    artifacts.push(...value.artifacts);
+    if (artifacts.length >= totalCount || value.artifacts.length < recordsPerPage) break;
+  }
+  invariant(artifacts.length === totalCount, "full-green workflow artifact listing is incomplete");
+  return Promise.all(
+    [`${limits.fullGreenArtifactPrefix}${sha}`, `${limits.canaryImageArtifactPrefix}${sha}`].map(
+      async (name) => {
+        const selected = artifacts.filter((artifact) => artifact?.name === name);
+        invariant(selected.length === 1, `${name} is not exactly one artifact of run ${runId}`);
+        const artifact = selected[0];
+        invariant(artifact.expired === false, `${name} has expired`);
+        invariant(
+          artifact.workflow_run?.id === runId &&
+            artifact.workflow_run?.head_sha === sha &&
+            artifact.workflow_run?.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+          `${name} is bound to another workflow run or commit`,
+        );
+        const digest = assertString(artifact.digest, `${name} digest`);
+        invariant(/^sha256:[0-9a-f]{64}$/.test(digest), `${name} digest is invalid`);
+        invariant(
+          assertTimestamp(artifact.created_at, `${name} creation`) >= startedAt,
+          `${name} predates the selected CI attempt`,
+        );
+        const file = name.startsWith(limits.fullGreenArtifactPrefix)
+          ? "full-green-main.json"
+          : "canary-images.json";
+        const { receipt, receiptSha256 } = readReceiptArchive(
+          await api.artifactBytes(artifact.id),
+          digest,
+          file,
+        );
+        verifyReceiptBody(receipt, file, sha, runId, runAttempt);
+        return Object.freeze({
+          name,
+          id: assertPositiveInteger(artifact.id, `${name} artifact ID`),
+          digest,
+          receiptSha256,
+        });
+      },
+    ),
+  );
+}
+
+async function verifyTestedDescendantRelease({ options, env, logger, context, api }) {
+  const limits = RELEASE_AUTOMATION_CONTRACT.descendant;
+  let auditMergeContent = options.auditMergeContent;
+  if (auditMergeContent === undefined) {
+    // Fail before any provider read when the merge-tree audit cannot run.
+    requiredEnvironment(env, ["RELEASE_DESCENDANT_GIT_DIR"]);
+    const gitDir = env.RELEASE_DESCENDANT_GIT_DIR;
+    auditMergeContent = (input) => auditDescendantMergeContent({ gitDir, ...input });
+  }
+  const { initialMainSha, controller, controllerRelease } = await readRetainedReleaseController(
+    api,
+    context,
+  );
+  const candidate = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${context.sourceSha}`)),
+    context.sourceSha,
+    "release candidate commit",
+  );
+
+  // Exact Version provenance: unchanged merged-PR, merge-event, reviewed
+  // base/head, retention, source-admission and topology/full-delta proofs.
+  const {
+    source: provenance,
+    pull,
+    pullNumber,
+    pullIdentity,
+  } = await readMergedReleasePull(api, context.provenanceSha, "Version provenance");
+  assertVersionProvenancePull(pull);
+  const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      context.controllerSha,
+      "release controller",
+      "release candidate",
+    );
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      initialMainSha,
+      "initial release main",
+      "release controller",
+    );
+  }
+  const [base, head] = await Promise.all([
+    api
+      .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
+      .then((value) => assertCommit(value, pullIdentity.baseSha, "reviewed base commit")),
+    api
+      .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
+      .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
+  ]);
+  if (controllerIsReviewedBase) {
+    invariant(
+      controller.treeSha === base.treeSha,
+      "release controller tree differs from the exact reviewed base tree",
+    );
+  }
+  const { mergeMethod, sourceComposition } = await classifyReleaseSourceComposition(
+    api,
+    provenance,
+    base,
+    head,
+    pullIdentity,
+  );
+  invariant(
+    limits.supportedProvenanceMergeMethods.includes(mergeMethod),
+    `Version provenance ${mergeMethod} is not a true merge commit retaining the reviewed head`,
+  );
+  const review = mergedSourceReview(pullNumber, context.provenanceSha, pullIdentity);
+  const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
+  const [headChecks, releaseHeadRef, releaseHeadReleaseValue] = await Promise.all([
+    paginatedCheckRuns(api, pullIdentity.headSha),
+    api.get(repositoryPath(`/git/ref/tags/${releaseHeadTag}`)),
+    api.get(repositoryPath(`/releases/tags/${releaseHeadTag}`)),
+  ]);
+  assertReleaseHeadRef(releaseHeadRef, pullIdentity.headSha);
+  const releaseHeadRelease = assertReleaseHeadRelease(
+    releaseHeadReleaseValue,
+    pullIdentity.headSha,
+  );
+  const sourceAdmission = await verifyDurableSourceAdmission({
+    api,
+    checks: headChecks,
+    pull,
+    pullNumber,
+    baseSha: pullIdentity.baseSha,
+    headSha: pullIdentity.headSha,
+    token: context.token,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch,
+    logger,
+  });
+
+  // Descendant topology and content: provider ancestry, intervening PR
+  // provenance, retained Version content and an independent merge-tree audit.
+  const firstParentMerges = await readDescendantFirstParentMerges(
+    api,
+    context.provenanceSha,
+    context.sourceSha,
+  );
+  const candidateEntry = firstParentMerges.at(-1);
+  invariant(
+    candidateEntry?.sha === context.sourceSha &&
+      candidateEntry.treeSha === candidate.treeSha &&
+      candidateEntry.parents.length === candidate.parents.length &&
+      candidateEntry.parents.every((parent, index) => parent === candidate.parents[index]),
+    "release candidate commit differs from its descendant ancestry evidence",
+  );
+  const interveningMerges = [];
+  for (const merge of firstParentMerges) {
+    interveningMerges.push(await verifyInterveningMergePull(api, merge));
+  }
+  const versionContent = await verifyVersionContentRetained(api, base, head, candidate);
+  const mergeContent = verifyMergeContentAudit(
+    await auditMergeContent({
+      provenanceSha: context.provenanceSha,
+      candidateSha: context.sourceSha,
+    }),
+    provenance,
+    firstParentMerges,
+    context.sourceSha,
+  );
+
+  // Every CI, image and receipt fact is bound to the released candidate only.
+  const candidateChecks = await paginatedCheckRuns(api, context.sourceSha);
+  const requiredSourceChecks = await verifySuccessfulSourceChecks(
+    api,
+    candidateChecks,
+    [
+      ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+      ...RELEASE_AUTOMATION_CONTRACT.checks.fullGreenJobs,
+    ],
+    context.sourceSha,
+  );
+  const { workflowRunId, workflowRunAttempt } = requiredSourceChecks[0];
+  const fullGreenStatus = await verifyFullGreenStatus(
+    api,
+    context.sourceSha,
+    workflowRunId,
+    workflowRunAttempt,
+  );
+  const fullGreenArtifacts = await verifyFullGreenArtifacts(
+    api,
+    context.sourceSha,
+    workflowRunId,
+    workflowRunAttempt,
+  );
+
+  const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
+  const terminalMainSha = await assertReleaseMainRef(
+    api,
+    terminalMain,
+    context.sourceSha,
+    "terminal release main",
+  );
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      terminalMainSha,
+      "terminal release main",
+      "release controller",
+    );
+  }
+
+  const releaseHead = {
+    name: releaseHeadTag,
+    ref: `refs/tags/${releaseHeadTag}`,
+    sha: pullIdentity.headSha,
+  };
+  const result = {
+    version: 3,
+    admissionMode: "tested-descendant",
+    repository: RELEASE_AUTOMATION_CONTRACT.repository,
+    sourceSha: context.sourceSha,
+    sourceTreeSha: candidate.treeSha,
+    sourceParents: candidate.parents,
+    controller: {
+      sha: context.controllerSha,
+      treeSha: controller.treeSha,
+      release: controllerRelease,
+    },
+    pullRequestNumber: pullNumber,
+    reviewedHeadSha: pullIdentity.headSha,
+    review,
+    versionProvenance: {
+      sha: context.provenanceSha,
+      treeSha: provenance.treeSha,
+      parents: provenance.parents,
+      pullRequestNumber: pullNumber,
+      mergeMethod,
+      sourceComposition,
+      providerPullCommitCount: pullIdentity.commitCount,
+      mergedAt: new Date(pullIdentity.mergedAt).toISOString(),
+      reviewedBaseSha: pullIdentity.baseSha,
+      reviewedBaseTreeSha: base.treeSha,
+      reviewedHeadSha: pullIdentity.headSha,
+      reviewedHeadTreeSha: head.treeSha,
+      releaseHead,
+      releaseHeadRelease,
+      review,
+      sourceAdmission,
+      retainedContent: versionContent,
+    },
+    descendant: {
+      interveningMerges,
+      interveningMergesSha256: mergeListSha256(interveningMerges),
+      mergeContent,
+    },
+    requiredSourceChecks,
+    fullGreen: {
+      workflowRunId,
+      workflowRunAttempt,
+      status: fullGreenStatus,
+      artifacts: fullGreenArtifacts,
+    },
+  };
+  logger.log(
+    `Verified Version PR #${pullNumber} provenance ${context.provenanceSha} and fully green ` +
+      `descendant ${context.sourceSha} across ${interveningMerges.length} audited merges.`,
+  );
+  return result;
+}
+
+export async function verifyApprovedMerge(options = {}) {
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? console;
+  const context = releaseApprovalContext(env, options.sourceSha, options.provenanceSha);
+  const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
+  if (context.descendant) {
+    return verifyTestedDescendantRelease({ options, env, logger, context, api });
+  }
+  const { initialMainSha, controller, controllerRelease } = await readRetainedReleaseController(
+    api,
+    context,
+  );
+  const { source, pull, pullNumber, pullIdentity } = await readMergedReleasePull(
+    api,
+    context.sourceSha,
+  );
   const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
   if (!controllerIsReviewedBase) {
     await assertSourceAncestorOfCurrentMain(
@@ -2236,23 +3161,7 @@ export async function verifyApprovedMerge(options = {}) {
     head,
     pullIdentity,
   );
-  const reviewUrl =
-    `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
-    `/pull/${pullNumber}`;
-  const review = {
-    type: "merged-source",
-    id: pullNumber,
-    url: reviewUrl,
-    evidenceSha256: canonicalSha256({
-      version: 1,
-      kind: "merged-source",
-      repository: RELEASE_AUTOMATION_CONTRACT.repository,
-      pullRequestNumber: pullNumber,
-      sourceSha: context.sourceSha,
-      reviewedBaseSha: pullIdentity.baseSha,
-      reviewedHeadSha: pullIdentity.headSha,
-    }),
-  };
+  const review = mergedSourceReview(pullNumber, context.sourceSha, pullIdentity);
 
   const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
   const [headChecks, sourceChecks, releaseHeadRef, releaseHeadReleaseValue] = await Promise.all([
@@ -2420,6 +3329,9 @@ async function runCommand(env = process.env) {
         approved_pr_number: result.pullRequestNumber,
         approved_pr_head_sha: result.reviewedHeadSha,
         approved_review_id: result.review.id,
+        release_source_sha: result.sourceSha,
+        version_provenance_sha: result.versionProvenance?.sha ?? result.sourceSha,
+        release_admission_mode: result.admissionMode ?? "exact-source",
       },
       env,
     );

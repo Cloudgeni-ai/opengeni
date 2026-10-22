@@ -1,15 +1,7 @@
-import {
-  boundWorkspaceControlEvent,
-  type SessionEvent,
-  type WorkspaceControlEvent,
-} from "@opengeni/contracts";
-import {
-  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
-  type EventBus,
-  type RequestConnection,
-  type RequestHandler,
-  type RequestReply,
-} from "@opengeni/events";
+import { boundWorkspaceControlEvent } from "@opengeni/contracts/workspace-control-event";
+import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
+import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION } from "@opengeni/events/durable-fanout";
+import type { EventBus, RequestConnection, RequestHandler, RequestReply } from "@opengeni/events";
 
 export class MemoryEventBus implements EventBus {
   published: SessionEvent[][] = [];
@@ -27,8 +19,12 @@ export class MemoryEventBus implements EventBus {
    *  metrics-ingestion consumer. */
   private agentEventSubscribers = new Map<
     string,
-    Set<(payload: Uint8Array, subject: string) => void | Promise<void>>
+    Set<{
+      handler: (payload: Uint8Array, subject: string) => void | Promise<void>;
+      queue?: string;
+    }>
   >();
+  private agentEventQueueOffsets = new Map<string, number>();
   private sessionEventRecoverySubscribers = new Set<(generation: number) => void>();
   private sessionEventRecoveryGeneration = 0;
 
@@ -119,24 +115,40 @@ export class MemoryEventBus implements EventBus {
   subscribeAgentEvents(
     subjectPattern: string,
     handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+    options?: { queue?: string },
   ): () => void {
     const subscribers = this.agentEventSubscribers.get(subjectPattern) ?? new Set();
-    subscribers.add(handler);
+    const subscriber = { handler, ...options };
+    subscribers.add(subscriber);
     this.agentEventSubscribers.set(subjectPattern, subscribers);
     return () => {
-      subscribers.delete(handler);
+      subscribers.delete(subscriber);
     };
   }
 
   /** Test helper: publish a raw agent-event payload on a concrete process subject,
-   *  delivering it to every matching wildcard subscriber. Mirrors NATS delivery
+   *  delivering it to every broadcast subscriber and one member of each queue.
+   *  Mirrors NATS delivery
    *  so ingestion tests can drive a generation-fenced heartbeat without a broker. */
   async emitAgentEvent(eventSubject: string, payload: Uint8Array): Promise<void> {
     const matching: Array<(payload: Uint8Array, subject: string) => void | Promise<void>> = [];
+    const queues = new Map<string, typeof matching>();
     for (const [pattern, subscribers] of this.agentEventSubscribers) {
       if (subjectMatches(pattern, eventSubject)) {
-        matching.push(...subscribers);
+        for (const subscriber of subscribers) {
+          if (!subscriber.queue) matching.push(subscriber.handler);
+          else {
+            const members = queues.get(subscriber.queue) ?? [];
+            members.push(subscriber.handler);
+            queues.set(subscriber.queue, members);
+          }
+        }
       }
+    }
+    for (const [queue, members] of queues) {
+      const offset = this.agentEventQueueOffsets.get(queue) ?? 0;
+      matching.push(members[offset % members.length]!);
+      this.agentEventQueueOffsets.set(queue, offset + 1);
     }
     await Promise.all(matching.map((handler) => handler(payload, eventSubject)));
   }

@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
 import { TranscriptionServiceError } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createTranscriptionService,
   orderedProviders,
@@ -371,12 +371,12 @@ describe("transcription providers", () => {
         billing: {
           admit: async () => {
             admits++;
-            // Opengeni credits are turned off in this workspace.
+            // Credits are turned off in this workspace.
             throw new TranscriptionServiceError({
               code: "policy_blocked",
               status: 403,
               fallbackSafe: true,
-              message: "Opengeni credits are turned off in this workspace.",
+              message: "Credits are turned off in this workspace.",
             });
           },
           settle: async () => {

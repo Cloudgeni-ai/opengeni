@@ -3,12 +3,16 @@ import { Agent, Runner, RunRawModelStreamEvent, tool } from "@openai/agents";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { CompactionNeededError, contextRobustnessFilterForSettings } from "@opengeni/runtime";
-import { ScriptedModel, assistantMessage, functionCall, testSettings } from "@opengeni/testing";
+import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createModelResponseEventState,
   modelResponseContextSignal,
   processModelResponseTerminalEvent,
 } from "../src/activities/agent-turn/model-usage";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 test.each(["delayed", "fresh-large"] as const)(
   "SDK post-compaction stream binds only its own usage: %s",

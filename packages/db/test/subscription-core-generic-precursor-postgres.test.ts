@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -192,6 +192,8 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
+    await owner`insert into schema_migrations(name) values ('0843_indexed_inbox_lineage.sql')`;
+    await owner`insert into schema_migrations(name) values ('0846_independent_session_titles.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
@@ -234,6 +236,8 @@ beforeAll(async () => {
   });
   try {
     await ownerAgain`delete from schema_migrations where name in (${PRECURSOR}, ${COMPAT}, ${FENCES})`;
+    await ownerAgain`delete from schema_migrations where name = '0843_indexed_inbox_lineage.sql'`;
+    await ownerAgain`delete from schema_migrations where name = '0846_independent_session_titles.sql'`;
     await database.admin.unsafe(
       `CREATE ROLE "${customApplicationRole}" NOLOGIN NOSUPERUSER NOBYPASSRLS`,
     );

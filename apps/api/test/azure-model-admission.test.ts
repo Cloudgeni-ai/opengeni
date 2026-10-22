@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { resolveModelProvider } from "@opengeni/config";
 import { canonicalConfiguredModel } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 
 function stagingAzureSettings() {

@@ -1,5 +1,849 @@
 # @opengeni/runtime
 
+## 4.3.1
+
+### Minor Changes
+
+- 49f2177: Agents can record a browser flow as a video. The new `browser_record` tool starts a recording of a managed or attached browser tab and stops it into an MP4 in the chat's workspace, with a log of when each action happened beside it, and publishes the MP4 so it plays in the chat. Frames are captured only when the page changes, so recording costs almost nothing while a page is still, and the video is encoded on the server, so browser hosts need no video encoder. The SDK adds `startBrowserRecording`, `getBrowserRecording` and `saveBrowserRecording`.
+- 5e32e0f: Improve deferred tool discovery with field-aware retrieval, best-match-first schema
+  loading and compact alternatives, an optional generic decision model for ambiguous
+  queries, exact-name loading,
+  and a paginated tool-group directory. Freeze disclosures in append-only history and
+  keep the first-request tool block stable. Preserve native Responses search and direct
+  function loading. Add retrieval and live generic discovery evaluations.
+
+  Introduce a shared typed decision-model category for tool discovery and code search,
+  with the existing Jev client and OpenAI/OpenRouter Decisions adapters. Use explicit
+  deployment credentials, preserve legacy code-search configuration, and retain
+  provider usage provenance without customer-credit debits. Code-search stats, usage
+  events and metrics use decision rather than Jev names.
+
+- 2acb52c: Add deployment-wide environment instructions that survive workspace and session persona overrides.
+
+### Patch Changes
+
+- 75101c9: Agents answer requested briefs, letters, plans and reports in chat, and create a document only when the person asks for a document or file (for example a DOCX or PDF), asks to edit an existing document, or the result is too long to read comfortably in chat. Before, "clearly meant to be kept or shared" let an agent turn a request like "write a one-page project brief" into a document: about 80 seconds and several document tool calls instead of a 15-second chat answer, with only a link left in the conversation.
+- 3d83bfd: On Claude Opus 5.5 and Sonnet 5.5, a note the agent writes for the person right before a tool call now shows as a normal assistant message and counts as a visible reply. Before, it showed as a collapsed thought. These models request Claude's progress-update thinking display, and each update's signed block is replayed unchanged in its original position.
+- d142e5b: A fresh managed box installs the Codemode client in one command. The worker publishes the release's client bundle once to object storage under its digest and hands the box a short-lived signed URL; the box checks its existing copy, otherwise downloads, verifies the digest and installs, all in one provider command. Before, the 1.15 MB bundle was staged through the provider file API in about eight sequential round trips on every new box. If the download fails for any reason, the box falls back to the old staging path, and Connected Machines are unchanged.
+- f1fd83b: Attached files now arrive on sandbox backends that cannot mount object storage, such as the compute backend. Capability descriptors replace `nativeBucketMount: boolean` with `bucketMount: "native" | "in-container" | "none"`; a `"none"` backend always receives files as pre-signed downloads before the first model request, as Connected Machines already did.
+- ed3a64c: On computers whose CUA driver supports it (macOS and Linux), a computer_act batch of semantic and keyboard actions now runs as one CUA operation checked against one observation, instead of one operation per action, which roughly halves the time of a long batch. Whether a computer session runs batches this way is fixed for the session's life, so every try of one batch, including tries on either side of an agent update, runs it the same way and never repeats its actions. CUA Driver is updated to 0.37.
+- 659c01a: Computer targets now mark a macOS window that is off screen (minimized, hidden, or on another Space or display), which can be neither captured nor read, so an agent sees it in the listing instead of finding out from a failed read. When any listed window is off screen, the listing adds one fixed note that a browser from browser_open runs off screen and can be shown on the computer by opening it with linkedComputerSessionId.
+- c8c2ca9: Attached files reach the sandbox faster. Each attached file used to download in its own sandbox command, one after another, and each command cost a full provider round trip even for a tiny file, so a turn with ten attachments waited about ten seconds before the model could start. Independent files now download up to six at a time. Downloads that write the same path still run in order, and any failures are reported in the same order and wording as before.
+- d776a1f: Sandbox setup before the first command is shorter. The artifact runtime check and the managed Codemode client install used to run one after another with credential setup and the repository clone, and each costs at least one provider round trip (on a fresh Modal box the client install alone takes several). They depend on no other setup step, so they now run alongside the ordered steps. Ordered steps keep their order, setup still waits for everything it started, and a failure is reported for the earliest failing step in the same order as before.
+- bf39d5e: Show ambiguous Connected Machine command outcomes as uncertain instead of successful, including when command details are hidden. Preserve the existing warning to inspect effects before retrying; command execution and retry behavior are unchanged.
+- fda625e: Upgrade the Bun runtime, bundler, test runner and package-manager pins to 1.4.3,
+  and use exact-pinned tsrs for CLI typechecks while retaining stable TypeScript
+  for declaration emission and editor/tooling compatibility. Preserve strict
+  protobuf partial-constructor checks under TypeScript 7.1 without changing the
+  wire codec, and make existing source annotations compatible with the new checker.
+  Regenerate the checked-in Site browser runtime with the pinned Bun bundler.
+- c2cbeae: An idle sandbox now drains even when an API request (Files, Terminal, Browser and similar) died mid-operation and left its request open. Before, the holder reaper removed the dead request's holder but kept its request, and that request refused every capture of the box: Modal boxes ran until the provider deadline, and Docker boxes stayed draining forever. Docker drains also capture requests left by a crashed turn worker now: the drain removes the exact container before it reads the host workspace, so the capture is a point-in-time image, as Modal snapshots already are.
+- d1de8b4: Honor explicit provider-dispatch catalog preparation even when all MCP servers
+  are already connected. Keep eager schemas available before the first request,
+  and join the same catalog completion fence before tool execution and cleanup.
+  Use the shared transport's dispatch notification after admission and transport
+  setup on both native subscription and generic model routes.
+  Compile a tool's input and output validators together on its first call, before
+  authorization or execution, instead of compiling every unused tool at startup.
+  Malformed schemas now fail that tool's call rather than catalog preparation.
+- ec0855c: Stop trusting the compromised emSign root certificates in every runtime Opengeni ships. In October 2026 the private keys of eight eMudhra intermediate CAs chaining to emSign roots became recoverable, so anyone on the network path could impersonate any HTTPS host to a client that still trusts those roots. Bun and Node trust a root list compiled into their executables regardless of the operating system store, and Bun 1.4.3 and Node 22.22.0 still include all four emSign roots. Image builds now rewrite those four certificates inside the shipped Bun and Node binaries (and verify the compiled browser controller and artifact materializer) so no chain can reach them, while every other root keeps working. The Rust agent and relay move to webpki-roots 1.0.10, and the sandbox and desktop images pin Python certifi 2026.10.19; both drop emSign ECC Root CA - G3, the root of the compromised intermediates.
+- 46a2ef3: A computer or browser driver failure (`driver_failed`) now tells operators what failed. The controller sends the failing error class and function beside the unchanged error, and server logs record them with the driver message's code-written part, with window titles, page text, paths and free-text reasons redacted. The controller's own log line for a failed request is redacted the same way and now also covers known driver failures. What callers and agents are shown does not change.
+- ffe09c2: An embedding product can give its agent a few of its own tools from the first request: `toolServer.eager` (and `eager` on a session's `mcpServers` entry or tool reference) now takes a list of tool names. Listed tools are visible from the start and stay visible; the server's other tools remain behind tool search.
+- 8c58607: Without a placement, computer_open and browser_open reuse only a live session on the machine the chat is routed to now, so a chat that swapped machines no longer reattaches to a session left on the previous one.
+- eeab39f: Keep accepted turns recovering while required first-party MCP setup cannot reach the internal API, instead of failing after five attempts during a deployment outage.
+- 5934780: Remote MCP servers that answer the 2026-07-28 `server/discover` probe but send 2025-era results (no `resultType`) are reconnected over the 2025 handshake instead of losing every tool. This covers agent turns, connector tool permissions, capability probes and OAuth connection checks. A best-effort server's failed `tools/list` warning now names its structural cause (error class, SDK or numeric code, validation violation) without message text.
+- 9eae8df: A Modal command whose output reads keep failing now reports that its output is unavailable instead of quietly looking like it is still running. After a failed read, the retry often had only a few milliseconds of the read's budget left, so it timed out before the provider could answer, and that timeout was treated as "no new output". Setup commands could then poll indefinitely without surfacing the outage. A retry now counts only when it actually returns output, end of output or the exit code.
+- d3996f9: Share one Modal client per credential across sandbox creates and resumes, and cache the Modal app and image lookups, so creating a sandbox no longer pays a fresh auth handshake and three lookup round trips, and reattaching a warm sandbox no longer builds a new client.
+- fa5347a: Use prefetched receiver-issued monotonic delivery tokens for Connected Machine reply recovery and streamed command deadlines, without an extra round trip on warm calls. Machine clock skew and corrections no longer reject valid control requests or poison replay admission. Expired and conflicting deliveries return prompt, non-retryable errors preserving uncertain prior outcomes. Mixed protocol versions retain conservative one-shot delivery.
+- 7517fbc: Organization owners and admins can now connect OpenAI and Azure OpenAI once for the whole organization in Organization settings → Models, next to the other organization providers. OpenAI stores an encrypted API key; Azure OpenAI stores an encrypted key plus the Azure resource endpoint. Admins add the organization's OpenAI model IDs or Azure deployments as its models, and each is checked with the organization's key (and Azure endpoint) before it is saved. The models (`organization-openai/<model>` and `organization-azure-openai/<deployment>`) inherit into the organization's current and future shared workspaces (Personal workspaces stay local), work for sessions created through the web app and the public API, and are billed to the organization's own provider account with no Opengeni credits. `OrganizationModelProviderKind` and `ModelConnectionAccessKind` gain `openai` and `azure_openai`; organization provider connection requests and responses gain an optional `endpoint` (Azure only). A missing or revoked connection fails closed and never falls back to deployment credentials. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `organization-openai` or `organization-azure-openai` provider ids. Rolling migration `0898_organization_direct_openai_model_providers.sql` widens the provider-kind, lifecycle-fact and analytics allow-lists and adds the nullable endpoint columns.
+
+  An organization ElevenLabs key no longer counts as an OpenRouter access policy when a workspace's model restrictions are read.
+
+- 9ff7e74: Retain long-running attempt-owned Connected Machine one-offs in the existing command ledger, returning a command ID after a bounded observation without imposing a process deadline or tying cancellation to HTTP lifetime. Preserve terminal result fields, Unix update handover, existing update diagnostics and the Windows exec_command shell default.
+- 726c332: Repository setup on a fresh sandbox now takes one command. The clone program travels compressed inside the launcher, which installs it under its content hash and runs it in the same command; programs unique to one turn (Smart-Git broker routes) decode, run and remove themselves in one command too, and a successful run no longer pays a separate seed-cleanup round trip. Before, a fresh box probed for the program, then bootstrapped, uploaded 2 KiB chunks, decoded and launched again: seven sequential sandbox round trips. On a Modal box in the EU, cloning three small repositories on a new box went from about 2.8–3.3 s to about 2.0–2.2 s (six fewer round trips, about 0.9 s); the rest is the box finishing its boot and the clone itself. Boxes without gzip keep the staged path, and staged chunks are now 12 KiB instead of 2 KiB.
+- b1a2e5b: Agents now edit a Word, Excel, PDF or PowerPoint file the user sends to be changed directly in the sandbox with ordinary tools (python-docx, openpyxl, pandoc, LibreOffice), check it and publish it, and make a newly requested file in such a format the same way unless the artifact export tool lists that format. Before, an agent asked for a Word or Excel file built a native artifact and then reported that export was unavailable, and a sent file the document importer could not read was returned unchanged.
+- 4199cd5: A move to another machine that the running turn attempt cannot serve (another workspace root, or a home it cannot reach) now ends the attempt cleanly between tool batches, before the model is asked for its next step. Previously the next batch's first sandbox call failed the attempt, discarding that whole model response, including sibling calls that had already run. A sandbox call in the same batch as the move that is refused before it reaches any machine now returns a result saying it did not start, so every call in the batch has a certain outcome.
+- 7851b64: Changing the sandbox image no longer strands sandboxes that were running during the upgrade. Docker checked that it still owned a running container by comparing it with the newly configured image, so after an image change every live container failed that check: chats could not save their sandbox state and the reaper could not drain the container, and every turn failed until the database was repaired by hand. OpenSandbox likewise refused to resume, save or delete a sandbox whose recorded image or pool differed from the new configuration. Both now verify an existing sandbox against the image (and ports or pool) it was created with; the new image applies to sandboxes created after the upgrade, including the replacement started when a live sandbox rotates to the new image.
+- cc0d008: Keep the Modal sandbox leaf free of agent-loop imports when it reports that a stopped sandbox cannot be resumed.
+- 72e00f6: Sandbox setup makes far fewer round trips. Run credentials used to take five sandbox commands per file plus six more, each a full provider round trip, so a session with several repositories spent tens of seconds writing credentials before its first command. A credential generation is now packed into as few commands as fit the provider's command-size limit, usually one, with the same atomic activation and verification. The shell wrapper that makes commands cancellable now carries each command once instead of three times, which is what kept those commands small. Modal command starts also reuse the sandbox's task id instead of asking Modal's control plane for it on every command.
+- 72e032c: Sandbox setup step timing now covers fresh Modal boxes. Modal creates boxes through its lifecycle-aware create call, which the setup-operation metric did not wrap, so `opengeni_sandbox_setup_operation_duration_seconds` stayed empty for every newly created Modal sandbox. Every client method that returns a new session is now measured.
+- b95784c: Support multiple personal Slack identities with exact-account reconnect, selected-workspace bot availability, and the same bot posting capabilities in scheduled and interactive work. Preserve existing schedule destinations as defaults without adding excluded tools.
+
+  Keep role provisioning compatible with database schemas that predate selected-workspace bot access.
+
+  Add workspace default machines for new chats and schedules that follow the workspace. Preserve accepted execution placement across retries and report unavailable machines without silently choosing another computer.
+
+- 22e3585: A tool call that fails while it is being prepared for approval no longer ends the whole turn with "The session stopped unexpectedly". Before, an error in that step, such as Gmail rejecting a malformed message ID while loading the approval preview, a connector's argument check, or a temporary policy lookup failure, failed the turn and left the call marked as having an unknown outcome even though nothing ran. Now the call returns to the model as an ordinary tool error saying it was not run and nothing was changed, so the model can correct it and continue. Gmail's approval preview also leaves out a message it cannot read for a malformed ID, rate limit or outage instead of refusing the action; authentication and access refusals still stop the call.
+- db09421: The web and artifact outbox dispatcher images trust Debian's current CA store, which distrusts the compromised emSign ECC Root CA - G3 and Comodo AAA Services roots, instead of their base image's older one.
+- Updated dependencies [e907c46]
+- Updated dependencies [49f2177]
+- Updated dependencies [bb438b0]
+- Updated dependencies [3d83bfd]
+- Updated dependencies [0e135b2]
+- Updated dependencies [03947ed]
+- Updated dependencies [5e32e0f]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [fda625e]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [c236847]
+- Updated dependencies [23fed2a]
+- Updated dependencies [e4915c1]
+- Updated dependencies [fa5347a]
+- Updated dependencies [16781e5]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [724b529]
+- Updated dependencies [2058cd3]
+- Updated dependencies [3915617]
+- Updated dependencies [908c0d3]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [017121f]
+- Updated dependencies [b95784c]
+- Updated dependencies [83a467d]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/observability@4.3.0
+  - @opengeni/sdk@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/decisions@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/agent-proto@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/codemode@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/interaction@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+
+## 4.2.0
+
+### Minor Changes
+
+- 641e179: Add an opt-in `compute` sandbox backend for Opengeni compute. Each compute sandbox runs the Opengeni machine agent with no credential; its host carries the agent's traffic over one link to a new agent gateway in the API, so the sandbox gets the same session as a Connected Machine and a message to a sleeping sandbox wakes it. Opengeni creates the sandbox's enrollment itself (kind `sandbox`, bound to its sandbox group, never listed or attachable as a Connected Machine), treats the sandbox as a managed sandbox, and deletes it and revokes the enrollment when its group ends. Configure it with `OPENGENI_COMPUTE_API_URL`, `OPENGENI_COMPUTE_API_KEY`, `OPENGENI_COMPUTE_LINK_URL` and `OPENGENI_COMPUTE_IMAGE`; the default backend is unchanged.
+- 641e179: A finished command's stored output is now released on its runner in one answered exchange, for foreground and background commands alike. The agent serves a new `OpRelease` request (advertised as `capabilities.op_release`): it drops the operation at once and confirms the release in its answer, so the release settles right where the output is stored, while the agent is live from the command, and nothing about the command is left for a later maintenance pass. When the storing process dies first, the agent's own operation inventory recovers the release, so maintenance never sends such an agent anything to release output. Every request Opengeni sends on its own behalf carries `Opengeni-No-Wake`, which a compute host answers itself instead of waking a sleeping sandbox; an unanswered one records nothing and is left to the agent's next inventory. The agent remembers every operation it has started for longer than Opengeni may resend a start for it, independent of output retention and across an in-place update, so a released operation never runs again. Connected Machine agents without the capability keep the existing final acknowledgement and later observation; a compute sandbox whose agent lacks it is refused as an image built with an older agent.
+
+### Patch Changes
+
+- 641e179: A command or file operation in flight when a Connected Machine's agent restarts,
+  or when a compute sandbox's VM dies and boots fresh, now ends as soon as the new
+  agent connection is live instead of retrying the old one for minutes. A command
+  that may have started is handed to the session's command ledger with a stop
+  request and reported with an unknown outcome, a read is read again from the new
+  agent, and a request that never reached the old agent is sent to the new one
+  with only the time it has left. A streaming command's timeout now also covers
+  its start, so abandoned work no longer keeps a sandbox lease warm or blocks
+  deleting the chat.
+- 641e179: Stopping a background command on a Connected Machine or compute sandbox now sends
+  the cancellation to the runner at once instead of waiting for the next maintenance
+  pass, so the process ends within moments of Stop. Stop answers within its five-second
+  budget; the reconciler still delivers the cancellation when that attempt fails, and
+  the runner's pushed exit settles the command. A stop to a compute sandbox that no
+  host currently serves wakes the sandbox, as any other request to it does.
+- e189078: A JavaScript dialog (alert, confirm, prompt) that a browser action opens no longer leaves the call hanging or silent. The action returns at once with the dialog's type and text, even when no page view was requested; a batch stops at the dialog and says how many of its actions ran; and page reads, fenced batch steps and screenshots that the dialog blocks end immediately with the same guidance to answer it with `handle_dialog`, instead of waiting out their timeouts. This holds in managed browsers and in the user's own Chrome.
+- 49b121d: Browser observations now show what form fields contain (text inputs, text areas, search boxes, number fields), as the page shows them on screen, so an agent can read a draft or a prefilled form and check what it typed without a screenshot or an extra read. Password fields stay redacted. Every secret value a browser or computer session typed from a secret reference is now remembered for that session and redacted from all its later observations, page reads, dialogs, clipboard reads and window titles, not only from the result of the action that typed it. Field values longer than 2,000 characters are clipped in the page outline with their full length noted; `browser_read` with `mode: "dom"` returns more.
+- b02f045: List the observed tab once in browser_tabs results and browser resume notices; its outline already starts with the tab's line.
+- aebb860: Browser tools now resume a browser that stopped between calls, the way browser_open already does. A browser is suspended while idle when its machine needs room for another one, and is lost when its controller restarts, for example after an agent update. Before, the agent's next browser_observe, browser_act or browser_tabs call failed with "BrowserSession is not active", and an agent that did not think to call browser_open again opened a fresh browser and lost its signed-in state.
+
+  Now the call resumes the same browser from its saved working copy; concurrent calls share one resume. Reads of the current tab (observe, read, screenshot), listing tabs, and opening a tab the browser refused to open then run on the restored browser. Calls that name a tab from before the resume, actions, diagnostics, and a tab operation that already changed the browser do not run (again), because tab IDs changed and unsaved page input may be gone: they return a `browser_resumed` error with the restored tabs and the selected tab's outline, so the next call can continue directly. An action admitted before any result reported the resume never runs on the reloaded page. A failed resume returns its own reason, and any other refusal is unchanged.
+
+- c27cffc: Make bulk browser work easy to script with Opengeni's own browsers. `navigate` takes an optional `waitUntil` (`load` or `network_idle`), and `viewport` defaults to desktop layout when `mobile` is omitted. `tab.navigate(url, { waitUntil })` passes it through in Code Mode. An explicit `load` wait now waits for the page's load event (images and other subresources finished), not just a parsed document. `ogtool call` and the native `codemode call` now write image blocks such as screenshots to files and print their paths instead of base64 pixels, and `--save-image <path>` saves the single image at an exact path. An existing `--save-image` path is refused before the call; a completed call whose image cannot be saved still prints its result with `imageSaveError` and exits with status 4. Expired temporary image directories are removed only when private and owned by the same user.
+- 1830cf0: computer_act can run a batch of semantic and keyboard actions in one call: they run in order on the same window, each acting on the state the one before it left, stop at the first that does not complete, and return the window's state after the last. A known sequence, such as pressing a run of Calculator buttons or filling several known fields, now takes one tool call instead of one per step. Each action stays its own durable operation, so a retried call repeats the same operations instead of acting twice.
+- a336e51: Keep session title generation independent of conversation handover. Steer and cancellation no longer wait for a title or cancel it; a durable metadata operation retains the accepted provider account, request custody, usage accounting and human-title precedence across recovery.
+- 4c90154: Agents handle the person's own computers better. `sandboxes_list` describes the person's Connected Machines, so tool search finds it. Its description says to check the list before saying a computer cannot be reached, to use the only fitting machine without asking which, and to work on a machine by swapping to it, where staying afterwards is fine. Agents never mention internal terms, tool names or ids to the person. The `sandboxes_list` result carries a short notice: when no machine is connected, some are offline, or the computer the person means is not listed, it asks for one `capability_authorization_request` call for `api:connected-machine` instead of described setup steps. Opening the screen on a machine with no display now says this may not be the person's own computer and points to `sandboxes_list` and `sandbox_swap`, instead of leading the agent to tell the person their computer has no display. A `run_on` command that times out says it may be waiting on a dialog on the person's screen. Nothing tells agents to swap back any more: the wrong-machine message for computers and browsers only says to swap to the requested machine, and a swap to `session` on a deployment without a managed sandbox says to keep working on the current machine. `computer_open` says to swap to another machine to use its screen and to operate apps through the computer tools rather than `osascript`, which makes macOS ask for permission and hang.
+- 523bac6: Clear a Connected Machine session's saved working directory when it is the filesystem root `/` or a Windows `System32` service launch directory left by older agents, so attachments, tool results and generated images work again in those chats. A filesystem or drive root, or anything inside the Windows directory, is never used as a working directory; the machine's reported root applies instead. The agent also moves out of the Windows system directory into the user's home, as it already did for a filesystem root.
+- 47eeb80: Site and console chat turns now use the same native authority, tools and execution settings. Remove automatic Site-agent restrictions and forced member profiles; retain normal access checks, approvals and outside-workspace visitor identities. Existing saved member settings and accepted turns are not rewritten. Site authors can explicitly choose narrower ordinary chat settings.
+- da09a6e: Recover pending Connected Machine requests immediately when the machine's control transport reconnects, preserving exact delivery identity and operation deadlines instead of waiting for a lost reply to time out.
+- dfd0ce5: Release turn cleanup after a refused command when the exact runner confirms a terminal operation with no output frames. Preserve the original command error and retain cleanup custody when the runner's outcome is uncertain.
+- Updated dependencies [c27cffc]
+- Updated dependencies [641e179]
+- Updated dependencies [8c38fe4]
+- Updated dependencies [e018445]
+- Updated dependencies [5715a3e]
+- Updated dependencies [47eeb80]
+- Updated dependencies [641e179]
+- Updated dependencies [641e179]
+- Updated dependencies [25c316a]
+  - @opengeni/codemode@4.2.0
+  - @opengeni/contracts@4.2.0
+  - @opengeni/config@4.2.0
+  - @opengeni/sdk@4.2.0
+  - @opengeni/agent-proto@4.2.0
+  - @opengeni/observability@4.2.0
+  - @opengeni/capabilities@4.2.0
+  - @opengeni/codex@4.2.0
+  - @opengeni/interaction@4.2.0
+  - @opengeni/tool-gateway@4.2.0
+  - @opengeni/vaults@4.2.0
+  - @opengeni/network@4.2.0
+  - @opengeni/xai-subscription@4.2.0
+
+## 4.1.3
+
+### Patch Changes
+
+- 1e77fbc: browser_open now returns and observes the tab it opened. Before, it picked the first tab in the profile showing the requested URL, so on a person's own Chrome an older tab, or another session's tab on the same URL, could be handed to the agent. Parallel sessions then acted on one shared tab and failed.
+- 3beb7bc: browser_open on a browser that was lost because its controller restarted, or because its resume expired, now resumes it through the browser resume route, as it already did for a suspended browser. The route continues the same browser and profile from its preserved working copy, or refuses with the reason, and never falls back to an older checkpoint. Before, browser_open returned the lost browser with no tabs and no way forward, so an agent could not continue its own browser after an agent update or restart.
+- Updated dependencies [404e017]
+  - @opengeni/sdk@4.1.2
+  - @opengeni/codemode@4.1.2
+  - @opengeni/agent-proto@4.1.2
+  - @opengeni/capabilities@4.1.2
+  - @opengeni/codex@4.1.2
+  - @opengeni/config@4.1.2
+  - @opengeni/contracts@4.1.2
+  - @opengeni/interaction@4.1.2
+  - @opengeni/network@4.1.2
+  - @opengeni/observability@4.1.2
+  - @opengeni/tool-gateway@4.1.2
+  - @opengeni/vaults@4.1.2
+  - @opengeni/xai-subscription@4.1.2
+
+## 4.1.1
+
+### Minor Changes
+
+- 373f408: browser_act accepts `includeScreenshot: true` and then returns a still image of the tab after the action in the same call, so screenshot-driven flows no longer need a separate browser_screenshot call after every action. A failed capture keeps the action's receipt and says why the image is missing.
+
+  An upload action also accepts `paths` of files in the session's workspace. The tool publishes each path the same way sandbox_file_publish does and uploads the resulting files, so a file the agent just wrote no longer needs a separate publish call (and a tool search to find it) before the upload. `workspaceFileIds` keep working unchanged.
+
+- 6156fab: browser_open accepts `includeScreenshot: true` and then returns a still image of the opened tab in the same call, so visual tasks no longer need a separate browser_screenshot call right after opening the browser. A failed capture keeps the opened browser's result and says why the image is missing.
+
+### Patch Changes
+
+- afff3f9: Managed browsers on Linux machines no longer fail requests with ERR_NETWORK_CHANGED when containers, bridges or VPN interfaces come and go on the machine. Each managed Chromium now runs in its own network namespace bridged to the host by pasta, keeping the person's UID, host localhost servers, DNS and the DevTools endpoint working. Machines without pasta or user namespaces launch as before, and browser_open then adds one plain line saying page loads can fail when the machine's network changes.
+- e6f56a1: Agents that can drive a browser or computer now always know that CAPTCHAs are theirs to solve. The rule moved from the secrets instructions, which only some sessions receive, into the `browser_open` and `computer_open` tool descriptions, which every session with those tools sees from its first request.
+- cf899f4: Commands on the e2b sandbox backend now finish. E2B's terminal always runs an interactive bash, and the command was typed into it, so the shell went on running after the command ended: a tty command never reported its exit status, and every turn that waited for one hung until the sandbox timed out. Its whole wrapper script was also echoed back as output. The command is now staged in a file, and the one short line typed replaces that bash with a shell running the file, which runs the command as a job of its own and reports its status in the terminal. A tty command therefore ends when it does, with its status: also when it is interrupted with Ctrl-C (exit status 130), and also when it leaves a process running in the background, which keeps running and keeps E2B's terminal open. Its output no longer includes bash's prompt or the typed line.
+
+  The backend also works with images whose workspace root is owned by root or lacks write permission. E2B runs commands as its default user, so in such an image every write to the workspace failed. Creating a sandbox now checks that the default user can write and enter the workspace root and, if not, hands it to that user as root with full access for them, then checks again as that user; if either step fails, creating the sandbox fails with the reason.
+
+- cf899f4: The e2b sandbox backend now works and can point at any E2B-compatible API. The E2B SDK (2.56.0) is installed, and the API key, now with `OPENGENI_E2B_DOMAIN`, `OPENGENI_E2B_API_URL` and `OPENGENI_E2B_SANDBOX_URL`, is passed to it explicitly on every create and resume instead of relying on ambient `E2B_*` variables. Before, the key was checked but never reached the SDK, and the SDK itself was missing. The connection is kept out of saved session state.
+- c602300: Fix large Connected Machine writes for machine-addressed operations, including run_on. Negotiate epoch-zero transactional upload support without inventing session epochs or replaying mutations. Older transactional agents receive a preflight 256 KiB limit and update guidance; nonzero session transfers remain compatible. Large machine-addressed transfers require the corresponding native agent release.
+- e4e30b8: Reuse integrity verification for the exact immutable catalog snapshot produced by `createAttemptToolEnvironment`, reducing repeated turn-start parsing and hashing. The factory's catalog is now deeply frozen and detached from caller-owned schemas; callers constructing modified fixtures should clone it first. Deserialized catalogs and database reads retain full integrity checks. Catalog bytes, tool definitions and execution authority are unchanged.
+
+  Allow an owning runtime to start deferred tool preparation at provider dispatch rather than during first-request setup. Earlier tool demand starts the same operation, while closing before either event releases resources without starting unused preparation. Existing embedded callers retain immediate background preparation by default.
+
+- 89ac8a8: When an agent opens a browser or computer, the tools it can now use reach the model as an honest declaration instead of a made-up tool_search call. The declaration follows the step's results: an `additional_tools` item on Responses routes verified to accept it (the Codex subscription), a developer message with the definitions on every other Responses route, and a system message with the definitions on Claude and Chat Completions, or a machine-origin user message on Gemini routes, which move system messages. The tools can be called by name or through tool_invoke; on built-in OpenAI and Azure, which have no tool_invoke, the message asks the model to load them with tool_search. Claude and Chat no longer need the request-time pass that kept a step's results together, so it is removed. browser_act shows its locator and batch item once instead of three times, which cuts a browser declaration by about a third. Existing chats take one prompt-cache miss when they switch.
+- 91dc10d: Carry producer-selected relay owner routes through stream descriptors so multi-replica terminal and frame streams connect without ingress affinity. Relays authenticate and proxy directly to the channel owner, preserving its replay and epoch fences; scoped terminals refresh the route after owner loss without restarting the shell.
+- 9be9a82: Steer reaches the agent within seconds and no longer kills work in progress. A model request still generating when a Steer arrives is cut short: assistant messages the provider had completed stay in history, unfinished text and unstarted tool calls are dropped, and the next request carries the Steer on the unchanged history. Short tool calls finish; long `exec_command`/`write_stdin`, `command_wait`/`command_read` and `session_wait` waits return early with their handle while the work keeps running (`session_wait` reports kind `steer`). The turn then hands over (`turn.superseded` with reason `steer`, `atModelStep: true` and, for a cut-off answer, `cutOffText`) and the Steer runs next. Several Steers are read together, in the order they were sent. Agent Steer (`session_steer`) behaves the same way. Queue (an ordinary Send) is unchanged and still runs after the whole turn. Custom model transports can honour preemption with the exported `isModelPreempted` and `preemptedResponseDone`.
+
+  The web and React Native session screens show a Steer only as the person's message: no status row, chip or "Send now". API callers can still stop the running attempt with `interrupt: true` on `steerQueueItem` on the turn that `steerMessage` returned. A new workspace setting `busySend` (`queue` by default, or `steer`) and a matching `busySend` option on `useComposer`, `SessionConversation` composer options and `useOpenGeniNativeSession` let a product make a normal Send act as Steer while the agent is busy; Cmd/Ctrl+Enter then does the other one.
+
+- 3b980e6: A Steer now cuts the in-flight model answer within 200 ms even when the model transport ignores the abort signal or is stalled between events. Before, the handover waited until such a stream ended on its own, so a Steer could take as long as the rest of the answer. The cut-off answer is kept exactly as before.
+- Updated dependencies [afff3f9]
+- Updated dependencies [84688e2]
+- Updated dependencies [04019de]
+- Updated dependencies [cf899f4]
+- Updated dependencies [c602300]
+- Updated dependencies [e4e30b8]
+- Updated dependencies [57e3a3e]
+- Updated dependencies [91dc10d]
+- Updated dependencies [9be9a82]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/sdk@4.1.0
+  - @opengeni/codex@4.1.0
+  - @opengeni/config@4.1.0
+  - @opengeni/agent-proto@4.1.0
+  - @opengeni/codemode@4.1.0
+  - @opengeni/capabilities@4.1.0
+  - @opengeni/interaction@4.1.0
+  - @opengeni/observability@4.1.0
+  - @opengeni/tool-gateway@4.1.0
+  - @opengeni/vaults@4.1.0
+  - @opengeni/network@4.1.0
+  - @opengeni/xai-subscription@4.1.0
+
+## 4.0.4
+
+### Patch Changes
+
+- 35dcfa0: Use Azure's API-key header for configured API-key credentials on HTTP and Responses WebSocket connections, while preserving Entra bearer authentication and explicit header overrides. Treat a redirected WebSocket upgrade as a refusal and use the existing turn-scoped HTTP fallback without following credential-bearing redirects.
+- 26b4c24: Lead the compact browser outline with what needs attention on dense pages. An opened menu, dialog, listbox or tooltip, live messages such as toasts, and the focused or acted-on element with its small enclosing group now come first, the page's own content next, and site navigation last; empty live regions are left out. The omitted-element note names the largest regions it left out. A role or text locator that matches several elements now picks the single one whose whole name is the requested text, and an ambiguous locator lists its candidates with refs. A covered target names the element on top of it, and a failed step in a batch says which step failed.
+- a819a58: A browser that cannot start now says why. A machine without Chrome or Chromium reports that plainly as an unsupported placement, other launch failures carry the driver's own reason, and `browser_open` returns that reason as an error instead of a bare failed session.
+- e428801: Completed browser downloads stay saveable after the browser is suspended. Suspension removes the browser's working directory, so before an explicit suspend or an automatic idle or deadline save, each completed download is now kept as a workspace file. Listing, reading and saving a download then work while the browser is suspended, after it resumes on a new controller, and after the task moves to another machine, which imports the file from storage. A download that cannot be kept is logged and never blocks the suspension.
+- a8c5057: Claude response streams that go silent or end without `message_stop` now raise `AnthropicStreamInterruptedError` (code `anthropic_stream_interrupted`), so callers can tell a dropped connection from a protocol violation.
+- 6e8ab51: Claude conversations no longer fail when history contains a tool call ID with characters Claude does not accept, such as the search step shown after opening a browser or computer.
+- 88459ff: A Codex turn now opens its conversation's Responses WebSocket while the rest of the turn prepares, so the first model request no longer waits for the handshake (about half a second on a new connection). A request that arrives while that handshake is still in progress waits for it instead of opening a second connection, and the model SDK's own telemetry headers no longer split a conversation's connection.
+- 3f21c12: Computer tools now give the model a compact text view instead of their full JSON. An observation lists one line per element it can read or act on (role, name, ref, value and meaningful states such as focused, disabled, collapsed or offscreen) and leaves out platform metadata, unlabeled containers and widgets that are not rendered. A Chromium window observed on Linux drops from about 85,000 characters to about 3,400. computer_open, computer_targets and computer_act use the same view, and the complete typed value stays in the structured result for Code Mode. computer_observe also reads the accessibility tree and the screenshot at the same time instead of one after the other.
+- 575b127: computer_observe on an app target now returns its accessibility tree when the app has no screenshot, instead of failing the whole observation. Apps span several windows, so macOS and Linux adapters cannot photograph them; window and screen observations still fail clearly when their screenshot cannot be captured.
+- 2f6b8bd: A desktop observation now says when the accessibility tree is partial. When CUA stops reading a window early (a slow or very large app runs out its time budget, or the element limit is reached), the semantic snapshot carries `incomplete` with the reason and how many found elements were not read, and the model's text view ends with a line saying the tree is partial and to use the screenshot for anything not listed. Before, a partial tree looked complete, so a model could conclude a visible control did not exist.
+- 01b790e: Desktop screenshots from `computer_observe` and the native CUA tools are re-encoded from PNG to JPEG (quality 85, full chroma) once, before the model or screenshot retention sees them. Pixel dimensions are unchanged, so coordinates stay exact; a capture that would not get smaller stays PNG. This makes each retained desktop screenshot about three times smaller, so workspace screenshot storage lasts its full retention period.
+- 9482fe0: Report observed command-scope cleanup of background child processes with an
+  append-only result notice, preserving structured output and process containment.
+- 2708a32: Settle Connected Machine background commands promptly from authenticated runner
+  completion events after verified output capture, with retained notification replay
+  across reconnects, independent liveness capacity, shared race-safe settlement,
+  reconciliation as fallback and independently retryable output release. Delivery-only
+  receipts stop redundant notifications without releasing output; failed collection
+  retains reconciliation backoff rather than replaying on every notification.
+- 09758fd: Claude and Chat Completions requests now keep a step's parallel tool results together when history holds other items between them (for example a browser or computer tool family disclosure after an entry call that was not the step's last). Such chats previously failed every turn with "Claude tool results are incomplete"; they now continue on their existing history.
+- 2a81601: Computer use now runs on CUA Driver 0.36. On macOS, drags are delivered to background windows without bringing them forward, background typing reaches editor surfaces and multi-window apps, and background actions no longer raise Chrome or re-activate the user's app. The batch tool `run_actions` is replaced by upstream's `run_steps`, which adds targeting by role and name, per-step waits and checks, and a diff of what changed (`observe: {}`). The new `run_script` tool runs a short sandboxed script against the same computer session for flows that need loops or branches; it has no filesystem, network or process access.
+- bd35473: A native computer tool call (list_windows, get_window_state, click and the other CUA tools) that the API refuses before dispatch, for example because the ComputerSession was retired when the agent moved to another machine, now returns that refusal as a tool error with its code and message. Before, a direct call reported it as a generic failure asking the model to try again, and a Code Mode call reported an operation of unknown outcome.
+- 42f4213: Enable automatic prompt caching for OpenRouter Anthropic Chat models without changing earlier message or tool content, while preserving explicit caller cache controls. Preserve provider input-token details, including cache writes, through streamed and non-streamed Chat usage accounting.
+- e278e4d: A file edit (`apply_patch`) now runs in model order relative to the other tool calls in the same model response. It starts after every earlier call has finished, and later calls start after it has finished; other calls still run concurrently. Previously a batch such as "edit a file, then `git add` it" ran both at once, so the command could run before the file existed.
+- 79ec9fd: Let a machine owner move a running chat to their personal Connected Machine. Record the click as consent for the current logical turn, retain it across replacement attempts, and recheck ownership and access before each operation without exposing other personal machines or resources. Remove the obsolete busy-chat refusal.
+- ddaebe9: Skip malformed or conflicting repository Skills with agent-visible index warnings instead of failing the entire turn. Keep valid repository Skills available and managed or explicitly selected Skill validation unchanged.
+- a34aebb: Responses WebSocket requests continue the previous response on the same connection: when a request extends the last completed response exactly, it sends `previous_response_id` and only the new input items, and falls back to the full request otherwise or when the provider no longer holds that response. The transport now serves the OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API (`/openai/v1/responses`) as well as the Codex subscription, with one connection per conversation (`OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED`, default on). Other OpenAI-compatible hosts stay on HTTP. Each request's transport label and the model-request phase metrics say whether the input was full or incremental.
+
+  Share lifecycle and failure policy in the network package. Use the JavaScript WebSocket implementation to release sent buffers, retain only continuation fingerprints, coalesce concurrent handshakes, and retire idle connections when credentials change. The existing durable model-step retry budget owns dropped responses; its final retry uses HTTP, with no additional retry budget or timer-based cooldown. HTTP remains selected through turn recovery and subsequent successful steps, but a new turn tries the socket again. Definitive continuation refusal settles and re-admits request custody before a full-input resend. Transport diagnostics distinguish first-request cache behavior and final-prefix startup overlap; no speculative model prewarm is sent.
+
+- 6ab7b55: sandbox_file_publish now publishes files of any size object storage accepts in one upload (up to 5 GB), not only files under 25 MiB. Files up to 25 MiB are still read through the API. A larger file is hashed where it lives and uploaded by the sandbox or Connected Machine straight to a signed storage URL, so its bytes never pass through the API. The signed URL stays in a private file outside the workspace, and the file is checked against its digest before and after the upload, so a file that changes mid-upload is reported, not published. The resulting workspace File ID works for browser uploads like any other, so an agent can upload, for example, a 190 MB app bundle through a web form.
+- 7b7b2b5: A recovering turn now honors its retry backoff: the deadline is stored on the turn and armed as a delayed wake, so the session's own wakes no longer cut it short and only new user input ends it early. A required MCP server that answers 503 (for example during a deployment) is waited out for up to ten minutes instead of using up the five quick retries.
+- Updated dependencies [e7113e3]
+- Updated dependencies [35dcfa0]
+- Updated dependencies [9c0c567]
+- Updated dependencies [26b4c24]
+- Updated dependencies [a0c07e5]
+- Updated dependencies [958d157]
+- Updated dependencies [b4a3b7f]
+- Updated dependencies [88459ff]
+- Updated dependencies [2f6b8bd]
+- Updated dependencies [9482fe0]
+- Updated dependencies [2708a32]
+- Updated dependencies [08a7a88]
+- Updated dependencies [2a81601]
+- Updated dependencies [b1b51e2]
+- Updated dependencies [71dfe30]
+- Updated dependencies [f010292]
+- Updated dependencies [9fb9db3]
+- Updated dependencies [6f005fa]
+- Updated dependencies [b1c5753]
+- Updated dependencies [79ec9fd]
+- Updated dependencies [1d24639]
+- Updated dependencies [7bac0d9]
+- Updated dependencies [a34aebb]
+- Updated dependencies [5927aae]
+- Updated dependencies [6ab7b55]
+- Updated dependencies [3e061d6]
+- Updated dependencies [a22ed79]
+- Updated dependencies [0ce7609]
+- Updated dependencies [5b10fc9]
+- Updated dependencies [e2e75c0]
+- Updated dependencies [24b346d]
+- Updated dependencies [9ddadf6]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/network@4.0.0
+  - @opengeni/interaction@4.0.0
+  - @opengeni/codemode@4.0.0
+  - @opengeni/agent-proto@4.0.0
+  - @opengeni/codex@4.0.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/observability@4.0.0
+  - @opengeni/config@4.0.0
+  - @opengeni/capabilities@4.0.0
+  - @opengeni/tool-gateway@4.0.0
+  - @opengeni/vaults@4.0.0
+  - @opengeni/xai-subscription@4.0.0
+
+## 3.4.0
+
+### Minor Changes
+
+- ceaf911: Browsers: a browser whose working directory was copied or restored (for example after a machine's disk was replaced) can now be continued from that copy instead of staying unavailable. `inspectBrowserSessionWorkingCopy` reports why the copy is refused and, when it can be adopted, the exact digest of its bytes; `adoptBrowserSessionWorkingCopy` adopts exactly those bytes under the browser's existing control authority, and `getBrowserSessionWorkingCopyAdoption` reports an adoption's recorded outcome, without changing it, when a reply was lost; retrying the same adoption settles one that stopped part way and never repeats a step. How recent the copy is stays explicitly unknown. Only controller-owned derived entries are left out of the copy, and inspection lists them. An adopted copy is never replaced by an older checkpoint afterwards, the directory it replaced is kept, and every step is journaled so a crash at any point is finished or reported, never guessed. Supported on Linux machines only for now. When a preserved browser is refused, its error now says why and what to do next.
+
+### Patch Changes
+
+- e5a48d2: Browser tool calls are much shorter. `browser_act`, `browser_observe`, `browser_read`, `browser_screenshot`, `browser_debug` and `browser_tabs` may omit `browserSessionId` and `targetId` to keep working in the browser and tab the agent used last (after a fresh start, this session's most recently used live browser and its selected tab), and a locator may be an element ref given as a bare string (`"locator":"e1a2b3c4d"`). A typical click drops from about 59 to 17 output tokens, and output tokens dominate a browser step's model latency. When no browser is open or the tab is ambiguous, the tool says what to pass instead of guessing.
+- a544972: Browser tool results now reach the model as a compact page outline instead of JSON: one line per element (`role "name" [ref] value states`), indented by nesting, with refs on controls and actionable elements and omitted on text and layout lines. Noise states are dropped. `browser_open`, `browser_tabs`, `browser_observe`, `browser_act` and accessibility `browser_read` use it; `structuredContent` keeps the complete typed value for Code Mode, the API and the UI. Element refs are shorter (`e`/`a` plus 8 hex digits, with the full digest on a collision within a snapshot). Together this roughly halves the tokens of browser tool output.
+- 0ed367a: Browser and computer tasks start without a tool search. `browser_open` and `computer_open` are visible from the first request, and opening one shows the rest of its tools (observe, act, screenshot, tabs) right after the open result, frozen so later requests reproduce the same prefix. Tagged-union summaries also list a tag once when several variants share it.
+- fbb2765: Browser and computer tool definitions are about four times smaller for the model. Each tagged union, such as a browser action and its locator, is now shown once as a single object with one line listing the fields each variant takes, instead of repeating the locator in every action. Limits that only matter for validation are left out of what the model sees; the tools still enforce them. When arguments are invalid, the error now names the exact field, such as `action.locator.role: expected string`, instead of only saying the arguments are invalid.
+- 462fa87: Connected-app tools no longer start with an account line when the turn has only one account for that app. The line ("Account: … Use only this account …") was added to every tool of every connected account, which repeated the same text across hundreds of tools and gave the model nothing to choose between. It now appears only when the same app has several accounts in the turn, where it tells them apart.
+- ad17c9e: An invalid human-handoff request no longer fails the agent's turn. The handoff tool pauses for a person before it runs, and its arguments were only checked after that pause, so a request with a wrong value type (for example a number sent as a string) stopped the whole turn with a raw validation error. The arguments are now checked before the pause, like the human-input question tool, and the model gets a tool result naming the fields to correct, with nothing requested.
+- 8053c9b: A Connected Machine that stops answering in the middle of a command now fails only that command. Previously the turn could not finish: it kept trying to cancel the command on the unreachable machine until the worker's quiescence watchdog drained the whole worker, ending the turn and every other turn on it. The command is now recorded in the session's command ledger with a stop request, the turn finishes normally, and the reconciler stops or settles the command when the machine returns or its runner is retired. The error the model sees is unchanged, and the later stop adds no model input. If the ledger cannot record the command, the turn keeps ownership as before.
+- Updated dependencies [28844d8]
+- Updated dependencies [ceaf911]
+- Updated dependencies [42caae1]
+- Updated dependencies [2f370c3]
+- Updated dependencies [60191f6]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/sdk@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/capabilities@3.4.0
+  - @opengeni/codemode@3.4.0
+  - @opengeni/interaction@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/tool-gateway@3.4.0
+  - @opengeni/vaults@3.4.0
+  - @opengeni/agent-proto@3.4.0
+  - @opengeni/network@3.4.0
+  - @opengeni/xai-subscription@3.4.0
+
+## 3.3.0
+
+### Patch Changes
+
+- 190a322: Browser and computer actions on Connected Machines and attached Chrome are faster. The agent now forwards each controller request itself over loopback, instead of starting a shell, curl and base64 for every click, screenshot or state check. Large responses such as screenshots are read back in pieces, so they stay within the message size limit. Older agents that do not advertise this keep using the previous path.
+- 38ac98e: Run Site AI privately per viewer through native sessions, with optional headless
+  inline results and app-defined prompts. Keep app work out of ordinary workspace
+  discovery, preserve native permissions and accounting, and expose private-safe
+  per-Site AI costs and separate platform metrics in Insights. Usage retains limits.
+- Updated dependencies [190a322]
+- Updated dependencies [38ac98e]
+  - @opengeni/agent-proto@3.3.0
+  - @opengeni/sdk@3.3.0
+  - @opengeni/contracts@3.3.0
+  - @opengeni/codemode@3.3.0
+  - @opengeni/capabilities@3.3.0
+  - @opengeni/codex@3.3.0
+  - @opengeni/config@3.3.0
+  - @opengeni/interaction@3.3.0
+  - @opengeni/observability@3.3.0
+  - @opengeni/tool-gateway@3.3.0
+  - @opengeni/vaults@3.3.0
+  - @opengeni/network@3.3.0
+  - @opengeni/xai-subscription@3.3.0
+
+## 3.2.2
+
+### Patch Changes
+
+- d5858bb: Give new Sites readable typography defaults in the central bundled authoring Skill, including responsive text scaling checks, without overriding existing Sites or deliberate user designs.
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/config@3.2.0
+  - @opengeni/vaults@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/sdk@3.2.0
+  - @opengeni/capabilities@3.2.0
+  - @opengeni/codemode@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/interaction@3.2.0
+  - @opengeni/observability@3.2.0
+  - @opengeni/tool-gateway@3.2.0
+  - @opengeni/agent-proto@3.2.0
+  - @opengeni/network@3.2.0
+  - @opengeni/xai-subscription@3.2.0
+
+## 3.1.2
+
+### Minor Changes
+
+- 1e67711: An MCP server can recommend Ask for a tool with `_meta: { "opengeni/recommendedPermission": "ask" }` in `tools/list` (`MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). It applies on model and Codemode calls from the next attempt of every session, and only when the workspace has saved no choice for the tool. A tool asks when either this or the session's `requireApproval` says so. Connector permission settings show the same recommendation.
+
+### Patch Changes
+
+- 0bdb953: Photo-heavy chats no longer compact over and over. After compaction only the newest user message that has attachments keeps its images inline; photos of older retained messages move to the dated attachment catalog, where the agent can reopen them, and those messages are charged only for their text. Newly sent photos are shown to every model at most 2000 px on the longest side (the file itself stays full resolution, and the receipt says so); photos sent before this change keep their original projection, so requests already sent are unchanged. The local image token estimate now prices images by the patches they cover at the sent resolution, so a full-resolution phone photo counts as about 15k tokens instead of 765.
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+- Updated dependencies [0b164a9]
+- Updated dependencies [99d545d]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/observability@3.1.0
+  - @opengeni/codemode@3.1.0
+  - @opengeni/capabilities@3.1.0
+  - @opengeni/codex@3.1.0
+  - @opengeni/config@3.1.0
+  - @opengeni/interaction@3.1.0
+  - @opengeni/tool-gateway@3.1.0
+  - @opengeni/vaults@3.1.0
+  - @opengeni/agent-proto@3.1.0
+  - @opengeni/network@3.1.0
+  - @opengeni/xai-subscription@3.1.0
+
+## 3.0.0
+
+### Minor Changes
+
+- db3efc5: Sites can now be published to the web. A Site's owner or a workspace admin can give it its own address under the deployment's Sites domain (for example `team-crm-4k9x.opengeni.site`) and choose who can open it: workspace members, invited people who sign in with their email, or anyone, with anonymous visitors as guests. Published Sites keep their Site Data and embedded agent, but their direct tool calls return 403 (tools need a person's session in the console), and only a workspace admin can give the embedded agent workspace tools (guests get them only with `agent.guestTools`). Site code reads the viewer with `site.viewer` and starts sign-in with `site.auth.signIn()`, and no Opengeni credential reaches the Site. Collections gain a guest rule (`none`, `read`, `append`, `own`). Embedded agent use is paid by the organization under a limit profile (free, credits, unlimited or custom) per workspace and per Site. Visitors can report a Site, and managers can take it down and restore it. Breaking: Site HTTP is limited to an explicit operation allowlist (`SITE_OPERATIONS`) in every host, so a console Site that called other API routes through the bridge is now refused; an agent started from a Site page may send workspace API writes only to its tools, its conversations, files and content, and other writes return 403. The SDK adds `getSitePublication`, `updateSitePublication`, `unpublishSite`, `checkSiteHostname`, `takeDownSite`, `restoreSite`, `listSiteAbuseReports`, `updateSiteAbuseReport`, `getSiteLimitProfile`, `updateSiteLimitProfile` and `authorizeSiteViewer`; `ArtifactSandbox` and `SiteView` accept a `viewer`; agents get `site_publication_get`, `site_publication_update` and `site_hostname_check`. Publishing is off until `OPENGENI_SITES_DOMAIN` is set.
+- 957f6ee: Sites can have their own SQL database. Where a deployment turns on Cloudflare storage (`OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`, `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` and the gateway secret), a Site's owner can enable a per-Site SQLite database, one Durable Object per Site in the Sites gateway, next to Site Data. Agents define schema migrations and named queries with the new `site_sql_*` tools (`site_sql_inspect`, `site_sql_enable`, `site_sql_migrate`, `site_sql_define_query`, `site_sql_query`, `site_sql_run`, `site_sql_execute`, `site_sql_export`, `site_sql_import`, `site_sql_reset`), and Site code runs those queries with `site.sql.run(name, params)` from `@opengeni/sdk/site`. Sites never send SQL; each query has an audience (`everyone`, `signed_in` or `managers`), and `:viewer` is bound from the verified viewer. Statements are checked against an allowlist (one statement per named query; no ATTACH, VACUUM, extensions or PRAGMA writes; no recursion in named queries; no reserved `_cf_`/`_og_` names, even as string literals; schema changes only through migrations), results are bounded, unique and primary-key violations return `conflict`, and rows read, rows written and storage are metered in `usage_only` mode under the Site's limit profile (`OPENGENI_SITES_SQL_*` settings). Data can always be exported as SQL, CSV or JSON, in pieces with a cursor for large databases (`exportSiteSql` takes `cursor` and `maxBytes` and returns `nextCursor`); export, inspect and dropping a database keep working after the flag is turned off while the gateway stays configured. `signed_in` queries need a viewer signed in as a person, guests' write queries count against the Site's guest write limit, and only Site page calls count toward the monthly caps. An agent started from a Site page gets the page's reach: it cannot manage Site SQL and `site_sql_run` runs only the named queries the page itself could run. Postgres keeps the settings, migrations and queries in new FORCE-RLS `site_sql_*` tables so a database can be rebuilt. The SDK client adds `getSiteSql`, `updateSiteSqlSettings`, `migrateSiteSql`, `defineSiteSqlQuery`, `deleteSiteSqlQuery`, `runSiteSqlQuery`, `querySiteSql`, `executeSiteSql`, `inspectSiteSql`, `exportSiteSql`, `importSiteSql` and `resetSiteSql`. Without the settings nothing changes.
+- 6339cec: Published Site limits now follow the viewer. Workspace members have no Site caps, only the flood brakes, and keep the embedded agent even when it is off for everyone else. Invited and signed-in people share one Site spend limit ($10 a month by default, or a daily limit) with an optional per-person limit; guests also meet the bot guards (20 conversations per visitor per day, 500 per Site per day, 50 turns and $1 per conversation). Workspace tools reach only members who may use connections, and outsiders never get a subscription-billed model: they use the workspace's credit-billed default or are refused. Sites also meter platform usage (gateway requests, Site SQL rows read and written, stored bytes) against a monthly workspace allowance with overage prices, in `usage_only`, `shadow` or `credits` billing mode, and a deployment-wide monthly spend brake an operator can lift with `scripts/operator/site-platform-brake.ts`. Managers see what each audience can use, readiness warnings with one-click fixes and a View as visitor preview; Site code reads `site.capabilities`. The SDK adds `applySitePublicationFix` and `getSitePlatformUsage`, and agents get `site_publication_apply_fix`.
+
+  Breaking: `agent.guestTools` is accepted but ignored. On published hosts, `not_available_for_viewer` (with the feature name) replaces `site_agents_unavailable`, `site_tools_unavailable` and audience-only Site Data and Site SQL forbidden errors. `details.legacyCode` retains the earlier code for migration; clients must explicitly adopt the new code or read that alias. Ownership refusals keep their own code. `effectiveLimits` now describes non-member limits, never a member's budget. The `free` profile is now `standard` (`free` remains an accepted alias). Limits follow the viewer. These immediate user-directed semantic changes are recorded in the API compatibility exception log, not claimed as a 90-day transition or security exception.
+
+  Migration 0790 adds platform metering, spend windows and verified conversation viewer emails. Migration 0791 is a no-write compatibility checkpoint: legacy stored kinds and overrides stay readable by old releases, with no locked backfill. New writers store standard as free. Request-time normalization ignores old-free defaults in unmarked custom overrides and preserves other owner values; new explicit overrides carry an internal version marker so intentional old-default values are preserved. Existing Sites and old-pod writes pick up the new defaults without republishing. See `docs/published-sites.md` for the exact values and compatibility mapping.
+
+  Members receive no Site budget or session usage-limit stamp. Every published-host conversation gets its own Site Data tools, viewer-bound Site SQL named queries when enabled, and member-only read-only SQL, never management tools. Site agents have no sandbox; publication settings expose no sandbox opt-in. Console-frame tools are narrowed per tool name. Non-member models are explicit and existing subscription conversations are refused. A configurable $0.25 per-turn reservation avoids consuming entire conversation caps; reservation contention returns retryable 429 `site_budget_busy`. React renders audience, budget and platform-brake refusals inline.
+
+  Migration 0790 also adds nullable pending-admission tokens. Funding stays reserved across dispatch, and enqueue transactions verify the token. Crash/unknown-outcome recovery revokes delayed requests and reconciles the locked canonical queue before refunding; neither an idle label nor a timeout can double-allocate funds.
+
+  Keyed Site Start retries also repair sessions whose shell committed but whose first turn did not. Repair reuses the original prompt/model, acquires fresh funding without duplicating conversation or turn counts, and invokes the existing core initialization path.
+
+  Platform usage excludes model spend and defaults to metering only. Site SQL has no monthly row quotas by default and 5 GiB storage per Site. Publishing can return 402 `site_platform_quota_exhausted` only in credits mode and 503 `site_platform_brake_engaged` while the global brake is engaged. The `OPENGENI_SITES_FREE_*` agent settings are deprecated fallbacks for `OPENGENI_SITES_AGENT_*` and `OPENGENI_SITES_GUEST_*` settings.
+
+- d367818: Agents using a personal Slack connection can now read files people share in Slack. A new `slack_download_file` tool fetches one file by its ID and saves it into the agent's workspace like an attachment, so PDFs, images and documents can be opened with the agent's usual tools. The Slack connection now asks for `files:read`; the tool appears only for connections that granted it, so existing connections are unchanged until they reconnect. The user token is sent only to Slack's private file host, Slack's sign-in page is reported as missing access rather than saved, and file bytes and private URLs never appear in tool results.
+
+### Patch Changes
+
+- a1d31ec: Agent-facing account-picking descriptions and the bundled help reference now say Primary first instead of Primary only, and describe Spread as sharing new chats evenly across accounts that can serve them rather than picking the account with the most usage left.
+- b0f5351: Resuming a browser whose earlier resume timed out no longer gets stuck. Before, the resume first tried to end that interrupted attempt, and when the machine still held the attempt's working copy it refused in order to protect it, so the browser could neither be continued nor resumed.
+
+  Now, when the attempt's browser launch completed (still running, or launched and then the machine restarted), the resume asks the machine to re-adopt that exact attempt from its own profile directory, on the same machine instance and under the same controller generation, and marks the browser active again under the same record and history. Nothing is restored over the working copy and nothing is discarded.
+
+  When the launch never recorded completion (for example the machine went down mid-launch), the attempt can't be adopted. If a complete process scan proves no browser is running its profile (Linux), the machine moves the attempt's whole session directory aside intact, under `set-aside/<browser>/<generation>` in its browser state directory, and the browser resumes from its saved checkpoint under the same record. A launch that completed, or whose profile may still be in use (including any platform without that proof), keeps refusing and stays preserved. Machines on agents without this option keep their original refusal.
+
+  Set-aside directories are kept until an operator removes them; nothing deletes or restores them automatically, because they can hold a private signed-in profile.
+
+- 501bb83: Stop presenting old attachments as if they came with the latest message after context compaction. Compaction used to add the files of summarized messages as an undated user message right after the latest request, so an agent could read a days-old image as something the person had just sent. New catalogs are a platform record placed before the retained messages, state that they are not user input, and list each file's upload time, frozen when the catalog is created. Catalogs created before this change replay exactly as before, so text already sent to a model is unchanged.
+- d7da8e4: An idle sandbox drain no longer piles up workspace captures. When a capture outlives the drain snapshot budget, a retry in the same worker now waits for it instead of starting another full read and temporary spool of the same box. The slow capture still publishes late and the box then drains. Host-backed captures also stop promptly when aborted during the archive re-read and verification passes.
+- aa5b7d8: Only a person's explicit end discards a browser whose controller lost it. Previously any end that removed state did, including the cleanup a failed or expired resume runs, so resuming such a browser could silently throw away its preserved working copy and restart from an older checkpoint. Now that cleanup keeps refusing and preserving it, as before. The end action first asks for a normal end and, only when the machine reports the browser's runtime preserved, asks again with an explicit discard. Machines on agents without the discard option keep their original refusal.
+- 664368a: Browser and computer session list requests accept optional `associatedSessionId` and `includeTerminal` filters, applied in the database. Agent `browser_open`, `computer_open` and `interaction_discover` request only live sessions tied to their own chat instead of the whole workspace history, so opening a browser no longer slows down as a workspace accumulates sessions.
+- f7abc0b: Images returned by any tool, such as an integration's capture tool, are now kept the same way as viewed images and screenshots: stored once in object storage with a compact reference in session history, instead of base64 inside each history row. The timeline shows them as images, and the model receives the same image bytes, in the same form, as before. Each image in a result is stored separately, and an image that cannot be stored stays inline exactly as today. Only new tool results change; existing history is untouched. Stored tool images follow the existing screenshot retention period and workspace quota.
+- Updated dependencies [9a15dda]
+- Updated dependencies [501bb83]
+- Updated dependencies [664368a]
+- Updated dependencies [2077293]
+- Updated dependencies [db3efc5]
+- Updated dependencies [957f6ee]
+- Updated dependencies [6339cec]
+- Updated dependencies [37169cd]
+- Updated dependencies [d367818]
+  - @opengeni/sdk@3.0.0
+  - @opengeni/contracts@3.0.0
+  - @opengeni/config@3.0.0
+  - @opengeni/codemode@3.0.0
+  - @opengeni/capabilities@3.0.0
+  - @opengeni/codex@3.0.0
+  - @opengeni/interaction@3.0.0
+  - @opengeni/observability@3.0.0
+  - @opengeni/tool-gateway@3.0.0
+  - @opengeni/vaults@3.0.0
+  - @opengeni/agent-proto@3.0.0
+  - @opengeni/network@3.0.0
+  - @opengeni/xai-subscription@3.0.0
+
+## 2.0.1
+
+### Patch Changes
+
+- Updated dependencies [2ea5f7b]
+- Updated dependencies [e8d18da]
+  - @opengeni/contracts@2.0.1
+  - @opengeni/sdk@2.0.1
+  - @opengeni/capabilities@2.0.1
+  - @opengeni/codemode@2.0.1
+  - @opengeni/codex@2.0.1
+  - @opengeni/config@2.0.1
+  - @opengeni/interaction@2.0.1
+  - @opengeni/observability@2.0.1
+  - @opengeni/tool-gateway@2.0.1
+  - @opengeni/vaults@2.0.1
+  - @opengeni/agent-proto@2.0.1
+  - @opengeni/network@2.0.1
+  - @opengeni/xai-subscription@2.0.1
+
+## 2.0.0
+
+### Minor Changes
+
+- 71c42bf: Configured agents are no longer told to call first-party tools that their attempt cannot reach. `BuildAgentOptions.agentPromptToolAvailability` (derived with `deriveAgentPromptToolAvailability` from the accepted first-party selection and permission ceiling) removes only instruction clauses that name a tool proven absent; deferred, external and unknown tools keep their guidance, and omitting it keeps today's bytes. `@opengeni/contracts` now exports the first-party tool registration table (`FIRST_PARTY_TOOL_AUTHORIZATION`, `permissionsRequiredByFirstPartyTools`) previously private to the API.
+- fe9bbb4: Secret references follow one rule in every tool call: a reference resolves where it is written, including Opengeni's own tools such as admin actions, messages, schedules and goals, and an escaped reference passes on unresolved for later work. Interaction tools (resolved by the API at dispatch) and the secret tools, whose arguments name references, keep their arguments unchanged. The agent instructions and the secrets skill describe the escape for handing a reference on.
+
+### Patch Changes
+
+- 12bcb8e: Keep authorized first-party harness control tools (goal lifecycle, `command_read`, `command_wait`, `wait_for_input`) visible from the first request on every progressive-disclosure transport, so the model no longer spends a `tool_search` round trip to find them. Other first-party tools stay deferred and a disabled family stays absent.
+- 14a9340: A person's question asked while the agent is working or waiting always gets a visible answer. `wait_for_input` is refused (as a tool error, at most twice per turn attempt; a resumed or retried attempt starts again, and the check fails open if it cannot decide) when the turn answers a person's message and the agent has not written any visible reply yet, so a status drafted only in reasoning is written out before the turn yields. `prepareAgentTools` accepts the new `inputWaitReplyGuard` option for this check.
+
+  In the timeline, a reply the agent wrote before more tool work and a wait stays visible after the "Worked for" row instead of folding into it: a turn that answers a person and ends with only progress notes keeps its first and last message visible, and the notes between them still fold.
+
+- 608e907: `apply_patch` `*** Add File` now creates files that end with a newline, matching Codex: each `+` line is followed by `\n`. Previously the last line had no trailing newline. Update and Delete File sections are unchanged, and internal sandbox writers keep their exact-content behavior.
+- 0380bc5: Recover confirmed Claude overload on the same accepted turn for at most 15 retries
+  within a 15-minute durable recovery window. Require structured provider evidence,
+  honor Retry-After only inside that window, and reject expired retries before
+  dispatch. Preserve the selected budget and delay through checkpoint database
+  outages without replaying completed tools or changing account/model selection.
+  Other failure classes retain their existing recovery behavior.
+
+  Ship runtime and turn/control workers with the workflow bundle from the same
+  source release; no database migration or configuration change is required.
+
+- 9eccfe5: Stop a warm (periodic or turn-end) host-backed Local/Docker workspace capture at
+  `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS` and release its exact capture claim once
+  the local reads have ended. A slow host no longer holds the workspace write
+  fence for the whole capture, which failed writes with
+  `SandboxWorkspaceMutationFencedError` and stalled turn finalization until the
+  worker was contained. A capture still queued behind provider operations is
+  abandoned the same way. Provider-native captures, archive publication and the
+  lease drain capture are unchanged.
+
+  The editable artifact materializer now retries an identity probe that timed out
+  at startup, with 1x, 3x and 9x the probe budget, instead of failing on one slow
+  start. Other probe failures are not retried.
+
+- 055015d: Browser action receipts now say which element each locator resolved to: its role, name, reference, and the nearest dialog, landmark, menu or toolbar around it. A "Close" that hit the page header instead of a dialog is now visible in the receipt. Controllers add the field only when the caller asks for it, and never store it in their operation journal, so older and newer API and controller versions keep working together.
+- b969da0: Saving a browser download to a workspace path now creates missing folders on that path, instead of failing with "mutation path not found". Every existing folder on the path must still be inside the workspace.
+- 8df9e66: Clarify browser action guidance for batches of known form edits, reuse of returned page observations, and inspection of uncertain outcomes.
+- 4b2d2c5: Browser press accepts the function keys F1-F24 and the navigation keys Home, End, PageUp, PageDown, Insert and ContextMenu, plus the common short spellings (Esc, Return, Del, PgUp, PgDn, Up, Down, Left, Right). Before, any of these was refused as an unsupported key even though the tool schema accepts any key string, so an agent could not, for example, press F2 to edit a grid cell. Genuinely unknown keys are still refused before focus moves or any input is sent. The browser action tool description now lists the accepted key names.
+- 4cccd33: Return the existing compact page observation from browser tab open/select tools so agents can reuse its references and generations without another observation request.
+- e8a3d83: Bound Claude's final serialized request and inline image bytes. Recover a first
+  request-size rejection through one durable checkpoint while preserving the
+  latest complete input/tool batch, signed thinking, and original history. Keep
+  the recovery allowance across attempt restarts and report content-free size
+  diagnostics instead of retrying an unchanged oversized request.
+- 63140a3: Claude context compaction now reuses the ordinary request's cached prefix (tools, instructions, thinking, effort and tool choice), so a checkpoint reads the prompt cache instead of rewriting the whole conversation. A Claude subscription rate limit during compaction now recovers through account rotation or a capacity wait instead of failing the turn as a used-up quota.
+- 69a3f42: Prepare Claude subscription chat turns for the shared subscription core. A Claude turn reads its provider route once: without the Claude cutover it runs exactly as before; during maintenance it fails with typed copy; on the core it is placed, leased and funded like the other subscriptions, every model, web-search continuation and session-title request is reserved and settled before and after it goes out, an unknown outcome is never replayed, and an unauthorized response is retried at most once, on the same account, after one forced refresh. On the core, workspace model policy must allow a workspace-scoped Claude model under both its own and the organization's provider identity. Nothing changes today: no organization has the Claude cutover, so Claude, SuperGrok and Codex behave exactly as before.
+- f5ad69f: Claude models get Anthropic's server-side web search when web search is enabled. Searches, results and citations are kept in history and sent back exactly as Anthropic requires, deferred and paused searches continue correctly, other providers and compaction see readable search facts, and the search tool is part of the stable cached prefix. A cited answer is one reply, a paused turn's context size is its last request, failed searches never wait as pending tool calls, and billed searches are counted.
+- 32528f8: Fix Claude conversations failing with "Invalid `encrypted_content` in `search_result` block" after they move to another Claude account. Anthropic encrypts web search results for the account that ran the search, so a conversation that later ran on a different account (an exhausted account in a subscription pool, a replaced key) was rejected on every turn. Each stored search now records an opaque account scope (the Claude account UUID, or a one-way digest of the API key) and is replayed natively only to that same account; on any other account, and for searches stored before this change, it is sent as readable facts (query, titles, URLs) without encrypted data or citations. Searches still continue natively within a turn, including paused turns, and the request prefix stays stable while the conversation stays on one account.
+- 6372501: The Codemode directive no longer says every available tool is callable programmatically. It now names the Codemode catalog (`ogtool list`) and says the built-in sandbox tools for the shell, file patching, image viewing and terminal input are outside it, so the agent uses the shell and filesystem directly for those.
+- 4532435: Codex Apps keeps working when a workspace routes models through its organization's Codex accounts. The workspace's designated Apps account now loads, and its token refreshes persist, through the Apps designation itself instead of the model-routing pool; that authority still reaches only the designated account, owned by this workspace and its current owner. Turning Apps off (`DELETE /v1/workspaces/:workspaceId/codex/apps`) now works in every routing mode, so `apps.canDisable` is accurate.
+
+  Apps no longer posts an authorization card every time it sets up a turn. A card appears only when an Apps tool call needs one, at most once per turn, and an unusable designated account is reported with the new `tool.auth_needed` reason `designated_credential_unavailable` instead of `refresh_failed`. Clients should treat unknown reasons generically, as before.
+
+- 1d3019e: Read browser page structure and requested screenshots concurrently. Keep generation checks and wait for both reads to settle before reporting an error.
+- f96605f: Connect a machine from the chat. Agents can post a Connected Machine card (`capability_authorization_request` with `api:connected-machine`, or `sandbox_provision` with `kind: "selfhosted"`) the way they request integrations. The person copies a one-line Mac/Linux or PowerShell command minted in their browser, the card notices when the machine comes online, and **Use in this chat** moves the conversation there. Once a machine is connected, the card links the Opengeni Browser Chrome extension and shows when Chrome is linked. Agents that can already reach a machine install it themselves with `connected_machine_enroll_token`, and their tool guidance now names the extension link and the machine-first requirement.
+
+  Enroll tokens are now single-use: each carries a `jti` that the exchange records (migration 0696), so one token connects one machine. The same machine may repeat the exchange while it is still enrolled; another machine, or a machine removed since, gets `401`. Tokens minted before this release stay multi-use until they expire. The Machines page connect dialog shares the new command component, adds Windows, and no longer calls a multi-use token "one-time".
+
+- 21d64c1: Align autonomous Knowledge retention across prompt paths and new Slack chats,
+  show accepted learning modes and destination scope, and improve selective
+  retrieval and feedback correction guidance.
+- 6a237fc: Recover Connected Machine control replies across NATS reconnects and credential rotation using negotiated, process-scoped delivery receipts. Retries share one immutable delivery and cannot repeat a mutation. Requires a native agent containing the reply journal; older agents retain conservative one-shot mutation behavior. Tool schemas, result text, and existing history are unchanged.
+- aab88de: `NatsControlRpc` accepts an optional `recoveryMs` transient-failure recovery allowance. The default is unchanged (two minutes beyond the operation timeout).
+- c47d199: Chats archived by a Local or Docker sandbox now continue after a deployment switches to a remote sandbox backend such as Modal. The host-backed workspace archive is converted into a portable tar, hydrated into the new sandbox, and every restored directory and file is verified against the archive before the sandbox is used. Previously the restore was refused and the chat became unrecoverable.
+- 225fcfc: Docker sandbox: draining an idle box to cold no longer leaves its whole host workspace directory (`openai-agents-docker-sandbox-*`) behind. After the workspace archive is published and the exact container is removed, the drain re-checks its ownership evidence and deletes the directory, including read-only Go module caches. A retry after a crash finishes without recapturing, and `bun run dev:clean` also removes the workspace directories of the sandbox containers it removes. Object-storage restore downloads now use owner-marked temporary directories as well, so a process killed mid-download leaves nothing behind once the next process starts.
+- adf96dc: Shell commands in managed sandboxes now honor a model-requested foreground wait up to 4 minutes (was 30 seconds; Connected Machines keep their 30-second background yield), so a long build or test run returns its result in one `exec_command` call instead of repeated empty `write_stdin` polls. A command that printed output and then went quiet still returns after the ordinary 30-second window, and one that ends in an input prompt returns after 2 seconds of silence. `exec_command` also uses a lean non-strict schema that requires only `cmd` and `max_output_tokens`; omitted `login`, `tty` and `yield_time_ms` run as `false`, `false` and `10000`. Both are on by default; set `OPENGENI_EXPERIMENT_CUT_POLLING=false` or `OPENGENI_EXPERIMENT_OUTPUT_COST=false` to disable either.
+- aeabfec: Stop failing turns when the deployment's own API is briefly slow. Opengeni's built-in MCP servers (`opengeni`, `files`, `docs`) inherited the MCP client's 5-second default for `initialize` and `tools/list`, so during a rolling restart or a busy period every turn start timed out, and turns exhausted their recovery budget within a few minutes. MCP server configs now accept `setupTimeoutMs`, which bounds only session setup (and the outer connect fence); the built-in servers use 30 seconds. Tool-call timeouts are unchanged.
+- 445baf4: Default generic native calls to fresh sessions while preserving explicit session entry. Add non-authoritative selected-session context and exact Send/Steer delivery-to-result tracking without transferring the call.
+- 2becf01: Workspace archive spools no longer pile up in TMPDIR when a worker stops while a capture, upload or restore is in flight. Each spool directory now records its owner process, a normal exit removes the live ones, and the next worker start (or its first capture) removes spools whose owner process is gone. Spools of live workers sharing the same TMPDIR are never touched.
+- 17374c1: An idle deployment no longer starts five Temporal workflows on every sandbox reaper tick (every 30 seconds by default): the reaper router, the drain inventory, its maintenance pass, the idle checkpoint sweep and the browser checkpoint sweep. The control worker now drives three work-checked cadences on the same reaper period:
+
+  - The lease reaper starts the unchanged drain inventory, which starts its maintenance pass, only when a lease is warming, warm, draining or held, when any reconciliation the pass runs has a due row, or when Modal is configured and its app still runs a sandbox.
+  - The idle checkpoint sweep starts only when a warm box may be due at the snapshot interval.
+  - The browser checkpoint sweep starts only when a checkpoint-capable browser on a warm box is suspending or facing its provider deadline.
+
+  An idle reaper tick still refreshes the reaper's read-only gauges in the control worker, so inventory freshness alerts keep working. The reaper period and its boot invariants are unchanged, and a failed check still starts the workflow.
+
+  The old `opengeni-sandbox-lease-reaper` Temporal Schedule is deleted at startup, and `registerSandboxReaperSchedule` is removed. The router workflow and activity stay registered so in-flight histories and a rollback still replay. New migration 0732 adds the read-only checks, each with the same owner and grants as the claim it previews.
+
+- e29b641: Preserve connected-machine failure details and request references in agent tool errors. Retain uncertain outcomes and guide inspection before another action instead of suggesting an automatic retry.
+- c13d080: Add canonical sparse row-height and column-width set/reset commands with live
+  spreadsheet projections and immediate, frame-coalesced drag and keyboard
+  resizing. Preserve existing dimension-free artifacts and shared artifact
+  authority, collaboration, and history.
+
+  Preserve sparse dimensions through native workbook reconciliation and verified
+  XLSX materialization, including empty-sheet geometry. Refresh all modality
+  kernel distributions together to retain their shared build identity.
+
+  Keep spreadsheet input responsive during delayed saves, retain pending cell
+  drafts when refocused, surface independent failures without unsafe overlapping
+  retries, and show server sync state separately from local command acceptance.
+
+  Center resize targets on header borders and retain valid covered cells while
+  viewport queries change. Show submitted cell input immediately without inventing
+  formula results. Support canonical worksheet renaming by double-click or F2,
+  with validated Enter/Save, Escape/Cancel, and readable pending/failure feedback.
+
+- 810d1d9: Add targeted current-human tool resolution and invocation without whole-workspace
+  provider discovery. Fence caller, pinned Site and selected live action policy
+  after awaited physical credential authorization. Preserve success/unknown
+  outcomes through cleanup failures, prevent stale retries on contradictory
+  transport flags, and retain Site entry pins through Codemode refresh. Preserve
+  live account authority, versioned executable-effect one-shot approval
+  bindings, optional full-definition preconditions, and explicit legacy discovery.
+  SDK calls use the targeted path by default; older APIs require explicit catalog
+  mode. Upgraded Site hosts adapt saved legacy bundles using bounded manifests.
+  Raw/local target approvals bind existing executable/configuration authority
+  instead of public catalog presentation. Retained catalog clients also veto
+  uncertain stale retries; explicit malformed pins are never silently omitted.
+  The host also separates executed stale-named provider diagnostics from legacy
+  Site retry control without rewriting saved bundles or changing success outputs.
+  Deploy rolling migration 0686 before enabling the new API and matched SDK/host.
+- c7165c2: Preserve unknown own properties during deferred argument type restoration and leave overflowing numeric JSON untouched for normal validation instead of converting it to null.
+- f718376: When a file cannot be staged on a Connected Machine session whose working directory is the filesystem root (`/`, read-only on macOS), the failure now says the root is likely the cause and how to fix it, followed by the underlying error, instead of only a raw `mkdir: .opengeni: Read-only file system` error. The check uses the effective backend and working directory, not the command's localized output. The original command output and exit code are kept, managed sandboxes keep their raw reason, and files are never redirected to another host folder.
+- 8e878ac: Turn screen control on for an already-connected machine, in place, with no reconnect, token or human click. `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control` (SDK `enableMachineScreenControl`; agent tool `connected_machine_enable_screen_control`) records the consent on the enrollment without a new credential generation. It then sends the live agent the new `credential_renew` control op, and the agent renews its credentials with its install-key proof. The response is `active`, or `pending` with `offline`, `agent_update_required`, `renewal_failed` or `reconnect_required`. Pending consent applies automatically on the machine's next Hello. Each change records a `connected_machine.screen_control.allowed` audit event with the actor.
+
+  Agents advertise `Capabilities.credential_renew`. Mac agents report Screen Recording, Accessibility and Input Monitoring (`MacDesktopPermissions`) on Hello and desktop heartbeats, which surface as `runtime.macPermissions`. `runtime.capabilities.screenControl` says whether the live agent holds the consent. `POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` (SDK `openMachinePrivacySettings`) opens one of those System Settings panes on the Mac. The Connected Machine card shows **Turn on**, then walks the missing Mac permissions from what the machine reports.
+
+- a876a1d: `useOpenNativeLink` moves to its own module so the native environment module no longer imports `react-native` at runtime, and the API derives the session MCP permission identity through the approved `@opengeni/runtime/workspace-tool-gateway` entrypoint instead of the runtime barrel.
+- d842107: MCP tool results reach the model as native content: images arrive as image input instead of base64 text, text arrives as plain text, structured content is added once, errors are marked, and `_meta` stays in the retained audit result.
+- c43f174: MCP tool-call metrics (`opengeni_mcp_tool_calls_total`, `opengeni_mcp_tool_call_duration_seconds`) carry a bounded `tool` label: the tool name for a first-party Opengeni catalog tool, and `external` for every connector, API-integration, and custom tool. The `OpenGeniMcpToolLatencyHigh` alert now fires per tool and names it.
+- 6819496: Preserve complete Modal output for synchronous filesystem commands that exit on their first read, without retaining terminal receipts beyond the collector's lifetime.
+- d15e8e9: Modal router reads no longer report a finished command as still running when the exit poll is answered just before both output streams reach EOF; the page polls again within its existing read budget. Internal callers that read once (file writes, Skill checkout) now see the finished command's exit instead of failing, so the command is not retained and later adopted as an agent-visible background command.
+- 6a510ec: A session whose Connected Machine is offline (or whose control requests time out) no longer fails every turn before the model runs when it has repository resources. Repository Skill discovery now degrades to a short "repository skills unavailable" instruction for that run, so the agent can still answer and explain the outage; the next run discovers again. Other discovery failures still fail the turn.
+- 906d3c2: Preserve the exact scheduler authority label and immutable curated Skill artifacts during the branding refresh so scheduled dispatch and pinned library discovery remain compatible.
+
+  Refresh the canonical browser artifact kernels to match the branding-updated Rust source identity.
+
+- 38b1ba1: Use Opengeni in product copy and Slack manifest defaults, add a clearly labeled staging icon, and accept both current and historical Slack installation names without rewriting saved credentials or receipts. Expose the Opengeni chat facade while preserving the existing `OpenGeni` export and public identifiers.
+- 42c87e4: Spell the product Opengeni in agent prompts, bundled Skills, tool descriptions and vault messages. Code identifiers, header names, wire values, persisted labels and pinned curated Skills keep their existing spelling.
+- 1da17d9: The deployment Opper rail now offers Claude Opus 5.5 (EU) (`opper/aws/claude-opus-5-5`, AWS Bedrock eu-north-1, no provider logging) instead of the Gemini 3.8 Flash and Claude Sonnet 4.6 EU starters. Reasoning is runnable (`low` through `max`, default `medium`), image input is enabled, and every Opper request without its own output cap gets the route's `maxOutputTokens`, because Opper otherwise stops at 4,096 tokens, which hidden thinking can use up. Opper streams use a 60-minute keepalive-only progress bound, because hidden thinking sends only keepalives and `max` effort exceeded the default 10 minutes. Billing still uses Opper's reported cost +5%. Workspace and organization custom Opper ids now get runnable reasoning, image input for the Claude and Gemini families, and a Claude output cap; an id that names a configured route inherits that route's definition. New `OPENGENI_MANAGED_MODELS_JSON` replaces the managed Gateway, OpenRouter, and Opper model lists in code catalog mode without a code deploy, using the catalog document's entry schemas. Database catalog mode ignores it.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- 7b825ec: Organization administrators can see and redeem Codex usage limit resets for organization-managed subscription accounts on the organization Models account page, including accounts that serve no workspaces. Organization account rows show the reset count. Redemption stays a signed-in human administrator action; agents and non-administrators are refused.
+- 32851ac: Allow the contracted 50-second command polling wait in the MCP latency alert while retaining detection of slow polls and the existing latency budget for other tools.
+- a15f487: Preserve included hosted web-search URLs and snippets across client-tool continuations and portable compaction without depending on provider-stored item IDs. Azure native search requests now include supported evidence; request-local history exposes only bounded, untrusted provider-returned facts while canonical history remains unchanged.
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+- 6d5b2ba: Reduce Connected Machine browser and computer controller request overhead by streaming small requests and binary responses through one existing command operation. Keep authority on stdin, preserve controller binding validation, and never retry an uncertain mutation.
+- db51750: Preserve authenticated host credential-provider Git helper chains during managed repository clones. Repository-scoped renewable helpers now work for multiple installations on one host, while ambient helpers stay excluded and explicit native connection selections remain isolated.
+- 70332a4: Turn-startup diagnostics: `model_prepare_runner_before_mcp_tools` is recorded only when the MCP tool snapshot happens before the first model request. A lazily prepared catalog snapshotted after that charged the model's own time to the gap (it read 14 s p50 while real first tokens took ~3 s).
+- 732a788: Send each distinct session goal context to the model once per request. Every accepted turn still freezes its goal onto its input, but a context identical to the most recent one earlier in the request now becomes a one-line "unchanged" stand-in; a changed revision, state or text is rendered in full. The projection depends only on earlier items, so request prefixes stay cache-stable. Compaction charges its retention budget on the collapsed form, keeps the goal in full on the oldest retained message, and no longer retains answered status-only machine updates (command results, wait timeouts, child progress, goal nudges) verbatim, since the summary already carries them. The newest input is always retained.
+- 11946c9: Say that files attached to a session stay mounted on every turn and belong to the current request only when the latest message refers to them, and name `session_events` in session-target guidance only when that tool is available.
+- a9a0395: Add a stateless OpenAI-compatible Chat Completions endpoint for single model calls without tools (`POST /v1/workspaces/:workspaceId/chat/completions`, `GET /v1/workspaces/:workspaceId/models`). Calls route through the workspace model catalog, including Codex, Claude and SuperGrok subscription accounts, admit on a positive credit balance, and settle actual usage once per request. Session titles use the same single-call path and stay on the turn's subscription account (Codex titles with `codex/gpt-6-luna`, Claude with Haiku 5.5).
+- e712954: Observe each already-started internal filesystem command to confirmed terminal completion before returning checkout, read, or mutation results. Preserve complete output, exact command custody and cancellation, and report unknown completion without replaying writes or advising a new retry. Interactive and background shell behavior is unchanged.
+- 443ac28: Recover a turn when a managed sandbox command fails to start before dispatch
+  inside an `exec_command` call. On every subscription-core route, checkpoint the
+  answered model request first so the turn recovers with the existing
+  connectivity backoff and limits instead of failing. The provable call is
+  settled as not started (replay safe) rather than outcome unknown. Recoveries
+  that interrupt a running tool now count toward the same budget until the turn
+  makes tool progress, so they cannot loop without bound.
+
+  A retryable failure that cannot recover automatically now says so instead of
+  promising a retry. When recovery is exhausted, Retry stays available. Retry
+  refusals now separate work that is still settling (`RETRY_EXECUTION_UNRESOLVED`)
+  from a permanent unknown tool outcome (`RETRY_TOOL_OUTCOME_UNKNOWN`), and the
+  web app tells the person what to do in each case. No migration or configuration
+  change is required.
+
+- dd82a5c: Correct modular tool-discovery guidance: a tool found with `tool_search` stays callable by its exact name, several capabilities can be searched in one response or loaded together through `names`, and goal tools are searched only when their input schema is not in context.
+- 0b5bf2c: Tell agents that the artifactId returned by `sandbox_file_publish` is also the file's workspace File ID, so a published sandbox file can be passed straight to a browser upload action.
+- d7b947e: A running background command (a dev server, a long benchmark, a command whose output is still draining) no longer stops workspace checkpoints. Warm checkpoints taken during a turn were refused while a background command held the sandbox, potentially leaving later changes without a recovery point if the provider instance was lost. When the checkpoint is a Modal native snapshot (a point-in-time image of the paused box), it now runs around the exact active, unsupervised retained commands on the same box. A file a command was writing at that instant can be saved half-written; that is the accepted trade-off. Tar-style checkpoints still wait for commands. Such a checkpoint is recorded one generation behind the workspace, so it is never reported complete: periodic checkpoints continue, and a restore after provider loss shows the usual discontinuity warning. Rolling migration 0659 records the claim so a drain, a drain takeover or a late adoption can never publish it as the final workspace. Viewers, sibling turns, in-flight requests and supervised commands still block a checkpoint. The worker exports `opengeni_workspace_capture_skipped_total{backend,reason}` for warm checkpoint attempts that could not start.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [ab03f44]
+- Updated dependencies [dbb2cb6]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [c2f4153]
+- Updated dependencies [de2d721]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [6861501]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [ab1ea00]
+- Updated dependencies [f5ad69f]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [4532435]
+- Updated dependencies [92b6aef]
+- Updated dependencies [851cbdc]
+- Updated dependencies [d393b9b]
+- Updated dependencies [6d5f287]
+- Updated dependencies [0eae048]
+- Updated dependencies [17b262f]
+- Updated dependencies [f96605f]
+- Updated dependencies [496ce55]
+- Updated dependencies [c08dfcd]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [8017d94]
+- Updated dependencies [adf96dc]
+- Updated dependencies [aeabfec]
+- Updated dependencies [ce7b403]
+- Updated dependencies [445baf4]
+- Updated dependencies [121f6ed]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [945490f]
+- Updated dependencies [4d8eb5e]
+- Updated dependencies [8e878ac]
+- Updated dependencies [c502add]
+- Updated dependencies [72b0312]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [9ffe528]
+- Updated dependencies [c7f468c]
+- Updated dependencies [4435af0]
+- Updated dependencies [eb68b58]
+- Updated dependencies [945c247]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [4c73e2e]
+- Updated dependencies [e125c0c]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [1489689]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [945c247]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [5441ac9]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [cb9e426]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [7852cda]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [a51c96e]
+- Updated dependencies [7f3f19f]
+- Updated dependencies [7ce535f]
+- Updated dependencies [ce61681]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [9975001]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [fa73fc0]
+- Updated dependencies [0bc3889]
+- Updated dependencies [003cd3d]
+- Updated dependencies [945c247]
+- Updated dependencies [c676ae8]
+- Updated dependencies [51c2be9]
+- Updated dependencies [aa0f483]
+- Updated dependencies [a91718c]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/sdk@2.0.0
+  - @opengeni/interaction@2.0.0
+  - @opengeni/config@2.0.0
+  - @opengeni/agent-proto@2.0.0
+  - @opengeni/observability@2.0.0
+  - @opengeni/codex@2.0.0
+  - @opengeni/tool-gateway@2.0.0
+  - @opengeni/codemode@2.0.0
+  - @opengeni/vaults@2.0.0
+  - @opengeni/xai-subscription@2.0.0
+  - @opengeni/capabilities@2.0.0
+  - @opengeni/network@2.0.0
+
 ## 1.4.4
 
 ### Patch Changes

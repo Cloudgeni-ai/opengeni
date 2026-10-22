@@ -2,9 +2,8 @@
 
 use std::env;
 
-const EMBEDDED_RUNTIME_INPUTS: [&str; 3] = [
+const EMBEDDED_RUNTIME_INPUTS: [&str; 2] = [
     "OPENGENI_EMBEDDED_BROWSERD",
-    "OPENGENI_EMBEDDED_AGENT_BROWSER",
     "OPENGENI_EMBEDDED_COMPUTER_NATIVE",
 ];
 
@@ -31,7 +30,7 @@ fn main() {
     assert_eq!(
         configured.len(),
         EMBEDDED_RUNTIME_INPUTS.len(),
-        "the interaction runtime must embed browserd, agent-browser, and computer-native together"
+        "the interaction runtime must embed browserd and computer-native together"
     );
     assert!(
         env::var_os("OPENGENI_RUNTIME_BUILD_ID").is_some(),
@@ -45,9 +44,9 @@ fn main() {
         assert!(
             matches!(
                 env::var("CARGO_CFG_TARGET_OS").as_deref(),
-                Ok("macos" | "linux")
+                Ok("macos" | "linux" | "windows")
             ),
-            "CUA assets require a macOS or Linux target"
+            "CUA assets require a macOS, Linux or Windows target"
         );
         let path = std::path::PathBuf::from(manifest);
         println!(

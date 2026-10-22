@@ -245,12 +245,8 @@ async fn pump_loop(
                 })?;
                 backoff.reset();
                 match message {
-                    RelayMessage::Frame(frame) => {
-                        // Best-effort: if the writer task ended, stop pumping input.
-                        if in_tx.send(frame.data.to_vec()).await.is_err() {
-                            return Ok(());
-                        }
-                    }
+                    // Best-effort: if the writer task ended, stop pumping input.
+                    RelayMessage::Frame(frame) if in_tx.send(frame.data.to_vec()).await.is_err() => return Ok(()),
                     RelayMessage::Close(_) => return Ok(()),
                     // Open/OpenAck/DesktopInput are not expected on a live PTY data
                     // channel; ignore them defensively rather than tearing down.
@@ -340,9 +336,10 @@ mod tests {
                 agent_id: "ag".to_string(),
                 kind: v1::StreamKind::Pty as i32,
                 port: 7681,
+                relay_route: None,
             },
-            token: "ogs_x".to_string(),
-            relay_url: "wss://relay/stream".to_string(),
+            credential: crate::RelayCredential::fixed("wss://relay/stream", "ogs_x"),
+            activity: crate::ActivityStamp::untracked(),
         }
     }
 
@@ -519,6 +516,7 @@ mod tests {
                 accepted: true,
                 error: None,
                 resume_from_seq,
+                relay_route: None,
             }))
             .await
             .unwrap();

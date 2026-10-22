@@ -2,9 +2,10 @@ import { expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { executeMigrationFile } from "../src/migrate";
-import { createDb, withRestoredSessionActivityRlsContext } from "../src/database";
+import { createDb } from "../src/database";
+import { withLegacySessionActivityRlsContext as withRestoredSessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 
 test("0608 upgrades an existing started session with the original deferred constraints", async () => {
   const database = await acquireOwnerMigratedTestDatabase("receiver-context-upgrade");

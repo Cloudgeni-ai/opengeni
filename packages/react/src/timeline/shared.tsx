@@ -1,4 +1,5 @@
 import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
+import { useToolDetails } from "./tool-details";
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
@@ -6,7 +7,8 @@ import { stringifyPayload } from "../lib/format";
 import { SecretRefText } from "../components/secret-ref-chip";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
-import type { ToolCallTruncation } from "./types";
+import type { ToolCallTruncation, ToolOutputPreview } from "./types";
+import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Shared timeline primitives
@@ -29,6 +31,30 @@ import type { ToolCallTruncation } from "./types";
      bad      a settled failure      red dot + red text ("exit 6") — the one hue
      muted    quiet metadata         subtle text ("session 3")
    -------------------------------------------------------------------------- */
+
+const ToolOutputPreviewContext = createContext<ToolOutputPreview | null>(null);
+
+/**
+ * Marks a tool row whose output is a bounded preview. The row's disclosure
+ * reads the exact output when it opens and shows it once it lands; until then
+ * the body says it is loading, and a failed read says it is a preview.
+ */
+export function ToolOutputPreviewProvider({
+  value,
+  children,
+}: {
+  value: ToolOutputPreview | null;
+  children: ReactNode;
+}) {
+  return (
+    <ToolOutputPreviewContext.Provider value={value}>{children}</ToolOutputPreviewContext.Provider>
+  );
+}
+
+/** The row's output preview, when its output is not exact. */
+export function useToolOutputPreview(): ToolOutputPreview | null {
+  return useContext(ToolOutputPreviewContext);
+}
 
 /**
  * A subtle settle signal — see the CHIP DOCTRINE above. The closed tone set.
@@ -138,6 +164,7 @@ export function ActivityDisclosure({
   defaultOpen,
   children,
 }: ActivityDisclosureProps) {
+  const t = useOpenGeniText();
   // `failed` takes precedence over `cancelled` when both are set (shouldn't happen, but be safe).
   // When `failed` is set the icon goes red and a "failed" chip appears in the
   // gutter — unless the caller already supplied an explicit chip (their chip wins,
@@ -148,9 +175,9 @@ export function ActivityDisclosure({
   const chip =
     chipProp ??
     (failed
-      ? ({ tone: "bad", text: "failed" } satisfies DisclosureChip)
+      ? ({ tone: "bad", text: t("timeline.chip.failed") } satisfies DisclosureChip)
       : cancelled
-        ? ({ tone: "interrupted", text: "interrupted" } satisfies DisclosureChip)
+        ? ({ tone: "interrupted", text: t("timeline.chip.interrupted") } satisfies DisclosureChip)
         : undefined);
   // An ancestor may seed the initial open state (screenshot instrumentation);
   // absent in normal app usage, where the row starts collapsed.
@@ -160,8 +187,19 @@ export function ActivityDisclosure({
   useEffect(() => {
     if (searchReveal) setOpen(true);
   }, [searchReveal]);
-  const truncation = useContext(ToolCallTruncationContext);
+  // A truncation notice is about raw output, which plain tool details never show.
+  const plain = useToolDetails() === "plain";
+  const truncationContext = useContext(ToolCallTruncationContext);
+  const truncation = plain ? null : truncationContext;
   const compact = useContext(CompactActivityContext);
+  // A previewed output reads its exact output when the row opens (once: a
+  // failed read waits for Retry).
+  const outputPreview = useContext(ToolOutputPreviewContext);
+  const loadOutput = outputPreview?.load;
+  const outputPending = outputPreview?.state === "preview";
+  useEffect(() => {
+    if (open && outputPending && !compact) loadOutput?.();
+  }, [open, outputPending, loadOutput, compact]);
   if (compact)
     return (
       <span className="og-rolling-label">
@@ -282,7 +320,25 @@ export function ActivityDisclosure({
       </div>
       {open ? (
         <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
-          {children}
+          {outputPreview && loadOutput && outputPreview.state !== "error" ? (
+            // Never show a preview's body as if it were the whole output.
+            <div
+              data-og-tool-output-loading=""
+              role="status"
+              className="text-og-sm leading-5 text-og-fg-subtle"
+            >
+              {t("timeline.shared.loadingFullOutput")}
+            </div>
+          ) : outputPreview ? (
+            <>
+              <ToolOutputPreviewNotice preview={outputPreview} />
+              <ToolOutputPreviewContext.Provider value={null}>
+                {children}
+              </ToolOutputPreviewContext.Provider>
+            </>
+          ) : (
+            children
+          )}
           {truncation ? <ToolCallTruncationNotice truncation={truncation} /> : null}
         </div>
       ) : null}
@@ -290,19 +346,47 @@ export function ActivityDisclosure({
   );
 }
 
+/** Says the body below is a preview, with Retry when the exact read failed. */
+function ToolOutputPreviewNotice({ preview }: { preview: ToolOutputPreview }) {
+  const t = useOpenGeniText();
+  const retry = preview.load;
+  return (
+    <div
+      data-og-tool-output-preview=""
+      role="status"
+      className="flex flex-wrap items-center gap-x-2 text-og-sm leading-5 text-og-fg-subtle"
+    >
+      <span>
+        {retry ? t("timeline.shared.outputPreviewFailed") : t("timeline.shared.outputPreviewOnly")}
+      </span>
+      {retry ? (
+        <button
+          type="button"
+          onClick={retry}
+          className="rounded-og-sm font-medium text-og-fg-muted underline-offset-2 hover:text-og-fg hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+        >
+          {t("timeline.shared.retryFullOutput")}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolCallTruncationNotice({ truncation }: { truncation: ToolCallTruncation }) {
+  const t = useOpenGeniText();
   const fullEvidence = truncation.fullEvidence.available
     ? "retained"
     : (truncation.fullEvidence.reason ?? "unavailable");
   return (
     <div data-og-tool-output-truncation="" className="text-og-sm leading-5 text-og-fg-subtle">
-      Output bounded at <code className="font-og-mono">{truncation.surface}</code>
+      {t("timeline.shared.outputBoundedAt")}{" "}
+      <code className="font-og-mono">{truncation.surface}</code>
       {truncation.omittedBytes != null && truncation.omittedBytes > 0
-        ? ` · ${truncation.omittedBytes.toLocaleString()} bytes omitted`
+        ? ` · ${t("timeline.shared.bytesOmitted", { count: truncation.omittedBytes, bytes: truncation.omittedBytes.toLocaleString(t.locale) })}`
         : null}
-      {" · reason "}
+      {` · ${t("timeline.shared.truncationReason")} `}
       <code className="font-og-mono">{truncation.reason}</code>
-      {" · full evidence "}
+      {` · ${t("timeline.shared.fullEvidence")} `}
       <code className="font-og-mono">{fullEvidence}</code>
     </div>
   );
@@ -337,7 +421,14 @@ function Chip({ chip }: { chip: DisclosureChip }) {
 
 /* --- terminal output block (exec / write_stdin) ---------------------------- */
 
-export function TermBlock({
+type TermBlockProps = Parameters<typeof TermBlockView>[0];
+
+/** Terminal output under a tool row; plain tool details never show it. */
+export function TermBlock(props: TermBlockProps) {
+  return useToolDetails() === "plain" ? null : <TermBlockView {...props} />;
+}
+
+function TermBlockView({
   command,
   workdir,
   output,
@@ -365,6 +456,7 @@ export function TermBlock({
    */
   tailLines?: number | undefined;
 }) {
+  const t = useOpenGeniText();
   const [full, setFull] = useState(false);
   const empty = output.trim() === "";
   const lines = output.split("\n");
@@ -404,7 +496,9 @@ export function TermBlock({
         </div>
       ) : null}
       {empty ? (
-        <p className="font-og-mono text-og-xs italic text-og-fg-subtle">(no output)</p>
+        <p className="font-og-mono text-og-xs italic text-og-fg-subtle">
+          {t("timeline.shared.noOutput")}
+        </p>
       ) : (
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5 text-og-fg-muted">
           {shown}
@@ -419,7 +513,7 @@ export function TermBlock({
           onClick={() => setFull(true)}
           className="mt-1 text-left text-og-xs text-og-fg-subtle transition-colors hover:text-og-fg"
         >
-          show full output ({lines.length} lines)
+          {t("timeline.shared.showFullOutputLengthLines", { length: lines.length })}
         </button>
       ) : null}
     </div>
@@ -437,8 +531,10 @@ export function PayloadBlock({
   value: unknown;
   failed?: boolean | undefined;
 }) {
+  const plain = useToolDetails() === "plain";
   const text = typeof value === "string" ? value : stringifyPayload(value);
-  if (!text || text.trim() === "") {
+  // Raw arguments and output are developer detail: plain tool details never show them.
+  if (plain || !text || text.trim() === "") {
     return null;
   }
   // Flush on the page, no frame — a labelled monospace run marked only by a 2px
@@ -534,8 +630,8 @@ export function Thumbnail({
   src,
   caption,
   alt = "screenshot",
-  expandLabel = "Expand screenshot",
-  lightboxLabel = "Screenshot",
+  expandLabel: expandLabelProp,
+  lightboxLabel: lightboxLabelProp,
   downloadFilename,
 }: {
   src: string;
@@ -545,6 +641,11 @@ export function Thumbnail({
   lightboxLabel?: string | undefined;
   downloadFilename?: string | undefined;
 }) {
+  const t = useOpenGeniText();
+  const expandLabel =
+    expandLabelProp === undefined ? t("timeline.shared.expandScreenshot") : expandLabelProp;
+  const lightboxLabel =
+    lightboxLabelProp === undefined ? t("timeline.shared.screenshot") : lightboxLabelProp;
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
   if (failed) {
@@ -599,18 +700,26 @@ export function Thumbnail({
 export function ScreenshotFigure({
   src,
   caption,
+  showCaption = true,
   alt = "screenshot",
-  expandLabel = "Expand screenshot",
-  lightboxLabel = "Screenshot",
+  expandLabel: expandLabelProp,
+  lightboxLabel: lightboxLabelProp,
   downloadFilename,
 }: {
   src: string;
   caption?: string | undefined;
+  /** Off when the row above already says the same; the lightbox keeps it. */
+  showCaption?: boolean | undefined;
   alt?: string;
   expandLabel?: string | undefined;
   lightboxLabel?: string | undefined;
   downloadFilename?: string | undefined;
 }) {
+  const t = useOpenGeniText();
+  const expandLabel =
+    expandLabelProp === undefined ? t("timeline.shared.expandScreenshot") : expandLabelProp;
+  const lightboxLabel =
+    lightboxLabelProp === undefined ? t("timeline.shared.screenshot") : lightboxLabelProp;
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
   const surface = "block w-full overflow-hidden rounded-og-md border border-og-border bg-og-bg";
@@ -628,7 +737,7 @@ export function ScreenshotFigure({
     <figure className="m-0 min-w-0">
       {failed ? (
         <div className="rounded-og-md border border-og-border bg-og-bg px-3 py-6 text-center font-og-mono text-og-xs text-og-fg-subtle">
-          image unavailable
+          {t("timeline.shared.imageUnavailable")}
         </div>
       ) : lightbox ? (
         <button
@@ -644,7 +753,7 @@ export function ScreenshotFigure({
       ) : (
         <div className={surface}>{img}</div>
       )}
-      {caption ? (
+      {caption && showCaption ? (
         <figcaption className="mt-1.5 font-og-mono text-og-xs text-og-fg-subtle">
           {caption}
         </figcaption>

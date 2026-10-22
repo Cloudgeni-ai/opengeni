@@ -2,7 +2,7 @@
 // session create form's first-party MCP permission scope. Groups derive from
 // the contracts Permission enum (lib/permissions.ts) so they can never drift
 // from the API.
-import type { PermissionGroup } from "@/lib/permissions";
+import type { PermissionGroup } from "@opengeni/react/app/lib/permissions";
 
 export function PermissionGroupPicker(props: {
   groups: PermissionGroup[];

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   claimSessionWorkForAttempt,
   createDb,
@@ -11,6 +11,7 @@ import {
   getWorkspaceConnectionModelRestrictions,
   isCodexBilledTurn,
   listSubscriptionCoreCodexServingConnections,
+  recordSubscriptionCoreCodexModelCatalog,
   subscriptionCoreCodexConnectionAllowlist,
   subscriptionCoreCodexConnectionAllowsModel,
   withSessionRlsActorContext,
@@ -204,6 +205,68 @@ function serving(org: Org, workspaceId: string, subjectId: string | null) {
 }
 
 describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover", () => {
+  test("shared catalog reuse is scoped, expires, and is fenced by credential generation", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, `fresh-${crypto.randomUUID()}`);
+    const scope = {
+      kind: "workspace" as const,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.ownerSubjectId,
+    };
+    const [row] = await shared!.admin<{ refresh_generation: number }[]>`
+      select refresh_generation from subscription_connections where id = ${connectionId}::uuid`;
+    const observedAt = Date.now() - 1_000;
+    expect(
+      await recordSubscriptionCoreCodexModelCatalog(client!.db, scope, connectionId, {
+        slugs: ["test-model"],
+        refreshGeneration: Number(row!.refresh_generation),
+        observedAt,
+      }),
+    ).toBe(true);
+    const read = (now = new Date()) =>
+      listSubscriptionCoreCodexServingConnections(client!.db, scope, now);
+    expect((await read()).find((c) => c.connectionId === connectionId)?.modelCatalog).toEqual({
+      slugs: ["test-model"],
+      observedAt,
+      expiresAt: observedAt + 60_000,
+    });
+    // Accepted-turn preparation can run before installing the worker's ambient
+    // file-access actor. Catalog authority comes from its explicit scope, not
+    // that ambient actor or an unrelated initiating human.
+    const beforeActor = await read();
+    expect(
+      await withSessionRlsActorContext(
+        {
+          subjectId: "service:agent-turn",
+          initiatingHumanSubjectId: org.ownerSubjectId,
+        },
+        read,
+      ),
+    ).toEqual(beforeActor);
+    expect(
+      await withSessionRlsActorContext(
+        { subjectId: "service:agent-turn", initiatingHumanSubjectId: "user:unrelated" },
+        read,
+      ),
+    ).toEqual(beforeActor);
+    expect(
+      (await read(new Date(observedAt + 60_000))).find((c) => c.connectionId === connectionId)
+        ?.modelCatalog,
+    ).toBeNull();
+    expect(
+      (await read(new Date(observedAt - 1))).find((c) => c.connectionId === connectionId)
+        ?.modelCatalog,
+    ).toBeNull();
+    await shared!
+      .admin`update subscription_connections set refresh_generation = refresh_generation + 1
+      where id = ${connectionId}::uuid`;
+    expect((await read()).find((c) => c.connectionId === connectionId)?.modelCatalog).toBeNull();
+    await shared!.admin`update subscription_connections set allocator_enabled = false
+      where id = ${connectionId}::uuid`;
+    expect(await read()).toEqual([]);
+  });
+
   test("automatic chat readiness retains organization capacity beside a disabled local pool", async () => {
     const org = await organization();
     const organizationId = await sharedConnection(org, "healthy-org");

@@ -1,0 +1,843 @@
+import { describe, expect, test } from "bun:test";
+import { ResourceRefConflictError, type ResourceRef } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import {
+  buildCreateSessionRequest,
+  classifyCreateSessionFailure,
+  emptySessionDraft,
+  newSessionCreateVisibility,
+  newSessionDraftOptionsFromSessionDraft,
+  prepareCreateSessionAttempt,
+  rememberedMachineFolder,
+  rememberedProjectCompute,
+  retainCreateSessionAttemptAfterFailure,
+  sessionDraftFromNewSessionDraftOptions,
+  submissionFromSessionDraft,
+  workspaceDefaultRigOptionLabel,
+} from "./session-create";
+import { newSessionProjectSelection } from "../routes/sessions-index-hydration";
+
+const fileA = "00000000-0000-4000-8000-0000000000a1";
+const fileB = "00000000-0000-4000-8000-0000000000b2";
+const repository: ResourceRef = {
+  kind: "repository",
+  uri: "https://github.com/Cloudgeni-ai/opengeni.git",
+  ref: "main",
+  mountPath: "repos/Cloudgeni-ai/opengeni",
+};
+
+function build(
+  currentResources: ResourceRef[],
+  submissionResources: ResourceRef[],
+  overrides: Partial<Parameters<typeof buildCreateSessionRequest>[0]> = {},
+) {
+  return buildCreateSessionRequest({
+    currentResources,
+    submission: { text: "start", resources: submissionResources },
+    selectedTools: [],
+    defaultModel: "gpt-5.4",
+    defaultReasoningEffort: "medium",
+    defaultLatencyMode: "standard",
+    clientEventId: "event-1",
+    idempotencyKey: "create-1",
+    ...overrides,
+  });
+}
+
+describe("buildCreateSessionRequest", () => {
+  test("deduplicates exact file and repository refs with first-seen stable order", () => {
+    const firstFile: ResourceRef = {
+      kind: "file",
+      fileId: fileA,
+      mountPath: `files/${fileA}`,
+    };
+    const secondFile: ResourceRef = {
+      kind: "file",
+      fileId: fileB,
+      mountPath: `files/${fileB}`,
+    };
+    const result = build(
+      [firstFile, repository, firstFile],
+      [{ ...repository }, secondFile, { ...secondFile }],
+    );
+
+    expect(result.resources).toEqual([firstFile, repository, secondFile]);
+  });
+
+  test("rejects two resources claiming the same mount path", () => {
+    expect(() =>
+      build(
+        [{ kind: "file", fileId: fileA, mountPath: "files/shared" }],
+        [{ kind: "file", fileId: fileB, mountPath: "files/shared" }],
+      ),
+    ).toThrow(ResourceRefConflictError);
+    expect(() =>
+      build(
+        [{ kind: "file", fileId: fileA, mountPath: "files/shared" }],
+        [{ kind: "file", fileId: fileB, mountPath: "files/shared" }],
+      ),
+    ).toThrow("resource mount path is already attached: files/shared");
+  });
+
+  test("rejects one identity with different settings", () => {
+    expect(() =>
+      build(
+        [{ kind: "file", fileId: fileA, mountPath: "files/first" }],
+        [{ kind: "file", fileId: fileA, mountPath: "files/second" }],
+      ),
+    ).toThrow("resource is already attached with different settings");
+
+    expect(() =>
+      build(
+        [repository],
+        [
+          {
+            ...repository,
+            ref: "feature",
+            mountPath: "repos/alternate-opengeni",
+          },
+        ],
+      ),
+    ).toThrow("resource is already attached with different settings");
+  });
+
+  test("does not mutate inputs and forwards exact create/draft fences", () => {
+    const currentResources: ResourceRef[] = [repository];
+    const submissionResources: ResourceRef[] = [
+      { kind: "file", fileId: fileA, mountPath: `files/${fileA}` },
+    ];
+    const currentBefore = structuredClone(currentResources);
+    const submissionBefore = structuredClone(submissionResources);
+    const tools = [{ kind: "mcp" as const, id: "opengeni" }];
+    const result = build(currentResources, submissionResources, {
+      instructions: "Hidden session guidance",
+      installedSkillIds: ["skill:product-integration@abc"],
+      selectedTools: tools,
+      targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
+      workingDir: "/workspace/opengeni",
+      channelId: "00000000-0000-4000-8000-0000000000d4",
+      expectedNewSessionDraftRevision: 7,
+    });
+
+    expect(currentResources).toEqual(currentBefore);
+    expect(submissionResources).toEqual(submissionBefore);
+    expect(result).toMatchObject({
+      resources: [...currentBefore, ...submissionBefore],
+      instructions: "Hidden session guidance",
+      installedSkillIds: ["skill:product-integration@abc"],
+      tools,
+      targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
+      workingDir: "/workspace/opengeni",
+      channelId: "00000000-0000-4000-8000-0000000000d4",
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result.resources).not.toBe(currentResources);
+    expect(result.tools).not.toBe(tools);
+  });
+
+  test("threads the selected latency mode into session creation", () => {
+    expect(
+      build([], [], {
+        submission: { text: "start", resources: [], latencyMode: "fast" },
+      }).latencyMode,
+    ).toBe("fast");
+  });
+
+  test("retains chat review overrides through draft recovery and initial submission", () => {
+    const agentLearning = { knowledge: "review_first" as const, skills: "off" as const };
+    for (const compute of [
+      { kind: "sandbox" as const, backend: "" as const },
+      {
+        kind: "machine" as const,
+        sandboxId: fileA,
+        folder: { kind: "path" as const, path: "/workspace" },
+      },
+    ]) {
+      const saved = newSessionDraftOptionsFromSessionDraft({
+        ...emptySessionDraft(),
+        compute,
+        agentLearning,
+      });
+      const recovered = sessionDraftFromNewSessionDraftOptions(saved);
+      expect(build([], [], { agentLearning: recovered.agentLearning }).agentLearning).toEqual(
+        agentLearning,
+      );
+    }
+    expect(build([], [], { agentLearning: {} })).not.toHaveProperty("agentLearning");
+  });
+
+  test("threads the selected session visibility and defaults to workspace access", () => {
+    expect(build([], []).visibility).toBe("workspace");
+    expect(build([], [], { visibility: "private" }).visibility).toBe("private");
+  });
+
+  test("threads one atomic personal-resource command into create identity", () => {
+    const personalResourceAttachment = {
+      mode: "once" as const,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1 as const,
+    };
+    const request = build([], [], {
+      submission: { text: "start", resources: [], personalResourceAttachment },
+    });
+    expect(request.personalResourceAttachment).toEqual(personalResourceAttachment);
+
+    const first = prepareCreateSessionAttempt({
+      pending: null,
+      client: {},
+      workspaceId: "workspace-a",
+      request,
+      freshIdempotencyKey: "first",
+    });
+    const changedMode = prepareCreateSessionAttempt({
+      pending: first.pending,
+      client: first.pending.client,
+      workspaceId: "workspace-a",
+      request: {
+        ...request,
+        personalResourceAttachment: { ...personalResourceAttachment, mode: "session" },
+      },
+      freshIdempotencyKey: "second",
+    });
+    expect(changedMode.request.idempotencyKey).toBe("second");
+  });
+
+  test("creates a realtime-first session without an initial user message", () => {
+    const request = build([], [], {
+      submission: { text: "", resources: [] },
+      startMode: "realtime",
+      expectedNewSessionDraftRevision: 7,
+    });
+
+    expect(request.startMode).toBe("realtime");
+    expect(request).not.toHaveProperty("initialMessage");
+    expect(request.expectedNewSessionDraftRevision).toBe(7);
+  });
+
+  test("sends the chat's Secrets narrowing as agent.vaultPolicy and restores it", () => {
+    const vaultId = "8d6f1d3e-4c1b-4b8f-9a55-1f0c9f0d2a11";
+    const all = submissionFromSessionDraft({
+      ...emptySessionDraft(),
+      vaultPolicy: { mode: "all" },
+    });
+    expect(all.extras).not.toHaveProperty("agent");
+
+    const narrowed = {
+      ...emptySessionDraft(),
+      vaultPolicy: { mode: "selected" as const, vaultIds: [vaultId] },
+    };
+    expect(submissionFromSessionDraft(narrowed).extras.agent).toEqual({
+      vaultPolicy: { mode: "selected", vaultIds: [vaultId] },
+    });
+    const options = newSessionDraftOptionsFromSessionDraft(narrowed);
+    expect(options.agent?.vaultPolicy).toEqual({ mode: "selected", vaultIds: [vaultId] });
+    expect(sessionDraftFromNewSessionDraftOptions(options).vaultPolicy).toEqual({
+      mode: "selected",
+      vaultIds: [vaultId],
+    });
+  });
+
+  test("omits tools only when the ready catalog selection equals workspace defaults", () => {
+    const result = build([], [], {
+      selectedTools: [{ kind: "mcp", id: "docs" }],
+      workspaceDefaultMcpServerIds: ["docs"],
+      workspaceMcpCatalogReady: true,
+    });
+
+    expect(result).not.toHaveProperty("tools");
+  });
+
+  test("preserves the acknowledged draft policy when explicit tools equal defaults", () => {
+    const tools = [{ kind: "mcp" as const, id: "docs" }];
+    const result = build([], [], {
+      selectedTools: tools,
+      workspaceDefaultMcpServerIds: ["docs"],
+      workspaceMcpCatalogReady: true,
+      expectedNewSessionDraftRevision: 7,
+      newSessionDraftToolPolicy: { tools, toolsProvided: true },
+    });
+    expect(result.tools).toEqual(tools);
+    expect(result.expectedNewSessionDraftRevision).toBe(7);
+  });
+
+  test("creates a live default policy with durable connector exclusions", () => {
+    const result = build([], [], {
+      selectedTools: [],
+      newSessionDraftToolPolicy: {
+        tools: [],
+        toolsProvided: false,
+        excludedMcpServerIds: ["slack"],
+      },
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result).not.toHaveProperty("tools");
+    expect(result.excludedMcpServerIds).toEqual(["slack"]);
+    expect(result.expectedNewSessionDraftRevision).toBe(7);
+  });
+
+  test("remembers customize-without-pin as exclusions rather than an empty tool list", () => {
+    const result = build([], [], {
+      selectedTools: [{ kind: "mcp", id: "docs" }],
+      newSessionDraftToolPolicy: {
+        tools: [],
+        toolsProvided: true,
+        excludedMcpServerIds: [],
+      },
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result).not.toHaveProperty("tools");
+    expect(result.excludedMcpServerIds).toEqual([]);
+  });
+
+  test("preserves explicit empty and omitted draft policies across catalog changes", () => {
+    for (const toolsProvided of [true, false]) {
+      const result = build([], [], {
+        selectedTools: [{ kind: "mcp", id: "docs" }],
+        workspaceDefaultMcpServerIds: ["files"],
+        workspaceMcpCatalogReady: true,
+        expectedNewSessionDraftRevision: 7,
+        newSessionDraftToolPolicy: { tools: [], toolsProvided },
+      });
+      if (toolsProvided) expect(result.tools).toEqual([]);
+      else expect(result).not.toHaveProperty("tools");
+    }
+  });
+
+  test("keeps explicit empty, subset, and partially hydrated selections on the wire", () => {
+    const common = {
+      workspaceDefaultMcpServerIds: ["docs"],
+      workspaceMcpCatalogReady: true,
+    };
+    expect(
+      build([], [], {
+        ...common,
+        selectedTools: [],
+      }).tools,
+    ).toEqual([]);
+    expect(
+      build([], [], {
+        ...common,
+        selectedTools: [{ kind: "mcp", id: "linear" }],
+      }).tools,
+    ).toEqual([{ kind: "mcp", id: "linear" }]);
+    expect(
+      build([], [], {
+        ...common,
+        selectedTools: [{ kind: "mcp", id: "docs" }],
+        workspaceMcpCatalogReady: false,
+      }).tools,
+    ).toEqual([{ kind: "mcp", id: "docs" }]);
+  });
+
+  test("omits workspace resources for a connected machine but keeps attachments", () => {
+    const attachment: ResourceRef = {
+      kind: "file",
+      fileId: fileA,
+      mountPath: `files/${fileA}`,
+    };
+    expect(build([repository], [attachment], { omitWorkspaceResources: true }).resources).toEqual([
+      attachment,
+    ]);
+  });
+
+  test("a connected-machine route request strips managed resources but keeps personal intent", () => {
+    const personalResourceAttachment = {
+      mode: "session" as const,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1 as const,
+    };
+    const draft = {
+      ...emptySessionDraft(),
+      compute: {
+        kind: "machine" as const,
+        sandboxId: "00000000-0000-4000-8000-0000000000c3",
+        folder: { kind: "root" as const },
+      },
+      rigId: "00000000-0000-4000-8000-000000000012",
+    };
+    const submission = submissionFromSessionDraft(draft, undefined, personalResourceAttachment);
+    const request = build([], [], {
+      submission: { text: "run on my machine", ...submission.extras },
+      targetSandboxId: submission.options.targetSandboxId,
+      workingDir: submission.options.workingDir,
+      omitWorkspaceResources: submission.omitWorkspaceResources,
+    });
+
+    expect(request.targetSandboxId).toBe(draft.compute.sandboxId);
+    expect(request).not.toHaveProperty("rigId");
+    expect(request.personalResourceAttachment).toEqual(personalResourceAttachment);
+  });
+
+  test("reuses create keys only for the same client, workspace, and logical request", () => {
+    const firstClient = {};
+    const secondClient = {};
+    const firstRequest = build([], [], {
+      clientEventId: "event-first",
+      idempotencyKey: "fresh-first",
+      expectedNewSessionDraftRevision: 1,
+    });
+    const first = prepareCreateSessionAttempt({
+      pending: null,
+      client: firstClient,
+      workspaceId: "workspace-a",
+      request: firstRequest,
+      freshIdempotencyKey: "fresh-first",
+    });
+    expect(first.request.idempotencyKey).toBe("fresh-first");
+
+    const exactRetry = prepareCreateSessionAttempt({
+      pending: first.pending,
+      client: firstClient,
+      workspaceId: "workspace-a",
+      request: {
+        ...firstRequest,
+        clientEventId: "event-retry",
+        idempotencyKey: "fresh-retry",
+        expectedNewSessionDraftRevision: 2,
+      },
+      freshIdempotencyKey: "fresh-retry",
+    });
+    expect(exactRetry.request.idempotencyKey).toBe("fresh-first");
+    expect(exactRetry.request.clientEventId).toBe("event-first");
+
+    for (const changed of [
+      {
+        client: firstClient,
+        workspaceId: "workspace-a",
+        request: { ...firstRequest, initialMessage: "edited" },
+      },
+      {
+        client: firstClient,
+        workspaceId: "workspace-b",
+        request: firstRequest,
+      },
+      {
+        client: secondClient,
+        workspaceId: "workspace-a",
+        request: firstRequest,
+      },
+    ]) {
+      const next = prepareCreateSessionAttempt({
+        pending: first.pending,
+        ...changed,
+        freshIdempotencyKey: "fresh-changed",
+      });
+      expect(next.request.idempotencyKey).toBe("fresh-changed");
+    }
+  });
+
+  test("retains an exact create key only while the mutation outcome is unknown", () => {
+    const client = {};
+    const request = build([], [], {
+      clientEventId: "event-first",
+      idempotencyKey: "fresh-first",
+    });
+    const first = prepareCreateSessionAttempt({
+      pending: null,
+      client,
+      workspaceId: "workspace-a",
+      request,
+      freshIdempotencyKey: "fresh-first",
+    });
+
+    const uncertain = new OpenGeniApiError(503, "gateway unavailable", {
+      mutation: true,
+      outcomeUnknown: true,
+    });
+    expect(classifyCreateSessionFailure(uncertain)).toMatchObject({
+      error: uncertain,
+      outcomeUnknown: true,
+    });
+    const retained = retainCreateSessionAttemptAfterFailure({
+      current: first.pending,
+      attempted: first.pending,
+      outcomeUnknown: uncertain.outcomeUnknown,
+    });
+    const exactRetry = prepareCreateSessionAttempt({
+      pending: retained,
+      client,
+      workspaceId: "workspace-a",
+      request: { ...request, clientEventId: "event-retry" },
+      freshIdempotencyKey: "fresh-retry",
+    });
+    expect(exactRetry.request.idempotencyKey).toBe("fresh-first");
+    expect(exactRetry.request.clientEventId).toBe("event-first");
+
+    const definitive = new OpenGeniApiError(409, "personal authority changed", {
+      mutation: true,
+    });
+    expect(classifyCreateSessionFailure(definitive)).toMatchObject({
+      error: definitive,
+      outcomeUnknown: false,
+    });
+    const cleared = retainCreateSessionAttemptAfterFailure({
+      current: exactRetry.pending,
+      attempted: exactRetry.pending,
+      outcomeUnknown: definitive.outcomeUnknown,
+    });
+    const reconfirmed = prepareCreateSessionAttempt({
+      pending: cleared,
+      client,
+      workspaceId: "workspace-a",
+      request: { ...request, clientEventId: "event-reconfirmed" },
+      freshIdempotencyKey: "fresh-reconfirmed",
+    });
+    expect(reconfirmed.request.idempotencyKey).toBe("fresh-reconfirmed");
+  });
+});
+
+describe("successful-create selection history", () => {
+  const project = "00000000-0000-4000-8000-000000000031";
+  const machineA = "00000000-0000-4000-8000-000000000041";
+  const machineB = "00000000-0000-4000-8000-000000000042";
+  const history = {
+    projects: [
+      {
+        channelId: project,
+        targetSandboxId: machineA,
+        machines: [
+          { sandboxId: machineA, workingDir: "/workspace/opengeni" },
+          { sandboxId: machineB, workingDir: "repos/cloudgeni" },
+        ],
+      },
+      { channelId: null, targetSandboxId: null, machines: [] },
+    ],
+  };
+
+  test("restores the last compute target for each project", () => {
+    expect(rememberedProjectCompute(history, project)).toEqual({
+      kind: "machine",
+      sandboxId: machineA,
+      folder: { kind: "path", path: "/workspace/opengeni" },
+    });
+    expect(rememberedProjectCompute(history, null)).toEqual({ kind: "sandbox", backend: "" });
+    expect(rememberedProjectCompute(history, null, "selfhosted")).toEqual({
+      kind: "machine",
+      sandboxId: null,
+      folder: { kind: "root" },
+    });
+  });
+
+  test("restores paths only within the exact project and machine pair", () => {
+    expect(rememberedMachineFolder(history, project, machineB)).toEqual({
+      kind: "path",
+      path: "repos/cloudgeni",
+    });
+    expect(rememberedMachineFolder(history, null, machineB)).toEqual({ kind: "root" });
+  });
+
+  test("reapplies the complete Default project selection on repeated same-route launches", () => {
+    const defaultHistory = {
+      projects: [
+        {
+          channelId: null,
+          targetSandboxId: machineB,
+          machines: [{ sandboxId: machineB, workingDir: "/workspace/default-project" }],
+        },
+        ...history.projects,
+      ],
+    };
+    const staleProjectCompute = {
+      kind: "machine" as const,
+      sandboxId: machineA,
+      folder: { kind: "path" as const, path: "/workspace/other-project" },
+    };
+
+    const firstDefault = newSessionProjectSelection(defaultHistory, null, {
+      channelId: project,
+      compute: staleProjectCompute,
+    });
+    expect(firstDefault).toEqual({
+      channelId: null,
+      compute: {
+        kind: "machine",
+        sandboxId: machineB,
+        folder: { kind: "path", path: "/workspace/default-project" },
+      },
+    });
+
+    const locallyChanged = newSessionProjectSelection(defaultHistory, project, firstDefault);
+    const repeatedDefault = newSessionProjectSelection(defaultHistory, null, locallyChanged);
+    expect(repeatedDefault).toEqual(firstDefault);
+  });
+
+  test("resets stale compute when the selected project has no history", () => {
+    const staleProjectSelection = {
+      channelId: project,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineA,
+        folder: { kind: "path" as const, path: "/workspace/other-project" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection)).toEqual({
+      channelId: null,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection, "selfhosted"),
+    ).toEqual({
+      channelId: null,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("preserves persisted machine placement for the same project without history", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const selection = newSessionProjectSelection({ projects: [] }, project, {
+      channelId: project,
+      compute: hydratedCompute,
+    });
+
+    expect(selection).toEqual({ channelId: project, compute: hydratedCompute });
+    expect(
+      submissionFromSessionDraft({ ...emptySessionDraft(), compute: selection.compute }).options,
+    ).toEqual({
+      targetSandboxId: machineB,
+      workingDir: "/workspace/project-a",
+      visibility: "workspace",
+    });
+  });
+
+  test("resets persisted compute for a different explicit launch target", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const projectB = "00000000-0000-4000-8000-000000000032";
+    const historyWithoutTargets = {
+      projects: history.projects.filter(
+        (candidate) => candidate.channelId !== null && candidate.channelId !== projectB,
+      ),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutTargets, projectB, {
+        channelId: project,
+        compute: hydratedCompute,
+      }),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(
+        historyWithoutTargets,
+        projectB,
+        { channelId: project, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("resets legacy hydrated compute with missing project provenance", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/legacy" },
+    };
+
+    expect(
+      newSessionProjectSelection(
+        { projects: [] },
+        project,
+        { channelId: undefined, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("remembered project history wins over hydrated compute with unknown provenance", () => {
+    expect(
+      newSessionProjectSelection(history, project, {
+        channelId: undefined,
+        compute: {
+          kind: "machine",
+          sandboxId: machineB,
+          folder: { kind: "path", path: "/workspace/unknown-project" },
+        },
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: {
+        kind: "machine",
+        sandboxId: machineA,
+        folder: { kind: "path", path: "/workspace/opengeni" },
+      },
+    });
+  });
+
+  test("preserves explicit compute intent with established same-project provenance", () => {
+    const explicitDefaultSelection = {
+      channelId: null,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineB,
+        folder: { kind: "path" as const, path: "/workspace/explicit-default" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, explicitDefaultSelection),
+    ).toEqual(explicitDefaultSelection);
+  });
+
+  test("treats null as explicit Default-project provenance", () => {
+    const defaultCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/default-draft" },
+    };
+
+    expect(
+      newSessionProjectSelection({ projects: [] }, null, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({ channelId: null, compute: defaultCompute });
+    expect(
+      newSessionProjectSelection({ projects: [] }, project, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "sandbox", backend: "" },
+    });
+  });
+});
+
+describe("new-session draft option mapping", () => {
+  test("restores an empty older draft to the required machine path on selfhosted-primary", () => {
+    expect(sessionDraftFromNewSessionDraftOptions({}, undefined, "selfhosted").compute).toEqual({
+      kind: "machine",
+      sandboxId: null,
+      folder: { kind: "root" },
+    });
+  });
+
+  test("creates Only-me Personal-workspace sessions with private tenancy", () => {
+    expect(newSessionCreateVisibility(true, "workspace", true)).toBe("private");
+    expect(newSessionCreateVisibility(true, "private", true)).toBe("private");
+    expect(newSessionCreateVisibility(false, "workspace", false)).toBe("workspace");
+  });
+
+  test("Personal sessions remain startable when Only-me tenancy is unavailable", () => {
+    for (const selected of ["private", "workspace"] as const) {
+      const visibility = newSessionCreateVisibility(true, selected, false);
+      const draft = { ...emptySessionDraft(), visibility: selected };
+      const options = newSessionDraftOptionsFromSessionDraft(draft, undefined, visibility);
+      const request = build([], [], { visibility });
+      expect(options.visibility).toBe("workspace");
+      expect(request.visibility).toBe("workspace");
+    }
+    expect(newSessionCreateVisibility(false, "private", false)).toBe("private");
+  });
+
+  test("round-trips managed compute, goal, and exact custom permissions", () => {
+    const draft = {
+      ...emptySessionDraft(),
+      compute: { kind: "sandbox" as const, backend: "modal" as const },
+      rigId: "00000000-0000-4000-8000-000000000012",
+      goalText: "  durable goal  ",
+      goalSuccessCriteria: "  accepted live  ",
+      goalMaxAutoContinuations: "8",
+      customMcpPermissions: true,
+      mcpPermissions: new Set(["workspace:read", "sessions:read"]),
+    };
+
+    const options = newSessionDraftOptionsFromSessionDraft(draft);
+    expect(options).toEqual({
+      visibility: "workspace",
+      sandboxBackend: "modal",
+      rigId: "00000000-0000-4000-8000-000000000012",
+      goal: {
+        text: "durable goal",
+        successCriteria: "accepted live",
+        maxAutoContinuations: 8,
+      },
+      firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
+    });
+    expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
+      // Keep an explicit managed choice distinct from a workspace machine default.
+      compute: { kind: "sandbox", backend: "modal" },
+      rigId: draft.rigId,
+      goalText: "durable goal",
+      goalSuccessCriteria: "accepted live",
+      goalMaxAutoContinuations: "8",
+      customMcpPermissions: true,
+      mcpPermissions: new Set(["workspace:read", "sessions:read"]),
+    });
+  });
+
+  test("round-trips machine placement and restores default permissions when absent", () => {
+    const options = newSessionDraftOptionsFromSessionDraft({
+      ...emptySessionDraft(),
+      compute: {
+        kind: "machine",
+        sandboxId: "00000000-0000-4000-8000-000000000021",
+        folder: { kind: "path", path: "  /srv/opengeni  " },
+      },
+    });
+    expect(options).toEqual({
+      visibility: "workspace",
+      targetSandboxId: "00000000-0000-4000-8000-000000000021",
+      workingDir: "/srv/opengeni",
+    });
+
+    const restored = sessionDraftFromNewSessionDraftOptions(options);
+    expect(restored.compute).toEqual({
+      kind: "machine",
+      sandboxId: "00000000-0000-4000-8000-000000000021",
+      folder: { kind: "path", path: "/srv/opengeni" },
+    });
+    expect(restored.customMcpPermissions).toBe(false);
+    expect(restored.mcpPermissions.size).toBeGreaterThan(0);
+  });
+});
+
+describe("workspace default Sandbox Environment option", () => {
+  const rigs = [
+    { id: "00000000-0000-4000-8000-00000000d001", name: "Analytics" },
+    { id: "00000000-0000-4000-8000-00000000d002", name: "Build" },
+  ];
+
+  test("names the workspace default the empty choice binds", () => {
+    expect(workspaceDefaultRigOptionLabel(rigs[0]!.id, rigs)).toBe("Workspace default: Analytics");
+  });
+
+  test("says None when the workspace has no default, because empty means no environment", () => {
+    expect(workspaceDefaultRigOptionLabel(null, rigs)).toBe("None");
+    expect(workspaceDefaultRigOptionLabel(undefined, rigs)).toBe("None");
+  });
+
+  test("keeps a neutral label when the default is not visible to this person", () => {
+    expect(workspaceDefaultRigOptionLabel("00000000-0000-4000-8000-00000000d003", rigs)).toBe(
+      "Workspace default",
+    );
+  });
+
+  test("the empty choice still omits rigId so the server resolves the default", () => {
+    const draft = emptySessionDraft();
+    expect(draft.rigId).toBe("");
+    expect(newSessionDraftOptionsFromSessionDraft(draft)).not.toHaveProperty("rigId");
+  });
+});

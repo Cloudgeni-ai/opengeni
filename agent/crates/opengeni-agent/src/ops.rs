@@ -73,13 +73,19 @@ pub async fn serve_op_start_scoped<P: Platform>(
     request_id: String,
     start: v1::OpStart,
 ) -> ControlResponse {
-    serve_op_start_scoped_with_policy(engine, platform, scope, publish, request_id, start, None)
-        .await
+    serve_op_start_scoped_with_policy(
+        engine, platform, scope, publish, request_id, start, None, None, None,
+    )
+    .await
 }
 
 /// Policy-aware multi-connection form. The policy snapshot is part of the
 /// idempotent OpStart request; the first accepted start owns it and later
 /// duplicates attach to that same operation without re-spawning.
+/// `frame_subject` is where `publish` sends frames; when given, an in-place
+/// agent update may hand the job to its successor instead of waiting for it.
+#[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
+#[allow(clippy::too_many_lines)] // one admission-to-start sequence
 pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
@@ -88,6 +94,8 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     request_id: String,
     start: v1::OpStart,
     resource_policy: Option<v1::OperationResourcePolicy>,
+    frame_subject: Option<String>,
+    completion_sink: Option<FrameSink>,
 ) -> ControlResponse {
     let mut exec = match extract_exec(&request_id, start.op) {
         Ok(exec) => exec,
@@ -129,17 +137,24 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     };
 
     let window = clamp_window(engine, &op_id, start.window_bytes);
-    let deadline = deadline_instant(start.deadline_ms);
+    let deadline = match crate::rpc_replay::current() {
+        Some(receipt) => match receipt.exec_deadline(exec.timeout_ms) {
+            Ok(deadline) => deadline,
+            Err(reason) => return reason.response(request_id),
+        },
+        None => deadline_instant(start.deadline_ms),
+    };
     let stdin = exec.stdin.to_vec();
     let outcome = engine.start_job(
         &op_id,
         ticket,
         stdin,
         deadline,
+        start.connection_generation,
         || platform.spawn_exec_with_policy(&exec, resource_policy.as_ref()),
         frame_publisher(publish, request_id.clone()),
         |exit| wire_exit(exit).encode_to_vec(),
-        |_, _| {},
+        completion_publisher(completion_sink, request_id.clone()),
     );
 
     match outcome {
@@ -148,6 +163,24 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
                 .handles
                 .window_bytes
                 .store(window, Ordering::Relaxed);
+            if let Some(subject) = frame_subject {
+                // The job's own reservation must not hold an update back:
+                // the update hands the job over instead of waiting for it.
+                if let Some(reservation) = opengeni_agent_platform::current_work_reservation() {
+                    reservation.mark_handover();
+                }
+                engine.mark_handover_capable(
+                    &op_id,
+                    &started.handles,
+                    crate::engine::OpHandoverTag {
+                        scope: scope.to_string(),
+                        request_id: request_id.clone(),
+                        subject,
+                        window_bytes: window,
+                        connection_generation: 0,
+                    },
+                );
+            }
             // The server subscribed before sending OpStart (protocol
             // invariant), so it is attached from the first frame.
             let _ = started
@@ -183,6 +216,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
                     detail: format!("spawn failed: {error}"),
                 }),
                 duration_ms: 0,
+                background_children_stopped: false,
                 stdout: empty_channel(),
                 stderr: empty_channel(),
             });
@@ -327,6 +361,33 @@ pub fn serve_op_attach_scoped(
     status_reply(engine, request_id, &op_id, &attach.op_id)
 }
 
+/// Serves `OpRelease`: the server stored the op's output through its terminal
+/// frame, so the runner drops the op now and confirms in the reply (LOST,
+/// RELEASED). A duplicate release, attach or query answers the same. An op
+/// still running, or completed with another terminal frame, answers its
+/// actual status and is left untouched.
+#[cfg(test)]
+pub fn serve_op_release(
+    engine: &Arc<Engine>,
+    request_id: String,
+    release: &v1::OpRelease,
+) -> ControlResponse {
+    serve_op_release_scoped(engine, "default", request_id, release)
+}
+
+/// Multi-connection form of [`serve_op_release`].
+pub fn serve_op_release_scoped(
+    engine: &Arc<Engine>,
+    scope: &str,
+    request_id: String,
+    release: &v1::OpRelease,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &release.op_id);
+    let outcome = engine.release(&op_id, release.exit_seq);
+    debug!(op = %op_id, ?outcome, "op release");
+    status_reply(engine, request_id, &op_id, &release.op_id)
+}
+
 /// Sinks one `OpAck` from the ack subject into the op's pump. The pump owns
 /// generation fencing AND final-ack acceptance (the registry flips final-acked
 /// only when the pump ends `FinalAcked`), so this is pure routing.
@@ -335,7 +396,57 @@ pub fn handle_op_ack(engine: &Arc<Engine>, ack: &v1::OpAck) {
     handle_op_ack_scoped(engine, "default", ack);
 }
 
-/// Multi-connection form of [`handle_op_ack`].
+/// Decode a notification-only receipt, never an output credit or final ACK.
+pub fn handle_completion_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    if let Ok(v1::AgentEventAck {
+        ack: Some(v1::agent_event_ack::Ack::OperationCompleted(ack)),
+    }) = v1::AgentEventAck::decode(payload)
+    {
+        engine.acknowledge_completion(scope, &ack.op_id);
+        true
+    } else {
+        false
+    }
+}
+
+/// Handle an `AgentEventAck` on a link's ack subject: a completion receipt or
+/// an inventory answer. `false` when the payload is neither (an `OpAck`).
+pub fn handle_event_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    handle_completion_ack_scoped(engine, scope, payload)
+        || handle_inventory_ack_scoped(engine, scope, payload)
+}
+
+/// Decode Opengeni's answer to one page of a link's operation inventory and
+/// end the ops it names. `true` when the payload was such an answer (applied
+/// or stale).
+pub fn handle_inventory_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    if let Ok(v1::AgentEventAck {
+        ack: Some(v1::agent_event_ack::Ack::OperationInventory(ack)),
+    }) = v1::AgentEventAck::decode(payload)
+    {
+        if engine.apply_inventory_answer(scope, &ack).is_none() {
+            debug!(
+                scope,
+                report = ack.report_id,
+                page = ack.page,
+                "stale inventory answer ignored"
+            );
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// One page of a link's operation inventory, as the event that carries it.
+pub(crate) fn inventory_event(page: v1::OperationInventory) -> v1::AgentEvent {
+    v1::AgentEvent {
+        agent_id: String::new(),
+        event: Some(v1::agent_event::Event::OperationInventory(page)),
+    }
+}
+
+/// Multi-connection output acknowledgement, independent of notification receipts.
 pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) {
     let op_id = scoped_op_id(scope, &ack.op_id);
     let routed = engine.route_command(
@@ -355,7 +466,10 @@ pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) 
 /// Builds the frame-publishing emit hook: engine [`Frame`]s become encoded
 /// `OpFrame`s on the sink. The retained Exit payload IS the encoded `OpExit`,
 /// decoded back for the typed oneof (uniform for live emission and replay).
-fn frame_publisher(publish: FrameSink, op_id: String) -> impl Fn(Frame) + Send + 'static {
+pub(crate) fn frame_publisher(
+    publish: FrameSink,
+    op_id: String,
+) -> impl Fn(Frame) + Send + 'static {
     move |frame| {
         let body = match frame.body {
             FrameBody::Data { channel, bytes } => v1::op_frame::Body::Data(v1::OpData {
@@ -377,6 +491,32 @@ fn frame_publisher(publish: FrameSink, op_id: String) -> impl Fn(Frame) + Send +
             body: Some(body),
         };
         publish(wire.encode_to_vec());
+    }
+}
+
+/// Publish terminal proof even when there is no output consumer or send credit.
+/// The bulk publisher retries retained, unacknowledged completions independently
+/// of frame credit; this immediate hook never acknowledges output.
+pub(crate) fn completion_publisher(
+    publish: Option<FrameSink>,
+    op_id: String,
+) -> impl FnOnce(Option<u64>, &JobExit) + Send + 'static {
+    move |_, exit| {
+        if let Some(publish) = publish {
+            publish(completion_event(op_id, exit).encode_to_vec());
+        }
+    }
+}
+
+pub(crate) fn completion_event(op_id: String, exit: &JobExit) -> v1::AgentEvent {
+    v1::AgentEvent {
+        agent_id: String::new(),
+        event: Some(v1::agent_event::Event::OperationCompleted(
+            v1::OperationCompleted {
+                op_id,
+                exit: Some(wire_exit(exit)),
+            },
+        )),
     }
 }
 
@@ -444,6 +584,7 @@ pub fn wire_exit(exit: &JobExit) -> v1::OpExit {
         timed_out: false,
         cancelled: false,
         duration_ms: exit.duration_ms,
+        background_children_stopped: exit.background_children_stopped,
         digests: [
             (
                 "stdout".to_string(),
@@ -534,6 +675,7 @@ fn op_status(op_id: &str, answer: QueryAnswer, handles: Option<&OpHandles>) -> v
             Some(match reason {
                 LostReason::Evicted => v1::OpLostReason::Evicted,
                 LostReason::RunnerRestarted => v1::OpLostReason::AgentRestarted,
+                LostReason::Released => v1::OpLostReason::Released,
             }),
         ),
         // A tombstone is "cancelled before it ever began": terminal, typed.
@@ -700,6 +842,33 @@ mod tests {
                     window_bytes: window,
                     deadline_ms: 0,
                     origin_id: "session-1".to_string(),
+                    connection_generation: 0,
+                },
+            )
+            .await
+        }
+
+        async fn start_exec_on(
+            &self,
+            op_id: &str,
+            script: &str,
+            generation: u64,
+        ) -> ControlResponse {
+            serve_op_start(
+                &self.engine,
+                &self.platform,
+                self.sink(),
+                op_id.to_string(),
+                v1::OpStart {
+                    op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                        command: vec![script.to_string()],
+                        shell: true,
+                        ..Default::default()
+                    })),
+                    window_bytes: 1 << 20,
+                    deadline_ms: 0,
+                    origin_id: "session-1".to_string(),
+                    connection_generation: generation,
                 },
             )
             .await
@@ -726,6 +895,7 @@ mod tests {
                     window_bytes: 1 << 20,
                     deadline_ms: 0,
                     origin_id: "session-1".to_string(),
+                    connection_generation: 0,
                 },
             )
             .await
@@ -848,6 +1018,16 @@ mod tests {
             "wire digest proves byte-exact assembly"
         );
         assert_eq!(exit.totals.get("stdout"), Some(&4));
+        // No completion sink was supplied: even a completely lost immediate
+        // notification remains recoverable from this connection's retained truth.
+        let retry = rig.engine.retained_completions("default");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].0, "op-1");
+        assert_eq!(wire_exit(&retry[0].1).exit_code, 3);
+        assert_eq!(
+            rig.engine.retained_completions("another-connection"),
+            vec![]
+        );
 
         // Query answers COMPLETE with the same record.
         let q = serve_op_query(
@@ -893,6 +1073,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_record_carries_native_child_cleanup_evidence() {
+        let rig = rig();
+        let response = rig
+            .start_exec("cleanup", "sleep 60 >/dev/null 2>&1 & printf done", 1 << 20)
+            .await;
+        assert!(started_status(&response).0);
+        let exit = rig.wait_for_exit_frame().await;
+        assert_eq!(exit.exit_code, 0);
+        assert!(exit.background_children_stopped);
+        assert_eq!(rig.stdout_bytes(), b"done");
+    }
+
+    #[tokio::test]
     async fn cancel_before_start_wins_and_spawns_nothing() {
         let rig = rig();
         let cancel = serve_op_cancel(
@@ -912,6 +1105,93 @@ mod tests {
         assert_eq!(status.state, v1::OpState::Complete as i32);
         assert!(status.exit.expect("terminal").cancelled);
         assert!(rig.frames.lock().expect("frames").is_empty(), "zero spawns");
+    }
+
+    /// The server tells a cancel-before-start tombstone from a real exit by its
+    /// shape alone, as the wire has no marker for it: COMPLETE, cancelled,
+    /// `next_seq` 0 and no output totals or digests. Pin that shape from both
+    /// sides: the tombstone has it on start, query and attach, and an op
+    /// cancelled after it began never has it.
+    #[tokio::test]
+    async fn a_tombstone_and_a_cancelled_exit_are_told_apart_by_shape() {
+        fn tombstone_shaped(status: &v1::OpStatus) -> bool {
+            let Some(exit) = status.exit.as_ref() else {
+                return false;
+            };
+            status.state == v1::OpState::Complete as i32
+                && exit.cancelled
+                && status.next_seq == 0
+                && exit.totals.is_empty()
+                && exit.digests.is_empty()
+        }
+        fn status_of(resp: &ControlResponse) -> v1::OpStatus {
+            match &resp.result {
+                Some(RespResult::OpStatus(status)) => status.clone(),
+                other => panic!("expected OpStatus, got {other:?} / {:?}", resp.error),
+            }
+        }
+        let rig = rig();
+        let query = |op_id: &str| {
+            status_of(&serve_op_query(
+                &rig.engine,
+                "q".to_string(),
+                &v1::OpQuery {
+                    op_id: op_id.to_string(),
+                },
+            ))
+        };
+
+        let cancel = serve_op_cancel(
+            &rig.engine,
+            "c-tomb".to_string(),
+            &v1::OpCancel {
+                op_id: "op-tomb".to_string(),
+            },
+        );
+        assert!(cancel.error.is_none());
+        let (accepted, refused) =
+            started_status(&rig.start_exec("op-tomb", "echo never", 1 << 20).await);
+        assert!(!accepted, "a tombstoned op is refused");
+        let attached = status_of(&serve_op_attach(
+            &rig.engine,
+            "a-tomb".to_string(),
+            &v1::OpAttach {
+                op_id: "op-tomb".to_string(),
+                from_seq: 0,
+                attach_generation: 1,
+                window_bytes: 0,
+            },
+        ));
+        for status in [&refused, &query("op-tomb"), &attached] {
+            assert!(tombstone_shaped(status), "tombstone: {status:?}");
+            assert_eq!(status.exit.as_ref().map(|exit| exit.exit_code), Some(-1));
+        }
+
+        let started = rig.start_exec("op-began", "sleep 30", 1 << 20).await;
+        assert!(started_status(&started).0);
+        let cancel = serve_op_cancel(
+            &rig.engine,
+            "c-began".to_string(),
+            &v1::OpCancel {
+                op_id: "op-began".to_string(),
+            },
+        );
+        assert!(cancel.error.is_none());
+        let exit = rig.wait_for_exit_frame().await;
+        assert!(exit.cancelled);
+        assert!(!exit.totals.is_empty() && !exit.digests.is_empty());
+        let mut complete = None;
+        for _ in 0..500 {
+            let status = query("op-began");
+            if status.state == v1::OpState::Complete as i32 {
+                complete = Some(status);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let complete = complete.expect("the cancelled op completes");
+        assert!(complete.exit.as_ref().is_some_and(|exit| exit.cancelled));
+        assert!(!tombstone_shaped(&complete), "a real exit: {complete:?}");
     }
 
     #[tokio::test]
@@ -1001,6 +1281,7 @@ mod tests {
                 .route_command(&op, JobCommand::Detach { completed: None }),
             "pump ended after the final ack"
         );
+        assert_eq!(rig.engine.retained_completions("default"), vec![]);
         assert!(matches!(
             rig.engine.query(&op),
             QueryAnswer::Complete {
@@ -1008,6 +1289,206 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// One exchange releases a stored result: the reply confirms it, the op
+    /// is dropped at once (no housekeeping pass needed), and every later
+    /// release, attach, query or start answers released without re-running.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One release story, read top to bottom.
+    async fn release_confirms_in_its_answer_and_a_duplicate_attach_answers_released() {
+        fn status_of(resp: &ControlResponse) -> v1::OpStatus {
+            match &resp.result {
+                Some(RespResult::OpStatus(status)) => status.clone(),
+                other => panic!("expected OpStatus, got {other:?} / {:?}", resp.error),
+            }
+        }
+        fn released(status: &v1::OpStatus) -> bool {
+            status.state == v1::OpState::Lost as i32
+                && status.lost_reason == v1::OpLostReason::Released as i32
+        }
+        let rig = rig();
+        let release = |op_id: &str, exit_seq: u64| {
+            status_of(&serve_op_release(
+                &rig.engine,
+                "r".to_string(),
+                &v1::OpRelease {
+                    op_id: op_id.to_string(),
+                    exit_seq,
+                },
+            ))
+        };
+
+        // A running op is never released.
+        assert!(started_status(&rig.start_exec("op-live", "sleep 30", 1 << 20).await).0);
+        let live = release("op-live", 1);
+        assert_eq!(live.state, v1::OpState::Running as i32, "running: {live:?}");
+
+        assert!(started_status(&rig.start_exec("op-rel", "printf payload", 1 << 20).await).0);
+        rig.wait_for_exit_frame().await;
+        let op = scoped_op_id("default", "op-rel");
+        let mut exit_seq = None;
+        for _ in 0..500 {
+            if let QueryAnswer::Complete { exit_seq: seq, .. } = rig.engine.query(&op) {
+                exit_seq = Some(seq);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let exit_seq = exit_seq.expect("the op completes");
+        assert_eq!(rig.engine.retained_completions("default").len(), 1);
+
+        // Another terminal frame releases nothing.
+        let mismatch = release("op-rel", exit_seq + 1);
+        assert_eq!(mismatch.state, v1::OpState::Complete as i32, "{mismatch:?}");
+        assert!(matches!(
+            rig.engine.query(&op),
+            QueryAnswer::Complete { .. }
+        ));
+
+        // The release itself: confirmed in the answer, dropped at once.
+        let confirmed = release("op-rel", exit_seq);
+        assert!(released(&confirmed), "confirmed: {confirmed:?}");
+        assert_eq!(
+            rig.engine.query(&op),
+            QueryAnswer::Lost(LostReason::Released)
+        );
+        assert!(
+            !rig.engine
+                .route_command(&op, JobCommand::Detach { completed: None }),
+            "the lingering pump is gone"
+        );
+        assert!(rig.engine.handles(&op).is_none(), "retained state dropped");
+        assert_eq!(
+            rig.engine.retained_completions("default"),
+            vec![],
+            "no completion notice is retried for a released op"
+        );
+
+        // Duplicates: release, attach, query and start all answer released.
+        assert!(released(&release("op-rel", exit_seq)));
+        let frames_before = rig.frames.lock().expect("frames").len();
+        let attached = status_of(&serve_op_attach(
+            &rig.engine,
+            "a".to_string(),
+            &v1::OpAttach {
+                op_id: "op-rel".to_string(),
+                from_seq: 0,
+                attach_generation: 9,
+                window_bytes: 0,
+            },
+        ));
+        assert!(released(&attached), "attach: {attached:?}");
+        assert!(released(&status_of(&serve_op_query(
+            &rig.engine,
+            "q".to_string(),
+            &v1::OpQuery {
+                op_id: "op-rel".to_string(),
+            },
+        ))));
+        // A duplicate start attaches to the known op (accepted, as for any
+        // duplicate) and reports it released; it never runs again.
+        let (_, restarted) =
+            started_status(&rig.start_exec("op-rel", "printf again", 1 << 20).await);
+        assert!(
+            released(&restarted),
+            "a released op never re-runs: {restarted:?}"
+        );
+        assert_eq!(
+            rig.engine.query(&op),
+            QueryAnswer::Lost(LostReason::Released)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.frames.lock().expect("frames").len(),
+            frames_before,
+            "nothing is replayed or re-run"
+        );
+
+        // An op this runner never had is not released, just not retained.
+        let unknown = release("op-never", 1);
+        assert_eq!(unknown.state, v1::OpState::Lost as i32);
+        assert_eq!(unknown.lost_reason, v1::OpLostReason::AgentRestarted as i32);
+
+        let _ = serve_op_cancel(
+            &rig.engine,
+            "c".to_string(),
+            &v1::OpCancel {
+                op_id: "op-live".to_string(),
+            },
+        );
+    }
+
+    /// A released op's id survives an in-place update: the successor image
+    /// answers a late start for it as released and never runs it again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_op_never_runs_again_after_an_update_handover() {
+        use crate::handover::{CarriedMarker, CarriedReason};
+        let rig = rig();
+        assert!(started_status(&rig.start_exec("op-once", "printf once", 1 << 20).await).0);
+        rig.wait_for_exit_frame().await;
+        let op = scoped_op_id("default", "op-once");
+        let mut exit_seq = None;
+        for _ in 0..500 {
+            if let QueryAnswer::Complete { exit_seq: seq, .. } = rig.engine.query(&op) {
+                exit_seq = Some(seq);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let released = serve_op_release(
+            &rig.engine,
+            "r".to_string(),
+            &v1::OpRelease {
+                op_id: "op-once".to_string(),
+                exit_seq: exit_seq.expect("the op completes"),
+            },
+        );
+        assert!(matches!(
+            released.result,
+            Some(RespResult::OpStatus(ref s)) if s.lost_reason == v1::OpLostReason::Released as i32
+        ));
+
+        // What the predecessor writes into its manifest, through JSON.
+        let carried: Vec<CarriedMarker> = rig
+            .engine
+            .carried_markers()
+            .into_iter()
+            .map(CarriedMarker::from)
+            .collect();
+        assert!(carried
+            .iter()
+            .any(|m| m.op_id == op.as_str() && m.reason == CarriedReason::Released));
+        let carried: Vec<CarriedMarker> =
+            serde_json::from_slice(&serde_json::to_vec(&carried).unwrap()).unwrap();
+
+        let successor = self::rig();
+        successor
+            .engine
+            .restore_markers(carried.into_iter().map(CarriedMarker::into_parts));
+        let (_, again) = started_status(
+            &successor
+                .start_exec("op-once", "printf again", 1 << 20)
+                .await,
+        );
+        assert_eq!(again.state, v1::OpState::Lost as i32, "{again:?}");
+        assert_eq!(again.lost_reason, v1::OpLostReason::Released as i32);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            successor.frames.lock().expect("frames").is_empty(),
+            "the successor never runs it"
+        );
+
+        // Negative control: a successor that was not handed the markers runs it.
+        let forgetful = self::rig();
+        let (accepted, fresh) = started_status(
+            &forgetful
+                .start_exec("op-once", "printf again", 1 << 20)
+                .await,
+        );
+        assert!(accepted);
+        assert_ne!(fresh.state, v1::OpState::Lost as i32, "{fresh:?}");
     }
 
     #[tokio::test]
@@ -1064,6 +1545,7 @@ mod tests {
                 retained_bytes: 12345,
             }),
             duration_ms: 7,
+            background_children_stopped: false,
             stdout: empty_channel(),
             stderr: empty_channel(),
         };
@@ -1077,6 +1559,303 @@ mod tests {
         );
         assert!(!wire.timed_out);
         assert!(!wire.cancelled);
+    }
+
+    #[tokio::test]
+    async fn detached_operation_pushes_completion_without_output_attachment() {
+        let rig = rig();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion_sink: FrameSink = Arc::new(move |bytes| {
+            tx.send(v1::AgentEvent::decode(bytes.as_slice()).expect("completion event"))
+                .expect("completion receiver");
+        });
+        let response = serve_op_start_scoped_with_policy(
+            &rig.engine,
+            &rig.platform,
+            "default",
+            rig.sink(),
+            "detached-exit".into(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["sleep 30".into()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            None,
+            None,
+            Some(completion_sink),
+        )
+        .await;
+        assert!(started_status(&response).0);
+        let id = scoped_op_id("default", "detached-exit");
+        assert!(rig
+            .engine
+            .route_command(&id, JobCommand::Detach { completed: None }));
+        serve_op_cancel_scoped(
+            &rig.engine,
+            "default",
+            "cancel".into(),
+            &v1::OpCancel {
+                op_id: "detached-exit".into(),
+            },
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion is pushed promptly")
+            .expect("event");
+        let Some(v1::agent_event::Event::OperationCompleted(completed)) = event.event else {
+            panic!("not a completion event");
+        };
+        assert_eq!(completed.op_id, "detached-exit");
+        assert!(completed.exit.expect("terminal proof").cancelled);
+        assert!(rx.try_recv().is_err(), "one terminal event only");
+        // Lifecycle publication does not release retained output.
+        assert!(rig.engine.handles(&id).is_some());
+    }
+
+    #[test]
+    fn completion_publication_does_not_require_a_retained_exit_frame() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink: FrameSink = Arc::new(move |bytes| captured.lock().unwrap().push(bytes));
+        completion_publisher(Some(sink), "overflow".into())(
+            None,
+            &JobExit {
+                outcome: JobOutcome::Failed(JobFailure::Overflow {
+                    retained_bytes: 12345,
+                }),
+                duration_ms: 7,
+                background_children_stopped: false,
+                stdout: empty_channel(),
+                stderr: empty_channel(),
+            },
+        );
+        let events = events.lock().unwrap();
+        let event = v1::AgentEvent::decode(events[0].as_slice()).unwrap();
+        let Some(v1::agent_event::Event::OperationCompleted(completed)) = event.event else {
+            panic!("not a completion event");
+        };
+        assert_eq!(completed.exit.unwrap().failure_code, "OP_OVERFLOW");
+    }
+
+    /// A returning process reports what it holds, each op with the
+    /// generation it was admitted under (known from its OpStart, so no lost
+    /// answer can leave it unknown); Opengeni's answer names the ops to end,
+    /// and only those end: a running op is cancelled and released when it
+    /// exits, a retained one is released at once, neither ever runs again,
+    /// and the next report holds only what is left.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One takeover story, read top to bottom.
+    async fn an_inventory_answer_ends_what_opengeni_names() {
+        fn answer(report_id: u64, end: &[&str]) -> Vec<u8> {
+            v1::AgentEventAck {
+                ack: Some(v1::agent_event_ack::Ack::OperationInventory(
+                    v1::OperationInventoryAck {
+                        report_id,
+                        page: 0,
+                        end_op_ids: end.iter().map(ToString::to_string).collect(),
+                    },
+                )),
+            }
+            .encode_to_vec()
+        }
+        fn reported(pages: &[v1::OperationInventory]) -> Vec<(String, u64, bool)> {
+            let mut ops: Vec<(String, u64, bool)> = pages
+                .iter()
+                .flat_map(|page| page.operations.iter())
+                .map(|op| (op.op_id.clone(), op.connection_generation, op.complete))
+                .collect();
+            ops.sort();
+            ops
+        }
+        async fn settle(engine: &Engine, op: &OpId, want: impl Fn(&QueryAnswer) -> bool) {
+            for _ in 0..500 {
+                if want(&engine.query(op)) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("{op:?} never settled: {:?}", engine.query(op));
+        }
+        let released = |answer: &QueryAnswer| *answer == QueryAnswer::Lost(LostReason::Released);
+        let rig = rig();
+        let engine = &rig.engine;
+
+        // Connection generation 1: one op keeps running, one completes and
+        // retains its output. Both carry generation 1 before any answer.
+        engine.begin_link_connection("default");
+        assert!(started_status(&rig.start_exec_on("op-run", "sleep 30", 1).await).0);
+        assert!(started_status(&rig.start_exec_on("op-done", "printf out", 1).await).0);
+        let run = scoped_op_id("default", "op-run");
+        let done = scoped_op_id("default", "op-done");
+        settle(engine, &done, |a| matches!(a, QueryAnswer::Complete { .. })).await;
+        let pages = engine.inventory_pages("default");
+        assert_eq!(pages.len(), 1);
+        let first = pages[0].report_id;
+        assert_eq!(
+            reported(&pages),
+            vec![
+                ("op-done".to_string(), 1, true),
+                ("op-run".to_string(), 1, false)
+            ],
+        );
+        // The answer is lost: the report repeats, still with generation 1.
+        assert_eq!(engine.inventory_pages("default"), pages);
+        assert!(handle_event_ack_scoped(
+            engine,
+            "default",
+            &answer(first, &[])
+        ));
+        assert!(
+            engine.inventory_pages("default").is_empty(),
+            "an answered report is not repeated"
+        );
+
+        // Another process held the connection meanwhile; this one is back on
+        // generation 3 and starts a new op there.
+        engine.begin_link_connection("default");
+        assert!(started_status(&rig.start_exec_on("op-new", "sleep 30", 3).await).0);
+        let new = scoped_op_id("default", "op-new");
+        let pages = engine.inventory_pages("default");
+        let third = pages[0].report_id;
+        assert_ne!(third, first);
+        assert_eq!(
+            reported(&pages),
+            vec![
+                ("op-done".to_string(), 1, true),
+                ("op-new".to_string(), 3, false),
+                ("op-run".to_string(), 1, false)
+            ]
+        );
+
+        // An answer to the previous report ends nothing.
+        assert!(handle_event_ack_scoped(
+            engine,
+            "default",
+            &answer(first, &["op-run", "op-done", "op-new"])
+        ));
+        assert!(matches!(engine.query(&run), QueryAnswer::Running { .. }));
+        assert!(matches!(engine.query(&done), QueryAnswer::Complete { .. }));
+        assert!(matches!(engine.query(&new), QueryAnswer::Running { .. }));
+
+        // The answer ends the two generation-1 ops; an id this report never
+        // held is ignored.
+        assert_eq!(
+            engine.apply_inventory_answer(
+                "default",
+                &v1::OperationInventoryAck {
+                    report_id: third,
+                    page: 0,
+                    end_op_ids: vec!["op-run".into(), "op-done".into(), "op-other".into()],
+                },
+            ),
+            Some(2)
+        );
+        assert!(
+            released(&engine.query(&done)),
+            "retained output released at once"
+        );
+        assert!(engine.handles(&done).is_none());
+        settle(engine, &run, released).await;
+        assert!(
+            engine.handles(&run).is_none(),
+            "the cancelled op left nothing"
+        );
+        assert!(
+            rig.frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .any(|frame| matches!(
+                    &frame.body,
+                    Some(v1::op_frame::Body::Exit(exit)) if exit.cancelled
+                )),
+            "the running op was cancelled"
+        );
+        assert_eq!(
+            engine.retained_completions("default"),
+            vec![],
+            "nothing ended is reported as a completion again"
+        );
+        assert!(matches!(engine.query(&new), QueryAnswer::Running { .. }));
+
+        // An ended op never runs again: a duplicate start answers released.
+        let (_, restarted) = started_status(&rig.start_exec_on("op-run", "sleep 30", 3).await);
+        assert_eq!(restarted.state, v1::OpState::Lost as i32);
+        assert_eq!(restarted.lost_reason, v1::OpLostReason::Released as i32);
+        assert!(released(&engine.query(&run)));
+
+        // The next connection reports only what is left.
+        engine.begin_link_connection("default");
+        let pages = engine.inventory_pages("default");
+        assert_eq!(reported(&pages), vec![("op-new".to_string(), 3, false)]);
+
+        let _ = serve_op_cancel(
+            engine,
+            "c".to_string(),
+            &v1::OpCancel {
+                op_id: "op-new".to_string(),
+            },
+        );
+    }
+
+    /// An op carried to a successor process image keeps the connection
+    /// generation it was admitted under, so the successor's report still lets
+    /// Opengeni tell it from an op of the current connection.
+    #[tokio::test]
+    async fn a_handed_over_op_keeps_the_generation_it_was_admitted_under() {
+        let rig = rig();
+        rig.engine.begin_link_connection("link");
+        let started = serve_op_start_scoped_with_policy(
+            &rig.engine,
+            &rig.platform,
+            "link",
+            rig.sink(),
+            "carried".to_string(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["sleep 30".to_string()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                deadline_ms: 0,
+                origin_id: "session-1".to_string(),
+                connection_generation: 4,
+            },
+            None,
+            Some("agent.w.a.connection.i.op.carried".to_string()),
+            None,
+        )
+        .await;
+        assert!(started_status(&started).0);
+
+        let handed = rig.engine.handover_all().await.expect("handed over");
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].tag.connection_generation, 4);
+
+        // The successor (its process could not be adopted here, so the op
+        // ends typed and retains its record) reports it with generation 4.
+        let successor = self::rig();
+        successor.engine.begin_link_connection("link");
+        for op in handed {
+            successor.engine.adopt_job(
+                op,
+                Err("not adopted in this test".to_string()),
+                |_| {},
+                |_| Vec::new(),
+                |_, _| {},
+            );
+        }
+        let pages = successor.engine.inventory_pages("link");
+        let reported: Vec<(String, u64)> = pages
+            .iter()
+            .flat_map(|page| page.operations.iter())
+            .map(|op| (op.op_id.clone(), op.connection_generation))
+            .collect();
+        assert_eq!(reported, vec![("carried".to_string(), 4)]);
     }
 
     #[test]

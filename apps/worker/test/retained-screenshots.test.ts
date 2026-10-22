@@ -1,10 +1,14 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import type { RetainedArtifactMetadata } from "@opengeni/contracts";
 import {
   collectRetainedScreenshotRunStateReceipts,
   compactRetainedScreenshotHistory,
   compactRetainedScreenshotRunState,
+  collectRetainedScreenshotReceipts,
+  inlineImagesFromToolResultItem,
   retainedScreenshotIdentity,
+  retainedToolImagesEventOutput,
   sdkEventContainsInlineImage,
   ScreenshotValidationError,
   typedScreenshotFromSdkEvent,
@@ -400,5 +404,126 @@ describe("retained computer screenshots", () => {
     );
     expect(JSON.stringify(compacted)).not.toContain("unsafe-inline-data");
     expect(JSON.stringify(compacted)).toContain("unsupported");
+  });
+});
+
+function receiptFor(
+  artifactId: string,
+  bytes: Uint8Array,
+  contentType: "image/png" | "image/jpeg",
+) {
+  return {
+    available: true,
+    artifactId,
+    kind: "computer_screenshot",
+    contentType,
+    originalBytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    retainedAt: "2026-07-31T00:00:00.000Z",
+    dimensions: { width: 1, height: 1 },
+    retention: { policy: "session_screenshot", expiresAt: "2026-08-30T00:00:00.000Z" },
+    retrieval: {
+      method: "GET",
+      path: `/v1/workspaces/22222222-2222-4222-8222-222222222222/sessions/33333333-3333-4333-8333-333333333333/artifacts/${artifactId}/content`,
+      acceptRanges: "bytes",
+      maxRangeBytes: 1024 * 1024,
+    },
+  } as const satisfies RetainedArtifactMetadata;
+}
+
+describe("images returned by any tool", () => {
+  const pngData = Buffer.from(PNG).toString("base64");
+  const jpegData = Buffer.from(JPEG).toString("base64");
+  const integrationResult = () => ({
+    type: "function_call_result",
+    id: "output-kvm",
+    callId: "call-kvm",
+    output: {
+      content: [
+        { type: "text", text: '{"width":1,"height":1}' },
+        { type: "image", data: pngData, mimeType: "image/png" },
+        { type: "image", data: "not-an-image", mimeType: "image/png" },
+        { type: "image", data: jpegData, mimeType: "image/jpeg" },
+      ],
+    },
+  });
+  const first = receiptFor("44444444-4444-4444-8444-444444444444", PNG, "image/png");
+  const third = receiptFor("55555555-5555-4555-8555-555555555555", JPEG, "image/jpeg");
+
+  test("lists every inline image with its own retention identity, keeping undecodable slots", () => {
+    const images = inlineImagesFromToolResultItem(integrationResult());
+    expect(images).toEqual([
+      { callId: "call-kvm", toolOutputId: "output-kvm", bytes: PNG, mediaType: "image/png" },
+      null,
+      {
+        callId: "call-kvm",
+        toolOutputId: "output-kvm:image:2",
+        bytes: JPEG,
+        mediaType: "image/jpeg",
+      },
+    ]);
+  });
+
+  test("history keeps references for retained images and the bytes of the rest", () => {
+    const receipts = new Map([["call-kvm", [first, null, third]]]);
+    const [compacted] = compactRetainedScreenshotHistory([integrationResult()], receipts);
+    const content = (compacted!.output as { content: unknown[] }).content;
+    expect(content[0]).toEqual({ type: "text", text: '{"width":1,"height":1}' });
+    expect(content[1]).toEqual({
+      type: "input_image",
+      image: { type: "retained_artifact", artifact: first },
+    });
+    // The image that could not be retained stays exactly as the tool returned it.
+    expect(content[2]).toEqual({ type: "image", data: "not-an-image", mimeType: "image/png" });
+    expect(content[3]).toEqual({
+      type: "input_image",
+      image: { type: "retained_artifact", artifact: third },
+    });
+    expect(JSON.stringify(compacted)).not.toContain(pngData);
+    expect(JSON.stringify(compacted)).not.toContain(jpegData);
+
+    // Re-reading the history recovers the same per-image receipts, so a retry
+    // or resume compacts identically.
+    expect(collectRetainedScreenshotReceipts([compacted!]).get("call-kvm")).toEqual([
+      first,
+      null,
+      third,
+    ]);
+    const runState = compactRetainedScreenshotRunState(
+      JSON.stringify({ originalInput: [integrationResult()] }),
+      receipts,
+    );
+    expect(runState).not.toContain(pngData);
+    expect(collectRetainedScreenshotRunStateReceipts(runState).get("call-kvm")).toEqual([
+      first,
+      null,
+      third,
+    ]);
+  });
+
+  test("a screenshot receipt shared by every image keeps its single-receipt form", () => {
+    const [compacted] = compactRetainedScreenshotHistory(
+      [
+        {
+          callId: "call-shot",
+          output: { content: [{ type: "image", data: pngData, mimeType: "image/png" }] },
+        },
+      ],
+      new Map([["call-shot", first]]),
+    );
+    expect(collectRetainedScreenshotReceipts([compacted!]).get("call-shot")).toEqual(first);
+  });
+
+  test("the timeline copy shows retained images as receipts and leaves the rest alone", () => {
+    const output = integrationResult().output;
+    expect(retainedToolImagesEventOutput(output, [first, null, third])).toEqual({
+      content: [
+        { type: "text", text: '{"width":1,"height":1}' },
+        first,
+        { type: "image", data: "not-an-image", mimeType: "image/png" },
+        third,
+      ],
+    });
+    expect(retainedToolImagesEventOutput(output, [null, null, null])).toBe(output);
   });
 });

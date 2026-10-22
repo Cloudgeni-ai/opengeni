@@ -1,12 +1,62 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Agent, Runner, tool, type ModelRequest, type StreamEvent } from "@openai/agents";
 import {
+  ActiveBackendUnresolvableError,
+  RoutingSandboxSession,
+  RoutingWorkspaceRootChangedError,
+  type RoutableBackendSession,
+} from "@opengeni/runtime";
+import {
   ScriptedModel,
   assistantMessage,
   functionCall,
 } from "../../../packages/testing/src/scripted-model";
 
-import { checkpointHistoryBeforeProviderDispatch } from "../src/activities/agent-turn/provider-dispatch-barrier";
+import {
+  ActiveRouteDispatchBoundary,
+  checkpointHistoryBeforeProviderDispatch,
+} from "../src/activities/agent-turn/provider-dispatch-barrier";
+import { sandboxRouteTransitionCode } from "../src/activities/agent-turn/errors";
+
+function routedSession() {
+  let pointer = { activeSandboxId: null as string | null, activeEpoch: 0 };
+  const calls: string[] = [];
+  const backend = (name: string, root: string): RoutableBackendSession => ({
+    state: { manifest: { root } },
+    exec: async (args: unknown) => {
+      calls.push(`${name}:${(args as { cmd: string }).cmd}`);
+      return { stdout: name, exitCode: 0 };
+    },
+  });
+  const home = backend("home", "/workspace");
+  const machine = backend("machine", "/srv/project");
+  const session = new RoutingSandboxSession({
+    defaultResolved: { session: home, sandboxId: null, kind: "modal" },
+    readPointer: async () => ({ ...pointer }),
+    resolveActiveBackend: async (route) => {
+      if (route.activeSandboxId === "offline")
+        throw new ActiveBackendUnresolvableError("offline_enrollment", "offline");
+      return route.activeSandboxId === null
+        ? { session: home, sandboxId: null, kind: "modal" }
+        : { session: machine, sandboxId: route.activeSandboxId, kind: "selfhosted" };
+    },
+  });
+  return {
+    session,
+    calls,
+    pointer: () => ({ ...pointer }),
+    swap: (target: string | null) => {
+      pointer = { activeSandboxId: target, activeEpoch: pointer.activeEpoch + 1 };
+    },
+  };
+}
+
+function routeBoundary(session: RoutingSandboxSession) {
+  return new ActiveRouteDispatchBoundary({
+    session: () => session,
+    isRouteTransition: (error) => sandboxRouteTransitionCode(error) !== null,
+  });
+}
 
 describe("provider dispatch history barrier", () => {
   test("the SDK exposes complete tool history before its follow-up model call", async () => {
@@ -86,6 +136,98 @@ describe("provider dispatch history barrier", () => {
     releaseCheckpoint();
     await dispatch;
     expect(order).toEqual(["checkpoint-started", "checkpoint-completed", "provider-dispatch"]);
+  });
+
+  test("a swap to another workspace root ends the attempt before the model chooses its next calls", async () => {
+    const routed = routedSession();
+    const activeRoute = routeBoundary(routed.session);
+    const historySink = { reconcileConversationTruth: mock(async () => {}) };
+    const requestedResponses: number[] = [];
+    class BarrierModel extends ScriptedModel {
+      override async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+        await checkpointHistoryBeforeProviderDispatch(historySink, {
+          effectiveSandboxBackend: "modal",
+          routingEnabled: true,
+          readActiveSandbox: async () => routed.pointer(),
+          activeRoute,
+        });
+        requestedResponses.push(requestedResponses.length + 1);
+        yield* super.getStreamedResponse(request);
+      }
+    }
+    const model = new BarrierModel([
+      { output: [functionCall("swap", {}, "swap-call")] },
+      { output: [functionCall("run", {}, "run-call")] },
+      { output: [assistantMessage("done")] },
+    ]);
+    const swap = tool({
+      name: "swap",
+      description: "Move this chat to the machine.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      strict: false,
+      execute: async () => {
+        routed.swap("machine");
+        return "swapped";
+      },
+    });
+    const run = tool({
+      name: "run",
+      description: "Run a command.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      strict: false,
+      execute: async () => await routed.session.exec({ cmd: "after-swap" }),
+    });
+    const agent = new Agent({
+      name: "route-boundary-test",
+      instructions: "Swap, then run.",
+      model,
+      tools: [swap, run],
+    });
+
+    const result = await new Runner().run(agent, "start", {
+      stream: true,
+      historyOwnership: "external",
+    });
+    let failure: unknown = null;
+    try {
+      for await (const _event of result.toStream()) {
+        // Drain the stream while the SDK owns its model/tool loop.
+      }
+      await result.completed;
+    } catch (error) {
+      failure = error;
+    }
+    failure ??= result.error;
+
+    expect(sandboxRouteTransitionCode(failure)).toBe("workspace_root_changed_this_turn");
+    expect(failure).toBeInstanceOf(RoutingWorkspaceRootChangedError);
+    // Only the swap's batch ran; the model was never asked for (and so never
+    // lost) a response chosen against the old machine.
+    expect(requestedResponses).toEqual([1]);
+    expect(routed.calls).toEqual([]);
+    expect(historySink.reconcileConversationTruth).toHaveBeenCalledTimes(2);
+  });
+
+  test("an unmoved route, a servable move and other resolution failures leave the attempt running", async () => {
+    const routed = routedSession();
+    const activeRoute = routeBoundary(routed.session);
+    const assert = mock(routed.session.assertActiveRouteContinuable.bind(routed.session));
+    routed.session.assertActiveRouteContinuable = assert;
+
+    await activeRoute.check(routed.pointer());
+    await activeRoute.check(routed.pointer());
+    expect(assert).not.toHaveBeenCalled();
+
+    routed.swap(null);
+    await activeRoute.check(routed.pointer());
+    expect(assert).toHaveBeenCalledTimes(1);
+
+    // An offline target is not an attempt boundary: the next call that needs
+    // the machine reports it, exactly as before.
+    routed.swap("offline");
+    await activeRoute.check(routed.pointer());
+    expect(assert).toHaveBeenCalledTimes(2);
+    expect(routed.calls).toEqual([]);
   });
 
   test("wires the barrier before generic and native provider started audits", async () => {

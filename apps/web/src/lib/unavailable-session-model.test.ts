@@ -1,3 +1,4 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
@@ -5,12 +6,13 @@ import { projectPickerRows, sortPickerRows } from "@opengeni/react";
 import {
   scheduledRunErrorText,
   SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE,
+  SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE,
 } from "./scheduled-run-error";
 import {
   sessionModelMissingFromCatalog,
   unavailableModelName,
   unavailableModelReplacement,
-} from "./unavailable-session-model";
+} from "@opengeni/react/app/lib/unavailable-session-model";
 
 function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id">,
@@ -58,7 +60,7 @@ const astra = catalogModel({ id: "gpt-6-astra", label: "GPT-6 Astra" });
 const sol = catalogModel({ id: "gpt-6-sol", label: "GPT-6 Sol", aliases: ["sol-latest"] });
 const codex = catalogModel({ id: "codex/gpt-6-sol", label: "GPT-6 Sol (Codex)", source: "codex" });
 const models = [astra, sol, codex];
-const rows = sortPickerRows(projectPickerRows(models));
+const rows = sortPickerRows(projectPickerRows(t, models));
 
 describe("sessionModelMissingFromCatalog", () => {
   const loaded = { models, error: null };
@@ -194,7 +196,7 @@ describe("unavailableModelReplacement", () => {
     });
     const pool = [astra, unselectableCodex, codexMini];
     const replacement = unavailableModelReplacement({
-      rows: sortPickerRows(projectPickerRows(pool)),
+      rows: sortPickerRows(projectPickerRows(t, pool)),
       defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
       latencyMode: "standard",
       codexOnly: true,
@@ -231,5 +233,12 @@ describe("scheduledRunErrorText", () => {
     expect(scheduledRunErrorText("  Sandbox capacity is unavailable.  ")).toBe(
       "Sandbox capacity is unavailable.",
     );
+  });
+
+  test("a run skipped at the task's usage limit says how it resumes, without credits", () => {
+    expect(scheduledRunErrorText("session_usage_limit")).toBe(
+      SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE,
+    );
+    expect(SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE).not.toMatch(/credit|budget|month/i);
   });
 });

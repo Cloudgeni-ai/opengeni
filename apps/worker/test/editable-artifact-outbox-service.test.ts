@@ -10,6 +10,8 @@ import {
   type EditableArtifactOutboxRuntimePort,
 } from "../src/editable-artifact-outbox-service";
 
+const HEALTHY = Object.freeze({ databaseRole: { ok: true }, nats: { ok: true } } as const);
+
 const EMPTY_SUMMARY: EditableArtifactOutboxDispatchSummary = Object.freeze({
   claimed: 0,
   published: 0,
@@ -81,9 +83,11 @@ describe("editable artifact outbox sidecar", () => {
       },
       async check() {
         checks += 1;
+        return HEALTHY;
       },
     };
     const observability = {
+      ...quietObservability(),
       prometheusMetrics: async () => "# metrics\n",
     } as unknown as Observability;
     const service = createEditableArtifactOutboxService({
@@ -116,22 +120,102 @@ describe("editable artifact outbox sidecar", () => {
       start: async () => undefined,
       drain: () => true,
       stop: async () => undefined,
-      check: async () => {
-        throw new Error("dependency unavailable");
+      check: async () => ({
+        databaseRole: { ok: true },
+        nats: { ok: false, reason: "dependency unavailable" },
+      }),
+    };
+    const service = createEditableArtifactOutboxService({
+      runtime,
+      observability: quietObservability(),
+      serviceName: "opengeni-test",
+      environment: "test",
+    });
+    await expect(service.run()).rejects.toThrow(
+      "Artifact outbox dispatcher is not ready: nats: dependency unavailable",
+    );
+    expect(service.state()).toBe("failed");
+    const readyz = await service.fetch(new Request("http://worker/readyz"));
+    expect(readyz.status).toBe(503);
+    expect(await readyz.json()).toMatchObject({
+      checks: {
+        databaseRole: { ok: true },
+        nats: { ok: false, reason: "dependency unavailable" },
       },
+    });
+    expect((await service.fetch(new Request("http://worker/healthz"))).status).toBe(503);
+  });
+
+  test("a readiness failure on a running dispatcher names the failing check and is logged once", async () => {
+    let posture: { ok: true } | { ok: false; reason: string } = { ok: true };
+    const logs = { warn: [] as string[], info: [] as string[] };
+    const runtime: EditableArtifactOutboxRuntimePort = {
+      dispatcher: { dispatchOnce: async () => EMPTY_SUMMARY },
+      start: () => new Promise<void>(() => undefined),
+      drain: () => true,
+      stop: async () => undefined,
+      check: async () => ({ databaseRole: posture, nats: { ok: true } }),
     };
     const service = createEditableArtifactOutboxService({
       runtime,
       observability: {
         prometheusMetrics: async () => "",
+        warn: (message: string) => logs.warn.push(message),
+        info: (message: string) => logs.info.push(message),
       } as unknown as Observability,
       serviceName: "opengeni-test",
       environment: "test",
     });
-    await expect(service.run()).rejects.toThrow("dependency unavailable");
-    expect(service.state()).toBe("failed");
-    expect((await service.fetch(new Request("http://worker/readyz"))).status).toBe(503);
-    expect((await service.fetch(new Request("http://worker/healthz"))).status).toBe(503);
+    void service.run();
+    await eventually(() => service.state() === "ready");
+    expect(logs.warn).toEqual([]);
+
+    const reason =
+      "Artifact outbox dispatcher database connection has an unsafe role posture: it can directly access public.metrics_view";
+    posture = { ok: false, reason };
+    for (let probe = 0; probe < 3; probe += 1) {
+      const readyz = await service.fetch(new Request("http://worker/readyz"));
+      expect(readyz.status).toBe(503);
+      expect(await readyz.json()).toEqual({
+        ok: false,
+        state: "ready",
+        checks: { databaseRole: { ok: false, reason }, nats: { ok: true } },
+      });
+    }
+    expect(logs.warn).toEqual([
+      `Artifact outbox dispatcher readiness check failing: databaseRole: ${reason}`,
+    ]);
+
+    posture = { ok: true };
+    expect((await service.fetch(new Request("http://worker/readyz"))).status).toBe(200);
+    expect(logs.info).toEqual(["Artifact outbox dispatcher readiness check recovered"]);
+    expect(logs.warn).toHaveLength(1);
+  });
+
+  test("a probe that outlives the readiness budget reports only itself as timed out", async () => {
+    const runtime: EditableArtifactOutboxRuntimePort = {
+      dispatcher: { dispatchOnce: async () => EMPTY_SUMMARY },
+      start: () => new Promise<void>(() => undefined),
+      drain: () => true,
+      stop: async () => undefined,
+      check: async (signal) => ({
+        databaseRole: { ok: true },
+        nats: await new Promise((resolve) =>
+          signal?.addEventListener("abort", () => resolve({ ok: false, reason: "timed out" })),
+        ),
+      }),
+    };
+    const service = createEditableArtifactOutboxService({
+      runtime,
+      observability: quietObservability(),
+      serviceName: "opengeni-test",
+      environment: "test",
+      readinessTimeoutMs: 20,
+    });
+    await expect(service.run()).rejects.toThrow("is not ready: nats: timed out");
+    expect(await (await service.fetch(new Request("http://worker/readyz"))).json()).toMatchObject({
+      checks: { databaseRole: { ok: true }, nats: { ok: false, reason: "timed out" } },
+    });
   });
 });
 
@@ -141,4 +225,12 @@ async function eventually(predicate: () => boolean): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   }
   throw new Error("condition did not become true");
+}
+
+function quietObservability(): Observability {
+  return {
+    prometheusMetrics: async () => "",
+    warn: () => undefined,
+    info: () => undefined,
+  } as unknown as Observability;
 }

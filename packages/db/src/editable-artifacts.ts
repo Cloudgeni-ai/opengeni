@@ -1392,6 +1392,63 @@ export class PostgresEditableArtifactStore {
     );
   }
 
+  async readArtifactsAtAuthorizationRevisions(
+    scopeInput: PersistedEditableArtifactScope,
+    requestsInput: readonly Readonly<{
+      artifactId: string;
+      expectedAuthorizationRevision: number;
+    }>[],
+  ): Promise<
+    readonly PromiseSettledResult<ReadPersistedEditableArtifactAtAuthorizationRevisionResult>[]
+  > {
+    const scope = validateScope(scopeInput);
+    if (requestsInput.length > 8) throw new TypeError("Artifact read batch is too large");
+    const requests = requestsInput.map((request) => ({
+      artifactId: validateStableId(request.artifactId, "artifact id"),
+      expectedAuthorizationRevision: validateInteger(
+        request.expectedAuthorizationRevision,
+        "expected artifact authorization revision",
+        1,
+      ),
+    }));
+    if (!requests.length) return [];
+    return withRlsContext(
+      this.db,
+      scope,
+      async (tx) => {
+        // The same single-statement MVCC fence as the scalar read. Scope and
+        // FORCE RLS apply before any row can be matched to an authorization.
+        const rows = await rawRows<ArtifactRow>(
+          tx,
+          sql`
+        select account_id, workspace_id, id, modality, title, lifecycle_state,
+          authorization_revision, head_sequence, causal_frontier, state_hash, current_snapshot_id,
+          created_at, updated_at
+        from editable_artifacts
+        where account_id = ${scope.accountId}::uuid
+          and workspace_id = ${scope.workspaceId}::uuid
+          and id in (${sql.join(
+            requests.map((request) => sql`${request.artifactId}`),
+            sql`, `,
+          )})`,
+        );
+        const byId = new Map(rows.map((row) => [row.id, row]));
+        return Promise.allSettled(
+          requests.map(async (request) => {
+            const row = byId.get(request.artifactId);
+            if (!row) return Object.freeze({ kind: "result" as const, artifact: null });
+            const artifact = artifactFromRow(row);
+            if (artifact.authorizationRevision !== request.expectedAuthorizationRevision) {
+              return Object.freeze({ kind: "authorization_stale" as const });
+            }
+            return Object.freeze({ kind: "result" as const, artifact });
+          }),
+        );
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
   async advanceAuthorizationRevision(
     scopeInput: PersistedEditableArtifactScope,
     artifactIdInput: string,

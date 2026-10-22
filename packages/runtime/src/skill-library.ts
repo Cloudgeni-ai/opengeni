@@ -293,11 +293,11 @@ export function loadSkillManagementSkill(): SkillLibrarySkill {
     join(moduleDir, "..", "src", "bundled_management_skills"),
   ].find((candidate) => isRealDirectory(candidate));
   if (!root) throw new Error("Built-in Skill management guidance is missing from this deployment.");
-  const artifact = readSkillLibraryArtifact(join(root, "opengeni-skills"));
+  const artifact = readSkillLibraryArtifact(join(root, "skill-management"));
   const main = artifact.files.find((entry) => entry.path === "SKILL.md");
   if (!main) throw new Error("Built-in Skill management guidance has no SKILL.md.");
   const metadata = parsePortableSkillFrontmatter(main.content);
-  if (metadata.name !== "opengeni-skills" || !metadata.description) {
+  if (metadata.name !== "skill-management" || !metadata.description) {
     throw new Error("Built-in Skill management metadata is invalid.");
   }
   return { name: metadata.name, description: metadata.description, files: artifact.files };

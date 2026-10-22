@@ -57,6 +57,7 @@ function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
     providerDeadlineAt: null,
     rotationRequestedAt: null,
     rotationReason: null,
+    groupEndRequestedAt: null,
     currentCheckpointArtifactId: null,
     previousCheckpointArtifactId: null,
     expiresAt: new Date("2026-08-07T12:00:00.000Z"),

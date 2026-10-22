@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseSecretsIndexSearch } from "./secrets-route";
+import { connectViewProvider, parseSecretsIndexSearch } from "./secrets-route";
 
 const CONNECTION = "0b6d8b1e-3c5a-4f0e-9a51-6c2f1f0d7a10";
 
@@ -13,10 +13,30 @@ describe("parseSecretsIndexSearch", () => {
     expect(parseSecretsIndexSearch({ view: "nope" })).toEqual({});
   });
 
-  test("keeps an owner only on Connect 1Password", () => {
+  test("keeps the picker and each provider's connect page", () => {
+    expect(parseSecretsIndexSearch({ view: "connect" })).toEqual({ view: "connect" });
+    for (const provider of ["protonpass", "keeper", "bitwarden", "external"] as const) {
+      expect(parseSecretsIndexSearch({ view: `connect-${provider}` })).toEqual({
+        view: `connect-${provider}`,
+      });
+      expect(connectViewProvider(`connect-${provider}`)).toBe(provider);
+    }
+    expect(parseSecretsIndexSearch({ view: "connect-lastpass" })).toEqual({});
+    expect(connectViewProvider("connect-1password")).toBeUndefined();
+    expect(connectViewProvider("connect")).toBeUndefined();
+  });
+
+  test("keeps an owner only on a connect page", () => {
     expect(parseSecretsIndexSearch({ view: "connect-1password", owner: "user" })).toEqual({
       view: "connect-1password",
       owner: "user",
+    });
+    expect(parseSecretsIndexSearch({ view: "connect-keeper", owner: "organization" })).toEqual({
+      view: "connect-keeper",
+      owner: "organization",
+    });
+    expect(parseSecretsIndexSearch({ view: "connect", owner: "user" })).toEqual({
+      view: "connect",
     });
     expect(parseSecretsIndexSearch({ view: "connect-1password", owner: "task" })).toEqual({
       view: "connect-1password",

@@ -1,5 +1,0 @@
----
-"@opengeni/db": patch
----
-
-A request that a crashed worker left open no longer keeps a sandbox from being saved. When a worker dies mid-command, its turn attempt is closed lease-lost or failed and its lease holder is dropped, but the exec request it had dispatched stays open with an unknown outcome and nothing ever settles it. That request used to refuse every checkpoint, the idle drain, idle command containment and the provider-deadline backstop for the rest of the box's life, so the provider's 24-hour deadline killed the box uncaptured. Containment no longer waits for such a request, and Modal native checkpoints (point-in-time images of the paused box) run around it: a drain right before terminating the box, a warm checkpoint recorded one generation behind the workspace. Tar-style checkpoints still wait, and the drain's cold commit rejects it only after the box was terminated, which is when nothing it started can still run. Its owner then gets a durable wake so the attempt's quiescence receipt can complete. A lease-lost attempt whose holder still exists, and an attempt closed by Pause, Steer or cancellation, keep their open requests as writers.

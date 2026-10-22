@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, withXaiSubscriptionCatalogProvider } from "@opengeni/config";
+import * as config from "@opengeni/config";
 import {
   AgentEffectiveTools,
   CUA_DESKTOP_TOOLS,
@@ -10,7 +11,7 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   sessionEffectiveToolProjectionInput,
   sessionWithEffectiveToolPolicy,
@@ -70,7 +71,264 @@ function projected(row = session(), env = context()) {
   );
 }
 
+async function withPageContext(
+  rows: readonly Session[],
+  catalogSettings: typeof settings,
+  run: (env: SessionEffectiveToolsContext) => void | Promise<void>,
+) {
+  const workspace = spyOn(db, "requireWorkspace").mockResolvedValue({
+    settings: {},
+  } as Awaited<ReturnType<typeof db.requireWorkspace>>);
+  const models = spyOn(catalog, "resolveWorkspaceCatalogSettings").mockResolvedValue({
+    settings: catalogSettings,
+    source: "code",
+    version: null,
+    modelNotes: {},
+  });
+  const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([]);
+  const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
+  try {
+    await run(
+      await workspaceSessionEffectiveToolsContext(
+        { db: {} as db.Database, settings },
+        rows[0]!.workspaceId,
+        "human",
+        rows,
+      ),
+    );
+    const configured = rows.filter((row) => row.agent != null);
+    if (configured.length) {
+      expect(history).toHaveBeenCalledTimes(1);
+      expect(history.mock.calls[0]?.[1]).toEqual({
+        accountId: configured[0]!.accountId,
+        workspaceId: rows[0]!.workspaceId,
+        sessionIds: [...new Set(configured.map((row) => row.id))],
+      });
+    } else {
+      expect(history).not.toHaveBeenCalled();
+    }
+  } finally {
+    history.mockRestore();
+    skills.mockRestore();
+    models.mockRestore();
+    workspace.mockRestore();
+  }
+}
+
+describe("response-page model resolution", () => {
+  test("resolves each distinct configured model once, including missing models", async () => {
+    const rows = [session(), session(), session("all", { model: "missing-model" })];
+    rows.push(rows[2]!);
+    const resolve = spyOn(config, "resolveModelProviderForTurn");
+    try {
+      await withPageContext(rows, settings, (env) => {
+        expect(resolve).toHaveBeenCalledTimes(2);
+        expect(env.modelProviders?.has("missing-model")).toBe(true);
+        for (const row of rows) projected(row, env);
+        expect(resolve).toHaveBeenCalledTimes(2);
+        // A caller can still project a row not present in the original page.
+        projected(session("all", { model: "another-missing-model" }), env);
+        expect(resolve).toHaveBeenCalledTimes(3);
+      });
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  test("mixed pages preserve exact serialized responses and legacy rows", async () => {
+    const rows = [
+      session(),
+      session("none"),
+      session("all", { model: "missing-model", sandboxBackend: "local" }),
+      session("all", { model: "supergrok/grok-4.6", sandboxBackend: "local" }),
+    ];
+    const legacy = { ...session(), agent: null };
+    await withPageContext([...rows, legacy], settings, (env) => {
+      const uncached = { ...env, modelProviders: undefined };
+      for (const row of rows) {
+        expect(JSON.stringify(projected(row, env))).toBe(JSON.stringify(projected(row, uncached)));
+      }
+      expect(JSON.stringify(sessionWithEffectiveToolPolicy(legacy, ["opengeni"], [], env))).toBe(
+        JSON.stringify(sessionWithEffectiveToolPolicy(legacy, ["opengeni"], [], uncached)),
+      );
+    });
+  });
+
+  test("registry aliases keep the same capabilities as uncached resolution", async () => {
+    const pageSettings = {
+      ...settings,
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "example",
+          api: "chat",
+          baseUrl: "https://provider.example/v1",
+          apiKey: "test-key",
+          models: [
+            {
+              id: "example/model",
+              aliases: ["example/alias"],
+              capabilities: configuredModels(settings)[0]!.capabilities,
+            },
+          ],
+        },
+      ]),
+    };
+    const rows = ["example/model", "example/alias"].map((model) => session("all", { model }));
+    await withPageContext(rows, pageSettings, (env) => {
+      for (const row of rows) {
+        expect(JSON.stringify(projected(row, env))).toBe(
+          JSON.stringify(projected(row, { ...env, modelProviders: undefined })),
+        );
+      }
+      expect(projected(rows[0]!, env).effectiveTools).toEqual(
+        projected(rows[1]!, env).effectiveTools,
+      );
+    });
+  });
+
+  test("a new page uses its own catalog settings rather than deployment or previous-page state", async () => {
+    const row = session();
+    let first: SessionEffectiveToolsContext | undefined;
+    await withPageContext([row], { ...settings, webSearchEnabled: false }, (env) => {
+      first = env;
+      expect(projected(row, env)).toEqual(projected(row, { ...env, modelProviders: undefined }));
+    });
+    await withPageContext([row], { ...settings, webSearchEnabled: true }, (env) => {
+      expect(env.modelProviders).not.toBe(first!.modelProviders);
+      expect(projected(row, env)).toEqual(projected(row, { ...env, modelProviders: undefined }));
+      expect(projected(row, env).effectiveTools).not.toEqual(projected(row, first!).effectiveTools);
+    });
+  });
+
+  test("legacy-only pages do not resolve a model", async () => {
+    const resolve = spyOn(config, "resolveModelProviderForTurn");
+    try {
+      await withPageContext([{ ...session(), agent: null }], settings, (env) => {
+        expect(env.modelProviders).toBeUndefined();
+        expect(resolve).not.toHaveBeenCalled();
+      });
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  test.skipIf(process.env.OPENGENI_BENCH_SESSION_PROJECTION !== "1")(
+    "benchmarks exact response pages with repeated registry models",
+    async () => {
+      const capabilities = configuredModels(settings)[0]!.capabilities;
+      const pageSettings = {
+        ...settings,
+        modelProvidersJson: JSON.stringify([
+          {
+            id: "example",
+            api: "chat",
+            baseUrl: "https://provider.example/v1",
+            apiKey: "test-key",
+            models: Array.from({ length: 32 }, (_, index) => ({
+              id: `example/model-${index}`,
+              upstreamModelId: `model-${index}`,
+              aliases: [`example/alias-${index}`],
+              capabilities,
+            })),
+          },
+        ]),
+      };
+      for (const size of [1, 20, 100]) {
+        const rows = Array.from({ length: size }, (_, index) =>
+          session("all", { model: `example/${index % 2 ? "alias" : "model"}-${index % 4}` }),
+        );
+        await withPageContext(rows, pageSettings, (env) => {
+          const before = { ...env, modelProviders: undefined };
+          const expected = JSON.stringify(rows.map((row) => projected(row, before)));
+          const samples: Record<string, Array<{ wallMs: number; cpuMs: number }>> = {
+            before: [],
+            after: [],
+          };
+          for (let round = 0; round < 9; round++) {
+            for (const mode of round % 2 ? ["after", "before"] : ["before", "after"]) {
+              const cpu = process.cpuUsage();
+              const start = performance.now();
+              // Charge the optimized path for constructing its per-page map.
+              const active =
+                mode === "before"
+                  ? before
+                  : {
+                      ...env,
+                      modelProviders: new Map(
+                        [...new Set(rows.map((row) => row.model))].map(
+                          (id) =>
+                            [id, config.resolveModelProviderForTurn(pageSettings, id)] as const,
+                        ),
+                      ),
+                    };
+              const actual = JSON.stringify(rows.map((row) => projected(row, active)));
+              const wallMs = performance.now() - start;
+              const used = process.cpuUsage(cpu);
+              expect(actual).toBe(expected);
+              if (round > 1)
+                samples[mode]!.push({ wallMs, cpuMs: (used.user + used.system) / 1000 });
+            }
+          }
+          const median = (values: number[]) =>
+            values.sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+          console.log(
+            JSON.stringify({
+              size,
+              registryModels: 32,
+              distinctModels: Math.min(size, 4),
+              results: Object.fromEntries(
+                Object.entries(samples).map(([mode, values]) => [
+                  mode,
+                  {
+                    wallMs: median(values.map((value) => value.wallMs)),
+                    cpuMs: median(values.map((value) => value.cpuMs)),
+                  },
+                ]),
+              ),
+              samples,
+            }),
+          );
+        });
+      }
+    },
+    120_000,
+  );
+});
+
 describe("server effectiveTools environment projection", () => {
+  test.each([true, false])("interaction entries stay upfront with lazy=%s", (lazy) => {
+    const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
+    const row = session("all", {
+      firstPartyMcpTools: ["browser_open", "browser_read", "computer_open", "computer_observe"],
+      tools: [{ id: "opengeni", eager: true }],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    });
+    const tools = projected(row, env).effectiveTools!.tools;
+    for (const name of ["browser_open", "computer_open"]) {
+      expect(tools.find((tool) => tool.name === `interaction__${name}`)?.visibility).toBe(
+        "upfront",
+      );
+    }
+    for (const name of ["browser_read", "computer_observe"]) {
+      expect(tools.find((tool) => tool.name === `interaction__${name}`)?.visibility).toBe(
+        lazy ? "search" : "upfront",
+      );
+    }
+    const restrictedRows: Array<typeof row> = [
+      { ...row, firstPartyMcpTools: ["browser_read"] },
+      { ...row, firstPartyMcpPermissions: ["sessions:read"] },
+      { ...row, agent: session("none").agent },
+    ];
+    for (const restricted of restrictedRows) {
+      expect(
+        projected(restricted, env).effectiveTools!.tools.some(
+          (tool) =>
+            tool.name === "interaction__browser_open" || tool.name === "interaction__computer_open",
+        ),
+      ).toBe(false);
+    }
+  });
+
   test("native computer projection matches eager and deferred interaction tools", () => {
     for (const lazy of [true, false]) {
       const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
@@ -188,7 +446,7 @@ describe("server effectiveTools environment projection", () => {
         version: null,
         modelNotes: {},
       });
-      const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
+      const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
       const codexPool = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
       // SuperGrok readiness is the core route's answer (its legacy pool is gone).
       const xaiPool = spyOn(db, "readSubscriptionCoreRouteReadiness");
@@ -270,7 +528,7 @@ describe("server effectiveTools environment projection", () => {
     expect(absent.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("generate_video");
   });
   test("bundled artifact Skills cannot leak a reader from disabled legacy columns", () => {
-    const result = projected(session("none", { bundledSkillIds: ["builtin:opengeni-documents"] }));
+    const result = projected(session("none", { bundledSkillIds: ["builtin:documents"] }));
     expect(result.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
   });
   test("null config preserves the exact legacy projection and skips metadata reads", async () => {
@@ -312,7 +570,7 @@ describe("server effectiveTools environment projection", () => {
     const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
       kind: "selfhosted",
     } as NonNullable<Awaited<ReturnType<typeof db.getSandbox>>>);
-    const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(true);
+    const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set([row.id]));
     try {
       const result = await workspaceSessionEffectiveToolsContext(
         { db: {} as db.Database, settings: envSettings, objectStorage: {} },
@@ -328,6 +586,11 @@ describe("server effectiveTools environment projection", () => {
       expect(models).toHaveBeenCalledTimes(1);
       expect(sandbox).toHaveBeenCalledTimes(1);
       expect(history).toHaveBeenCalledTimes(1);
+      expect(history.mock.calls[0]?.[1]).toEqual({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionIds: [row.id],
+      });
       expect(sandbox.mock.calls[0]?.[1]).toEqual({
         accountId: row.accountId,
         workspaceId: row.workspaceId,

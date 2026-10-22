@@ -268,12 +268,14 @@ at zero on API start. `reason` is `invalid`, `too_large`, `origin` or
 `rate_limited`. A `rate_limited` refusal keeps the report's `kind`, so accepted
 plus rate-limited is the true per-kind arrival rate while a bucket is empty; the
 other reasons use `kind="unknown"` because the report was not read or not valid.
-The strict body is the kind, a route pattern and a bundle revision, under 512
-bytes; the limit is enforced on the streamed body, so a chunked request is
-refused after 512 bytes instead of being buffered, and the generic request-body
-ceiling does not apply to this exact route. The wire grammar is shared by the
-browser, the route and the log projection through
-`@opengeni/contracts/client-error-report`.
+The strict body is the kind, a route pattern, a bundle revision and optional
+error diagnostics (`error.name`, `error.message`, `error.stack`,
+`error.componentStack`), under 20 KiB; the limit is enforced on the streamed
+body, so a chunked request is refused at 20 KiB instead of being buffered, and
+the generic request-body ceiling does not apply to this exact route. The wire
+grammar, the scrubbing and the per-field bounds (name 128 bytes, message 1 KiB,
+stack and component stack 4 KiB) are shared by the browser, the route and the
+log projection through `@opengeni/contracts/client-error-report`.
 
 A request whose `Origin` header is present but is not one of the deployment's
 own web origins (the CORS allowlist, `OPENGENI_PUBLIC_BASE_URL` or
@@ -283,7 +285,24 @@ in each API process (burst 30, then one every two seconds), so a hostile or
 looping client cannot inflate the counter or the log without bound. Each
 accepted report writes one `Web client error reported` warning whose public
 fields are `surface`, `reason` (the kind), and the grammar-validated opaque
-`clientRoute` and `clientRevision`. No message, stack or URL is accepted.
+`clientRoute` and `clientRevision`, plus the error diagnostics as
+`clientErrorName`, `clientErrorMessage`, `clientErrorStack` and
+`clientComponentStack`.
+
+The diagnostics are the one deliberate free-text exception to the public log
+projection, so that a crash report says why a page failed and not only where.
+They are error text, which can occasionally quote user content. The route
+re-applies the shared projection to every report: URL query strings and
+fragments are removed (except on React's error-decoder links, whose query holds
+only the error's arguments), authorization values, JWTs, well-known API token
+formats, `token=`/`password:`-style assignment values and long opaque
+letter-and-digit strings become `[redacted]`, control characters are removed,
+and each field is cut to its bound. The log projection then admits these four
+names only when the value is already exactly what that projection produces, so
+raw text passed under them by any other caller is omitted. Structured stdout
+logs carry each field in full; OTLP log export cuts every string attribute to
+512 bytes, as for all attributes. The route is anonymous, so treat the text as
+untrusted input when reading it.
 
 The route is anonymous and a non-browser client can omit or forge `Origin`, so
 the counter can be spoofed up to the admission ceiling (about 43,000 reports per

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import * as opengeniCore from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { agentRunAdmissionDenial } from "../src/activities/agent-run-admission";
@@ -9,6 +9,9 @@ import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/go
 import type { ControlActivityServices } from "../src/activities/types";
 import { checkLimit } from "@opengeni/core";
 import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/admission";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";
@@ -134,7 +137,7 @@ describe("worker agent-run admission funding", () => {
           initiatingHumanSubjectId: null,
         });
         if (allowed) await expect(check).resolves.toBe(7);
-        else await expect(check).rejects.toThrow("insufficient Opengeni credits");
+        else await expect(check).rejects.toThrow("insufficient workspace credits");
       }
     } finally {
       balance.mockRestore();
@@ -379,7 +382,7 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toEqual({
         pausedReason: "allowance",
-        message: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+        message: "Usage allowance exhausted. Resume when your allowance is available.",
       });
       expect(allowance).toHaveBeenCalledWith(expect.anything(), {
         accountId: ACCOUNT,
@@ -445,8 +448,7 @@ describe("worker agent-run admission funding", () => {
             initiatingHumanSubjectId: "user:original-goal-human",
           }),
         ).toEqual({
-          budgetBlocked:
-            "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+          budgetBlocked: "Usage allowance exhausted. Resume when your allowance is available.",
           budgetPausedReason: "allowance",
         });
         expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);

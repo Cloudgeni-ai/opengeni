@@ -5,10 +5,11 @@
  */
 import type { SandboxBackend } from "@opengeni/sdk";
 import type { MachineView } from "./types/machines";
+import { type OpenGeniText } from "./messages/runtime";
 
-export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
-export const NO_SANDBOX_LABEL = "No sandbox";
-export const LOCAL_SANDBOX_LABEL = "Local sandbox";
+export const CLOUD_SANDBOX_LABEL = (t: OpenGeniText) => t("sandboxLabelModel.cloudSandbox");
+export const NO_SANDBOX_LABEL = (t: OpenGeniText) => t("sandboxLabelModel.noSandbox");
+export const LOCAL_SANDBOX_LABEL = (t: OpenGeniText) => t("sandboxLabelModel.localSandbox");
 
 /**
  * User-facing name for a session's own managed box. Hosting vendors (Modal,
@@ -18,18 +19,19 @@ export const LOCAL_SANDBOX_LABEL = "Local sandbox";
  * honest "this computer" instead of implying isolation. Connected Machines keep
  * their own names.
  */
-export function sessionSandboxLabel(backend: SandboxBackend | string): string {
-  if (backend === "none") return NO_SANDBOX_LABEL;
-  if (backend === "local") return "this computer";
-  if (backend === "docker") return LOCAL_SANDBOX_LABEL;
-  return CLOUD_SANDBOX_LABEL;
+export function sessionSandboxLabel(t: OpenGeniText, backend: SandboxBackend | string): string {
+  if (backend === "none") return NO_SANDBOX_LABEL(t);
+  if (backend === "local") return t("sandboxLabelModel.thisComputer");
+  if (backend === "docker") return LOCAL_SANDBOX_LABEL(t);
+  return CLOUD_SANDBOX_LABEL(t);
 }
 
 /** Display name for a fleet row: the session's own box never shows its vendor. */
 export function machineDisplayName(
+  t: OpenGeniText,
   machine: Pick<MachineView, "isSessionGroup" | "kind" | "name">,
 ): string {
-  return machine.isSessionGroup ? sessionSandboxLabel(machine.kind) : machine.name;
+  return machine.isSessionGroup ? sessionSandboxLabel(t, machine.kind) : machine.name;
 }
 
 /**
@@ -38,16 +40,17 @@ export function machineDisplayName(
  * workspace they can access), a workspace machine is shared with that
  * workspace's members, and an organization machine with the whole organization.
  */
-export function machineScopeLabel(scope: MachineView["scope"]): string {
-  if (scope === "user") return "Only me";
-  if (scope === "organization") return "Organization";
-  return "Workspace";
+export function machineScopeLabel(t: OpenGeniText, scope: MachineView["scope"]): string {
+  if (scope === "user") return t("sandboxLabelModel.onlyMe");
+  if (scope === "organization") return t("sandboxLabelModel.organization");
+  return t("sandboxLabelModel.workspace");
 }
 
 /** The compute label a session timeline shows: the active machine, else the cloud box. */
 export function sessionComputeLabel(
+  t: OpenGeniText,
   machines: readonly Pick<MachineView, "active" | "isSessionGroup" | "kind" | "name">[],
 ): string {
   const active = machines.find((machine) => machine.active);
-  return active ? machineDisplayName(active) : CLOUD_SANDBOX_LABEL;
+  return active ? machineDisplayName(t, active) : CLOUD_SANDBOX_LABEL(t);
 }

@@ -30,7 +30,7 @@ const MAX_PAID_QUERY_MICROS_PER_MONTH = 1_000_000;
 export class KnowledgeVectorFundingError extends Error {
   readonly code = "knowledge_vector_funding_required";
   constructor() {
-    super("Knowledge vector search needs Opengeni credits; keyword search remains available.");
+    super("Knowledge vector search needs credits; keyword search remains available.");
     this.name = "KnowledgeVectorFundingError";
   }
 }
@@ -39,7 +39,7 @@ export class KnowledgeVectorCreditsDisabledError extends Error {
   readonly code = "knowledge_vector_credits_disabled";
   constructor() {
     super(
-      "Knowledge vector search uses Opengeni credits, which are turned off in this workspace; keyword search remains available.",
+      "Knowledge vector search uses credits, which are turned off in this workspace; keyword search remains available.",
     );
     this.name = "KnowledgeVectorCreditsDisabledError";
   }

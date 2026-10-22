@@ -9,14 +9,214 @@ box.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Using it from an
-exact agent attempt additionally requires an explicit `connected_machine.use` grant
-for that session visibility/context. Once/session/always grants use the common
-personal-resource lifecycle; every operation revalidates the exact attempt, owner
+account-admin approval. Only the owner may attach a user machine. Moving a running
+chat is explicit owner consent for that logical turn, even when another person,
+a schedule, or an agent started it. The route changes immediately; the next tool
+operation uses the new machine. Already dispatched work is not moved or replayed.
+The separate `session_turn_machine_consents` receipt is bound to the current attempt
+and to replacement attempts of the same turn (recovery, failover, retry). It does
+not change the initiating person, rewrite accepted resource snapshots, expose the
+owner's other machines/resources, or authorize another person's future turns.
+Only the human move path supplies `consentToCurrentTurn`; session creation and
+schedule seeding do not implicitly consent for a running turn. The receipt's
+route epoch records which successful move supplied consent and orders successive
+clicks; it is not a standing route lock. Metadata resolution does not audit usage
+or demand an unchanged pointer, while dispatch checks the current selection and
+records usage once. Worker and API-direct browser/computer/file routes share this
+authority, including turns without an initiating human.
+Without a turn-bound move receipt, an exact attempt still needs an explicit
+`connected_machine.use` grant for that session visibility/context.
+Once/session/always grants use the common personal-resource lifecycle;
+every operation revalidates the exact attempt, owner
 membership revision, target-workspace access, authority epoch, resource/grant
 generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
+
+### Control transport recovery
+
+The API/worker uses its shared NATS connection for control RPC, operation frames,
+and acknowledgements. The native supervisor treats either control- or bulk-lane
+loss, including scheduled five-minute user-JWT expiry, as a transport-generation
+change: it reconnects, authenticates again, resubscribes, and detaches rather than
+restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+it does not carry these NATS control requests. Codemode's NATS dispatch is only
+a wake-up for its PostgreSQL operation journal; clients re-notify the same
+operation, and the worker claims that row before execution.
+
+For control reply recovery, a read-only ping obtains a batch of 64 single-use
+tokens and negotiates the NATS response header `Opengeni-Control-Replay: 2`.
+The caller caches them by authenticated bus and exact process subject, including
+across one-off RPC adapters. Warm calls take a token without another round trip;
+at 16 remaining tokens the caller replenishes in the background, sharing one
+pending refill across concurrent callers. Cold, expired or exhausted pools wait
+for a batch. No idle timer or recurring ping is introduced. The batch window is
+twice the requested call timeout plus recovery allowance; the caller discards
+tokens without enough remaining headroom, conservatively measured from before
+the batch request. The receiver retains each opaque token's deadline on a
+suspend-inclusive elapsed clock (Linux BOOTTIME, macOS MONOTONIC_RAW, Windows
+GetTickCount64), never civil time. Sleeping does not extend the delivery window.
+Supporting callers send the immutable delivery to
+`<exact-process-rpc-subject>.replay.<token>.<age-ms>.<lifetime-ms>`, with the unchanged protobuf request
+as its payload. Only issued, unexpired tokens can admit work. First admission
+binds the payload digest and timing; duplicates join its pending reply or retrieve the exact
+retained bytes. Changed payloads or timing are refused. The journal survives
+socket/JWT/credential replacement, including removal and re-addition of the same
+exact origin/connection/process scope, but is not shared across different scopes.
+Receipts and unused tokens are collected after expiry; unknown tokens are never
+admitted, so collection cannot license another execution. Neither admission nor
+the caller's retry budget reads wall time: clock skew, jumps and corrections do
+not poison this transport. The call offset is elapsed caller time since receiving
+the batch, anchored at the receiver's issuance time. This conservatively includes
+return-path latency in the call budget, but not idle prefetch age. Future offsets
+are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+call offset plus lifetime. Streamed exec uses its existing relative timeout from
+that same call offset; delivery or retries cannot reset the deadline.
+The absolute exec deadline remains only for legacy one-shot peers. This does not
+change external authentication systems' clock requirements.
+
+Private batch allocation avoids distributing the same single-use token to several
+workers through a broadcast hello. It also avoids estimating wall-clock offsets
+from heartbeats, which can become stale when a clock jumps. Long machine sleep can
+expire already-prefetched tokens: the first refused call is not silently retried
+under a fresh identity; the caller discards its pool and refreshes for the next
+call. An unknown token never grants fresh execution.
+
+The requester retries transient transport failures within the operation's request
+timeout plus a two-minute recovery allowance, preserving the delivery identity
+and bytes. It subscribes to the exact process's existing `.hello` subject before
+sending a journaled delivery (or its safe negotiation ping). A hello, or recovery
+of the requester's own NATS connection, immediately resends that same delivery to
+the same reply inbox, without waiting for the operation timeout or resetting its
+deadline. The supervisor sends hello only after both transport lanes and its
+subscriptions are established. Resend observers and reply subscriptions are
+removed when the request settles. This continuity requires the runtime deployment
+and agent readiness ordering; older agents remain wire-compatible, and mutations
+without negotiated journal support remain one-shot.
+
+It never retries a received tool error. Rejected expired/unknown or conflicting
+deliveries return a non-retryable protocol error promptly, explicitly preserving
+an unknown prior outcome instead of silently timing out. A later no-responder cannot
+erase uncertainty from an earlier send. Accepted physical work and any unflushed
+reply retain the existing update-drain reservation until a successful socket
+publication or receipt expiry; independent physical producers retain their own
+reservations until they settle. This is transport proof,
+not proof that a caller consumed the reply.
+
+The guarantee requires both the updated server runtime and a native agent with
+the v2 journal. Mixed versions (including a v1 journal) use the existing
+conservative one-shot mutation behavior. An old caller with a cached v1
+negotiation receives an explicit unknown-receipt error from a v2 receiver, never
+fresh execution. Native process replacement, revoked
+authority, genuine tool errors, and outages beyond the recovery deadline are not
+transparent successes: the existing failure/unknown-outcome semantics remain,
+and ambiguous mutations are never automatically reissued as fresh deliveries.
+No tool schema or previously sent history changes. Protocol rejection messages
+can reach tools and therefore require model-facing review.
+
+Retrying stops early when the agent process a request was sent to is replaced.
+While an attempt waits for its reply (every second, from Opengeni's own records,
+never by contacting the agent) and after each failed attempt, the requester
+checks the enrollment's live connection instance (an unknown answer counts as
+unchanged), so a request a host holds for an agent that no longer holds the
+connection ends too. Once a new connection has replaced the request's (the
+agent restarted, a second process took over, or a compute sandbox's VM booted
+fresh), the request ends at once with `agent_offline`: "The machine's agent was
+replaced before this request reached it, so it did not run." when no attempt
+reached a responder, otherwise "The machine's agent was replaced while this
+request was in flight, so its outcome is unknown." The texts say "replaced",
+not "restarted": a new connection does not tell which happened. A request that reached no responder is re-admitted to the new
+connection like any never-sent request, and a read whose outcome is unknown is
+read again; nothing else is re-sent, and the old subject is never rebound to the
+new connection. A replaced connection does not prove the old agent process
+exited: an agent keeps its operations across a disconnect, and once the new
+connection's lease expires the old process can hold the connection again. So a
+streaming exec that was started, or may have been, is not settled by the
+requester. It is handed to the session's command ledger with a stop request
+bound to its exact enrollment, connection instance and operation (the same
+adoption used when a machine stops answering), and the exec ends with
+`agent_offline`. Once an agent had acknowledged the command (accepted its
+start, or reported its status, also to an earlier read through the same
+connection), the text is "The machine's agent was replaced while this command
+was running, so its outcome is unknown: it may still be running, or it may have
+finished." Otherwise it is "The machine's agent was replaced before this
+command's outcome was known: it may not have started, may still be running, or
+may have finished." Either ends with " A stop has been requested for it." only
+once the ledger has recorded that stop. A turn records it through its own
+adoption; a direct terminal or file request records it in the same ledger
+without a turn. If recording fails, the caller keeps custody and goes on
+stopping it, as for a machine that stopped answering, and the text claims no
+stop. A direct terminal exec whose own deadline passes meanwhile ends with that
+same answer, not exit 124: it reports 124 only when its deadline provably ended
+the command. The reconciler alone decides the outcome: it delivers the stop if the old
+runner answers again, and settles the command as lost once the enrollment
+retires that runner (revoked, a different connection instance, or a stopped
+connection). The exec's own timeout also covers its
+start and first attach, so an exec whose agent never answers ends at that
+timeout; a start that timeout abandoned is never sent afterwards, every retry
+of a start keeps the one absolute deadline fixed when the exec began (neither
+subscription setup nor a retry extends it, and no start is sent once it has
+passed), and a start re-admitted to a new connection is sent only the time
+left. A start that timeout or deadline ended before any OpStart was sent fails
+as never sent, so nothing keeps custody of it or waits on its agent.
+
+A runner reports what it still runs or retains, and Opengeni answers which of
+those to end. Every OpStart carries the connection generation Opengeni
+dispatched it under (the enrollment's generation moves only when a different
+process claims the connection), and the agent stores it with the operation when
+it admits it, so no operation's generation is ever inferred later. On every
+connection, and again while it holds a completed operation whose output nobody
+released (about a minute after completion, then backing off to ten minutes,
+and only while such output remains), the agent reports its operations. The API
+answers each page in the same exchange, and only to the process that holds the
+connection:
+
+- An operation with a command of that exact process is decided by the command.
+  One in flight is kept. One that exited is ended once Opengeni has stored its
+  output (the release is recorded before the answer is sent) or recorded it
+  unavailable, and a lost one is ended. Output Opengeni has not stored is never
+  ended: the API keeps it and collects it while the agent is talking, and
+  collecting releases it in the same exchange.
+- An operation without a command (foreground work, or a command deleted with
+  its chat) is ended when it started under an earlier generation than the
+  current one, because its requester can no longer address it. Otherwise it is
+  kept, running or completed, however long ago it completed: no durable record
+  shows that a foreground requester finished with its output, and age never
+  shows it either, so the agent's own retention bound limits what it keeps. One
+  an older Opengeni started carries generation 0 and is kept.
+
+The agent cancels what it runs and drops what it retains; none of it runs again
+or writes into a settled record. So a process that comes back after another
+process took its connection stops what Opengeni settled meanwhile, whatever
+happened to the chats. The agent starts every such exchange, so none reaches an
+agent that is not talking, such as a sleeping compute sandbox. An agent that
+does not report keeps the earlier behaviour.
+
+Requests Opengeni sends on its own behalf rather than for a call (the release
+of stored output, the collection of output an inventory answer kept, and the
+reconciler's recovery query for a running command, to any runner) carry the
+`Opengeni-No-Wake` header. A compute host delivers such a request only while
+the sandbox runs and its agent holds the link, and otherwise answers it itself
+with `Opengeni-Agent-Unanswered` (`asleep`, `away` or `busy`) without waking
+the sandbox; a Connected Machine agent simply receives it. When such a request
+goes unanswered (that header, no responders, a lost link or a timeout),
+Opengeni records nothing and leaves the work to the agent's next inventory. The
+reconciler asks a runner that reports its inventory, compute or Connected
+Machine, once: after one unanswered query it defers the command (outcome
+`provider_unanswered`) and does not claim it again until the agent reports it,
+the command is stopped, or its runner is retired. A runner that does not report
+its inventory is asked again on a later pass, as when it is offline, and when
+the reconciler cannot read which kind of runner it is, it leaves the command
+for a later pass and records nothing. A Connected Machine never sleeps, so its
+answered queries continue on each pass as before.
+
+A stop can reach an agent before the start it stops, for example when the
+start sat on a link that ended and is delivered again. The agent then refuses
+the start and keeps a tombstone for the operation: a query or attach answers
+`COMPLETE` with a cancelled exit and no output. The requester treats that
+answer as the command's end (cancelled, exit code -1, no output, nothing
+proven to have run) and never waits for frames from it, so the stop settles and
+nothing keeps custody of the command.
 
 ### Enrollment maintenance boundary
 
@@ -80,6 +280,13 @@ client. The matching UI ships in
 | Working dir  | `/workspace`                    | the agent-reported absolute host root, optionally narrowed per session |
 | Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
+An Opengeni compute sandbox (`compute`) is a managed sandbox that runs this same
+agent. Its enrollment has kind `sandbox`: Opengeni creates it, it has no key or
+bearer, and it is never listed, offered, attached or granted as a machine; its
+lease authorizes its use, and it is revoked when the sandbox is deleted. The
+agent reaches NATS through its host's link to the API's agent gateway.
+See [compute backend](compute-backend.md).
+
 The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no Opengeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
@@ -118,13 +325,33 @@ redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
+Native `codemode call` accepts inline JSON (default `{}`), `-` to read one UTF-8
+JSON object from stdin through EOF, or `@path` to read it from a local file.
+Use stdin or a file for large arguments so the operating system's argv limit
+does not apply to the JSON payload:
+
+```sh
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call server.tool - < arguments.json
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call server.tool '@arguments with spaces.json'
+```
+
+Relative file paths resolve from the command's working directory. Input is read
+once and validated before catalog lookup or submission; errors do not echo the
+file's contents. Omitting arguments does not consume stdin. These input forms
+require an updated native agent; API/tool payload limits and the existing
+attempt journal, approval and recovery semantics are unchanged.
+
 Vault secrets reach a machine only per command. When an `exec_command` or
 `run_on` command contains `{{secret:…}}` references, Opengeni runs it with
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
 `ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root and removed when the attempt ends. `cmd.exe`, fish
+`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+end; terminal one-offs clean it on return, while yielded `run_on` commands retain
+it as described below. That best-effort cleanup
+first waits for any write still in flight from an exec that timed out during
+preparation, and such an exec writes no further file. `cmd.exe`, fish
 and unknown shells return `unsupported_shell`. Commands without references run
 exactly as before, and nothing from a vault is copied into the machine's
 environment. See [`secrets.md`](secrets.md#where-references-resolve).
@@ -144,8 +371,7 @@ bun run agent:local-runtime
 bun run agent:local-runtime:run
 ```
 
-The command builds browserd, the pinned agent-browser driver, and
-computer-native first, hashes them into one development generation, then embeds
+The command builds browserd and computer-native first, hashes them into one development generation, then embeds
 that exact closure in the Rust agent. On macOS it also enables the same real
 ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
@@ -193,6 +419,19 @@ connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
 
+Where the browser finds the native host depends on the platform. On macOS and
+Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
+browser's per-user `NativeMessagingHosts` directory. On Windows, browsers look
+the host up in the per-user registry instead: the agent writes the one manifest
+to `%LOCALAPPDATA%\Opengeni\NativeMessagingHosts\ai.opengeni.browser.json` and
+sets the default value of
+`HKCU\Software\Google\Chrome\NativeMessagingHosts\ai.opengeni.browser` (and the
+matching keys for Chromium, Edge and Brave when those browsers are present) to
+that path. Removal deletes only keys that still name this agent's manifest.
+When the extension cannot reach the agent, its popup says why: no agent is set
+up on this computer, the agent is too old for the extension, or it is not
+running.
+
 The bridge generation is an opaque unpadded-base64url token: leading `-` and
 `_` are valid and retained verbatim in inventory and discovery. Rejecting either
 prefix strands a healthy bridge until its next generation. Rolling migration
@@ -216,6 +455,47 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+The extension's hello carries two generations. `connectionGeneration` is new
+for every native port and fences that transport: commands, results and
+inventory must name the exact live port. `stateGeneration` is created once per
+extension worker lifetime and reused by every native reconnect in it; Chrome
+keeps the tab ids, pages and debugger attachments that the worker owns for
+exactly that long. The agent reports `stateGeneration` as the profile's
+inventory `connectionGeneration` (the placement instance above), so a
+native-host exit, an agent restart or an agent update reconnects in place and
+the profile's sessions stay live; if the agent restarted, the next action
+re-creates the controller session. A restarted worker, a reloaded or updated
+extension, or a restarted Chrome reports a new `stateGeneration` and ends the
+sessions as above. Extensions that do not send `stateGeneration` keep the
+per-port behavior, and the agent's update gate waits while one of them backs a
+live attached controller, because restarting would end its sessions. A
+quiescent attached session does not otherwise hold back an agent update.
+
+Each ended connection generation is recorded with its reason in
+`attached_browser_devices.connection_history` (the latest 50 per profile).
+The native host sends a final `native_host_closing` frame before it exits,
+naming whether Chrome closed the port (`browser_closed_port`), sent an
+unreadable message (`browser_message_invalid`) or stopped accepting output
+(`browser_output_failed`). A socket end without that frame is
+`native_host_lost`: the native host process itself vanished. A hello or message
+the agent refuses is `agent_rejected`. The agent reports its recent ends in
+every inventory snapshot. The server records `agent_restarted` for generations
+that ended with a replaced bridge and `unreported` for older agents; a later
+agent report for the same generation replaces either inference. Native-host
+diagnostics are written to stderr because stdout carries Chrome frames.
+Oversized tab titles are truncated and oversized tab URLs make only that tab
+uncontrollable; neither ends the profile's connection.
+
+An accepted full inventory snapshot observes every connected profile once through
+`attached_browser_inventories.observed_at`. Unchanged profiles need neither a
+device update nor a device row lock; enrollment and inventory cursor locks still
+serialize snapshots. Reads derive connected profiles' `lastSeenAt` from that
+observation, while a disconnect freezes the effective value on the device.
+Material changes re-read device rows under their existing locks before mutation;
+equal-revision snapshots still apply corrective metadata and reconnects. During a
+mixed-version API rollout, older readers can briefly show an older per-profile
+last-seen timestamp, without changing connection state or bridge freshness.
+
 Renaming a Chrome profile is inventory metadata, not a connection transition.
 The extension keeps the same ready native port and sends optional
 `profile: { profileLabel }` metadata with its inventory revision. The agent updates
@@ -229,6 +509,11 @@ can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it
 can explain the outage, choose another available tool or compute target, or help
 recover the machine. The transport failure must not replace the agent loop.
+The same holds for sessions with repository resources, whose repository Skill
+index is built through the sandbox before the first model call: a typed
+offline/timeout control error during that discovery degrades to a short
+"repository skills unavailable" instruction for that run instead of failing the
+turn, and the next run discovers again.
 
 ## Create a session on a machine
 
@@ -306,6 +591,41 @@ Rules to keep in mind:
   with neither an inherited nor explicit machine is rejected before an unusable
   session starts.
 
+Personal-machine consent also covers the consenting session's agent-created
+descendants (0851). Every causal parent/turn link must remain in the same workspace
+and belong to the same machine owner and initiating human. Admission and dispatch
+reuse the original grant, never mint child grants, and recheck each parent machine
+snapshot for the exact creating attempt plus live membership, machine authority, grant generation, expiry and
+revocation. `once` covers only descendants of the originating accepted turn;
+`session` covers its consented session tree. A sibling of the consenting session,
+an unrelated chat, a bare parent/group ID, another human's turn, or another machine
+is not covered. Other personal-resource grants remain exact-session.
+An owner move's logical-turn receipt follows the same causal tree and live
+authority checks when no exact-session machine grant exists. If a source grant
+exists in the current execution epoch, tree coverage stays grant-derived: a
+move receipt cannot bypass its expiry, revocation, generation change or stale
+grant snapshot. Grant-backed ancestors must have a valid grant snapshot; a move
+receipt is never a replacement for a failed snapshot check.
+
+Parent IDs alone are not delegation evidence. `create_agent_child_session`
+verifies the exact live parent turn/attempt/generation and requires the request's
+claimed human (the agent attempt's verified initiating human, or the subject of a
+direct request) to match the turn's recorded initiating human. The child's
+creator must be that turn's frozen initiator, so the owner's service-initiated
+turns (internal-update deliveries, goal continuations) are covered while another
+person's turns never match. The same SQL statement inserts the child and its immutable,
+owner-protected witness; there is no post-insert stamping function. Both grant
+and receipt inheritance require that witness at every edge and match the human
+to the machine's grant/receipt owner. Direct inserts, unscoped legacy creates,
+turns with no initiating human and legacy children without it remain uncovered;
+migration does not backfill proof from readable parent IDs. Existing
+exact-session grants remain usable.
+
+As with exact-session machine checks, these functions trust account, workspace
+and subject/initiating-human claims installed by the authenticated API. Protecting against an
+application role that lies about those claims would require a separate
+claim-bound attempt capability; this migration does not introduce that model.
+
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
 `targetSandboxId` plus optional `workingDir`, then maps that object to the stable
@@ -320,7 +640,25 @@ Switching projects or machines restores the matching nested choice. Absolute
 host paths remain tied to the exact machine id and are never reused on another
 machine.
 
-Scheduled agent tasks use the same explicit targeting rule. A generated-session
+Workspace settings can choose `defaultExecutionTarget` as managed compute or an
+exact shared Connected Machine. New top-level chats with no explicit placement
+inherit that default. Child and existing chats retain their existing placement;
+a removed or unavailable configured machine fails visibly and never selects a
+different computer. Personal machines cannot be workspace defaults.
+
+A schedule can save `agentConfig.executionTarget: "workspace_default"` instead
+of an explicit backend or machine. The worker resolves the current workspace
+choice only when accepting a new run chat, freezes it in
+`resolvedMachineTarget` (including an explicit null for managed compute), and
+re-proves live machine access before attaching. Recovery uses that receipt even
+if the workspace default changed. Reusable schedules resolve once for their
+first chat; later occurrences keep that chat's machine. Schedules following the
+workspace do not implicitly pin a managed Sandbox Environment, since a future
+run may use a Connected Machine. Explicit environment selections retain their
+normal authority checks. Old schedules without `executionTarget` keep their
+previous behavior.
+
+Scheduled agent tasks also support the explicit targeting rule. A generated-session
 schedule persists a `machineTarget` containing the exact `targetSandboxId` and
 optional `workingDir`; the worker proves that machine is still available and
 seeds the generated session's active pointer before its first turn. A deployment
@@ -434,17 +772,74 @@ machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
 means a verified self-update is draining accepted work; `queue_breaker` and
 `wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
 detail remains an unspecified admission refusal. The same distinction survives
-retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
-`update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Open browser and
-computer controllers also keep the host busy, including pending creation and
-shutdown. The agent checks every owned browserd scope through its private
-admin-only idle proof after fencing new routed work; unavailable, crashed, or
-older incompatible controllers return retryable `update_state_unavailable`.
-An empty controller may remain running without blocking an update. Request an update
-again at a safe idle point. Older runners can remain draining indefinitely;
-inspect their accepted operations and coordinate a safe stop/restart with their
-owners instead of killing useful work or increasing concurrency limits.
+retry exhaustion and structured tool-error rendering. A self-update on a busy
+host is accepted and waits for idle: the agent reports `waiting_for_idle` with
+the current reason (`update_busy_work`, `update_busy_uploads`, `update_busy_interactions` or a transiently
+unreadable controller as `update_state_unavailable`), keeps admitting new work,
+and every few seconds re-attempts a short fenced idle proof, reopening
+admission whenever it is still busy. It never cancels accepted work, stops
+long-lived servers, or restarts the host early. On Linux and macOS a running
+streamed command (an `OpStart` exec) does not hold the update back: after the
+verified binary is installed, the agent hands each such command to its
+successor and `exec`s the new binary in the same process. The command keeps
+running as the same process with the same pipes, process group and operation
+cgroup; the successor keeps the connection instance, so the server sees a
+short reconnect on the same op subjects (no `GoingOffline`), re-attaches as
+after any reconnect, and the stream continues byte-exact with one digest.
+Every failure is fail-closed: a command that cannot be continued ends as a
+typed failure, and if the successor never starts, the command's anchor ends it
+as for a crashed runner. Other admitted work, such as a request still being
+answered, a git operation or a pending upload, still makes the update wait,
+and Windows keeps waiting for every command. Command spawn failures, cancellation
+and panicking waiters retain their actual cleanup owner until exit is proved;
+they do not permanently disable self-update. A transient cleanup error is scoped
+to its exact producer and clears only when that producer obtains completion
+evidence. While that evidence is unavailable, the update reports retryable
+`update_cleanup_unconfirmed`; the response and agent log identify the producer
+and explain recovery. If the cleanup owner itself was lost, finish active commands
+and restart the agent service before retrying. An unreadable admission boundary
+still reports `update_state_unavailable`. A browser controller that crashed, was killed or
+stopped uncleanly is not lost settlement on Linux and macOS: it runs as the
+leader of its own process group, so the update waits (busy) only until nothing
+remains in that group. The browsers it launched run in their own sessions and
+are adopted by the next controller. The agent checks every owned browserd scope through
+its private admin-only idle proof. Open sessions block only when a restart
+would lose something: admitted commands, pending creation or shutdown,
+busy attached browser sessions, browsers without a durable working runtime, and
+isolated virtual desktops. A quiescent managed browser with a durable working
+runtime does not: graceful browserd shutdown detaches from it without closing
+it, so its tabs and unsaved page state stay live and the restarted controller
+adopts the same process on its next request, even when the old launcher was
+killed with the stopped service or came from an earlier agent release. A
+session whose browser already ended and a computer session on the machine's
+own physical seat do not keep the host busy either.
+
+The idle proof also carries bounded blocker snapshots: categories and counts,
+not private session IDs, command text, page titles, URLs or filesystem paths.
+Controller scopes can belong to different workspaces on the same host, so
+session identities never leave that boundary in update diagnostics. The
+agent emits a progress event when the reason/categories change and refreshes
+counts at most once per minute. Enrollment
+progress retains it under the existing exact operation/process fence, clears
+it when the update advances or its accepting process is replaced, and exposes
+it through Machines and fleet. Machines highlights a hold after ten minutes and
+shows elapsed time from the original request; this is presentation, not a
+deadline or permission to end work. The snapshot is last-reported evidence,
+not a live ownership query, and the counters can describe overlapping ownership
+layers rather than distinct commands. Older ambiguous `update_busy_work`
+receipts cannot identify a culprit and are labeled accordingly. A settled
+attached-transport error does not itself hold admission: the uncertain action
+remains journaled without retaining a running queue or replaying the action.
+These diagnostics do not establish the cause of an earlier hold whose admission
+snapshot was not recorded, and do not change the admission decision or cancel work.
+
+Older agents still end a
+busy update with retryable `update_busy_work`. Nobody has to request updates:
+the control plane asks every live machine behind its channel's promoted build
+to update from its heartbeat, and asks an older busy agent again every 10
+minutes until it applies (see the deployment guide for the full policy and
+`OPENGENI_AGENT_AUTO_UPDATE`). A request for the build a machine already runs
+is refused, whatever happened to an earlier attempt.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
@@ -526,8 +921,9 @@ commands may use N GiB. An already-admitted command keeps its immutable policy.
 Every provider operation revalidates its exact live connection and any
 caller-owned personal-machine authority at the last boundary before dispatch,
 even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
-that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
-snapshot, current visibility-keyed grant, membership/generation fences, and the
+that same PostgreSQL snapshot verifies the accepted attempt, its owner-click
+consent or immutable admission snapshot/current visibility-keyed grant,
+membership/generation fences, and the
 runner connection. One-off `run_on` exec/read/write uses the same boundary after
 creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
 Organization- and user-scoped machines used from another same-organization
@@ -576,19 +972,57 @@ freezes the physical control workspace, enrollment, connection instance, and op
 ID. Normal turn completion and Steer detach from that adopted command; they do
 not cancel or retarget it. Session/workspace Pause and terminal Cancel atomically
 move adopted commands to `stopping`, after which the global reconciler issues
-`OpCancel` only to that frozen subject. Switching the session's selected machine
+`OpCancel` only to that frozen subject. Stopping one command through
+`DELETE .../background-commands/:commandId` also sends that `OpCancel` from
+the API at once, best effort, so the process ends without waiting for the next
+maintenance pass; the reconciler still delivers it when that attempt fails,
+and the pushed exit settles the command. Switching the session's selected machine
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
+
+The runner pushes an `OperationCompleted` event after exit and pipe drain,
+independently of the output consumer and its credit. API ingestion uses the
+authenticated control-workspace/enrollment/connection subject and operation ID
+to claim the original adopted command, even after its session changes routes.
+The collector durably captures retained output through the verified exit frontier
+before settlement, so a terminal read cannot race ahead of the final output.
+Duplicate events cannot steal an active collector's claim. The runner republishes
+unacknowledged terminal records on connection establishment and at its existing
+heartbeat cadence over the independent bulk connection, healing a full send queue
+or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
+stops these notifications after the server durably owns reconciliation; it never
+releases retained output. Only the first notification bypasses polling backoff.
+Failed collections reuse reconciliation's exponential backoff, and pending
+duplicates coalesce per operation. Older agents and lost connections remain covered by
+reconciliation. Terminal publication
+does not discard retained output; release remains separately retryable after custody.
+Completion collectors have independent ingestion capacity, so even a saturated
+collection queue cannot delay machine heartbeats. A collector yields to reconciliation
+before its existing claim lease expires; this never cancels or time-limits the command.
+
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
-ambient default shell. Calls that omit `shell` intentionally retain the
-machine-owned `$SHELL`/`ComSpec` default.
+ambient default shell. Calls that omit `shell` retain the machine-owned `$SHELL`
+default on Linux and macOS. On Windows they run Windows PowerShell
+(`powershell.exe -NoLogo -NoProfile -NonInteractive -Command`), the dialect agents
+write for Windows and the one secret splicing already uses, instead of the
+machine's `ComSpec` (`cmd.exe`). Internal Channel-A commands keep the machine default.
 On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
 cannot exit and leave invisible same-group work behind. The runner-death lease
 also closes the crash gap where `Drop` cannot run.
+On Windows the owned Job Object provides the same containment and a native
+active-process-zero cleanup receipt. Ordinary shell backgrounding (`&`, subshells
+and `nohup`) does not detach work from the command's scope. Just before automatic
+shell-exit cleanup, the runner observes live non-anchor members using the owned
+Linux cgroup, the anchored Unix process group, or the Windows Job Object. Positive
+evidence travels with the terminal result and survives command settlement and
+agent handover. Only then does a new shell result or terminal command read append
+a short notice explaining the cleanup and the foreground `exec_command` workflow
+for long jobs. Structured stdout/stderr remain unchanged; ordinary commands,
+explicit cancellation/deadlines and older runners produce no inferred notice.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 
@@ -598,15 +1032,42 @@ personal-machine path requires the same exact accepted-attempt authorization
 and current `connected_machine.use` grant as an active route. Its
 `exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
 `deadlineMs` (`0` means none). A process killed at an explicitly configured
-deadline, or a response with no terminal
-exit proof, is never reported as `ok: true`; a transport loss after dispatch is
+deadline, or a response with neither terminal exit proof nor durable running
+custody, is never reported as `ok: true`; a transport loss after dispatch is
 ambiguous and is not replayed. `run_on` uses the deployment's separate
 `OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS` and
 `OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and no exec
 deadline by default), while preserving the active sandbox pointer and epoch.
+Attempt-owned calls use the existing ten-second observation yield and the same
+session-command ledger hooks as attached exec (`agent-background-commands.ts`
+in core, shared by the API and worker). A still-running command returns
+`state: "running"`, a `commandId`, and output so far only after the ledger accepts
+custody; use `command_read` or `command_wait` rather than repeating the command.
+The observation wait is not a process deadline. HTTP loss is not cancellation.
+Failed adoption stops the unowned operation through the existing native cleanup
+path; ambiguous machine loss records an exact-connection stop request for the
+reconciler. Direct callers without attempt authority retain terminal semantics.
+An API crash before adoption remains a non-durable observation window; it does
+not make a Unix command block handover. Secret files needed by yielded commands
+are not removed on HTTP return. They remain available on the machine for the
+owning agent; terminal settlement performs best-effort cleanup only while the
+originating session object is still observing it. Later ledger reconciliation
+does not delete those files. There is no expiry or forced-cleanup ledger.
+There is no new duration limit. Unix streamed one-offs already use
+the same update handover as background commands; Windows still waits for live
+commands rather than interrupting them.
+
+Fleet entries report the installed `agentVersion` and the accepted `agentUpdate`
+status, target, waiting reason and timestamps. Machines shows the current hold
+reason and highlights holds after ten minutes; this attention state never kills
+work or overrides update admission. Old agents' `update_busy_work` is ambiguous
+(it also covered interaction sessions), so it must not be presented as proof of
+a stuck command. New agents distinguish interaction-controller holds. Neither
+surface reveals another person's command text or private session identifiers.
 
 Large `write` operations use the existing bounded transactional file transfer
-when the live target advertises `transactional_fs_write`. Each transfer request
+when the live target advertises `transactional_fs_write` and
+`transactional_fs_write_machine`. Each transfer request
 rechecks authority, capability, and the pinned connection; it never falls back
 to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
@@ -648,7 +1109,21 @@ connection, including after worker loss; a newer enrollment route is never
 substituted. Already captured output takes priority over full replay, so older
 uncaptured results cannot delay final acknowledgements for saved results. Publish
 success leaves the obligation pending until an exact runner
-observation establishes that output is no longer retained. Completion input to
+observation establishes that output is no longer retained. A runner that
+advertises `capabilities.op_release` in the Hello of that same connection also
+reports its own operation inventory (above). It is instead sent one
+`OpRelease` for the stored exit frame right where the output is stored; it
+drops the operation at once and confirms the release in its answer (LOST,
+reason RELEASED, which also answers any duplicate), so the release settles in
+that exchange. A different exit frame or a running operation releases nothing.
+Foreground command output is released the same way at its durability point
+when the runner advertises the capability, and by a final ACK when it does not.
+When the storing process dies before it releases or stores the output, that
+runner's own inventory recovers it; the reaper sends such a runner nothing and
+only rechecks the obligation in the database. A runner without the capability
+keeps the attach, final ACK and later observation from the reaper; Connected
+Machines do not sleep, so that exchange is answered on the first pass. Compute
+sandboxes have no such path (see [compute-backend.md](compute-backend.md)). Completion input to
 the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable
 without manufacturing consumption or an acknowledgement.
@@ -767,6 +1242,13 @@ the ordinary background service online. A same-version connection is additive an
 does not restart the process or interrupt existing commands. A real upgrade
 restarts once when activation requires it; subsequent connection files load live.
 
+A successor started by a manual installer has no managed-update receipt. Its
+authoritative Hello settles the replaced process's unfinished request as
+`accepting_process_replaced`, not a successful automatic update. The installed
+version remains authoritative for current/ahead status; an old version still
+shows the failed attempt and can retry. A reconnect by the same process does not
+terminate its own active update, and superseded processes cannot settle it.
+
 The running agent captures its executable install path before admitting managed
 updates. Unix apply, rollback/retry, and successor exec use that stable path: a
 late executable lookup can name the old deleted inode after atomic replacement.
@@ -780,21 +1262,66 @@ user's home directory. This makes the reported default workspace root writable
 for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
 continues to use the directory it was launched from, and an explicit session
 `workingDir` still takes precedence.
+Reinstalling or restarting the LaunchAgent preserves its existing environment
+(including PATH and locale), rather than replacing it with the invoking shell's
+environment. Fresh installs still inherit the installer's PATH.
 
-After installing a release with this fix, regenerate an older service definition
-with `opengeni-agent service install --restart` when no machine work is running.
+On Windows, the background agent is a per-user Task Scheduler task named
+**Opengeni Agent**, not a Windows Service. A service runs in session 0, where
+the screen, input and the user's browser are out of reach, and registering one
+needs an administrator. The task runs as the signed-in user in their own
+desktop session, so computer use works, and `start` needs no elevation. It
+starts at sign-in, runs the agent inside a hidden console host (no window, and
+the commands the agent runs share that hidden console), and a one-minute
+repetition starts the agent again if it ever exits. Its working directory is the
+user's profile folder. `stop` pauses: it disables the task so nothing restarts
+the agent, then asks the running agent to shut down cleanly through a named pipe
+private to the user, and ends the agent's process tree only if it does not stop
+within 45 seconds. The agent stays paused across sign-ins until `start`.
+`status` prints `opengeni-agent background task: running`, `paused`, `stopped`
+or `not installed`, read from the agent's own instance lock. The agent does not
+run while nobody is signed in to Windows. Earlier releases
+registered an `OpengeniAgent` Windows Service that could never start; `start`
+deletes it when allowed, and otherwise prints the one elevated command that
+removes it.
+
+The agent also never treats a filesystem root or the Windows system directory
+as its workspace, so an older service definition needs no manual step: when
+`run` starts with `/` (or a Windows drive root, or `%SystemRoot%` such as the
+`C:\Windows\System32` a Windows service starts in) as its working directory
+and the user's home directory is usable, it moves into that home directory
+before connecting and reports it as the workspace root. Any other launch
+directory is kept as chosen.
+
+Regenerating an older service definition with `opengeni-agent service install
+--restart` is still useful to pick up other plist changes (such as the stderr log).
 The installer checks launchd's loaded binary and working directory as well as the
 plist on disk. If an earlier install wrote the plist but failed before reloading,
 a retry still reloads the stale job without requiring `--restart`. Dry-run
 rendering and installation share the `HOME`, then `USERPROFILE`, resolver;
 unsupported control characters and XML-invalid home paths are rejected before a
-plist is written. Existing sessions retain their saved absolute folder; restarting the service does not
-change an already-saved `/`. The existing-session Runs on menu changes the machine,
-not the folder. For a session with `/` saved, start a new session on that machine
-with a writable custom path in the new-session **Runs on** settings (or pass an
-explicit `workingDir` to `createSession`). Historical attachments are not restaged
-automatically; retrieve them explicitly through Files or attach them to a new
-message when needed.
+plist is written. Existing sessions retain their saved absolute folder, except
+that a filesystem or drive root, or anything inside the Windows directory, is
+never used as a working directory: the machine's reported root applies instead.
+Migration 0853 also cleared the saved `/` (and saved Windows
+`C:\Windows\System32` service launch directories) left by older agents. The existing-session Runs
+on menu changes the machine, not the folder. Historical attachments are not
+restaged automatically; retrieve them explicitly through Files or attach them
+to a new message when needed.
+
+While a machine still reports `/` (an older agent without a usable home), staging an attachment, spilled tool result or generated
+image into it usually still fails. When the turn's effective backend is a
+Connected Machine and its working directory is `/`, any failed staging command
+gets a reason that says the filesystem root is often not writable (read-only on
+macOS), that this may be why it failed, and how to fix it, followed by the
+underlying error. The model and timeline therefore no longer see only a raw
+`mkdir: .opengeni: Read-only file system`. This condition is structural (backend
+plus root), never a match on the possibly localized command output, so the
+wording stays conditional. The original command output and exit code are kept,
+and managed sandboxes keep their raw reason. Opengeni never redirects those
+files to another host folder, so the cwd-relative `.opengeni/...` paths keep
+their meaning (`packages/runtime/src/index.ts`,
+`explainConnectedMachineRootDownloadFailure`).
 
 `opengeni-agent run` is the explicit foreground alternative.
 
@@ -808,8 +1335,19 @@ command. Success requires empty internal buffers and a flush of that stream;
 losing the stream fails its attached receipt before reconnect. A replacement
 socket cannot prove that the previous reply was sent.
 Controller admission is fenced atomically during its idle proof; failed or
-deferred updates release only their own fence. Missing settlement makes updates
-unavailable for the running process while ordinary work remains usable. Older
+deferred updates release only their own fence. Missing physical settlement makes
+updates unavailable while ordinary work remains usable. Failures are retained per
+producer, never cleared globally or merely by dropping a reservation. Native exec
+and PTY cleanup keep owned handles and retry failed exit observations; a positive
+exit clears only that cleanup's failure. Cleanup cannot inherit a running job's
+handover exemption. Successor startup and rollback restore each adopted command's
+reservation as well as its native handles. After handing over running jobs, the updater rechecks cleanup
+before recording its restart manifest, including failures during the download.
+A panicking worker releases its own reservation only after
+unwinding; independently owned native resources still retain theirs. Lost reply
+delivery is logged, not mistaken for still-running native work. Retained RPC
+replies hold their reservation through delivery or expiry; expiry still rejects
+the original request and does not permit replay or release a live producer. Older
 controller builds without the update-admission transaction cannot authorize
 replacement from an unfenced idle snapshot. A lost fence-release reply retains
 its exact operation owner; ordinary scoped recovery retries only that release
@@ -817,10 +1355,8 @@ after host update admission has reopened. Failed helper/factory cleanup and
 forced or nonzero helper termination remain unsettled even after the original
 owner leaves active inventory. Helper EOF joins persistent capture producers;
 missing ScreenCaptureKit stop completion cannot become a successful shutdown.
-The current Windows command-group dependency cannot prove full-job
-exit; commands keep their ordinary results, but accepting a command fences
-subsequent self-update for that process. A positive same-job exit proof is
-required before normal Windows update eligibility can be restored. Unexpected
+Windows cleanup retains the same Job Object until its active process count is
+zero; signaling it alone is not completion. Unexpected
 controller exit and forced controller termination likewise preserve uncertainty
 after the old controller is removed from the active inventory. They cannot be
 made update-eligible by reconnecting or replacing the controller.
@@ -839,6 +1375,31 @@ The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
 
+A NATS authentication refusal suspends dialing for that exact saved connection;
+it is not treated as an ordinary network outage. The existing renewal loop checks
+it even when its bearer is not near expiration. A successful renewal clears the
+suspension and the live file reconciler resumes that link. An explicit
+`enrollment_reconnect_required` renewal response persists a terminal state across
+agent restarts: no more NATS or renewal requests until an authorized reconnect
+replaces the connection. `opengeni-agent connections` shows pending renewal versus
+reconnect-required state and the deployment-specific recovery command. Removing
+an obsolete saved connection is also supported. Other workspace links and retained
+host operations remain independent.
+
+Clock skew, transport failure, disabled renewal and older APIs' generic 401/404
+responses are not terminal proof. They allow another transport attempt on the
+existing jittered renewal cadence, so an older API or a temporary callout outage
+cannot strand a still-valid connection. Deploy the typed renewal response before the
+agent update to stop retries for permanently rejected grants completely. An older
+agent does not gain this behavior from a server deployment alone.
+
+Machines shows expired credentials only when the server can verify the bearer
+signature and match its current enrollment generation, and never over a live
+runner. Fresh Hello/heartbeat clears the diagnostic. Invalid signatures and
+removed enrollments cannot safely identify a dashboard row; inspect the local
+connection inventory instead. Saved links to other deployments/workspaces are
+never disclosed through a healthy workspace's machine status.
+
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.
 Older agents still need a one-time authorized reconnect after expiration; a
@@ -855,6 +1416,15 @@ exchange. A failed post-exchange verification or managed-receipt write exchanges
 the entire old app back. The successor receipt contains the installed executable
 digest, not the ZIP digest. Interrupted transactions retain their recovery copy.
 Standalone Mac executables retain the binary update path.
+The updater resolves macOS executable symlinks before selecting the artifact,
+so invoking an app through `~/.local/bin/opengeni-agent` still updates the whole
+app and leaves that symlink intact. Standalone release binaries are signed with
+the stable identifier `ai.opengeni.agent`, matching the app. Previously released
+standalone binaries used build-dependent identifiers: their grants may need a
+one-time reapproval after migration to the stable identity. Updating the old
+updater itself still uses its old behavior; use the official whole-app installer
+for that first upgrade when launching through an app symlink. No updater can
+restore grants that macOS already revoked or that a user explicitly removed.
 
 Mac agents older than 0.1.29 require a one-time upgrade through the official
 whole-app installer. Their old updater would replace a single sealed executable;
@@ -887,16 +1457,47 @@ own computer, the agent posts the **Connected Machine card**: either
 `sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
 `tool.auth_needed` event with that capability id; the event carries no token.
 
-The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
+The card also appears without an agent decision. When `sandbox_swap`,
+`sandbox_attach` or `run_on` is refused with
+`personal_machine_permission_required` (the machine's owner started the turn
+but has not allowed this chat yet), the API posts the same card in the calling
+turn (`apps/api/src/mcp/machine-permission-card.ts`). The refusal the agent
+reads then says the card is posted in this chat in Opengeni, carries the chat
+link (`chatUrl`), and tells the agent to tell the person in one sentence: that
+they can allow it in the chat, or, when they read the chat elsewhere (Slack, a
+worker or a scheduled chat), to open the link. It must not wait or retry:
+choosing the machine sends the message that continues the chat. A repeated
+refusal in the same turn reuses that turn's machine card, since one card lists
+every machine; the lookup and append run atomically under the turn-attempt
+fence (`appendTurnCapabilityCardOnce`), so parallel refusals cannot stack
+copies. Cards for other capabilities, such as Slack and GitHub in the same
+turn, are never limited. `personal_machine_not_permitted` (not
+the owner, or not the owner's turn) and every other failure stay plain
+refusals, and callers without an exact agent attempt get no card. If the card
+cannot be posted, the original refusal is returned unchanged.
+
+The card (`packages/react/src/app/components/capabilities/session-machine-card.tsx`):
 
 - lists the workspace's enrolled machines with **Use in this chat**, which swaps
   the session onto that machine and sends `Use the machine “<name>” for this
   chat.` (the name quoted, on one line, at most 60 characters) so the agent
   continues there. A chat that cannot take a Send is not moved; a chat waiting
   on a question is moved and keeps the question;
-- opens the shared **Connect a machine** dialog
-  (`apps/web/src/components/machines/connect-machine-dialog.tsx`, also used by
-  the Machines page). The person chooses **Who can use it?** (**Only me** by
+- inside the desktop app, **Use this computer** calls the existing desktop host
+  connection directly, with personal ownership and screen-control consent. There
+  is no second setup confirmation; required operating-system permission prompts
+  still use the shared permission guide. Connecting does not move an existing
+  chat's compute route: **Use in this chat** remains a separate optional action;
+- in a browser, opens the shared **Use your computer** dialog
+  (`packages/react/src/app/components/machines/connect-machine-dialog.tsx`, also used by
+  the Machines page). It offers the current platform's desktop app download and
+  **Open app and connect**. After installation the person returns to that link;
+  the app selects the exact account or starts its existing PKCE sign-in, checks
+  workspace access and confirms locally before connecting. The link carries only
+  the origin, workspace/chat destination and subject, never an enrollment token.
+  Mobile browsers direct the person to the computer they want to connect;
+- **Connect a server instead** explicitly reveals the advanced terminal flow.
+  Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are
   baked into a single-use token minted in their browser for exactly that choice.
   Mac, Linux and Windows tabs (the detected OS selected) show the matching
@@ -910,7 +1511,7 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat** (the same attach path as the list). Closing the dialog stops the watch;
 - once a machine with a screen is reachable (the chat's own machine first),
   offers the
-  [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
   stops after ten minutes or when the inventory is not readable.
@@ -918,6 +1519,13 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
 Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
 moving the chat needs `sessions:control`. The card says who can act otherwise.
 Like GitHub, the card is posted even when machines are already connected.
+
+Embedded products supply `SessionConversation.computerConnection` (also through
+`OpenGeniChat.conversationProps`) with their own desktop host, downloads and
+account-bound handoff, or a product-owned connect callback. The shared
+`ThisComputerCard` never chooses an Opengeni download or terminal command for a
+host. Without host configuration the default card explains that setup is not
+enabled there. See [embedding](embedding.md#computer-connection-offers).
 
 ### Turn on screen control for a connected machine
 
@@ -969,13 +1577,13 @@ per-attempt admission `run_on` uses. When computer input is refused because
 screen control is off, the error names that tool.
 
 macOS also needs Screen Recording, Accessibility and Input Monitoring for
-OpenGeni. Mac agents report all three without prompting, on Hello and on each
+Opengeni. Mac agents report all three without prompting, on Hello and on each
 desktop heartbeat, as `runtime.macPermissions` in the machine list; older agents
 report only a missing Screen Recording grant, as `desktopUnavailableReason`.
 `POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` with
 `pane: screen_recording | accessibility | input_monitoring` opens that System
 Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
-nothing; the person switches OpenGeni on there. The chat card walks the missing
+nothing; the person switches Opengeni on there. The chat card walks the missing
 permissions in that order, from what the Mac reports.
 
 ### Change who can use a machine
@@ -1052,6 +1660,12 @@ The API is the same flow:
   changed since the preview (preview again and retry), and
   `details.reason: "blocked"` with the preview while a duplicate connection
   remains.
+
+A person makes this change, in the app, through the API, or through an agent
+they gave their full access: a session with admin access or a connected agent
+with full access calls the same two routes as them (the `previewMachineAudience`
+and `changeMachineAudience` admin actions). An agent acting as itself, or one
+with less than the person's full access, is refused.
 
 ### Zero-click token (fleet / headless)
 
@@ -1163,6 +1777,26 @@ organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
+### Agent logs
+
+The running agent (`opengeni-agent run`, or a bare launch of an enrolled
+machine) keeps its own log in `logs/agent.log` under its config directory
+(`~/.config/opengeni/agent` unless `$OPENGENI_CONFIG_DIR` or
+`$XDG_CONFIG_HOME` says otherwise), whatever service manager runs it. The file
+rotates at 8 MiB and keeps two older generations (`agent.log.1`,
+`agent.log.2`); the directory and files are owner-only. It records browser
+controller diagnostics and exit statuses, and a panic on any thread with its
+backtrace, so a crashed agent can be diagnosed afterwards. One-shot CLI
+commands log only to the terminal.
+
+On Linux the same lines also reach the systemd journal
+(`journalctl --user -u opengeni-agent`). The macOS LaunchAgent sends the
+process's raw stdout and stderr to `logs/agent.stderr.log` and sets
+`OPENGENI_AGENT_STDERR_LOG=off`, so that file keeps only output that bypasses
+the agent log, such as an abort message; the agent bounds it at startup. A Mac
+picks up that LaunchAgent change the next time `opengeni-agent service install`
+runs; the agent log itself needs only the new agent.
+
 ## Transactional file edits
 
 Native ranged file reads retain only the selected bytes, rather than allocating
@@ -1185,11 +1819,20 @@ Large Files-panel writes use provider byte transport instead of shell arguments.
 On capable Linux and macOS agents, raw replacements above 256 KiB use these same transfers,
 including binary files; an ambiguous write is never retried through a fallback.
 Every transfer request is reauthorized against the same physical connection.
-The runner pins each operation to its original nonzero session route epoch;
+The runner pins each operation to its original session route epoch;
 different sessions may have different epochs on the same machine. This is not
 the legacy machine hello epoch, which normal enrollment leaves unset. The
 connection-local registry rejects another epoch adopting an operation, and
 connection shutdown is checked again at publication.
+Machine-addressed operations such as `run_on` use epoch 0 and additionally
+require the live `transactional_fs_write_machine` capability. Zero is pinned
+exactly, never a wildcard or a fabricated session epoch. Older agents with only
+`transactional_fs_write` still support session-scoped transfers, but new servers
+refuse their machine-addressed replacements above 262144 bytes (256 KiB) before
+any file operation, with an instruction to update the agent. Small writes keep
+working. Deploy the updated server and release/update the native agent for
+large machine-addressed writes; either rollout order is safe. No mutation is
+retried through the legacy path after a transfer has begun.
 An ambiguous acknowledgment triggers one read-only query of the exact operation,
 never a replay of the edit. A lost operation after agent restart remains unknown;
 inspect the destination before submitting another edit.
@@ -1200,12 +1843,17 @@ lost authority do not prove cleanup: private staging may remain until the link
 ends, and a process crash may leave an orphan. There is no automatic sweep or
 adoption of unknown transfers.
 
-The native implementation supports ordinary Linux and macOS APFS regular files
-with existing parent directories. It fails closed on unsupported symlinks, hard links,
+The native implementation supports ordinary Linux and macOS APFS regular files.
+Expected-absent creates honor `create_parents`: missing directories are created
+through pinned handles and remain after cancellation or failure; file publication
+is still atomic. Existing-base edits never create missing parents. It fails closed on unsupported symlinks, hard links,
 ownership, special modes, and extended metadata rather than silently discarding
 their semantics. Transactional editing does not implement `runAs` impersonation.
-macOS permits OS-generated provenance only when replacement preserves its exact
-bytes; extended ACLs, other attributes and inode flags remain unsupported.
+macOS leaves parent-directory ACLs and attributes untouched, including the standard
+home-directory ACL. The replacement inode keeps OS-assigned provenance; the old
+inode's provenance is not copied or required to match. Destination/staged-file
+ACLs, other file attributes and inode flags remain unsupported rather than being
+silently removed.
 Expected-base checks detect observed changes but are not a filesystem
 compare-and-swap against unrelated concurrent writers.
 
@@ -1232,6 +1880,33 @@ reporting does not add transactional transfer support to unsupported platforms.
 
 Deploy matching protocol/runtime packages and a compatible native agent before
 expecting transactional support. Changing transport limits is not required.
+
+## Run as another local user
+
+Exec (including op-stream and background commands), git, PTY open and every file
+request, transactional uploads included, carry an optional `run_as`: a local user
+name, else a decimal uid, which must exist in the machine's password database.
+The agent honors it only when it advertises `Capabilities.run_as`, which it does
+only on Linux while running as root (as in a managed sandbox); a Connected
+Machine agent running as its owner's account never does, and the control plane
+must not send `run_as` to an agent that does not advertise it. Such an agent
+refuses a non-empty `run_as` with `ERROR_CODE_UNSUPPORTED` rather than ignoring it,
+and an unknown user fails with `ERROR_CODE_RUN_AS_UNKNOWN_USER`.
+
+A process started for the request runs with the user's uid, primary gid and
+groups (real, effective and saved ids, no capabilities), with `HOME`, `USER`,
+`LOGNAME` and `SHELL` from the password database before the request's own
+environment. A PTY without a command starts the user's login shell, and the user
+owns the terminal device. File requests run on a dedicated agent thread switched
+to the user, so the kernel enforces the user's permissions and everything the
+request creates is the user's; `~` expands to the user's home. Transactional
+uploads stage as the user, so the published file is the user's. Because that
+user can also reach its own staged file, a replacement re-checks the published
+inode and its content right after the atomic exchange: on any difference the
+agent exchanges the previous file back and reports `WRITE_CONFLICT`, or reports
+`WRITE_OUTCOME_UNKNOWN` when it cannot confirm that restore. Exec and git
+children switch identity after their cgroup placement, which still uses the
+agent's privileges.
 
 ## Revoke / detach
 
@@ -1282,6 +1957,17 @@ This engine does not provide rendered screenshots, live viewing, desktop input,
 Chromium profile identities, or a linked ComputerSession. Use Chromium for
 visual/mobile testing and human interaction. Browser authority, per-session
 isolation, and source-placement fences remain identical for both engines.
+
+The agent runs one browser controller (browserd) per scope: workspace,
+placement kind and placement (the machine, or an attached Chrome device). A
+controller that reports holding no session at all (no open, retained or
+recovering browser or computer session and no work in flight), and whose scope
+has not been ensured for ten minutes, is stopped; the next request starts a
+fresh one in about a second. Each controller also holds the write end of a
+stdin lifeline from its agent: however the agent ends, including a crash or
+SIGKILL, the kernel closes it and the controller shuts down gracefully,
+leaving retained browsers running for the next agent to adopt. Controllers no
+longer accumulate across scopes or outlive the agent that started them.
 
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and

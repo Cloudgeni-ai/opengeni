@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import { ADD_CUSTOM_CATALOG_KINDS } from "./add-custom-dialog";
 import { CustomApiSection } from "./custom-api-section";
-import type { ApiIntegrationInstallationSummary } from "@/types";
+import type { ApiIntegrationInstallationSummary } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();

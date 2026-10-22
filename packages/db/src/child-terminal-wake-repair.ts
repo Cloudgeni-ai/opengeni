@@ -3,7 +3,10 @@ import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withSessionActivityRlsContext, type Database } from "./database";
 import { compactionFailureHoldSequenceTx } from "./compaction-failure-hold";
 import { fromPostgresLosslessJson } from "./lossless-json";
-import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  sessionAttemptPendingWritersSql,
+  sessionPendingWriterAttemptIdsSql,
+} from "./session-attempt-writers";
 import {
   evaluateSessionControl,
   lockSessionEventWriteRows,
@@ -83,8 +86,9 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
                     and interruption.attempt_id = attempt.id
                     and interruption.state in ('pending', 'delivered', 'acknowledged', 'settled', 'rejected_stale'))
               ))
-              or ${sessionAttemptPendingWritersSql(sql`attempt`, "physical")}
-              or ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")})
+              or (attempt.id in ${sessionPendingWriterAttemptIdsSql(candidate)}
+                and (${sessionAttemptPendingWritersSql(sql`attempt`, "physical")}
+                  or ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")})))
         ) as pending`,
       );
       if (blocked?.pending) return false;

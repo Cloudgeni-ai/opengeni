@@ -1,4 +1,5 @@
 import {
+  isConnectedMachineOutcomeUnknownOutput,
   parseCustomMcpSetupRequest,
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
@@ -14,10 +15,17 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
+import { learningRefusalText } from "./learning-refusal-copy";
 import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/sdk/allowance-refusal";
+import {
+  parseSessionUsageLimitReachedRefusal,
+  SESSION_USAGE_LIMIT_SEGMENT,
+  sessionUsageLimitReachedMessage,
+} from "@opengeni/sdk/session-usage-limits";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   presentFailure,
@@ -26,6 +34,7 @@ import {
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { presentTurnFailureText } from "./compaction-copy";
+import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -45,10 +54,14 @@ import type {
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
   ToolCallItem,
+  ToolOutputPreview,
   ToolCallTruncation,
+  UserMessageItem,
   WorkerItem,
 } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 export { toolDisplayName, mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 
@@ -150,12 +163,38 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+export type BuildTimelineOptions = {
+  partialStart?: boolean;
+  /**
+   * Turns whose steps are not all loaded, keyed by turn id. Each becomes a
+   * `turn-steps` item placed at the turn's start (its `turn.started`, or its
+   * first event), so the readable grouping gives the turn an expandable work
+   * row even when none of its steps are in the browser.
+   */
+  turnSteps?: ReadonlyMap<string, Pick<TurnStepsItem, "state" | "load" | "retain">>;
+  /**
+   * Exact reads of tool outputs a step page delivered as previews, by output
+   * event. A previewed tool row carries its read's state and loader in
+   * `outputPreview`; without a reader it is still marked as a preview.
+   */
+  toolOutputs?: ToolOutputReader | undefined;
+};
+
 export function buildTimeline(
+  t: OpenGeniText,
   events: SessionEvent[],
-  options: { partialStart?: boolean } = {},
+  options: BuildTimelineOptions = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
+  // Calls remain in insertion order while message bubbles can move. Keep the
+  // two existing lookup rules separate: creation merges only tool rows, while
+  // an output correlates to the latest tool or worker with that exact id.
+  const toolCallsById = new Map<string, ToolCallItem>();
+  const callsById = new Map<string, ToolCallItem | WorkerItem>();
   const allowanceNotices = new Set<string>();
+  // One "not saved" notice per turn for the same refused change, however
+  // often the agent retried it.
+  const learningRefusalNotices = new Set<string>();
   const allowanceNotice = (event: SessionEvent, turnId: string | null) => {
     const refusal = parseAllowanceExhaustedRefusal(event.payload);
     if (!refusal) return null;
@@ -195,6 +234,12 @@ export function buildTimeline(
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
   const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
   const identifiedMessages = new Map<string, AgentMessageItem>();
+  // Messages drawn from streamed text that no completion has settled yet. A
+  // Steer that cuts the answer short leaves its unfinished text here.
+  const unsettledStreamedMessages = new Set<AgentMessageItem>();
+  // Steer bubbles drawn while the current turn still ran. The turn's answer
+  // was written before them, so a handover keeps that answer above them.
+  let steerBubblesAwaitingHandover: UserMessageItem[] = [];
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -255,6 +300,10 @@ export function buildTimeline(
     });
   };
   const queuedAtByTurn = new Map<string, string>();
+  // When the session's previous turn ended. A prompt queued behind running
+  // work waits for that turn by the person's choice, so its queue span starts
+  // only once the session was free to run it.
+  let previousTurnEndedAt: string | null = null;
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
   let startupEvent: SessionEvent;
@@ -408,7 +457,15 @@ export function buildTimeline(
     }
   };
 
+  const turnStepsByAnchor = turnStepsAnchors(ordered, options.turnSteps);
+  let pendingTurnSteps: TurnStepsItem | null = null;
   for (const event of ordered) {
+    // A turn's steps marker follows its anchor event, before anything later.
+    if (pendingTurnSteps) {
+      items.push(pendingTurnSteps);
+      pendingTurnSteps = null;
+    }
+    pendingTurnSteps = turnStepsByAnchor.get(event.id) ?? null;
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
     resolveCapacityWaits(event, payload);
@@ -502,6 +559,16 @@ export function buildTimeline(
       continue;
     }
 
+    if (
+      event.turnId &&
+      (event.type === "turn.completed" ||
+        event.type === "turn.failed" ||
+        event.type === "turn.cancelled" ||
+        event.type === "turn.superseded")
+    ) {
+      previousTurnEndedAt = event.occurredAt;
+    }
+
     switch (event.type) {
       case "user.message": {
         // A steering message must not mark in-flight tools complete; it only
@@ -529,7 +596,7 @@ export function buildTimeline(
         }
         const voiceMessage = realtimeVoiceMessage(payload);
         const sender = messageSender(payload.initiator);
-        items.push({
+        const userMessage: UserMessageItem = {
           kind: "user-message",
           id: event.id,
           ...(event.clientEventId
@@ -550,7 +617,11 @@ export function buildTimeline(
           tools: toolRefs(payload.tools),
           ...(sender ? { sender } : {}),
           occurredAt: event.occurredAt,
-        });
+        };
+        items.push(userMessage);
+        if (payload.delivery === "steer" || payload.routing === "accepted_for_steering") {
+          steerBubblesAwaitingHandover.push(userMessage);
+        }
         break;
       }
 
@@ -691,6 +762,7 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         items.push(item);
+        unsettledStreamedMessages.add(item);
         if (messageKey) identifiedMessages.set(messageKey, item);
         rememberAgentResponse(turnId, item, false);
         break;
@@ -759,6 +831,7 @@ export function buildTimeline(
             items.splice(openIndex, 1);
             items.push(open);
           }
+          unsettledStreamedMessages.delete(open);
           rememberAgentResponse(turnId, open, true);
           break;
         }
@@ -827,7 +900,7 @@ export function buildTimeline(
         ) {
           const spawn = toolMatchesLeaf(name, WORKER_SPAWN_TOOL);
           const title = spawn ? workerTitle(args) : null;
-          items.push({
+          const item: WorkerItem = {
             kind: "worker",
             id: event.id,
             turnId,
@@ -839,7 +912,9 @@ export function buildTimeline(
             failure: null,
             status: "running",
             occurredAt: event.occurredAt,
-          });
+          };
+          items.push(item);
+          if (callId) callsById.set(callId, item);
           break;
         }
         if (LANDMARK_ONLY_TOOL_LEAVES.has(mcpToolLeaf(name))) {
@@ -850,11 +925,7 @@ export function buildTimeline(
         // `RunToolCallItem` share the same item id. Merge so mid-stream cards
         // do not duplicate when the step finally materializes.
         if (callId) {
-          const existing = [...items]
-            .reverse()
-            .find(
-              (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
-            );
+          const existing = toolCallsById.get(callId);
           if (existing) {
             if (display) existing.display = display;
             if (args != null) {
@@ -867,7 +938,7 @@ export function buildTimeline(
             break;
           }
         }
-        items.push({
+        const item: ToolCallItem = {
           kind: "tool-call",
           id: event.id,
           turnId,
@@ -882,13 +953,18 @@ export function buildTimeline(
           raw: payload.raw,
           status: providerNativeToolStatus(payload.raw),
           occurredAt: event.occurredAt,
-        });
+        };
+        items.push(item);
+        if (callId) {
+          toolCallsById.set(callId, item);
+          callsById.set(callId, item);
+        }
         break;
       }
 
       case "agent.toolCall.output": {
         const callId = typeof payload.id === "string" ? payload.id : null;
-        const target = findOpenCall(items, callId);
+        const target = findOpenCall(items, callId, callsById);
         if (!target) {
           break;
         }
@@ -911,6 +987,22 @@ export function buildTimeline(
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
         const truncation = toolCallTruncation(payload);
+        const previewFact = toolOutputPreviewFact(payload);
+        const previewRead = previewFact
+          ? options.toolOutputs?.(event.id, event.sequence, event.turnId ?? null)
+          : undefined;
+        // An exact read that landed replaced this event; a forged fact on an
+        // exact output must not ask again.
+        const outputPreview: ToolOutputPreview | null =
+          previewFact && previewRead?.state !== "loaded"
+            ? {
+                shape: previewFact.shape,
+                originalBytes: previewFact.originalBytes,
+                previewBytes: previewFact.previewBytes,
+                state: previewRead?.state ?? "preview",
+                ...(previewRead ? { load: previewRead.load } : {}),
+              }
+            : null;
         target.status = isErrorOutput(payload) ? "failed" : "complete";
         target.output = Object.prototype.hasOwnProperty.call(payload, "output")
           ? payload.output
@@ -918,12 +1010,14 @@ export function buildTimeline(
             ? payload.preview
             : payload.output;
         target.truncation = truncation;
+        target.outputPreview = outputPreview;
         const sourceText = timelineAnnotationToolOutputText(
           Object.prototype.hasOwnProperty.call(payload, "output")
             ? payload.output
             : payload.preview,
         );
-        if (sourceText !== null) {
+        // Annotations anchor in the exact text, which a preview is not.
+        if (sourceText !== null && !outputPreview) {
           target.annotationSource = {
             kind: "tool_output",
             eventId: event.id,
@@ -933,6 +1027,29 @@ export function buildTimeline(
             text: sourceText,
             label: target.name,
           };
+        }
+        // A refused Skill, instruction, or Knowledge change is told to the
+        // person outside the folded work row, whatever the agent then says.
+        const learningRefusal = learningRefusalFromToolOutput(payload.output);
+        if (learningRefusal) {
+          const key = JSON.stringify([
+            turnId ?? target.turnId,
+            learningRefusal.destination,
+            learningRefusal.reason,
+            learningRefusal.skillId ?? null,
+          ]);
+          if (!learningRefusalNotices.has(key)) {
+            learningRefusalNotices.add(key);
+            closeStreamingTail();
+            items.push({
+              kind: "notice",
+              id: `${event.id}-learning-refusal`,
+              tone: "failed",
+              text: learningRefusalText(t, learningRefusal),
+              learningRefusal,
+              occurredAt: event.occurredAt,
+            });
+          }
         }
         break;
       }
@@ -954,14 +1071,20 @@ export function buildTimeline(
         // the first admission only, so consume the queued timestamp after its
         // first projection instead of manufacturing another queue span.
         queuedAtByTurn.delete(turnId);
+        const queueStart =
+          previousTurnEndedAt &&
+          Date.parse(previousTurnEndedAt) > Date.parse(queuedAt) &&
+          Date.parse(previousTurnEndedAt) <= Date.parse(event.occurredAt)
+            ? previousTurnEndedAt
+            : queuedAt;
         closeStreamingTail();
         settleStartupPhase(
           "queue",
           "complete",
-          elapsedDurationMs(queuedAt, event.occurredAt),
+          elapsedDurationMs(queueStart, event.occurredAt),
           null,
           0,
-          queuedAt,
+          queueStart,
           `${turnId}-queue`,
         );
         break;
@@ -1029,7 +1152,7 @@ export function buildTimeline(
         if (existing && status !== "running") {
           existing.status = status;
           if (origin) existing.origin = origin;
-          const message = failureMessage(payload);
+          const message = failureMessage(t, payload);
           if (message) {
             existing.output = existing.output ? `${existing.output}\n${message}` : message;
           }
@@ -1043,7 +1166,7 @@ export function buildTimeline(
             turnId,
             name,
             command: typeof payload.command === "string" ? payload.command : null,
-            output: failureMessage(payload) ?? "",
+            output: failureMessage(t, payload) ?? "",
             origin,
             status,
             occurredAt: event.occurredAt,
@@ -1155,15 +1278,27 @@ export function buildTimeline(
         break;
       }
 
+      case "sandbox.recovery.selected": {
+        if (payload.mode === "fresh_workspace" && typeof payload.text === "string")
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text: payload.text,
+            occurredAt: event.occurredAt,
+          });
+        break;
+      }
+
       case "subscription.account.switched": {
         // One neutral receipt, not its provider-specific compatibility alias.
         // Never expose connection ids, personal labels, or provider error text.
         const text =
           payload.reason === "return_to_preferred"
-            ? "Returned to your preferred model."
+            ? t("timeline.projection.returnedToYourPreferredModel")
             : payload.reason === "failover_cross_provider"
-              ? "Switched to a fallback model."
-              : "Switched to another subscription account.";
+              ? t("timeline.projection.switchedToAFallbackModel")
+              : t("timeline.projection.switchedToAnotherSubscriptionAccount");
         items.push({
           kind: "notice",
           id: event.id,
@@ -1176,7 +1311,7 @@ export function buildTimeline(
 
       case "codex.capacity.waiting":
       case "turn.capacity_waiting": {
-        const capacityWait = capacityWaitPresentation(event.type, payload, turnId);
+        const capacityWait = capacityWaitPresentation(t, event.type, payload, turnId);
         const item: NoticeItem = {
           kind: "notice",
           id: event.id,
@@ -1207,7 +1342,8 @@ export function buildTimeline(
             kind: "notice",
             id: event.id,
             tone: "waiting",
-            text: "Approval needed — the turn is paused until someone decides.",
+            text: t("timeline.projection.approvalNeededTheTurnIs"),
+            approval: true,
             occurredAt: event.occurredAt,
           },
           turnId,
@@ -1372,6 +1508,7 @@ export function buildTimeline(
       }
 
       case "turn.completed": {
+        steerBubblesAwaitingHandover = [];
         // A standalone manual compaction uses the turn ledger for fencing and
         // recovery, but it is maintenance rather than a conversational turn.
         // The dedicated context-compaction landmark is the complete UI truth;
@@ -1390,11 +1527,22 @@ export function buildTimeline(
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
         const allowance = parseAllowanceExhaustedRefusal(payload);
+        // The task's own usage limit refused the next model request. That is a
+        // person's setting doing its job, not a failure or a billing problem:
+        // the turn settles complete and one calm row says what stopped it.
+        if (payload.segmentLimit === SESSION_USAGE_LIMIT_SEGMENT) {
+          finalizeOpen(turnId, "complete", event.occurredAt);
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          items.push(turnEndItem(event, "complete", null));
+          items.push(sessionUsageLimitNotice(t, event, payload));
+          break;
+        }
         if (allowance) {
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT));
+          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT(t)));
           allowanceNotice(event, turnId);
           break;
         }
@@ -1402,12 +1550,12 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
+          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE(t)));
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: CREDIT_EXHAUSTION_MESSAGE,
+            text: CREDIT_EXHAUSTION_MESSAGE(t),
             occurredAt: event.occurredAt,
           });
           break;
@@ -1487,7 +1635,7 @@ export function buildTimeline(
             kind: "notice",
             id: `${pendingWaitOutcome.id}-visible-outcome`,
             tone: "waiting",
-            text: waitingOutcomeText(pendingWaitOutcome.reason),
+            text: waitingOutcomeText(t, pendingWaitOutcome.reason),
             recordedOutcome: true,
             ...(pendingWorkerSessions.size > 0
               ? { waitingAgents: pendingWorkerSessions.size }
@@ -1501,6 +1649,7 @@ export function buildTimeline(
       }
 
       case "turn.failed": {
+        steerBubblesAwaitingHandover = [];
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
@@ -1509,10 +1658,10 @@ export function buildTimeline(
         // back to the generic error/message extraction.
         const allowance = parseAllowanceExhaustedRefusal(payload);
         const failureText = allowance
-          ? ALLOWANCE_TURN_END_TEXT
+          ? ALLOWANCE_TURN_END_TEXT(t)
           : isCreditExhaustionPayload(payload)
-            ? CREDIT_EXHAUSTION_MESSAGE
-            : failureMessage(payload);
+            ? CREDIT_EXHAUSTION_MESSAGE(t)
+            : failureMessage(t, payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
@@ -1525,7 +1674,7 @@ export function buildTimeline(
         // text, and no separate notice repeats it.
         // Retry reopens the same logical turn, so only a landmark from this
         // attempt (after the turn's previous settlement) can own this failure.
-        const failure = allowance ? null : presentTurnFailureText(failureText);
+        const failure = allowance ? null : presentTurnFailureText(t, failureText);
         let landmarkIndex = -1;
         if (failure?.detail !== undefined && turnId !== null) {
           // Skip the turn-end just pushed for this failure.
@@ -1554,8 +1703,10 @@ export function buildTimeline(
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: failure?.summary ?? "The turn failed.",
-            ...(failure?.detail ? { details: { label: "Details", value: failure.detail } } : {}),
+            text: failure?.summary ?? t("timeline.projection.theTurnFailed"),
+            ...(failure?.detail
+              ? { details: { label: t("timeline.projection.details"), value: failure.detail } }
+              : {}),
             occurredAt: event.occurredAt,
           });
         }
@@ -1564,12 +1715,109 @@ export function buildTimeline(
 
       case "turn.superseded":
       case "turn.cancelled": {
-        // A retraction of a never-started queued turn is not a turn ending —
-        // the message was withdrawn before any work happened; show nothing.
-        // A null turnId proves nothing, so it keeps the legacy finalize path.
+        // Only an explicit batch receipt proves a supersession never ran:
+        // a partial history may omit a real handover's earlier execution.
+        if (event.type === "turn.superseded" && payload.beforeAttempt === true) {
+          break;
+        }
+        // A withdrawn queued turn must not manufacture an empty response.
         if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
+        // The turn handed over to a Steer at a safe boundary: its next model
+        // step, right after a context compaction, or while it only waited (an
+        // approval, a question or capacity; those supersessions name their
+        // target). No running work was stopped: the agent reads the message
+        // next and carries on, so the turn closes quietly instead of as
+        // interrupted. Only the API hard interrupt stops a live attempt.
+        const steerReplacedWait =
+          (payload.reason === "steer" || payload.reason === "agent_steer") &&
+          (typeof payload.targetTurnId === "string" || typeof payload.targetUpdateId === "string");
+        if (
+          event.type === "turn.superseded" &&
+          (payload.atModelStep === true ||
+            payload.deferredUntilCompaction === true ||
+            steerReplacedWait)
+        ) {
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          // A Steer cut the model's answer short. Its unfinished streamed text
+          // stays visible, after the messages that did finish (their
+          // completions arrive only when the cut request ends). When those
+          // deltas are absent (an archived history) the recorded cut-off text
+          // stands in, as a plain progress note rather than an error. Either
+          // way the answer stays above the Steer's own bubble, which was drawn
+          // while this request still streamed: a late completion must not
+          // carry finished text below it either.
+          const cutOffText = stringValue(payload.cutOffText);
+          const steerBoundary = Math.min(
+            ...steerBubblesAwaitingHandover
+              .map((bubble) => items.indexOf(bubble))
+              .filter((index) => index >= 0),
+            items.length,
+          );
+          const isTurnMessage = (item: TimelineItem): item is AgentMessageItem =>
+            item.kind === "agent-message" && item.turnId === turnId;
+          // Finished messages a late completion moved below the Steer go
+          // back above it, in their order; unfinished ones follow them.
+          const settledBelow = items
+            .slice(steerBoundary)
+            .filter(
+              (item): item is AgentMessageItem =>
+                isTurnMessage(item) && !unsettledStreamedMessages.has(item),
+            );
+          const unsettled = cutOffText
+            ? items.filter(
+                (item): item is AgentMessageItem =>
+                  isTurnMessage(item) && unsettledStreamedMessages.has(item),
+              )
+            : [];
+          const moved: AgentMessageItem[] = [...settledBelow, ...unsettled];
+          if (cutOffText && unsettled.length === 0) {
+            closeStreamingTail();
+            moved.push({
+              kind: "agent-message",
+              id: `${event.id}:cut-off`,
+              turnId,
+              text: cutOffText,
+              phase: "commentary",
+              streaming: false,
+              occurredAt: event.occurredAt,
+            });
+          }
+          if (moved.length > 0) {
+            let insertAt = items.length;
+            for (const item of moved) {
+              const index = items.indexOf(item);
+              if (index < 0) continue;
+              items.splice(index, 1);
+              unsettledStreamedMessages.delete(item);
+            }
+            if (steerBubblesAwaitingHandover.length > 0) {
+              const bubbleIndexes = steerBubblesAwaitingHandover
+                .map((bubble) => items.indexOf(bubble))
+                .filter((index) => index >= 0);
+              if (bubbleIndexes.length > 0) insertAt = Math.min(...bubbleIndexes);
+            } else {
+              // No Steer bubble in view (an API-only history): keep the text
+              // right after this turn's other work.
+              for (let index = items.length - 1; index >= 0; index -= 1) {
+                const item = items[index]!;
+                if ("turnId" in item && item.turnId === turnId) {
+                  insertAt = index + 1;
+                  break;
+                }
+              }
+            }
+            items.splice(insertAt, 0, ...moved);
+          }
+          steerBubblesAwaitingHandover = [];
+          // A call still waiting for approval or an answer never ran.
+          finalizeOpen(turnId, steerReplacedWait ? "cancelled" : "complete", event.occurredAt);
+          items.push({ ...turnEndItem(event, "complete", null), handedOver: true });
+          break;
+        }
+        steerBubblesAwaitingHandover = [];
         takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
@@ -1580,7 +1828,7 @@ export function buildTimeline(
             kind: "notice",
             id: event.id,
             tone: "cancelled",
-            text: "Interrupted.",
+            text: t("timeline.projection.interrupted"),
             occurredAt: event.occurredAt,
           });
         }
@@ -1595,7 +1843,7 @@ export function buildTimeline(
           kind: "notice",
           id: event.id,
           tone: "input",
-          text: "Your previously approved workspace instruction was saved.",
+          text: t("timeline.projection.yourPreviouslyApprovedWorkspaceInstruction"),
           occurredAt: event.occurredAt,
         });
         break;
@@ -1688,6 +1936,7 @@ export function buildTimeline(
         break;
     }
   }
+  if (pendingTurnSteps) items.push(pendingTurnSteps);
 
   const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
@@ -1955,7 +2204,7 @@ export function stripOpaqueCitationTokens(text: string): string {
  * carries who can raise it and when it resets (and is host-customizable), so
  * the summary line stays a neutral fact instead of repeating remedy prose.
  */
-const ALLOWANCE_TURN_END_TEXT = "Usage limit reached";
+const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
@@ -2019,6 +2268,37 @@ type WorkActivityItem = Exclude<ActivityItem, AgentMessageItem>;
  * decide its grouping, and it narrows `item` to a work item with no cast.
  * Assistant prose stays outside activity clusters.
  */
+/** Each marked turn's anchor: its `turn.started`, else its first event. */
+function turnStepsAnchors(
+  ordered: readonly SessionEvent[],
+  turnSteps: BuildTimelineOptions["turnSteps"],
+): Map<string, TurnStepsItem> {
+  const anchors = new Map<string, TurnStepsItem>();
+  if (!turnSteps || turnSteps.size === 0) return anchors;
+  const chosen = new Map<string, SessionEvent>();
+  for (const event of ordered) {
+    const turnId = event.turnId;
+    if (!turnId || !turnSteps.has(turnId)) continue;
+    const current = chosen.get(turnId);
+    if (!current || (event.type === "turn.started" && current.type !== "turn.started")) {
+      chosen.set(turnId, event);
+    }
+  }
+  for (const [turnId, anchor] of chosen) {
+    const marker = turnSteps.get(turnId)!;
+    anchors.set(anchor.id, {
+      kind: "turn-steps",
+      id: `turn-steps-${turnId}`,
+      turnId,
+      occurredAt: anchor.occurredAt,
+      state: marker.state,
+      load: marker.load,
+      retain: marker.retain,
+    });
+  }
+  return anchors;
+}
+
 function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   switch (item.kind) {
     case "reasoning":
@@ -2043,10 +2323,11 @@ export type GroupTimelineOptions = {
 };
 
 export function groupTimeline(
+  t: OpenGeniText,
   items: TimelineItem[],
   options: GroupTimelineOptions = {},
 ): TimelineGroup[] {
-  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(items);
+  if (options.readableTurns || options.foldExchanges) return groupReadableTurns(t, items);
   const groups: TimelineGroup[] = [];
   for (const item of items) {
     // A recovered capacity wait is over; it leaves no warning behind.
@@ -2075,7 +2356,7 @@ export function groupTimeline(
 }
 
 /** Live prose stays primary; settled progress joins its own turn's work history. */
-function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
+function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
@@ -2087,6 +2368,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
+  // Turns that handed over to a Steer instead of finishing.
+  const handedOverTurns = new Set<string>();
   const messages = new Map<string, AgentMessageItem[]>();
   // Capacity waits per turn: their spans are not work, and a live one is
   // carried by the turn's work row instead of a separate warning.
@@ -2186,7 +2469,11 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       }
       return group;
     };
-    if (isActivityItem(item)) {
+    if (item.kind === "turn-steps") {
+      // Not a step: it gives the turn its work row (a turn whose steps are all
+      // unloaded has nothing else) and is rendered by that row.
+      workForTurn().work!.steps = item;
+    } else if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
       const previous = group.work!.details.at(-1);
@@ -2217,6 +2504,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         }
       }
     } else if (item.kind === "turn-end") {
+      if (item.handedOver) handedOverTurns.add(key);
       if (!item.resumedAt) {
         settlements.set(key, {
           endedAt: item.occurredAt,
@@ -2233,7 +2521,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
               kind: "notice",
               id: item.id,
               tone: "failed",
-              text: item.failureText ?? "The turn failed before retrying.",
+              text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
               occurredAt: item.occurredAt,
             },
           });
@@ -2280,7 +2568,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         item.tone === "waiting" &&
         !item.recordedOutcome &&
         !item.resolvedAt &&
-        item.text.startsWith("Approval needed") &&
+        item.approval === true &&
         current !== undefined &&
         !current.endedAt;
       // Likewise the live "waiting on you" divider: the open turn's header
@@ -2302,7 +2590,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           !item.resolvedAt
         ) {
           current.waiting = {
-            label: item.text.startsWith("Approval needed") ? "Waiting for you" : "Waiting",
+            label:
+              item.approval === true
+                ? t("timeline.projection.waitingForYou")
+                : t("timeline.projection.waiting"),
             since: item.occurredAt,
           };
         } else if (
@@ -2311,7 +2602,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           !item.blocked &&
           !item.resolvedAt
         ) {
-          current.waiting = { label: "Waiting for you", since: item.occurredAt };
+          current.waiting = {
+            label: t("timeline.projection.waitingForYou"),
+            since: item.occurredAt,
+          };
         } else if (
           item.kind === "session-status" &&
           ["paused", "cancelled", "failed"].includes(item.status) &&
@@ -2370,6 +2664,25 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     work.details.push(entry);
     return false;
   });
+  // A turn that handed over to the next Steer before doing anything but start
+  // up did no work of its own: the steered message carries on in the next
+  // turn. Quickly steering several queued messages in a row would otherwise
+  // leave a stack of empty "Worked for" rows between the messages.
+  for (const key of handedOverTurns) {
+    const group = turns.get(key);
+    if (
+      !group ||
+      (messages.get(key)?.length ?? 0) > 0 ||
+      !group.items.every((item) => item.kind === "startup-phase") ||
+      !group.work!.details.every(
+        (detail) =>
+          detail.kind === "activity" && detail.items.every((item) => item.kind === "startup-phase"),
+      )
+    )
+      continue;
+    turns.delete(key);
+    groups = groups.filter((entry) => entry !== group);
+  }
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
   const beforeRows = new Map<TimelineGroup, Work>();
@@ -2456,13 +2769,16 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      // The work row leads the first visible reply of the turn.
+      // The work row leads the first visible reply of the turn. A live turn
+      // whose answer is already declared puts the row there too, so the answer
+      // being read stays put when the turn settles instead of hopping past it.
       const anchor = Math.min(
         ...[...responses].map((message) => positions.get(message) ?? groups.length),
       );
-      if (settledAt && anchor < (nextBoundary.get(group) ?? groups.length)) {
+      if (anchor < (nextBoundary.get(group) ?? groups.length)) {
         beforeRows.set(groups[anchor]!, group);
         movedRows.add(group);
+        continue;
       }
     }
     if (!settledAt) {
@@ -2818,7 +3134,11 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
         fallbackSeqByTurn.set(turnId, event.sequence);
       }
     }
-    if (turnId && isTurnExecutionEvidence(event.type)) {
+    if (
+      turnId &&
+      isTurnExecutionEvidence(event.type) &&
+      !(event.type === "turn.superseded" && payload.beforeAttempt === true)
+    ) {
       startedTurnIds.add(turnId);
     }
   }
@@ -2976,6 +3296,36 @@ function turnEndItem(
   };
 }
 
+/** Plain text for a usage-limit stop whose marker carried no readable amounts. */
+const SESSION_USAGE_LIMIT_STOP_TEXT = (t: OpenGeniText) =>
+  t("timeline.projection.thisTaskSUsageLimit");
+
+/**
+ * The stop row for a `segmentLimit: "session_usage_limit"` completion. Only the
+ * typed amounts are kept (never upstream prose), and a malformed marker still
+ * reads as the same neutral stop instead of a credit or failure notice.
+ */
+function sessionUsageLimitNotice(
+  t: OpenGeniText,
+  event: SessionEvent,
+  payload: Record<string, unknown>,
+): NoticeItem {
+  const refusal = parseSessionUsageLimitReachedRefusal(payload);
+  return {
+    kind: "notice",
+    id: `${event.id}-session-usage-limit`,
+    // Neutral: not a failure, and not an open wait the turn header should claim.
+    tone: "cancelled",
+    text: refusal ? sessionUsageLimitReachedMessage(refusal) : SESSION_USAGE_LIMIT_STOP_TEXT(t),
+    sessionUsageLimit: {
+      rootSessionId: refusal?.rootSessionId ?? null,
+      limitMicros: refusal?.limitMicros ?? null,
+      usedMicros: refusal?.usedMicros ?? null,
+    },
+    occurredAt: event.occurredAt,
+  };
+}
+
 function hasTurnActivity(items: TimelineItem[], turnId: string | null): boolean {
   if (turnId) {
     return items.some((item) => isActivityItem(item) && item.turnId === turnId);
@@ -3108,7 +3458,15 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     );
     if (first && first !== visibleMessage) visibleMessages.unshift(first);
   }
-  const body = collected.filter((group) => !visibleMessages.includes(group as never));
+  // A change the person asked to keep that was not saved stays in view beside
+  // the answer, whatever the agent said about it.
+  const keptNotices = collected.filter(
+    (group) =>
+      group.kind === "item" && group.item.kind === "notice" && !!group.item.learningRefusal,
+  );
+  const body = collected.filter(
+    (group) => !visibleMessages.includes(group as never) && !keptNotices.includes(group),
+  );
   if (body.length === 0) {
     return;
   }
@@ -3134,7 +3492,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     turnGroup.failureText = turnEnd.failureText;
   }
 
-  groups.splice(startIndex, collectedLength, turnGroup, ...visibleMessages);
+  groups.splice(startIndex, collectedLength, turnGroup, ...keptNotices, ...visibleMessages);
 }
 
 /** Whether the input boundary before a turn includes a person's message. */
@@ -3521,6 +3879,8 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
     return true;
   }
   const output = payload.output;
+  // Older receipts predate the explicit event error flag.
+  if (isConnectedMachineOutcomeUnknownOutput(output)) return true;
   return (
     !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true
   );
@@ -3554,23 +3914,21 @@ function toolCallTruncation(payload: Record<string, unknown>): ToolCallTruncatio
 function findOpenCall(
   items: TimelineItem[],
   callId: string | null,
+  callsById: ReadonlyMap<string, ToolCallItem | WorkerItem>,
 ): ToolCallItem | WorkerItem | undefined {
-  const reversed = [...items].reverse();
-  const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem =>
-    item.kind === "tool-call" || item.kind === "worker";
   if (callId) {
-    const byId = reversed.find((item) => isCall(item) && item.callId === callId);
-    if (byId) {
-      return byId as ToolCallItem | WorkerItem;
-    }
     // An explicit provider correlation id is authoritative. Falling back to
     // an unrelated running call corrupts its status/output when compact pages
     // or interleaved providers deliver an unmatched historical result.
-    return undefined;
+    return callsById.get(callId);
   }
-  return reversed.find(
-    (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",
-  );
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
+      return item;
+    }
+  }
+  return undefined;
 }
 
 function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | undefined {
@@ -3595,6 +3953,16 @@ function startupPhaseFromPayload(value: unknown): StartupPhase | null {
 function startupLifecycleWaitReason(
   payload: Record<string, unknown>,
 ): StartupPhaseItem["blockedReason"] {
+  // The first model request waited for context compaction: an expected step
+  // of preparation that reopens after compacting, never a failure.
+  if (
+    payload.expectedTransition === true &&
+    payload.failureStage === "context_compaction" &&
+    payload.failureCategory === "context_compaction" &&
+    payload.failureCode === "compaction_required"
+  ) {
+    return "compaction_required";
+  }
   if (
     payload.expectedTransition !== true ||
     payload.failureStage !== "lifecycle_wait" ||
@@ -3632,8 +4000,8 @@ function elapsedDurationMs(startedAt: string, completedAt: string): number | nul
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
-function failureMessage(payload: Record<string, unknown>): string | null {
-  return presentFailure(payload).reason;
+function failureMessage(t: OpenGeniText, payload: Record<string, unknown>): string | null {
+  return presentFailure(t, payload).reason;
 }
 
 function goalText(payload: Record<string, unknown>): string | null {
@@ -3665,6 +4033,7 @@ function rememberPendingWaitOutcome(
 
 /** Wait reasons that need a person or a policy change, not only time. */
 const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
+  "pinned_account_disabled",
   "pinned_account_ineligible",
   "model_not_allowed",
   // Only sending the work again ends it (design 5.3 decision 4).
@@ -3686,6 +4055,7 @@ const ACTION_CAPACITY_WAIT_CODE = /_(?:allocator_disabled|relogin_required|accou
  * account) keeps its recorded, actionable reason and is not labelled a limit.
  */
 function capacityWaitPresentation(
+  t: OpenGeniText,
   type: string,
   payload: Record<string, unknown>,
   turnId: string | null,
@@ -3700,20 +4070,28 @@ function capacityWaitPresentation(
       type === "turn.capacity_waiting"
         ? [payload.error, payload.detail]
         : [payload.detail, payload.error];
-    const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
-    return { turnId, label: "Waiting", detail, text: detail };
+    const detail =
+      stringValue(first) || stringValue(second) || t("timeline.projection.waitingForAnAccount");
+    return {
+      turnId,
+      label:
+        stringValue(payload.waitReason) === "pinned_account_disabled"
+          ? t("timeline.projection.needsYou")
+          : t("timeline.projection.waiting"),
+      detail,
+      text: detail,
+    };
   }
   return {
     turnId,
-    label: CAPACITY_LIMIT_LABEL,
-    detail: CAPACITY_LIMIT_DETAIL,
-    text: `${CAPACITY_LIMIT_LABEL}. ${CAPACITY_LIMIT_DETAIL}`,
+    label: CAPACITY_LIMIT_LABEL(t),
+    detail: CAPACITY_LIMIT_DETAIL(t),
+    text: `${CAPACITY_LIMIT_LABEL(t)}. ${CAPACITY_LIMIT_DETAIL(t)}`,
   };
 }
 
-const CAPACITY_LIMIT_LABEL = "Usage limit reached";
-const CAPACITY_LIMIT_DETAIL =
-  "Try again after your quota resets, or switch to another model or provider.";
+const CAPACITY_LIMIT_LABEL = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
+const CAPACITY_LIMIT_DETAIL = (t: OpenGeniText) => t("timeline.projection.tryAgainAfterYourQuota");
 
 /** Lifecycle evidence that a capacity wait is over. */
 function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>): boolean {
@@ -3734,8 +4112,8 @@ function endsCapacityWait(event: SessionEvent, payload: Record<string, unknown>)
   }
 }
 
-function waitingOutcomeText(reason: string): string {
-  return /^waiting\b/i.test(reason) ? reason : `Waiting: ${reason}`;
+function waitingOutcomeText(t: OpenGeniText, reason: string): string {
+  return /^waiting\b/i.test(reason) ? reason : t("timeline.projection.waitingReason", { reason });
 }
 
 /**
@@ -3862,7 +4240,10 @@ function stringList(value: unknown): string[] {
  * ("**Checking the workspace**", then "**Inspecting guidance**"). Joined
  * as-is the parts run together and their bold markers collide ("****"), so a
  * new part that opens bold right after one that closed bold starts a new
- * paragraph. Ordinary token deltas are joined unchanged.
+ * paragraph. Ordinary token deltas are joined unchanged. The worker's
+ * write-time merge and the read-side coalescer apply the same rule
+ * (`reasoningDeltaSeparator` in @opengeni/events), so stored, coalesced and
+ * live fragments render identically.
  */
 function reasoningDeltaJoiner(previous: string, next: string): string {
   return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";

@@ -32,12 +32,16 @@ export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-ro
 export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
@@ -129,9 +133,30 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./timeline/learning-refusal-row";
+export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 export { StartupTimings } from "./timeline/startup-timings";
 export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
 export type { GenieLoadingOptions } from "./timeline/genie-loading";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+
+// Why a message can't start, with machine choice and recheck. Every word comes
+// from the message catalog (`sessionAdmission.*`). The headless state is
+// `useSessionStart` in `@opengeni/react/session`.
+export {
+  PersonalMachineExplanation,
+  SessionAdmissionNotice,
+  SessionMachineAccessNotice,
+  SessionMachineChoices,
+  SessionStartNotice,
+} from "./components/session-admission-notice";
+export type {
+  SessionAdmissionNoticeProps,
+  SessionMachineChoicesProps,
+  SessionStartNoticeProps,
+} from "./components/session-admission-notice";

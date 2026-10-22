@@ -4,7 +4,7 @@ import {
   acquireSharedTestDatabase,
   type OwnerMigratedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import type { Settings } from "@opengeni/config";
 import { CodexReloginRequired, isCodexAppsCredentialUnavailable } from "@opengeni/codex";
 import { sql } from "drizzle-orm";

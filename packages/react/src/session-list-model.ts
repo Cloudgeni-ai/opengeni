@@ -14,6 +14,7 @@ import {
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
+import { type OpenGeniText } from "./messages/runtime";
 
 /** A list row may be a compact page entry or a complete session response. */
 export type SessionListRow = Session | SessionListEntry;
@@ -63,12 +64,12 @@ export function resolveRenameSubmission(
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
 
-export const SESSION_GROUP_LABELS: Record<SessionRecencyGroup, string> = {
-  today: "Today",
-  yesterday: "Yesterday",
-  previous7: "Previous 7 days",
-  older: "Older",
-};
+export const SESSION_GROUP_LABELS = (t: OpenGeniText): Record<SessionRecencyGroup, string> => ({
+  today: t("sessionListModel.today"),
+  yesterday: t("sessionListModel.yesterday"),
+  previous7: t("sessionListModel.previous7Days"),
+  older: t("sessionListModel.older"),
+});
 
 /** The render order of recency groups, top → bottom. */
 export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
@@ -240,6 +241,7 @@ export type GroupedSessions<T extends SessionListRow = SessionListRow> = {
  * within each bucket. Empty groups are dropped.
  */
 export function groupSessionsForRail<T extends SessionListRow>(
+  t: OpenGeniText,
   sessions: T[],
   now: Date = new Date(),
 ): GroupedSessions<T> {
@@ -262,7 +264,7 @@ export function groupSessionsForRail<T extends SessionListRow>(
     if (list && list.length > 0) {
       grouped.push({
         group,
-        label: SESSION_GROUP_LABELS[group],
+        label: SESSION_GROUP_LABELS(t)[group],
         sessions: list,
       });
     }
@@ -270,7 +272,7 @@ export function groupSessionsForRail<T extends SessionListRow>(
   return { running, grouped };
 }
 
-export function relativeTimeLabel(value: string, now: Date = new Date()): string {
+export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = new Date()): string {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) {
     return "";
@@ -279,7 +281,8 @@ export function relativeTimeLabel(value: string, now: Date = new Date()): string
   if (diffSeconds < 45) {
     return "now";
   }
-  const minutes = Math.floor(diffSeconds / 60);
+  // 45 to 59 seconds reads as a minute, never "0m".
+  const minutes = Math.max(1, Math.floor(diffSeconds / 60));
   if (minutes < 60) {
     return `${minutes}m`;
   }
@@ -287,14 +290,22 @@ export function relativeTimeLabel(value: string, now: Date = new Date()): string
   if (hours < 24) {
     return `${hours}h`;
   }
-  const days = Math.floor(hours / 24);
+  // Past a day, count calendar days in the viewer's time zone, like the long
+  // form ("4 days ago"), so both read the same for the same chat.
+  const days = Math.max(1, localCalendarDaysBetween(new Date(timestamp), now));
   if (days < 7) {
     return `${days}d`;
   }
-  return new Date(timestamp).toLocaleDateString(undefined, {
+  return new Date(timestamp).toLocaleDateString(t.locale, {
     month: "short",
     day: "numeric",
   });
+}
+
+function localCalendarDaysBetween(from: Date, to: Date): number {
+  const start = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const end = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((end - start) / 86_400_000);
 }
 
 /** Codex subscription product ids are prefixed `codex/`. */
@@ -364,6 +375,7 @@ export function recentSessionModelPresentation<TCatalog extends ClientModel>(
  * its pins are removed before recombining the explicit pinned section.
  */
 export function recentSessionsForHome<T extends SessionListRow>(
+  t: OpenGeniText,
   sessions: T[],
   pinned: T[],
   limit = 6,
@@ -373,12 +385,33 @@ export function recentSessionsForHome<T extends SessionListRow>(
   // many sub-agents they would otherwise take every slot (they run often) and
   // push the person's own conversations out of the list.
   const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
-  const { running, grouped } = groupSessionsForRail(ordinary, now);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
   const topLevelPinned = pinned.filter((session) => !session.parentSessionId);
   return [...topLevelPinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(
     0,
     limit,
   );
+}
+
+/**
+ * The phone home screen's chats in two sections: every pinned conversation,
+ * then the most recently used others (running first, then by recency), so
+ * pins never push recent work off the screen. Sub-agent sessions are reached
+ * from their parent and are left out of both.
+ */
+export function homeSessionSections<T extends SessionListRow>(
+  t: OpenGeniText,
+  sessions: T[],
+  pinned: T[],
+  recentLimit = 15,
+  now: Date = new Date(),
+): { pinned: T[]; recent: T[] } {
+  const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
+  return {
+    pinned: pinned.filter((session) => !session.parentSessionId),
+    recent: [...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, recentLimit),
+  };
 }
 
 /** One project (workspace channel) and its sessions, as the web rail groups them. */

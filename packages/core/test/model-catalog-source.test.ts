@@ -8,7 +8,7 @@ import {
   type ModelCatalogDocument,
 } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { canonicalConfiguredModel } from "../src/domain/sessions";
 import {
   isWorkspaceGatewayCustomModelId,

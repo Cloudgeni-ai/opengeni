@@ -2,22 +2,22 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { CheckboxField } from "@/components/ui/field";
-import { InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SelectMenu } from "@/components/ui/select-menu";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { CheckboxField } from "@opengeni/react/ui/field";
+import { InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import {
   SettingDangerRow,
   SettingRow,
   SettingRowGroup,
   SettingRowSkeleton,
-} from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -26,9 +26,13 @@ import {
   type OrganizationAdminIdentity,
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
-} from "@/lib/organization-admin";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
-import type { OrganizationRecoveryOverview } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
+import type { OrganizationRecoveryOverview } from "@opengeni/react/app/types";
 
 type RecoveryState = {
   ownerKey: string;

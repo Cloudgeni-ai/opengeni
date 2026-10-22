@@ -6,7 +6,9 @@ import {
 } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { MemoryEventBus, testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { Hono } from "hono";
 import { acquireSearchTestDatabase } from "../../../packages/db/test/session-message-search-fixture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";

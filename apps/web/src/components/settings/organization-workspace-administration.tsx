@@ -1,5 +1,5 @@
-import { organizationAdministrationAccountIds } from "@/lib/permissions";
-export { organizationAdministrationAccountIds } from "@/lib/permissions";
+import { organizationAdministrationAccountIds } from "@opengeni/react/app/lib/permissions";
+export { organizationAdministrationAccountIds } from "@opengeni/react/app/lib/permissions";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   createContext,
@@ -11,12 +11,12 @@ import {
   type ReactNode,
 } from "react";
 
-import { LoadingPanel } from "@/components/common";
+import { LoadingPanel } from "@opengeni/react/app/components/common";
 import type {
   AccessContext,
   OrganizationAdministrationOverview,
   OrganizationWorkspaceAccess,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type OrganizationWorkspaceAdministration = {
   organizationId: string;

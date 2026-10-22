@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type { ConnectionMetadata, VaultErrorCode } from "@opengeni/contracts";
 import {
   getConnectionMetadata,
+  getProviderConnectionHomeWorkspace,
   loadConnectionCredentialForBroker,
   type Database,
 } from "@opengeni/db";
@@ -11,7 +12,12 @@ import {
   type VaultProvider,
   type VaultProviderErrorCode,
   type VaultProviderRegistry,
+  type VaultProviderAuthority,
 } from "@opengeni/vaults";
+import {
+  externalVaultProviderForConnection,
+  type ExternalVaultProviderFactories,
+} from "./external-provider-connections";
 
 /**
  * Provider error codes as vault API error codes (§10B.1.1). `provider_not_found`
@@ -100,9 +106,12 @@ export function onePasswordCredentialBundle(token: string): Record<string, unkno
 }
 
 /**
- * Decrypts the token of one 1Password connection the caller can see
- * (workspace-shared, or personal to `subjectId`). The token goes only to the
- * provider factory; it is never logged or returned to a client.
+ * Decrypts the token of one 1Password connection the caller can use from
+ * `workspaceId`: one in this workspace (shared, or personal to `subjectId`),
+ * or one added in another workspace that still serves vaults reached here
+ * (the caller's own personal connection, or a shared connection behind an
+ * organization vault). The token goes only to the provider factory; it is
+ * never logged or returned to a client.
  */
 export async function loadOnePasswordConnectionToken(
   db: Database,
@@ -114,12 +123,25 @@ export async function loadOnePasswordConnectionToken(
       "provider_auth_invalid",
       "The 1Password connection for this vault was removed or is not available to you; reconnect 1Password",
     );
-  const connection = await getConnectionMetadata(
+  let homeWorkspaceId = input.workspaceId;
+  let connection = await getConnectionMetadata(
     db,
     input.workspaceId,
     input.connectionId,
     input.subjectId,
   );
+  if (!connection) {
+    const home = await getProviderConnectionHomeWorkspace(
+      db,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    if (home && home !== input.workspaceId) {
+      homeWorkspaceId = home;
+      connection = await getConnectionMetadata(db, home, input.connectionId, input.subjectId);
+    }
+  }
   if (!connection || !isOnePasswordConnection(connection)) throw unavailable();
   if (connection.status !== "active") {
     throw new VaultProviderError(
@@ -129,7 +151,7 @@ export async function loadOnePasswordConnectionToken(
   }
   const personal = connection.subjectId !== null;
   const credential = await loadConnectionCredentialForBroker(db, settings, {
-    workspaceId: input.workspaceId,
+    workspaceId: homeWorkspaceId,
     connectionId: connection.id,
     providerDomain: ONEPASSWORD_PROVIDER_DOMAIN,
     kind: "api_key",
@@ -153,6 +175,8 @@ export function createWorkspaceVaultProviderRegistry(input: {
   subjectId: string | null;
   hostVaultProvider?: VaultProvider | null;
   onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
+  executionContext?: Pick<VaultProviderAuthority, "sessionId" | "turnId" | "attemptId" | "siteId">;
 }): VaultProviderRegistry {
   const factory = input.onePasswordVaultProvider;
   const host = input.hostVaultProvider;
@@ -180,5 +204,27 @@ export function createWorkspaceVaultProviderRegistry(input: {
         }
       : {}),
     ...(host ? { host: async () => host } : {}),
+    ...Object.fromEntries(
+      Object.entries(input.externalVaultProviders ?? {}).map(([provider, providerFactory]) => [
+        provider,
+        async (connectionId: string | null) => {
+          if (!connectionId || !providerFactory)
+            throw new VaultProviderError(
+              "provider_unavailable",
+              "This vault has no available connection.",
+            );
+          return externalVaultProviderForConnection({
+            db: input.db,
+            settings: input.settings,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            connectionId,
+            provider: provider as keyof ExternalVaultProviderFactories,
+            factory: providerFactory,
+            ...(input.executionContext ? { executionContext: input.executionContext } : {}),
+          });
+        },
+      ]),
+    ),
   });
 }

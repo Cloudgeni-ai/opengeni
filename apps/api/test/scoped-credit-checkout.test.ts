@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import Stripe from "stripe";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { registerBillingRoutes } from "../src/routes/billing";
 
 const accountId = "00000000-0000-4000-8000-000000000001";
@@ -108,7 +108,14 @@ beforeEach(() => {
   );
   restores.push(spyOn(sessionPrototype, "retrieve").mockImplementation(async () => session));
   app = new Hono();
-  registerBillingRoutes(app, { settings, db: {} } as core.ApiRouteDeps);
+  // Customer read/create/persist now shares a scoped account transaction even
+  // when the mocked existing customer means no provider creation is needed.
+  const transactionalDb = {
+    execute: async () => [{ account_id: accountId, workspace_id: "" }],
+    transaction: async (run: (tx: db.Database) => Promise<unknown>) =>
+      run(transactionalDb as unknown as db.Database),
+  };
+  registerBillingRoutes(app, { settings, db: transactionalDb } as core.ApiRouteDeps);
 });
 afterEach(() => {
   for (const spy of restores.splice(0).reverse()) spy.mockRestore();

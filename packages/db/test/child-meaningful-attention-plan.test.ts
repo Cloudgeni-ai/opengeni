@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { bootstrapWorkspace, createDb, createSession, withWorkspaceSubjectRls } from "../src";
@@ -143,7 +143,7 @@ test("generic and custom application-RLS plans bound cleanup tails and oversized
           walk(plan);
           expect(eventNodes).toHaveLength(1);
           const node = eventNodes[0]!;
-          expect(node["Index Name"]).toBe("session_events_meaningful_attention_v2_idx");
+          expect(node["Index Name"]).toBe("session_events_meaningful_attention_v3_idx");
           expect(node["Actual Rows"]).toBe(maximumRows);
           expect(Number(node["Rows Removed by Filter"] ?? 0)).toBe(0);
           expect(

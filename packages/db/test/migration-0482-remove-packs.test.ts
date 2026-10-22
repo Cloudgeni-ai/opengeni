@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   bootstrapWorkspace,
   changePreferenceRegistryScope,

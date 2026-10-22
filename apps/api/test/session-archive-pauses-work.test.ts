@@ -1,17 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { Hono } from "hono";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
   createSession,
   createSessionGoal,
   createWorkspace,
+  initializeSessionStartAtomically,
   migrate,
   type Database,
   type DbClient,
@@ -93,6 +91,16 @@ async function freshChat(
     createdBy: { kind: "subject", subjectId: OWNER },
   });
   if (status) await admin`update sessions set status = ${status} where id = ${session.id}`;
+  // Creation reserves an idle shell (#4330); a chat with work has its first turn admitted.
+  else
+    await initializeSessionStartAtomically(db, {
+      accountId: account!.id,
+      workspaceId: workspace.id,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
   // Archive is personal per-member state, so both people are workspace members.
   await admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id) values

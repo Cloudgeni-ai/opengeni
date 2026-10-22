@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { type Permission, signDelegatedAccessToken } from "@opengeni/contracts";
 import type { TranscriptionService } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { createTranscriptionService } from "../src/transcription/service";
 

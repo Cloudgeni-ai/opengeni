@@ -1,3 +1,4 @@
+import { t } from "@opengeni/react/app/lib/console-text";
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -10,24 +11,25 @@ import {
   MODEL_LIST_SEARCH_AT,
   ModelSearchField,
 } from "@/components/models/model-list";
-import { ModelsFormPage } from "@/components/models/models-ui";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Checkbox, TextInput } from "@/components/ui/field";
-import { Notice } from "@/components/ui/notice";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Checkbox, TextInput } from "@opengeni/react/ui/field";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   SettingNavRow,
   SettingRow,
   SettingRowGroup,
   SettingRowSkeleton,
-} from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { userErrorText } from "@/lib/api-error";
-import { modelUsesCredits, payerSummaryForModel } from "@/lib/model-policy";
-import { cn } from "@/lib/utils";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { modelUsesCredits, payerSummaryForModel } from "@opengeni/react/app/lib/model-policy";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import type { OrganizationModelDefaultsState } from "@/components/models/use-organization-model-defaults";
 
 /* ----------------------------------------------------------------------------
@@ -71,6 +73,7 @@ export type ModelPolicyScope =
     };
 
 const UNRESTRICTED = { allowedProviders: null, allowedModels: null } as const;
+const EMPTY_MODELS: WorkspaceModelCatalogModel[] = [];
 
 export function modelAccessPolicyDraft(
   policy: WorkspaceModelAccessPolicy,
@@ -216,91 +219,61 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
       ? { kind: "workspace", workspaceId: scopeOrWorkspaceId }
       : scopeOrWorkspaceId;
   const workspaceId = scope.workspaceId;
+  const organizationScope = scope.kind === "organization";
   const organizationDefaults = scope.kind === "organization" ? scope.defaults : null;
   const organizationPolicy = organizationDefaults?.defaults ?? null;
-  const organizationKey = organizationDefaults
-    ? JSON.stringify([
-        organizationDefaults.loading,
-        Boolean(organizationDefaults.error),
-        organizationPolicy?.allowedProviders,
-        organizationPolicy?.allowedModels,
-      ])
-    : "";
   const { client, refreshWorkspace } = useAppContext();
-  const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
-  const [saved, setSaved] = useState<ModelAccessPolicyDraft | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-  const loadGeneration = useRef(0);
-  const scopeRef = useRef({ client, mounted: false, workspaceId });
+  const policyQuery = useSharedQuery(
+    client,
+    ["model-settings", "workspace-access-policy", workspaceId],
+    () => client.getWorkspaceModelAccessPolicy(workspaceId),
+    { staleTimeMs: 300_000 },
+  );
+  const catalogQuery = useSharedQuery(
+    client,
+    ["model-settings", "workspace-catalog", workspaceId],
+    (signal) => client.getWorkspaceModelCatalog(workspaceId, { signal }),
+    { staleTimeMs: 300_000 },
+  );
+  const error =
+    catalogQuery.error ?? (organizationDefaults ? organizationDefaults.error : policyQuery.error);
+  const models = error ? EMPTY_MODELS : (catalogQuery.data?.models ?? EMPTY_MODELS);
+  const saved = useMemo(() => {
+    if (error || !catalogQuery.data) return null;
+    const policy = organizationScope ? organizationPolicy : policyQuery.data;
+    if (!policy) return null;
+    // The hosting workspace's verdicts include its credit switch. If that
+    // switch is unknown, keep exact-model conversion unavailable.
+    const hostCreditsOff =
+      policyQuery.error || !policyQuery.data ? true : policyQuery.data.allowCreditModels === false;
+    return modelAccessPolicyDraft(policy, models, organizationScope ? hostCreditsOff : undefined);
+  }, [
+    error,
+    catalogQuery.data,
+    organizationScope,
+    organizationPolicy,
+    policyQuery.data,
+    policyQuery.error,
+    models,
+  ]);
+  const loading =
+    policyQuery.loading || catalogQuery.loading || Boolean(organizationDefaults?.loading);
+  const scopeRef = useRef({ client, mounted: false, workspaceId, kind: scope.kind });
 
   const load = useCallback(async () => {
-    const generation = ++loadGeneration.current;
-    setLoading(true);
-    setError(null);
-    // The organization's list arrives with its defaults; wait for them.
-    if (organizationDefaults?.loading) return;
-    try {
-      const [policy, catalog, hostCreditsOff] = await Promise.all([
-        organizationDefaults
-          ? Promise.resolve<WorkspaceModelAccessPolicy | null>(
-              organizationPolicy && {
-                allowedProviders: organizationPolicy.allowedProviders,
-                allowedModels: organizationPolicy.allowedModels,
-              },
-            )
-          : client.getWorkspaceModelAccessPolicy(workspaceId),
-        client.getWorkspaceModelCatalog(workspaceId),
-        // The organization's list is shown through this workspace's catalog,
-        // whose verdicts include this workspace's own credit switch.
-        organizationDefaults
-          ? client
-              .getWorkspaceModelAccessPolicy(workspaceId)
-              .then((hosting) => hosting.allowCreditModels === false)
-              // Fail closed: an unknown switch hides "Choose exact models".
-              .catch(() => true)
-          : Promise.resolve(false),
-      ]);
-      if (generation !== loadGeneration.current) return;
-      setModels(catalog.models);
-      setSaved(
-        policy
-          ? modelAccessPolicyDraft(
-              policy,
-              catalog.models,
-              organizationDefaults ? hostCreditsOff : undefined,
-            )
-          : null,
-      );
-      if (!policy && organizationDefaults?.error) throw organizationDefaults.error;
-    } catch (caught) {
-      if (generation !== loadGeneration.current) return;
-      setModels([]);
-      setSaved(null);
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
-    } finally {
-      if (generation === loadGeneration.current) setLoading(false);
-    }
-    // Reload when the organization's saved list changes, not on every render.
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by the saved values
-  }, [client, workspaceId, organizationKey]);
+    await Promise.all([
+      invalidateSharedQueries(client, ["model-settings", "workspace-access-policy", workspaceId]),
+      invalidateSharedQueries(client, ["model-settings", "workspace-catalog", workspaceId]),
+    ]);
+  }, [client, workspaceId]);
 
   useEffect(() => {
-    scopeRef.current = { client, mounted: true, workspaceId };
-    void load();
+    const current = { client, mounted: true, workspaceId, kind: scope.kind };
+    scopeRef.current = current;
     return () => {
-      scopeRef.current.mounted = false;
-      loadGeneration.current += 1;
+      current.mounted = false;
     };
-  }, [client, load, workspaceId]);
-
-  useEffect(() => {
-    const changed = () => {
-      void load();
-    };
-    window.addEventListener("model-connections-changed", changed);
-    return () => window.removeEventListener("model-connections-changed", changed);
-  }, [load]);
+  }, [client, workspaceId, scope.kind]);
 
   /**
    * Saves, then re-reads. Resolves false when the page moved to another
@@ -308,13 +281,14 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
    */
   const save = useCallback(
     async (draft: ModelAccessPolicyDraft): Promise<boolean> => {
-      const saveScope = { client, workspaceId };
+      const saveScope = scopeRef.current;
       const isCurrentScope = () => {
         const current = scopeRef.current;
         return (
           current.mounted &&
-          current.client === saveScope.client &&
-          current.workspaceId === saveScope.workspaceId
+          current === saveScope &&
+          current.client === client &&
+          current.workspaceId === workspaceId
         );
       };
       try {
@@ -335,7 +309,8 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
           ? caught
           : new Error("Couldn't save Allowed models. Try again.", { cause: caught });
       }
-      if (!isCurrentScope()) return false;
+      // Invalidate even after navigation so a retained old scope cannot show
+      // the policy or catalog from before this successful save.
       await load();
       if (!isCurrentScope()) return false;
       toast.success("Allowed models saved");
@@ -352,13 +327,14 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
   const setAllowCreditModels = useCallback(
     async (allowCreditModels: boolean): Promise<boolean> => {
       if (organizationDefaults) return false;
-      const saveScope = { client, workspaceId };
+      const saveScope = scopeRef.current;
       const isCurrentScope = () => {
         const current = scopeRef.current;
         return (
           current.mounted &&
-          current.client === saveScope.client &&
-          current.workspaceId === saveScope.workspaceId
+          current === saveScope &&
+          current.client === client &&
+          current.workspaceId === workspaceId
         );
       };
       // The row only shows when this server reports (and so enforces) the switch.
@@ -366,7 +342,6 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
       // Pages that read the cached workspace settings (the Knowledge index
       // notice) follow the switch without a reload.
       void refreshWorkspace(workspaceId).catch(() => undefined);
-      if (!isCurrentScope()) return false;
       // The switch shows the saved value before the success toast. A failed
       // re-read shows on the page itself, never as a failed change.
       await load();
@@ -385,7 +360,7 @@ export function useModelAccessPolicy(scopeOrWorkspaceId: string | ModelPolicySco
     scope: scope.kind,
     models,
     saved,
-    loading: loading || Boolean(organizationDefaults?.loading),
+    loading,
     error,
     reload: load,
     save,
@@ -430,7 +405,7 @@ export function allowedModelsSource(
   if (state.scope !== "workspace" || !saved?.originalPolicy.source || !organizationName) {
     return null;
   }
-  return saved.follow ? `Following ${organizationName}.` : "Changed for this workspace.";
+  return saved.follow ? "Uses the default." : "Changed for this workspace.";
 }
 
 /** The Allowed models row on the Models page: opens its page. */
@@ -990,7 +965,9 @@ function ModelChecklist({
             creditsOff && modelUsesCredits(model);
           const changeable = providerModels.filter((model) => !lockedByCredits(model));
           const changeableSelected = changeable.filter((model) => selected.has(model.id)).length;
-          const payers = [...new Set(providerModels.map((model) => payerSummaryForModel(model)))];
+          const payers = [
+            ...new Set(providerModels.map((model) => payerSummaryForModel(t, model))),
+          ];
           return (
             <ModelGroup
               key={providerLabel}

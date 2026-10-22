@@ -2,14 +2,14 @@ import type { WorkspaceUsageResponse } from "@opengeni/sdk/usage-allowances";
 import { useEffect, useState } from "react";
 
 import { useOrganizationDirectory } from "@/components/organization/organization-directory";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Section } from "@/components/ui/section";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { useAppContext } from "@/context";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Section } from "@opengeni/react/ui/section";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import { formatBudget, formatCredits } from "@/lib/usage-allowances";
-import { cn } from "@/lib/utils";
+import { cn } from "@opengeni/react/app/lib/utils";
 import { loadWorkspaceBudgetRows, type WorkspaceBudgetRow } from "./workspace-budget-rows";
 
 // One fact column: on a phone the list folds a single fact under the name,

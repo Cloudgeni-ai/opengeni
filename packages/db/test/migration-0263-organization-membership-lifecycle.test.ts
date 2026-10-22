@@ -5,7 +5,7 @@ import {
   acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {

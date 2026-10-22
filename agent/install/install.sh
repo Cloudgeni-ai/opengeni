@@ -4,7 +4,7 @@
 # Opengeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
-#   curl -fsSL https://get.opengeni.ai/install.sh | sh
+#   curl -fsSL https://app.opengeni.ai/install.sh | sh
 #
 # READ THIS BEFORE PIPING IT TO A SHELL. This script downloads the
 # `opengeni-agent` binary for your OS/arch, VERIFIES it two independent ways
@@ -21,7 +21,7 @@
 #
 # Environment overrides (all optional):
 #   OPENGENI_INSTALL_BASE_URL  Release asset base URL. Default:
-#                              https://get.opengeni.ai. Point this at a local
+#                              https://app.opengeni.ai. Point this at a local
 #                              mock release dir (file:// or http://localhost)
 #                              to test the verify flow offline.
 #   OPENGENI_AGENT_VERSION     Pin a version (e.g. 1.2.3). Default: "latest",
@@ -105,7 +105,7 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 # standalone install. The OPENGENI_INSTALL_BASE_URL env override always wins.
 # Keep this line's shape stable: apps/api/src/routes/install.ts rewrites it by
 # exact match (DEFAULT_BASE_REWRITES).
-OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
+OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
 # Default connection origin. A deployed control plane rewrites this marker next
@@ -509,9 +509,9 @@ asset_url() {
 }
 
 # The connected runtime is a coherent unit: the Rust control agent, browserd,
-# the pinned agent-browser driver, and the native computer helper must come from
-# the same immutable release. Legacy releases have no companion assets; a new
-# release may provide either all three or none, never a partially mixed runtime.
+# and the native computer helper must come from the same immutable release.
+# Legacy releases have no companion assets; a new release may provide either
+# both or none, never a partially mixed runtime.
 interaction_target_from_agent_asset() {
   printf '%s' "$1" | sed 's/^opengeni-agent-//; s/\.exe$//'
 }
@@ -552,17 +552,15 @@ stage_interaction_companions() {
   _companion_target="$(interaction_target_from_agent_asset "$1")"
   _companion_dir="$TMPDIR_OG/interaction-runtime"
   _browserd_asset="opengeni-browserd-$_companion_target"
-  _agent_browser_asset="opengeni-agent-browser-$_companion_target"
   _computer_native_asset="opengeni-computer-native-$_companion_target"
   # browserd is the single presence marker. Releases before the coherent runtime
   # have none of these files. Once browserd exists, every companion is required
   # and verified below; a transient/missing second asset fails closed instead of
-  # being misclassified by three independent availability probes.
+  # being misclassified by independent availability probes.
   release_asset_available "$_browserd_asset" || return 1
   rm -rf "$_companion_dir"
   mkdir -p "$_companion_dir" || die 2 "cannot stage the interaction runtime"
   download_verified_asset "$_browserd_asset" "$_companion_dir/opengeni-browserd"
-  download_verified_asset "$_agent_browser_asset" "$_companion_dir/agent-browser"
   download_verified_asset "$_computer_native_asset" "$_companion_dir/opengeni-computer-native"
   printf '%s' "$_companion_dir"
 }
@@ -573,7 +571,7 @@ install_interaction_companions() {
   [ -n "$_runtime_source" ] || return 0
   mkdir -p "$_runtime_destination" \
     || die 2 "cannot create interaction runtime directory $_runtime_destination"
-  for _runtime_name in opengeni-browserd agent-browser opengeni-computer-native; do
+  for _runtime_name in opengeni-browserd opengeni-computer-native; do
     _runtime_stage="$_runtime_destination/.$_runtime_name.new.$$"
     cp "$_runtime_source/$_runtime_name" "$_runtime_stage" \
       || die 2 "cannot stage $_runtime_name in $_runtime_destination"
@@ -927,7 +925,6 @@ install_macos_prebuilt_bundle() {
   for _required in \
     "$_staged_app/Contents/MacOS/opengeni-agent" \
     "$_staged_app/Contents/Helpers/opengeni-browserd" \
-    "$_staged_app/Contents/Helpers/agent-browser" \
     "$_staged_app/Contents/Helpers/opengeni-computer-native"
   do
     [ -x "$_required" ] || die 3 "the app bundle is missing executable $(basename "$_required")"
@@ -1001,7 +998,7 @@ main() {
     log "verified the complete version-coherent browser/computer runtime"
   else
     # Compatibility with releases predating the interaction runtime. A future
-    # release that publishes one helper publishes all three or fails above.
+    # release that publishes one helper publishes both or fails above.
     interaction_runtime=""
     log "this release predates the packaged browser/computer runtime"
   fi

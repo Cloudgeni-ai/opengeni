@@ -469,6 +469,13 @@ function webRules(
   const line = tone === "muted" ? 24 : 28;
   return {
     ...renderRules,
+    // Every run of text is selectable, as on the web: a long press selects
+    // words (and, inside a timeline message, offers Add note).
+    textgroup: (node, children, _parent, styles) => (
+      <Text key={node.key} selectable style={styles.textgroup}>
+        {children}
+      </Text>
+    ),
     // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
     list_item: (node, children, parent, styles, inheritedStyles = {}) => {
       if (parent.some((entry: { type: string }) => entry.type === "bullet_list")) {

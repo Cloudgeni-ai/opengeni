@@ -9,7 +9,7 @@
  */
 import { beforeEach, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 let probes: Array<{ provider: string; scope: unknown }>;
 let personalProbes: Array<{ provider: string; turn: unknown }>;

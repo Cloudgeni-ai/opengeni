@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser, type Page } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -351,14 +352,29 @@ describe("readable timeline browser regression", () => {
         await page.waitForTimeout(600);
         const result = await page.evaluate(() => {
           const driver = window.exchangeFoldHarness!;
+          const answerTop = () =>
+            [...document.querySelectorAll("[data-og-wide-table-message]")]
+              .at(-1)
+              ?.getBoundingClientRect().top ?? Number.NaN;
+          const before = answerTop();
           driver.show(driver.total, true);
           const animation = document.getAnimations().find((a) => a.id === "og-timeline-settlement");
           const started = !!animation;
+          const moved = Math.abs(answerTop() - before) >= 1;
           const oldScroller = document.querySelector("[data-og-timeline-scroller]")!;
           driver.switchSession();
-          return { started, state: animation?.playState, detached: !oldScroller.isConnected };
+          return {
+            started,
+            moved,
+            state: animation?.playState,
+            detached: !oldScroller.isConnected,
+          };
         });
-        expect(result).toEqual({ started: true, state: "idle", detached: true });
+        expect(result.detached).toBe(true);
+        // Settlement motion runs only when folding moved the answer; a session
+        // switch then cancels it. When nothing moved there is nothing to run.
+        if (result.started) expect(result.state).toBe("idle");
+        else expect(result.moved).toBe(false);
         await page.evaluate(() => window.exchangeFoldHarness!.show(3));
         await nextPaint(page);
         expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
@@ -1273,7 +1289,7 @@ describe("readable timeline browser regression", () => {
           expect(
             await page.locator("[data-og-fold-content] [data-og-wide-table-message]").count(),
           ).toBe(3);
-          expect(await header.textContent()).toContain("26 steps");
+          expect(await header.textContent()).toContain("Worked for");
           await capture("expanded");
         } finally {
           await page.context().close();
@@ -1338,7 +1354,7 @@ describe("readable timeline browser regression", () => {
           expect(geometry.hit).toBe(true);
           expect(geometry.following).toBe("false");
           expect(geometry.overflow).toBe(false);
-          expect(await header.textContent()).toContain("42 steps");
+          expect(await header.textContent()).toContain("Worked for");
           expect(
             await page.locator('[data-og-recorded-outcome="wait"] summary').textContent(),
           ).toContain("Waiting for 2 agents");

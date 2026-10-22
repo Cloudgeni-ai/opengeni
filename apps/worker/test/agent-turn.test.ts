@@ -55,7 +55,7 @@ import {
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { guardedMcpFetch } from "@opengeni/runtime/mcp-network";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
@@ -162,6 +162,9 @@ import {
 } from "../src/sandbox-resume";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
@@ -2595,6 +2598,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
@@ -2670,6 +2674,7 @@ describe("model call usage observability", () => {
       provider: "codex-subscription",
       providerApi: "responses",
       model: "codex/gpt-5.6",
+      purpose: "main",
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
@@ -2720,6 +2725,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-duplicate",
       usage: { usage: { inputTokens: 10, outputTokens: 1 } },
     });
@@ -2760,6 +2766,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-write",
       usage: responseUsage,
     });
@@ -2822,6 +2829,7 @@ describe("model call usage observability", () => {
       provider: "codex-subscription",
       providerApi: "responses" as const,
       model: "codex/gpt-5.6-sol",
+      purpose: "main" as const,
       sourceKey: "aggregate-1",
       usage: { usage: aggregate },
       emittedSourceKeys: sourceKeys,
@@ -2890,6 +2898,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-malformed",
       usage: responseUsage,
     });
@@ -3541,6 +3550,16 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(toolsSource).not.toContain("getWorkspaceGrant");
     expect(toolsSource).toMatch(
       /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
+    );
+  });
+
+  test("resuming journaled work starts deferred preparation before joining it", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const resume = source.slice(source.indexOf("const codemodeOperations = await"));
+    expect(resume).toMatch(
+      /async \(\) => \{\s*eventing\.preparedTools\?\.startDeferredPreparation\?\.\(\);\s*await eventing\.toolPreparationReady;/,
     );
   });
 
@@ -4797,6 +4816,30 @@ describe("sandbox file materialization note", () => {
     expect(requiresSignedFileResourceDownloads(modalHome, "none")).toBe(false);
   });
 
+  test("a backend that cannot mount object storage always gets signed downloads", () => {
+    // The compute fabric applies no mount entries, so a mounted attachment would
+    // never appear at its path. Every store must use signed delivery there, and
+    // that delivery keeps the box eager so the file is in place before the model.
+    for (const objectStorageBackend of ["s3-compatible", "azure-blob", "aws-s3", "gcs"] as const) {
+      const computeHome = testSettings({ sandboxBackend: "compute", objectStorageBackend });
+      expect(requiresSignedFileResourceDownloads(computeHome)).toBe(true);
+    }
+    const computeHome = testSettings({
+      sandboxBackend: "compute",
+      objectStorageBackend: "s3-compatible",
+    });
+    expect(
+      sandboxEstablishPolicyDecision({
+        lazyEnabled: true,
+        machinePrimary: false,
+        sandboxBackend: "compute",
+        hasRunCredentialResolver: false,
+        generatedVideoFileCount: 0,
+        hasSignedFileResources: requiresSignedFileResourceDownloads(computeHome),
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
+  });
+
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
       {
@@ -5759,7 +5802,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "An upstream service could not be reached. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
@@ -5785,6 +5828,44 @@ describe("transient provider error classifier", () => {
     ]) {
       expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
       expect(agentRunFailurePayload(new Error(nearMatch))).toEqual({ error: nearMatch });
+    }
+  });
+
+  test("a dropped upstream socket recovers the same turn even when wrapped", () => {
+    // Bun's exact fetch error when an upstream closes an open connection.
+    const message =
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+    const dropped = Object.assign(new TypeError(message), { code: "ECONNRESET" });
+    const recovery = {
+      error:
+        "An upstream service could not be reached. The same turn will retry after a short delay.",
+      code: "upstream_connectivity_unavailable",
+      retryable: true,
+    };
+    for (const error of [
+      dropped,
+      // A wrapper that keeps the text but moves the code to `cause`.
+      new Error(message, { cause: dropped }),
+      // A wrapper that re-creates the error from its message alone.
+      new Error(message),
+    ]) {
+      expect(isTransientProviderError(error)).toBe(true);
+      expect(agentRunFailurePayload(error)).toEqual(recovery);
+    }
+    // A wrapper with its own text still recovers through the transport code.
+    const runner = new Error("Model stream failed", {
+      cause: new Error("read failed", { cause: dropped }),
+    });
+    expect(isTransientProviderError(runner)).toBe(true);
+    expect(agentRunFailurePayload(runner)).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    // HTTP status stays authoritative over a transport code or text in the chain.
+    const rejected = Object.assign(new Error(message, { cause: dropped }), { status: 400 });
+    expect(isTransientProviderError(rejected)).toBe(false);
+    for (const nearMatch of [`Tool failed: ${message}`, `${message} Unexpected suffix`]) {
+      expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
     }
   });
 
@@ -6218,7 +6299,7 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
-  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", async () => {
     const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
     const refreshCodexToken = mock(async () => ({
       accessToken: "codex-token-2",
@@ -6248,7 +6329,12 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
-    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
+    // The main dispatch checks still run for title requests, scoped as a title dispatch.
+    await titleCodexContext.beforeProviderDispatch?.({
+      requestId: "title-request",
+      transportAttempt: 1,
+    });
+    expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
     expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
@@ -6283,10 +6369,10 @@ describe("transient provider error classifier", () => {
     expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
   });
 
-  test("surfaces a stalled hosted-search continuation without unsafe replay", () => {
+  test("classifies a stalled hosted-search continuation as an interrupted stream", () => {
     expect(agentRunFailurePayload(new XaiSubscriptionHostedToolContinuationError())).toEqual({
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     });
@@ -6350,7 +6436,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("surfaces a stalled SuperGrok stream with bounded correlation facts and no replay", () => {
+  test("surfaces a stalled SuperGrok stream with bounded correlation facts", () => {
     expect(
       agentRunFailurePayload(
         new XaiSubscriptionStreamIdleTimeoutError(
@@ -6362,8 +6448,7 @@ describe("transient provider error classifier", () => {
         ),
       ),
     ).toEqual({
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: true,

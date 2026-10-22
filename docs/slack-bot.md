@@ -142,6 +142,7 @@ oauth_config:
       - im:history
       - mpim:history
       - users:read
+      - files:read
       - im:write
       - chat:write
 settings:
@@ -453,7 +454,7 @@ App Home stays home, so it lists the installation workspace's tasks rather than 
 - File and canvas reads are limited to channels where the bot is already a member. Results expose bounded file metadata and text content, never Slack private-file URLs or credentials.
 - For a PNG, JPEG, or WebP file ID in thread context, `slack_bot_file_content` returns fully decoded, validated image content on explicit request (up to 640 KiB, directly shared to a non-shared channel). Larger files return `image_result_too_large` rather than failing at the model's 1 MiB result limit. This does not import surrounding attachments into the session or make them available to other sessions. Text files still use bounded pages. Unsupported image formats and Slack Connect channels remain unavailable through this path.
 
-The generic first-party MCP exposes `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_delete_message`. `slack_bot_search` remains a reserved contract name but is not registered: Real-time Search needs a trusted server-owned interaction token in addition to eligible scopes. Scheduled runs whose task has a person-chosen channel also get `slack_bot_prepare_message` and `slack_bot_send_prepared_message` (see [Scheduled tasks](#scheduled-tasks)). Ordinary default sessions can list bot channels and prepare/send a bot message to an explicit channel. Other connector-wide tools remain explicit-only. Existing accepted selections are unchanged. `slack_bot_post_message` remains an accepted stored tool-name value for backward-compatible session and delegated-token parsing, but it is deliberately not registered on the generic model-facing MCP: a caller UUID, tool-call ID, turn ID, attempt ID, generation, request content, or JSON-RPC ID does not prove one durable logical delivery across model operations. A session started from a Slack mention, command, DM, or shortcut always freezes the seven read-only list/history/thread/user/file tools on top of its base selection so it can retrieve bounded context on demand; it does not expose deletion, because the durable interaction pump owns replies to the originating thread. Internal interaction delivery and governed Memory publication call the server-owned Slack client directly with operation IDs reserved in their durable ledgers. Threaded internal posts bind the parent message timestamp and return it in the result so placement can be verified. Message deletion accepts an operation UUID, the exact channel ID, and the exact message timestamp; Slack permits the bot token to delete only messages authored by that bot. Calls require `connections:read` in the target workspace; the connection ID is optional when exactly one eligible bot principal is available. Eligible bots are local installations or explicitly organization-shared installations. That selection reads workspace connection metadata and collapses exact-principal duplicates, it does NOT consult the installation binding ledger: the ledger is the team-to-installation authority used by the inbound event edge, not the outbound tool selector. Legacy exact-principal duplicate connection rows are non-authoritative. A scheduled session can use only its immutable selected bot connection ID.
+The generic first-party MCP exposes `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_delete_message`. `slack_bot_search` remains a reserved contract name but is not registered: Real-time Search needs a trusted server-owned interaction token in addition to eligible scopes. Scheduled and interactive sessions retain their selected `slack_bot_prepare_message` and `slack_bot_send_prepared_message` tools (see [Scheduled and interactive bot posting](#scheduled-and-interactive-bot-posting)). Both can list bot channels and prepare/send a bot message to an explicit channel. Other connector-wide tools remain explicit-only. Existing accepted selections are unchanged. `slack_bot_post_message` remains an accepted stored tool-name value for backward-compatible session and delegated-token parsing, but it is deliberately not registered on the generic model-facing MCP: a caller UUID, tool-call ID, turn ID, attempt ID, generation, request content, or JSON-RPC ID does not prove one durable logical delivery across model operations. A session started from a Slack mention, command, DM, or shortcut always freezes the seven read-only list/history/thread/user/file tools on top of its base selection so it can retrieve bounded context on demand; it does not expose deletion, because the durable interaction pump owns replies to the originating thread. Internal interaction delivery and governed Memory publication call the server-owned Slack client directly with operation IDs reserved in their durable ledgers. Threaded internal posts bind the parent message timestamp and return it in the result so placement can be verified. Message deletion accepts an operation UUID, the exact channel ID, and the exact message timestamp; Slack permits the bot token to delete only messages authored by that bot. Calls require `connections:read` in the target workspace; the connection ID is optional when exactly one eligible bot principal is available. Eligible bots are local installations or explicitly organization-shared installations. That selection reads workspace connection metadata and collapses exact-principal duplicates, it does NOT consult the installation binding ledger: the ledger is the team-to-installation authority used by the inbound event edge, not the outbound tool selector. Legacy exact-principal duplicate connection rows are non-authoritative. A legacy saved bot connection is a default; an explicit connection selection uses the ordinary live workspace authority.
 
 Slack AI huddle notes are canvases. Sharing that canvas into a channel where the bot is a member lets Opengeni read the notes and exposes the associated `huddleTranscriptFileId`. For transcript content, Opengeni requests the expanded `files.info` projection with `include_transcription=true` and reads the returned `huddle_transcription` object from the transcript or parent canvas. If Slack omits that projection and redirects the private download to an interactive user page, Opengeni reports `huddle_transcript_requires_participant_access` and never treats Slack web-client HTML as transcript content.
 
@@ -467,60 +468,104 @@ Rolling migration `0224_slack_post_outcome_reconciliation.sql` installs the post
 
 Each deletion also requires an `operationId` UUID. Opengeni durably binds it to the tenant, initiating subject or scheduler principal, exact connection, `slack_bot_delete_message` tool, channel, timestamp, and protected request digest before `chat.delete`. Completed retries replay the stored result. Concurrent retries observe the live claim. If the process or response is lost after provider admission, the row becomes outcome-unknown and the retry first reconciles the exact Slack message through `chat.getPermalink`: an absent message completes as already deleted, while a still-present message permits one new delete attempt. Opengeni never blindly sends `chat.delete` twice.
 
-## Organization bot access and ordinary chats
+## Bot availability and workspace settings
 
-An organization administrator can enable **Use the bot across the organization** in the installation workspace's Slack settings. The setting shares only the verified bot, with authorized workspaces in the same organization. It grants no personal-account access, inbound workspace route, channel membership, or session visibility. It is off for existing installations until explicitly enabled. Disabling it immediately fences further provider requests from other workspaces; re-enabling creates a new sharing generation.
+The Slack capability page lists **Opengeni bot** installations separately from
+**Your accounts**. Each bot row names its Slack workspace. Opening it keeps the
+current Opengeni workspace selected while requests use the installation's actual
+home workspace and the viewer's normal permissions. Installation discovery never
+grants administration of an otherwise inaccessible home workspace.
 
-`GET /v1/workspaces/:workspaceId/connections/slack-bot/available` returns credential-free bot metadata for the authorized target workspace. `PUT /v1/workspaces/:workspaceId/connections/:connectionId/slack-bot/organization-access` changes a local installation's organization sharing after canonical organization-administrator authentication and a live database authority check. The organization inventory does not grant installation administration in its home workspace.
+An organization administrator chooses **Available in Opengeni**: the installation
+workspace, selected workspaces, or all workspaces in the organization. Sharing
+grants only bot-tool access, never personal credentials, channel membership,
+inbound routing, or session visibility. Existing installations retain their saved
+sharing setting. The installation workspace retains its own local connection.
 
-In an ordinary chat, use `slack_bot_list_channels`, then `slack_bot_prepare_message` with `channelId`, text, optional thread timestamp and an explicit `connectionId` when multiple bot principals exist. Send only its returned `messageId` with `slack_bot_send_prepared_message`; reuse that ID for retries. The channel must be active, unshared and already include the bot. These tools use the bot token and never substitute a personal Slack connector. Old chats that froze a smaller tool selection need the bot tools enabled through ordinary human configuration; an accepted turn is never widened.
+`GET /v1/workspaces/:workspaceId/connections/slack-bot/available` returns
+credential-free bot metadata for an authorized target workspace. The installation's
+`slack-bot/organization-access` GET/PUT endpoints read and change sharing after
+normal workspace permission and canonical organization-administrator checks.
+`workspaceIds: null` means all workspaces; an array narrows sharing to that set.
+Omitting `workspaceIds` preserves the saved selection for older clients. Changing
+availability advances its generation and fences previously prepared unsent work.
 
-## Scheduled tasks
+**Work started from Slack → Channels** separately chooses the Opengeni workspace
+where an incoming channel conversation starts work. It does not grant outbound
+posting access. Connection-scoped knowledge settings are under **More settings**. Workspace-wide
+reaction, notice and publication settings live under **Workspace automation** on
+the inventory, outside any selected bot. Publication names the configured Slack
+workspace and channel; reaction selection groups locally installed bots.
 
-A scheduled task can post to **one** Slack channel as the Opengeni workspace bot. A person chooses that channel when setting up the task; the agent can never choose or change it. Without a chosen channel, scheduled Slack posts use the personal Slack Web API bridge and user grant, which reaches a scheduled occurrence only through the task's immutable frozen personal delegation snapshot; it is never inherited as a workspace capability and never inferred from the task's service initiator.
+## Scheduled and interactive bot posting
 
-### Choosing the channel
+Schedules use the same selected bot capabilities as interactive chats. Instructions
+choose whether to post and where; no schedule-specific Post to Slack setting is
+required. This applies to existing-chat occurrences, generated chats, reusable
+chats and child work, under their accepted capability selection. Creating a
+schedule never adds tools excluded by its creator or deployment ceiling.
 
-In the schedule editor, **Post to Slack** (under **Advanced**) lists the active channels the installed bot already belongs to that are not shared with another organization. Invite the bot to a channel in Slack to make it appear. The task stores the bot's exact connection UUID in `agentConfig.slackBotConnectionId` and the channel ID in `agentConfig.slackBotChannelId`. A task can use a local bot or one an organization administrator explicitly shared with the organization. The bot token and delivery ledger remain in its installation workspace; personal accounts are never borrowed.
+Use `slack_bot_list_channels`, then `slack_bot_prepare_message` with `channelId`,
+text, optional thread timestamp and an explicit `connectionId` when multiple bot
+principals exist. Send its returned `messageId` with
+`slack_bot_send_prepared_message`; reuse that ID for retries. These tools always
+use the verified bot and never substitute a personal Slack account. The channel
+must be active, unshared and already include the bot. Older chats with a smaller
+frozen tool selection still need the tools enabled through normal configuration;
+an accepted turn is never widened.
 
-Choosing or changing the channel, or moving it to another bot connection, requires:
+Legacy schedules retain their saved `agentConfig.slackBotConnectionId` and
+`slackBotChannelId` as defaults. Omitting both destination arguments uses the
+legacy task-bound prepare/send path. Explicit destinations use ordinary bot
+capability checks. The legacy configuration API retains its original human-only
+validation, but new agent-created schedules do not need those fields. Existing
+paused schedules stay paused.
 
-- a signed-in person (`human_session` with verified context). An agent attempt, a service, an API key, or a request carrying service provenance gets 403, so `scheduled_tasks_create` and `scheduled_tasks_update` cannot set or change it;
-- `connections:write` in the workspace, besides `scheduled_tasks:manage`;
-- a live check with the bot's token that the bot is a member and the channel is active and unshared (`GET /v1/workspaces/:workspaceId/scheduled-task-slack-channels` lists the eligible channels).
+Prepared messages bind the exact chat, optional legacy task, bot connection and
+version, sharing generation, channel and text. The FORCE-RLS
+`opengeni_private.scheduled_slack_bot_messages` table is inaccessible directly to
+the runtime role. Migration `0864_scheduled_bot_capability.sql` removes the
+scheduler-origin rejection from ordinary preparation and adds selected-workspace
+sharing while preserving these boundaries. Every physical request rechecks live
+bot and sharing authority. Legacy task-bound messages additionally recheck the
+saved task destination. Completed sends replay their recorded outcome; uncertain
+sends reconcile through the existing operation ledger rather than blindly repost.
 
-Keeping the saved channel while editing other task fields needs no new proof, and anyone who can edit the task can clear it, including a task that continues the same chat. The channel requires a bot connection and a task that starts its own chats: a task that continues an existing chat cannot post. A chat's tools are fixed when it is created, so a task that continues the same chat can choose a channel after that chat exists only if the chat was created with the posting tools; otherwise recreate the task.
+## Multiple Slack workspaces and personal accounts
 
-### How a run posts
+Installing a different Slack workspace creates a separate bot connection.
+Reinstalling the exact Slack team, bot ID and bot-user principal updates that
+connection in place. Existing task references do not move. A conflicting bot
+principal, cross-organization move or quarantined installation still requires an
+administrator-led repair.
 
-A generated run of a task with a chosen channel gets the two posting tools under the deployment's allowed tool ceiling. Scheduled calls must omit the ordinary-chat channel and connection arguments:
+**Add account** creates a personal connection for the selected Slack team and user.
+**Reconnect** targets one existing connection and requires that same verified
+identity. A concurrent or repeated Add for the same identity fails without
+replacing its credentials. OAuth failure settles the setup attempt so the UI can
+show the actionable error. Identity labels use verified user and Slack workspace
+metadata; older grants may retain a fallback label until reconnected.
 
-1. `slack_bot_prepare_message` saves the text (and optionally a `threadTimestamp` for a reply in that channel) as an immutable prepared message and returns its server-generated `messageId`. Nothing is sent.
-2. `slack_bot_send_prepared_message` sends that saved message, exactly as saved. The `messageId` is also the Slack post operation ID and `client_msg_id`, so a retry after an interrupted or unclear send reconciles the original post through the normal post ledger instead of posting twice.
-
-Both tools re-read the task on every call and refuse unless the session is the scheduler-created run of that task, the task still names the run's bot connection, and a channel is chosen. A prepared message is sent only if the task still names the same channel and the bot connection version is unchanged. So a person clearing or changing the channel stops or redirects future posts immediately, and never redirects an already prepared message. Replaying a send that Slack already confirmed still returns the original result, and a send whose earlier attempt was interrupted is reported as possibly posted rather than as unsent. Posts also require an active, unshared, bot-member channel at send time. Scheduled child work never qualifies for arbitrary-channel posting. An existing-chat scheduled occurrence is also refused by its exact accepted schedule authority. Ordinary human-started chats can prepare an explicit channel message with these same tools.
-
-Prepared messages live in the FORCE-RLS `opengeni_private.scheduled_slack_bot_messages` table. The runtime role has no table access. The organization-aware prepare/read capabilities bind the preparing chat, optional task, home connection/version, sharing generation, channel and exact text. Historical local prepared messages remain readable. Rolling migration `0622_organization_slack_bot_delivery.sql` expands the store introduced by `0530_scheduled_slack_bot_messages.sql`. Known completed messages replay their saved outcome even after sharing is removed; unsent messages cannot survive revocation and re-enabling. Every physical request rechecks bot and sharing authority, and every scheduled physical post rechecks the person-chosen destination.
-
-### Bot connection binding
-
-The task stores its exact bot connection UUID. At each fire, the worker revalidates that the row is active, workspace-shared, is local or currently shared with the task workspace's organization, has the verified Opengeni bot role, and retains the exact required scopes before starting model work.
-
-Installing a different Slack team creates a separate connection and does not rebind existing scheduled tasks. Reinstalling the exact same Slack team, bot ID, and bot-user principal updates the existing connection in place so explicit task references remain stable. The same Slack team cannot be installed with a different bot principal or into another Opengeni workspace; that conflict fails closed and requires an administrator-led forward fix.
-
-Publication configuration remains stricter than ambient routing: an accepted revision freezes one active verified connection plus its exact Slack team and channel. If that connection or binding becomes stale, revoked, quarantined, or mismatched, the stale revision cancels; it never follows a replacement connection or newly resolved workspace route.
+Personal tool approvals use the selected live account. An absent or disconnected
+account shows a connection-required state instead of a tool-permission failure.
+Account lifecycle changes refresh the permissions view; genuine discovery errors
+retain their retry action.
 
 ## Disconnect, uninstall, revocation, and reconnect
 
-The Plugins Slack panel keeps the team name and connection status visible. **Where work starts** explains channel and DM routing when deployment routing is enabled and opens the existing channel picker. **More options** contains channel access, workspace settings, reconnect/disconnect, and expandable technical connection details. Disconnect confirmation names its effect on the whole installation, including channels routed to other workspaces; historical tasks remain in place.
+Slack OAuth failures remain visible across reloads until dismissed or replaced by
+a successful callback. Outcome URL parameters are display hints, never authority.
+Disconnecting a personal account disables that exact subject-owned row; removing
+a bot disables that installation. Neither revokes the grant at Slack. Provider
+revocation or uninstall remains a separate Slack administrator action.
 
-When the current workspace has no bot connection or installation binding, the web client checks installation metadata in other same-organization workspaces for which the viewer has `connections:read`. Each read uses that workspace's normal protected API; an active binding is shown as connected only when the matching connection's verified identity and version also agree. The result links to the original workspace's Slack settings rather than copying credentials or offering another setup. Discovery does not expose inaccessible workspaces, grant installation management, or create organization-wide bot-tool authority. A failed discovery offers Retry instead of claiming no installation exists. This installation-management discovery is distinct from the explicit organization bot-tool inventory: a shared bot can be used from an authorized target workspace without granting access to installation management in its home workspace.
-
-Slack OAuth outcomes open the Slack panel automatically. A failed callback remains visible across reloads through its bounded URL outcome until dismissed or replaced by a successful callback. Dismissal removes only Slack outcome parameters. These parameters are display hints, never repair authority. Conflicts and lost permissions explain the next owner/admin action instead of inviting repeated installation attempts. Cross-organization moves and quarantined installation recovery still require an administrator-led forward fix; this panel does not advertise an unsupported self-service transfer.
-
-Disconnecting a personal account API MCP bridge connection in Opengeni disables that exact subject-owned row and does not revoke the grant at Slack. Disconnecting the bot likewise disables only the bot row; it does not uninstall the Slack app or affect user-account OAuth. To remove provider access, an authorized Slack administrator must revoke or uninstall the app in Slack as a separate action.
-
-Slack authentication errors that prove invalid, inactive, expired, or revoked credentials mark the connection for reinstall. Provider transport failures, HTTP 5xx responses, missing channel membership, missing scope, or a missing channel do not falsely poison the credential. Reinstall preserves an existing row only after exact principal validation; otherwise use **Install another Slack workspace/bot** and explicitly review scheduled tasks.
+Permanent invalid, inactive, expired or revoked credentials require reconnect.
+Transport errors, HTTP 5xx, missing channel membership, missing scope or a missing
+channel do not falsely poison the credential. Disconnect confirmation names the
+whole-installation effect, including channels routed to other Opengeni workspaces.
+Publication configuration remains stricter than ambient routing: an accepted
+revision freezes the exact connection, Slack team and channel and never follows
+a replacement connection or a changed route.
 
 ## Audit evidence
 

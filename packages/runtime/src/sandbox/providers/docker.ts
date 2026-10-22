@@ -5,20 +5,37 @@ import {
 } from "@openai/agents/sandbox/local";
 import { NoopSnapshotSpec } from "@openai/agents/sandbox";
 import { execFile } from "node:child_process";
+import { lstat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
-import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
+import { installDurableShellProcesses } from "../durable-shell-process";
+import {
+  SandboxConfigError,
+  SandboxExactResumeInstanceUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
+} from "../errors";
 import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 import {
   attachDockerWorkspaceForDrain,
+  dockerWorkspaceProvablyAbsent,
   rememberOwnedDockerSdkState,
   rememberSerializedDockerOwnership,
   serializeDockerOwnership,
 } from "./docker-workspace-drain";
 
 const execFileAsync = promisify(execFile);
+
+/** False only for a definite ENOENT; every other answer counts as present. */
+async function pathPresent(path: unknown): Promise<boolean> {
+  if (typeof path !== "string") return true;
+  return await lstat(path).then(
+    () => true,
+    (error: unknown) =>
+      !(error && typeof error === "object" && Reflect.get(error, "code") === "ENOENT"),
+  );
+}
 const DOCKER_EXACT_INSPECT_TIMEOUT_MS = 10_000;
 const DOCKER_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
@@ -89,7 +106,7 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
   override async create(...args: Parameters<DockerSandboxClient["create"]>) {
     const session = await super.create(...args);
     rememberOwnedDockerSdkState(session.state);
-    return session;
+    return installDurableShellProcesses(session, "docker");
   }
 
   override async deserializeSessionState(
@@ -134,12 +151,22 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
     state: Parameters<DockerSandboxClient["resume"]>[0],
     options?: Parameters<DockerSandboxClient["resume"]>[1],
   ) {
+    // Without its host directory the SDK can only fail ("resources are
+    // unavailable"). Say whether the workspace is provably gone, so the lease
+    // can record the loss as final instead of retrying it on every turn; any
+    // doubt leaves the SDK's own error, which keeps the continuity receipt.
+    if (
+      !(await pathPresent(state.workspaceRootPath)) &&
+      (await dockerWorkspaceProvablyAbsent(state))
+    ) {
+      throw new SandboxProviderWorkspaceAbsentError("docker", state.containerId);
+    }
     const session = await super.resume(
       dockerContinuityResumeStateForImage(state, this.#openGeniOptions.image),
       options,
     );
     rememberOwnedDockerSdkState(session.state);
-    return session;
+    return installDurableShellProcesses(session, "docker");
   }
 
   /** Exact attach must not call the SDK's ordinary resume when the persisted
@@ -185,7 +212,9 @@ class OpenGeniDockerSandboxClient extends DockerSandboxClient {
       ...(archiveLimits !== undefined ? { archiveLimits } : {}),
     });
     rememberOwnedDockerSdkState(session.state);
-    return session;
+    // Commands run under an in-container supervisor, so any session object
+    // for this container (another turn, worker or the reaper) reaches them.
+    return installDurableShellProcesses(session, "docker");
   }
 }
 

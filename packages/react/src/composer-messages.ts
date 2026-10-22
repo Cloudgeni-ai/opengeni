@@ -4,6 +4,7 @@
  */
 import type { SlashCommand } from "./commands/types";
 import { formatBytes, formatRelativeTime } from "./lib/format";
+import { type OpenGeniText } from "./messages/runtime";
 
 export type ChatComposerMessages = {
   messagePlaceholder: string;
@@ -23,6 +24,16 @@ export type ChatComposerMessages = {
   sendMessageAriaLabel: string;
   sendAndResumeAriaLabel: string;
   sendTitle: string;
+  /** Send tooltip while a busy Send steers (`busySend="steer"`). */
+  steerSendTitle?: string | undefined;
+  /**
+   * The alternate action beside Send while the agent works: Steer when Send
+   * queues, Queue when Send steers.
+   */
+  steerLabel?: string | undefined;
+  steerTitle?: string | undefined;
+  queueLabel?: string | undefined;
+  queueTitle?: string | undefined;
   sendAndResumeTitle: string;
   annotationNotesRequired: string;
   workspacePaused: string;
@@ -74,77 +85,84 @@ export type ChatComposerMessages = {
   formatRelativeTime: (changedAt: string) => string;
 };
 
-export const defaultChatComposerMessages: ChatComposerMessages = {
-  messagePlaceholder: "Message the agent…",
-  pausedPlaceholder: "Message the agent — it will wait in the queue…",
-  inputLabel: "Message the agent",
+export const defaultChatComposerMessages = (t: OpenGeniText): ChatComposerMessages => ({
+  messagePlaceholder: t("composerMessages.messageTheAgent"),
+  pausedPlaceholder: t("composerMessages.messageTheAgentItWill"),
+  inputLabel: t("composerMessages.messageTheAgent2"),
   // Shortcuts live in the send button's title; the footer stays quiet unless
   // the host supplies its own hint.
   keyboardHint: "",
-  slashCommandBlocked:
-    "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
-  controlChangedError:
-    "This workstream was paused while you were sending. Nothing was sent, and your draft is still here.",
-  sendFailedError: "Sending failed — your draft is still here. Try again.",
-  dropFiles: "Drop files to attach",
-  attachFiles: "Attach files",
-  pauseAriaLabel: "Pause this workstream",
-  pauseTitle: "Pause this workstream; queued prompts and approvals are preserved",
-  stopAriaLabel: "Stop",
-  stopTitle: "Stop the response",
-  sendMessageAriaLabel: "Send message",
-  sendAndResumeAriaLabel: "Add message to queue",
-  sendTitle: "Queue message (Enter); steer with Cmd/Ctrl+Enter",
-  sendAndResumeTitle: "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
-  annotationNotesRequired: "Add a note to each quote before sending.",
-  workspacePaused: "Workspace paused",
-  pausedHere: "Paused here",
+  slashCommandBlocked: t("composerMessages.thatSASlashCommand"),
+  controlChangedError: t("composerMessages.thisWorkstreamWasPausedWhile"),
+  sendFailedError: t("composerMessages.sendingFailedYourDraftIs"),
+  dropFiles: t("composerMessages.dropFilesToAttach"),
+  attachFiles: t("composerMessages.attachFiles"),
+  pauseAriaLabel: t("composerMessages.pauseThisWorkstream"),
+  pauseTitle: t("composerMessages.pauseThisWorkstreamQueuedPrompts"),
+  stopAriaLabel: t("composerMessages.stop"),
+  stopTitle: t("composerMessages.stopTheResponse"),
+  sendMessageAriaLabel: t("composerMessages.sendMessage"),
+  sendAndResumeAriaLabel: t("composerMessages.addMessageToQueue"),
+  sendTitle: t("composerMessages.queueMessageEnterSteerWith"),
+  steerSendTitle: t("composerMessages.steerMessageEnterQueueWith"),
+  steerLabel: t("composerMessages.steer"),
+  steerTitle: t("composerMessages.steerReadsItSoon"),
+  queueLabel: t("composerMessages.queue"),
+  queueTitle: t("composerMessages.queueRunsAfterCurrentWork"),
+  sendAndResumeTitle: t("composerMessages.addToQueueEnterSteer"),
+  annotationNotesRequired: t("composerMessages.addANoteToEach"),
+  workspacePaused: t("composerMessages.workspacePaused"),
+  pausedHere: t("composerMessages.pausedHere"),
   parentBlocker: "parent",
-  narrowerPause: "a narrower pause",
-  pausedBy: (displayName) => `Paused by ${displayName}`,
-  queuedAhead: (count) =>
-    `${count} waiting prompt${count === 1 ? "" : "s"}; your message joins the queue.`,
-  resumingAndSending: "Sending…",
-  nextMessageResumes: "Messages wait in the queue until you resume.",
-  resumeThisWorkstream: "Resume this workstream",
-  resumeShort: "Resume",
-  hidePauseDetails: "Hide pause details",
-  showPauseDetails: "Show pause details",
-  pauseReasonsLabel: "Reasons this workstream is paused",
-  pausedByLabel: "Paused by ",
-  alsoPausedByLabel: "Also paused by ",
-  resumeWorkspace: "Resume workspace",
-  resumeFromSession: "Resume from this session",
-  sessionCanRun: "This session will be able to run",
-  stillPausedBy: (displayName) => `Still paused by ${displayName}`,
-  restoredResourcesLabel: "Restored prompt resources",
-  restoredFile: (fileId) => `File ${fileId.slice(0, 8)}`,
-  removeRestoredResource: (index) => `Remove restored resource ${index + 1}`,
-  uploading: "Uploading",
-  uploadFailed: "Upload failed",
-  previewAttachment: (name) => `Preview ${name}`,
-  previewUnavailable: "Preview unavailable",
-  attachmentPreviewLabel: "Attachment preview",
-  downloadAttachment: (name) => `Download ${name}`,
-  closeAttachmentPreview: "Close",
-  retryAttachment: (name) => `Retry ${name}`,
-  retryUpload: "Retry upload",
-  removeAttachment: (name) => `Remove ${name}`,
-  confirmCommand: (name) => `Confirm /${name}`,
-  confirmDescription: (command) => `Run /${command.name}? ${command.description}`,
-  cancel: "Cancel",
-  runCommand: (name) => `Run /${name}`,
-  commands: "Commands",
-  slashCommandsLabel: "Slash commands",
-  modelLabel: "Model",
-  close: "Close",
+  narrowerPause: t("composerMessages.aNarrowerPause"),
+  pausedBy: (displayName) => t("composerMessages.pausedByDisplayname", { displayName }),
+  queuedAhead: (count) => t("composerMessages.queuedAhead", { count }),
+  resumingAndSending: t("composerMessages.sending"),
+  nextMessageResumes: t("composerMessages.messagesWaitInTheQueue"),
+  resumeThisWorkstream: t("composerMessages.resumeThisWorkstream"),
+  resumeShort: t("composerMessages.resume"),
+  hidePauseDetails: t("composerMessages.hidePauseDetails"),
+  showPauseDetails: t("composerMessages.showPauseDetails"),
+  pauseReasonsLabel: t("composerMessages.reasonsThisWorkstreamIsPaused"),
+  pausedByLabel: `${t("composerMessages.pausedBy")} `,
+  alsoPausedByLabel: `${t("composerMessages.alsoPausedBy")} `,
+  resumeWorkspace: t("composerMessages.resumeWorkspace"),
+  resumeFromSession: t("composerMessages.resumeFromThisSession"),
+  sessionCanRun: t("composerMessages.thisSessionWillBeAble"),
+  stillPausedBy: (displayName) => t("composerMessages.stillPausedByDisplayname", { displayName }),
+  restoredResourcesLabel: t("composerMessages.restoredPromptResources"),
+  restoredFile: (fileId) => t("composerMessages.fileSlice", { slice: fileId.slice(0, 8) }),
+  removeRestoredResource: (index) =>
+    t("composerMessages.removeRestoredResourceIndex", { index: index + 1 }),
+  uploading: t("composerMessages.uploading"),
+  uploadFailed: t("composerMessages.uploadFailed"),
+  previewAttachment: (name) => t("composerMessages.previewName", { name }),
+  previewUnavailable: t("composerMessages.previewUnavailable"),
+  attachmentPreviewLabel: t("composerMessages.attachmentPreview"),
+  downloadAttachment: (name) => t("composerMessages.downloadName", { name }),
+  closeAttachmentPreview: t("composerMessages.close"),
+  retryAttachment: (name) => t("composerMessages.retryName", { name }),
+  retryUpload: t("composerMessages.retryUpload"),
+  removeAttachment: (name) => t("composerMessages.removeName", { name }),
+  confirmCommand: (name) => t("composerMessages.confirmName", { name }),
+  confirmDescription: (command) =>
+    t("composerMessages.runNameDescription", {
+      name: command.name,
+      description: command.description,
+    }),
+  cancel: t("composerMessages.cancel"),
+  runCommand: (name) => t("composerMessages.runName", { name }),
+  commands: t("composerMessages.commands"),
+  slashCommandsLabel: t("composerMessages.slashCommands"),
+  modelLabel: t("composerMessages.model"),
+  close: t("composerMessages.close"),
   danger: "danger",
-  draftConflict: "This draft changed in another tab. Your local draft is still here.",
-  useOtherDraft: "Use other draft",
-  keepMine: "Keep mine",
+  draftConflict: t("composerMessages.thisDraftChangedInAnother"),
+  useOtherDraft: t("composerMessages.useOtherDraft"),
+  keepMine: t("composerMessages.keepMine"),
   // Kept for embedder message overrides / back-compat. Routine autosave is
   // silent — only draft conflicts surface under the composer.
-  savingDraft: "Saving draft…",
+  savingDraft: t("composerMessages.savingDraft"),
   formatBytes,
-  formatRelativeTime,
-};
+  formatRelativeTime: (changedAt: string) => formatRelativeTime(t, changedAt),
+});

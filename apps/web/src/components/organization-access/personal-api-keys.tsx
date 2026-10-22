@@ -3,27 +3,31 @@ import { KeyRoundIcon, PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
 import {
   OrganizationAccessFields,
   type AccessWorkspace,
 } from "@/components/organization-access/organization-access-fields";
-import { Button } from "@/components/ui/button";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
-import { Section } from "@/components/ui/section";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { useAppContext } from "@/context";
-import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
+import { Section } from "@opengeni/react/ui/section";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  apiErrorDetails,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@opengeni/react/ui/api-error";
 import {
   policyBlockedReason,
   policySummary,

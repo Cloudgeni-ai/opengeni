@@ -236,6 +236,7 @@ in `packages/deployment`).
 | `OPENGENI_WEB_<PROVIDER>_BASE_URL` | provider default | Required for `searxng`; a self-hosted Jina reader or a proxy for others |
 | `OPENGENI_WEB_SEARCH_PREFER` | `native` | `native` or `provider` |
 | `OPENGENI_WEB_SEARCH_PRICING_JSON` | built-in | One price for every provider, `{"searchMicros":5000,"fetchMicros":1000,"marginBps":500}`, or per provider, `{"parallel":{"searchMicros":1000,"fetchMicros":1000}}` (USD micros per call) |
+| `OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` | unset | Optional integer from `0` to `10000`; replaces built-in and per-provider margins for credit charges. Unset preserves the pricing entry's margin or the 5% default. |
 | `OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS` | `20000` | Per provider request |
 
 The earlier single-provider variables still work: `OPENGENI_WEB_SEARCH_API_KEY`

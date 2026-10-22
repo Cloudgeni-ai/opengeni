@@ -29,6 +29,8 @@ export type ExtensionDevice = {
   platform: ExtensionPlatform;
   architecture: ExtensionArchitecture;
   connectionGeneration: string;
+  /** Stable for this extension worker's lifetime, across native reconnects. */
+  stateGeneration: string;
   inventoryRevision: number;
   capabilities: {
     tabInventory: true;
@@ -114,6 +116,26 @@ export type ExtensionCommandResult = {
   };
 };
 
+const DEBUGGER_DOMAINS = new Set([
+  "Accessibility",
+  "DOM",
+  "Input",
+  "Log",
+  "Network",
+  "Page",
+  "Runtime",
+]);
+
+// Single methods admitted outside the driver's domains. Focus emulation keeps
+// a background tab rendering and acknowledging input without activating it or
+// raising Chrome; without it Chrome holds every mouse event sent to a hidden
+// tab for about five seconds. Chrome clears it when the debugger detaches.
+const DEBUGGER_METHODS = new Set(["Emulation.setFocusEmulationEnabled"]);
+
+export function isAllowedDebuggerMethod(method: string): boolean {
+  return DEBUGGER_METHODS.has(method) || DEBUGGER_DOMAINS.has(method.slice(0, method.indexOf(".")));
+}
+
 export function parseExtensionCommand(value: unknown): ExtensionCommandEnvelope {
   const envelope = requireRecord(value, "bridge command envelope");
   exactKeys(envelope, [
@@ -158,6 +180,57 @@ export function parseExtensionReady(value: unknown): ExtensionReady {
       512,
       "browser connection generation",
     ),
+  };
+}
+
+export type AgentUnavailableReason =
+  | "agent_not_running"
+  | "agent_outdated"
+  | "extension_outdated"
+  | "agent_error";
+
+/**
+ * The agent side's explanation, sent once before it closes a connection it
+ * cannot take. Agents that predate it close without one.
+ */
+export type AgentUnavailable = {
+  type: "unavailable";
+  reason: AgentUnavailableReason;
+  agentVersion: string | null;
+  detail: string | null;
+};
+
+const AGENT_UNAVAILABLE_REASONS: readonly string[] = [
+  "agent_not_running",
+  "agent_outdated",
+  "extension_outdated",
+  "agent_error",
+];
+
+export function isAgentUnavailable(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as { type?: unknown }).type === "unavailable"
+  );
+}
+
+/**
+ * Deliberately tolerant: this message explains a version difference, so it
+ * must read from an agent of any version. Unknown reasons are agent errors.
+ */
+export function parseAgentUnavailable(value: unknown): AgentUnavailable {
+  const envelope = requireRecord(value, "agent unavailable message");
+  if (envelope.type !== "unavailable") throw new Error("agent unavailable message is invalid");
+  const optionalText = (field: unknown, maxLength: number): string | null =>
+    typeof field === "string" && field.trim() ? field.trim().slice(0, maxLength) : null;
+  return {
+    type: "unavailable",
+    reason: AGENT_UNAVAILABLE_REASONS.includes(envelope.reason as string)
+      ? (envelope.reason as AgentUnavailableReason)
+      : "agent_error",
+    agentVersion: optionalText(envelope.agentVersion, 64),
+    detail: optionalText(envelope.detail, 512),
   };
 }
 

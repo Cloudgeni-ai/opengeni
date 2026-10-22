@@ -1,10 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import { BudgetExhaustedError } from "../src/activities/agent-turn/admission";
 import { runTurnStreamAttempt } from "../src/activities/agent-turn/stream-attempt";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 test("stream component retains the completed compaction checkpoint before refusing every paid dispatch", async () => {
   const checkpoint = [{ type: "message", role: "user", content: "Completed summary" }];
@@ -27,6 +30,8 @@ test("stream component retains the completed compaction checkpoint before refusi
     action: "continue",
   } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>);
   const position = spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2);
+  // No explicit workspace recovery adds a discontinuity notice here.
+  const recoveryNotice = spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null);
   // The completed checkpoint contains no stored programmatic operations.
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
   const allowance = spyOn(db, "checkWorkspaceAllowance").mockImplementation(async (_db, input) => {
@@ -108,6 +113,7 @@ test("stream component retains the completed compaction checkpoint before refusi
     prepared.mockRestore();
     suffix.mockRestore();
     position.mockRestore();
+    recoveryNotice.mockRestore();
     operations.mockRestore();
     allowance.mockRestore();
   }

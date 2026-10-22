@@ -1,5 +1,5 @@
 /**
- * 1Password service-account adapter for OpenGeni vaults.
+ * 1Password service-account adapter for Opengeni vaults.
  *
  * Import this package only with a dynamic `import()` from apps/api or
  * apps/worker (the SDK carries a ~14 MB WASM core); see
@@ -7,6 +7,7 @@
  */
 export {
   createOnePasswordVaultProvider,
+  OnePasswordVaultCreatedError,
   ONEPASSWORD_GET_ALL_BATCH,
   ONEPASSWORD_MANAGED_GROUP_PERMISSIONS,
   ONEPASSWORD_VALUE_CACHE_MS,

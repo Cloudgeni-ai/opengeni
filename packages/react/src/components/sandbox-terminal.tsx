@@ -15,6 +15,7 @@ import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
 import { sandboxTerminalPeers } from "../lib/workbench-peers";
+import { useOpenGeniText } from "../messages/runtime";
 
 /**
  * A COMPLETE xterm `ITheme` (subset by intent, but every field xterm colors a
@@ -107,6 +108,8 @@ type XtermLike = {
   focus: () => void;
   write: (data: string) => void;
   clear: () => void;
+  /** Full reset (screen, scrollback and modes); optional for test doubles. */
+  reset?: () => void;
   onData: (cb: (data: string) => void) => { dispose: () => void };
   onResize: (cb: (size: { cols: number; rows: number }) => void) => { dispose: () => void };
   loadAddon: (addon: unknown) => void;
@@ -181,6 +184,16 @@ export function clearTerminalBootStatus(term: Pick<XtermLike, "write">): void {
   term.write("\r\x1b[2K\x1b[2J\x1b[H");
 }
 
+/** Empty the screen and scrollback before the transcript is written again. */
+function resetTerminal(term: Pick<XtermLike, "write" | "clear" | "reset">): void {
+  if (term.reset) {
+    term.reset();
+    return;
+  }
+  term.clear();
+  term.write("\x1b[2J\x1b[3J\x1b[H");
+}
+
 /** Debug seam (dev/evidence only, never a typed public API): a global hook the
  *  screenshot harness reads to probe the settled renderer tier + resolved font
  *  without mounting a real WebGL context in unit tests. */
@@ -250,11 +263,15 @@ export function SandboxTerminal({
   onReconnectNeeded,
   className,
 }: SandboxTerminalProps) {
+  const t = useOpenGeniText();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XtermLike | null>(null);
   const fitRef = useRef<FitAddonLike | null>(null);
   const rendererRef = useRef<RendererTier | null>(null);
   const writtenRef = useRef<Set<string>>(new Set());
+  // Newest written chunk, and the newest one a Clear removed.
+  const writtenThroughRef = useRef(0);
+  const clearedThroughRef = useRef(0);
   const wroteFirehoseRef = useRef(false);
   const bootActiveRef = useRef(false);
   const [ready, setReady] = useState(false);
@@ -316,11 +333,16 @@ export function SandboxTerminal({
   const acceptsInput = inputReady && (!ptyAttachable || ptyConnected);
   const inputPending = inputReady && ptyAttachable && !ptyConnected && activated;
   let terminalModeLabel: string | null;
-  if (readOnly) terminalModeLabel = "read-only";
-  else if (!ptyAttachable) terminalModeLabel = acceptsInput ? null : "output only";
-  else if (ptyStatus === "error") terminalModeLabel = "connection error";
-  else if (acceptsInput) terminalModeLabel = inputReadiness === "legacy" ? "legacy input" : null;
-  else terminalModeLabel = activated ? "connecting" : "connect on input";
+  if (readOnly) terminalModeLabel = t("sandboxTerminal.readOnly");
+  else if (!ptyAttachable)
+    terminalModeLabel = acceptsInput ? null : t("sandboxTerminal.outputOnly");
+  else if (ptyStatus === "error") terminalModeLabel = t("sandboxTerminal.connectionError");
+  else if (acceptsInput)
+    terminalModeLabel = inputReadiness === "legacy" ? t("sandboxTerminal.legacyInput") : null;
+  else
+    terminalModeLabel = activated
+      ? t("sandboxTerminal.connecting")
+      : t("sandboxTerminal.connectOnInput");
 
   // Boot-in-terminal: after the user engages a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
@@ -494,6 +516,7 @@ export function SandboxTerminal({
       fitRef.current = null;
       rendererRef.current = null;
       writtenRef.current = new Set();
+      writtenThroughRef.current = 0;
       wroteFirehoseRef.current = false;
       bootActiveRef.current = false;
       setReady(false);
@@ -540,23 +563,35 @@ export function SandboxTerminal({
       const s = Math.max(0, Math.round((Date.now() - start) / 1000));
       // Bright-blue dot (accent) + dim label; `\r` + clear-line keeps it on one
       // line so the counter updates in place.
-      term.write(`\r\x1b[2K\x1b[94m●\x1b[0m \x1b[2mwaking machine — ${s}s…\x1b[0m`);
+      term.write(
+        `\r\x1b[2K\x1b[94m●\x1b[0m \x1b[2m${t("sandboxTerminal.wakingMachineSeconds", { seconds: s })}\x1b[0m`,
+      );
     };
     term.write("\r\n");
     paint();
     const id = setInterval(paint, 1000);
     return () => clearInterval(id);
-  }, [ready, booting]);
+  }, [ready, booting, t]);
 
   // Write new firehose chunks incrementally — ONLY in firehose mode. In PTY mode
   // the ttyd socket owns the screen. Records that a real transcript exists so the
-  // boot cleanup never wipes it.
+  // boot cleanup never wipes it. History read after live output arrives below
+  // what is on screen: then the transcript is written again, in order.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || ptyMode) return;
-    for (const chunk of result.chunks) {
-      if (writtenRef.current.has(chunk.id)) continue;
+    const shown = result.chunks.filter((chunk) => chunk.seq > clearedThroughRef.current);
+    const fresh = shown.filter((chunk) => !writtenRef.current.has(chunk.id));
+    if (fresh.length === 0) return;
+    let pending = fresh;
+    if (fresh[0]!.seq < writtenThroughRef.current) {
+      resetTerminal(term);
+      writtenRef.current = new Set();
+      pending = shown;
+    }
+    for (const chunk of pending) {
       writtenRef.current.add(chunk.id);
+      writtenThroughRef.current = Math.max(writtenThroughRef.current, chunk.seq);
       wroteFirehoseRef.current = true;
       term.write(chunk.text);
     }
@@ -624,7 +659,9 @@ export function SandboxTerminal({
                 result.running ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
-            <span className="truncate font-og-mono">pty: {shell ?? "shell"}</span>
+            <span className="truncate font-og-mono">
+              {t("sandboxTerminal.pty")} {shell ?? t("sandboxTerminal.shell")}
+            </span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
             {terminalModeLabel && (
@@ -633,7 +670,7 @@ export function SandboxTerminal({
                 role="status"
                 title={
                   inputReadiness === "legacy"
-                    ? "Shell readiness is not guaranteed. Wait for startup before typing."
+                    ? t("sandboxTerminal.shellReadinessIsNotGuaranteed")
                     : undefined
                 }
               >
@@ -644,36 +681,39 @@ export function SandboxTerminal({
               type="button"
               onClick={() => {
                 termRef.current?.clear();
-                writtenRef.current = new Set();
+                // Cleared output stays cleared, even when the transcript is
+                // written again.
+                clearedThroughRef.current = Math.max(
+                  clearedThroughRef.current,
+                  writtenThroughRef.current,
+                );
                 wroteFirehoseRef.current = false;
               }}
               className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-11"
             >
-              Clear
+              {t("sandboxTerminal.clear")}
             </button>
           </span>
         </div>
       )}
       {ptyAttachable && !readOnly && !showHeader && inputReadiness === "legacy" && (
         <p role="status" className="shrink-0 px-3 py-1 text-og-xs text-og-fg-subtle">
-          Legacy input — wait for shell startup before typing.
+          {t("sandboxTerminal.legacyInputWaitForShell")}
         </p>
       )}
       {ptyAttachable && !readOnly && inputReadiness === "waiting" && (
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-og-border px-3 py-2 text-og-xs text-og-fg-subtle">
-          <span role="status">
-            Waiting for shell readiness. Manual input clears buffered typing.
-          </span>
+          <span role="status">{t("sandboxTerminal.waitingForShellReadinessManual")}</span>
           <button
             type="button"
             onClick={() => {
               useLegacyInput();
               termRef.current?.focus();
             }}
-            title="Use for startup prompts or shells without readiness support. Early input is not guaranteed."
+            title={t("sandboxTerminal.useForStartupPromptsOr")}
             className="shrink-0 rounded-og-sm px-2 py-1 text-og-fg hover:bg-og-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-og-accent pointer-coarse:min-h-11"
           >
-            Use manual input
+            {t("sandboxTerminal.useManualInput")}
           </button>
         </div>
       )}
@@ -761,9 +801,10 @@ function ensureXtermBaseCss(): void {
 }
 
 function TerminalPlaceholder() {
+  const t = useOpenGeniText();
   return (
     <div className="absolute inset-0 flex items-center justify-center text-og-sm text-og-fg-subtle">
-      Loading terminal…
+      {t("sandboxTerminal.loadingTerminal")}
     </div>
   );
 }

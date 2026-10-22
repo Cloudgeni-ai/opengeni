@@ -12,14 +12,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-#[cfg(windows)]
-use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use opengeni_agent_proto::v1;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::cgroup::{OpCgroupConfig, OpCgroups};
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
+use crate::run_as::{RunAsChild, RunAsIdentity};
 use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
 
 /// The host-native platform: exec/fs/git against the machine the agent runs on,
@@ -71,15 +71,22 @@ impl Default for NativePlatform {
 }
 
 impl NativePlatform {
-    /// Builds a platform rooted at the process's current working directory, with the
-    /// host desktop backend resolved and no relay registrar yet (the supervisor
-    /// wires one via [`with_stream_registry`](Self::with_stream_registry)).
+    /// Builds a platform rooted at the process's current working directory (or the
+    /// user's home when that directory is a filesystem root, see
+    /// [`resolve_workspace_root`]), with the host desktop backend resolved and no
+    /// relay registrar yet (the supervisor wires one via
+    /// [`with_stream_registry`](Self::with_stream_registry)).
     #[must_use]
     pub fn new() -> Self {
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let home_dir = user_home_dir();
+        let workspace_root = resolve_workspace_root(
+            std::env::current_dir().ok(),
+            home_dir.as_deref(),
+            windows_system_dir().as_deref(),
+        );
         Self {
             workspace_root,
-            home_dir: user_home_dir(),
+            home_dir,
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             browser_control: None,
@@ -138,11 +145,20 @@ impl NativePlatform {
     /// Resolves a request-supplied machine path. Empty falls back to the agent
     /// root, exact `~` / `~/...` expands against the agent user's home, ordinary
     /// relative paths join the root, and absolute paths pass through unchanged.
-    fn resolve_path(&self, path: &str) -> PlatformResult<PathBuf> {
+    /// For a request running as `identity`, `~` expands against that account's
+    /// home instead.
+    fn resolve_path(
+        &self,
+        path: &str,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<PathBuf> {
         if path.is_empty() {
             Ok(self.workspace_root.clone())
         } else if path == "~" || path.starts_with("~/") {
-            let home = self.home_dir.as_ref().ok_or_else(|| {
+            let home = identity
+                .map(|identity| &identity.home)
+                .or(self.home_dir.as_ref());
+            let home = home.ok_or_else(|| {
                 PlatformError::os(
                     "cannot resolve '~': the agent service has no HOME or USERPROFILE",
                 )
@@ -165,14 +181,35 @@ impl NativePlatform {
     /// Resolves and validates a process working directory before spawn. Tokio's
     /// spawn error otherwise reports `ENOENT` against the executable even when
     /// the missing object is actually `current_dir`, which is actively misleading.
-    fn resolve_process_cwd(&self, cwd: &str, operation: &str) -> PlatformResult<PathBuf> {
-        let path = self.resolve_path(cwd)?;
-        let metadata = std::fs::metadata(&path).map_err(|error| {
-            PlatformError::from_io(
-                &format!("{operation} working directory {}", path.display()),
-                &error,
-            )
-        })?;
+    fn resolve_process_cwd(
+        &self,
+        cwd: &str,
+        operation: &str,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<PathBuf> {
+        let path = self.resolve_path(cwd, identity)?;
+        // Checked as the requested user, so a directory only the agent can
+        // reach is reported the same way the user's own chdir would fail.
+        let metadata = match identity {
+            Some(identity) => {
+                let checked = path.clone();
+                let operation = operation.to_string();
+                crate::run_as::on_identity_thread(identity, move || {
+                    std::fs::metadata(&checked).map_err(|error| {
+                        PlatformError::from_io(
+                            &format!("{operation} working directory {}", checked.display()),
+                            &error,
+                        )
+                    })
+                })?
+            }
+            None => std::fs::metadata(&path).map_err(|error| {
+                PlatformError::from_io(
+                    &format!("{operation} working directory {}", path.display()),
+                    &error,
+                )
+            })?,
+        };
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
             detail.insert("path".to_string(), path.to_string_lossy().into_owned());
@@ -193,6 +230,82 @@ fn user_home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+/// Chooses the agent's workspace root from its working directory.
+///
+/// A filesystem root or the Windows system directory is never a usable
+/// workspace: service managers start a process there unless told otherwise
+/// (launchd does at `/` for a LaunchAgent without `WorkingDirectory`, as does a
+/// custom systemd unit; Windows starts services in `%SystemRoot%\System32`). It
+/// is read-only or protected, and every relative write would land in it. In
+/// that case (or when the working directory is unknown) the user's home
+/// directory is used. Any other working directory is kept exactly as the
+/// operator chose it.
+#[must_use]
+pub fn resolve_workspace_root(
+    current_dir: Option<PathBuf>,
+    home_dir: Option<&Path>,
+    system_dir: Option<&Path>,
+) -> PathBuf {
+    let unusable = |directory: &Path| {
+        directory.parent().is_none()
+            || system_dir.is_some_and(|system| path_within_ignoring_case(directory, system))
+    };
+    let usable_home = home_dir.filter(|home| home.is_absolute() && !unusable(home));
+    match (current_dir, usable_home) {
+        (Some(directory), _) if !unusable(&directory) => directory,
+        (_, Some(home)) => home.to_path_buf(),
+        (directory, None) => directory.unwrap_or_else(|| PathBuf::from("/")),
+    }
+}
+
+/// Whether `path` is `parent` or beneath it, comparing case-insensitively with
+/// either separator (Windows paths are case-insensitive, and the system
+/// directory is reported as both `C:\WINDOWS` and `C:\Windows`).
+fn path_within_ignoring_case(path: &Path, parent: &Path) -> bool {
+    let normalize = |value: &Path| {
+        value
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
+    let (path, parent) = (normalize(path), normalize(parent));
+    !parent.is_empty() && (path == parent || path.starts_with(&format!("{parent}/")))
+}
+
+/// The Windows system directory (`%SystemRoot%`); `None` on other platforms.
+fn windows_system_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Moves the process into its workspace root when it was started at a
+/// filesystem root or in the Windows system directory, so the reported workspace, relative paths and child
+/// processes all agree on the user's home directory. Returns the directory it
+/// moved to, or `None` when the working directory was already usable (or no
+/// usable home directory exists).
+///
+/// # Errors
+/// Returns the OS error when changing into the home directory fails.
+pub fn adopt_workspace_working_directory() -> std::io::Result<Option<PathBuf>> {
+    let current = std::env::current_dir().ok();
+    let target = resolve_workspace_root(
+        current.clone(),
+        user_home_dir().as_deref(),
+        windows_system_dir().as_deref(),
+    );
+    if current.as_ref() == Some(&target) || !target.is_dir() {
+        return Ok(None);
+    }
+    std::env::set_current_dir(&target)?;
+    Ok(Some(target))
 }
 
 fn requested_policy(
@@ -234,13 +347,15 @@ struct ExecOutput {
 /// is issued. Tokio's direct-child waits are cancel-safe; Drop only signals while
 /// the still-unreaped anchor fences the numeric PGID against reuse.
 #[cfg(unix)]
+#[allow(clippy::struct_excessive_bools)] // Cleanup progress, cancellation intent and observed evidence are independent.
 struct ExecProcessGroup {
-    anchor: tokio::process::Child,
+    anchor: crate::exec_handover::UnixProc,
     /// The sole writer for the anchor's kernel-close death lease. Tokio creates
     /// child pipes close-on-exec, so user commands and descendants cannot inherit
     /// authority to keep the anchor alive after the runner process disappears.
-    runner_lease: Option<tokio::process::ChildStdin>,
-    child: tokio::process::Child,
+    /// Only an in-place agent update deliberately carries it across `exec`.
+    runner_lease: Option<std::os::fd::OwnedFd>,
+    child: crate::exec_handover::UnixProc,
     pgid: i32,
     running: bool,
     reservation: Option<crate::WorkReservation>,
@@ -255,6 +370,9 @@ struct ExecProcessGroup {
     /// fork-race window (a descendant forked between a cancel's kill scan and
     /// the direct child's exit).
     wait_killed_group: bool,
+    /// Positive pre-cleanup evidence, retained across cancelled wait futures.
+    background_children_stopped: bool,
+    termination_requested: bool,
     /// The per-op resource-accounting leaf this exec's processes were placed in (issue #345),
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
@@ -263,11 +381,20 @@ struct ExecProcessGroup {
 
 #[cfg(unix)]
 impl ExecProcessGroup {
+    #[allow(clippy::too_many_lines)] // one ordered containment sequence; each step's failure unwinds the previous ones
     fn spawn(
         mut command: tokio::process::Command,
         cgroups: Option<&OpCgroups>,
         requested_policy: OpCgroupConfig,
+        run_as: Option<&RunAsChild>,
     ) -> std::io::Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        if run_as.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "run_as requires Linux",
+            ));
+        }
         // Create and configure the operation leaf before either child is forked.
         // Their pre-exec hooks migrate them before user code can create a
         // session-detached or double-forked descendant.
@@ -301,42 +428,50 @@ impl ExecProcessGroup {
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
         }
-        let mut anchor = anchor_command.spawn()?;
-        let Some(runner_lease) = anchor.stdin.take() else {
-            mark_unsettled_work();
-            let _ = anchor.start_kill();
-            return Err(std::io::Error::other(
-                "exec anchor did not expose its runner-death lease",
-            ));
+        let anchor = anchor_command.spawn()?;
+        let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
+            .expect("a Unix PID fits pid_t");
+        // Own cleanup as soon as the first child exists, including every later
+        // setup/spawn error. Signaling a child is not an exit receipt.
+        let mut group = Self {
+            anchor: crate::exec_handover::UnixProc::Owned(anchor),
+            runner_lease: None,
+            child: crate::exec_handover::UnixProc::released(),
+            pgid,
+            running: true,
+            reservation: crate::current_work_reservation(),
+            wait_killed_group: false,
+            background_children_stopped: false,
+            termination_requested: false,
+            op_cgroup: None,
         };
-        let pgid =
-            i32::try_from(anchor.id().expect("new anchor must have a pid")).map_err(|_| {
-                mark_unsettled_work();
-                std::io::Error::other("exec anchor PID exceeds i32")
-            })?;
+        let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
+            unreachable!("new anchor is owned");
+        };
+        group.runner_lease = Some(
+            anchor
+                .stdin
+                .take()
+                .ok_or_else(|| {
+                    std::io::Error::other("exec anchor did not expose its runner-death lease")
+                })?
+                .into_owned_fd()?,
+        );
 
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
         let child_oom_score = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
-            if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
-            {
-                mark_unsettled_work();
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
+            cgroups.configure_process_cgroup_before_exec(prepared, &mut command)?;
         }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                mark_unsettled_work();
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
-        };
+        // Registered last: the hooks above still need the agent's privileges.
+        // A failure here, like any later one, is cleaned up by `group`.
+        #[cfg(target_os = "linux")]
+        if let Some(run_as) = run_as {
+            crate::run_as::configure_child(run_as, &mut command)?;
+        }
+        group.child = crate::exec_handover::UnixProc::Owned(command.spawn()?);
 
         // Give this child (and its inheriting descendants) the smallest higher
         // global OOM victim bias when the kernel ABI can represent one. A
@@ -344,7 +479,7 @@ impl ExecProcessGroup {
         // independent of, and composing with, the per-op cgroup below (which
         // bounds systemd-oomd's scope).
         #[cfg(target_os = "linux")]
-        if let Some(child_pid) = child.id() {
+        if let Some(child_pid) = group.child.id() {
             crate::cgroup::raise_exec_oom_score_adj(child_pid, child_oom_score);
         }
 
@@ -354,50 +489,42 @@ impl ExecProcessGroup {
         // returns an error. This is a no-op when isolation is unavailable/off Linux.
         #[cfg(target_os = "linux")]
         let op_cgroup = if let (Some(cg), Some(prepared)) = (cgroups, prepared_op) {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
-            match cg.place_process_group(pgid, &pids, prepared) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    mark_unsettled_work();
-                    let _ = terminate_unix_process_group(pgid);
-                    let _ = anchor.start_kill();
-                    return Err(error);
-                }
-            }
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
+            Some(cg.place_process_group(pgid, &pids, prepared)?)
         } else {
             None
         };
         #[cfg(not(target_os = "linux"))]
         let op_cgroup = if let Some(cg) = cgroups {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
             cg.place_op(&pids, requested_policy)?
         } else {
             None
         };
 
-        Ok(Self {
-            anchor,
-            runner_lease: Some(runner_lease),
-            child,
-            pgid,
-            running: true,
-            reservation: crate::current_work_reservation(),
-            wait_killed_group: false,
-            op_cgroup,
-        })
+        group.op_cgroup = op_cgroup;
+        Ok(group)
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`]; after
     /// this the group only tracks lifecycle (wait/terminate), the caller owns I/O.
     fn take_pipes(&mut self) -> ContainedPipes {
-        (
-            self.child.stdin.take(),
-            self.child.stdout.take(),
-            self.child.stderr.take(),
-        )
+        match &mut self.child {
+            crate::exec_handover::UnixProc::Owned(child) => {
+                (child.stdin.take(), child.stdout.take(), child.stderr.take())
+            }
+            crate::exec_handover::UnixProc::Adopted(_) => (None, None, None),
+        }
     }
 
     fn terminate(&mut self) -> std::io::Result<()> {
+        self.termination_requested = true;
         let group_result = terminate_unix_process_group(self.pgid);
         let cgroup_result = self
             .op_cgroup
@@ -426,8 +553,29 @@ impl ExecProcessGroup {
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
         if !self.wait_killed_group {
+            let had_children = if self.termination_requested {
+                false
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    self.op_cgroup.as_ref().map_or_else(
+                        || crate::process_cleanup::group_has_live_children(self.pgid),
+                        |group| group.has_live_children(self.pgid),
+                    )?
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    crate::process_cleanup::group_has_live_children(self.pgid)?
+                }
+            };
             self.terminate()?;
+            self.background_children_stopped = had_children;
             self.wait_killed_group = true;
+        }
+        // A successful signal (including macOS EPERM for a zombie) is not a
+        // completed tree. Keep the anchor unreaped while observing descendants.
+        while crate::process_cleanup::group_has_live_children(self.pgid)? {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // Reap the fence only after the group kill. Tokio wait is cancel-safe; if
         // this future is dropped after reaping, anchor.id() is None and Drop will
@@ -448,13 +596,10 @@ impl ExecProcessGroup {
 #[cfg(unix)]
 impl Drop for ExecProcessGroup {
     fn drop(&mut self) {
-        if self.running {
-            if let Some(reservation) = &self.reservation {
-                // Drop signals cleanup but cannot await its exit receipt.
-                reservation.mark_unsettled();
-            }
+        if !self.running {
+            return;
         }
-        if self.running && self.anchor.id().is_some() {
+        if self.anchor.id().is_some() {
             if let Err(error) = self.terminate() {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
@@ -465,13 +610,142 @@ impl Drop for ExecProcessGroup {
                 }
             }
         }
-        // A cancelled/timed-out/task-aborted exec drops here with its op leaf still
-        // present. Dropping the handle schedules event-driven removal after the
-        // group becomes unpopulated. On the normal path the handle was already
-        // taken and torn down in wait(), so this is a no-op there.
-        if let Some(handle) = self.op_cgroup.take() {
-            drop(handle);
+        let reservation = self.reservation.take();
+        let mut cleanup = Self {
+            anchor: std::mem::replace(&mut self.anchor, crate::exec_handover::UnixProc::released()),
+            child: std::mem::replace(&mut self.child, crate::exec_handover::UnixProc::released()),
+            runner_lease: self.runner_lease.take(),
+            pgid: self.pgid,
+            // This cleanup owner must not recursively schedule itself on drop.
+            running: false,
+            reservation: None,
+            wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: true,
+            op_cgroup: self.op_cgroup.take(),
+        };
+        self.running = false;
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("exec process group {}", self.pgid),
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(crate::with_work_reservation(reservation, async move {
+                let mut witness = witness;
+                loop {
+                    match cleanup.wait().await {
+                        Ok(_) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }));
         }
+    }
+}
+
+#[cfg(unix)]
+impl ExecProcessGroup {
+    /// Completes a handover prepared by [`ContainedExec::into_handover`]:
+    /// gives up ownership of every part without signaling anything.
+    /// Infallible, so nothing is half given up.
+    fn finish_handover(
+        mut self,
+        anchor: crate::exec_handover::ProcHandover,
+        child: crate::exec_handover::ProcHandover,
+        pipes: [Option<std::os::fd::OwnedFd>; 3],
+    ) -> crate::exec_handover::ExecHandover {
+        use crate::exec_handover::{release_fd, UnixProc};
+
+        std::mem::replace(&mut self.anchor, UnixProc::released()).release();
+        std::mem::replace(&mut self.child, UnixProc::released()).release();
+        // Drop must neither signal the group nor touch the leaf from here on.
+        let running = std::mem::replace(&mut self.running, false);
+        let op_cgroup = self
+            .op_cgroup
+            .take()
+            .and_then(crate::cgroup::OpCgroupHandle::into_handover);
+        let [stdin, stdout, stderr] = pipes;
+        crate::exec_handover::ExecHandover {
+            anchor,
+            child,
+            pgid: self.pgid,
+            running,
+            wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: self.termination_requested,
+            lease_fd: self.runner_lease.take().map(release_fd),
+            stdin_fd: stdin.map(release_fd),
+            stdout_fd: stdout.map(release_fd),
+            stderr_fd: stderr.map(release_fd),
+            op_cgroup,
+        }
+    }
+
+    /// Takes over a contained exec a predecessor process image handed over.
+    /// Any failure drops what was already claimed; dropping the death lease
+    /// makes the anchor kill the operation, the same fail-closed outcome as a
+    /// crashed runner.
+    fn adopt(
+        handover: &crate::exec_handover::ExecHandover,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<(Self, ContainedPipes)> {
+        use crate::exec_handover::{claim, UnixProc};
+
+        let runner_lease = handover.lease_fd.map(claim).transpose()?;
+        let stdin = handover
+            .stdin_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStdin::from_std(std::process::ChildStdin::from(fd))
+                })
+            })
+            .transpose()?;
+        let stdout = handover
+            .stdout_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStdout::from_std(std::process::ChildStdout::from(fd))
+                })
+            })
+            .transpose()?;
+        let stderr = handover
+            .stderr_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStderr::from_std(std::process::ChildStderr::from(fd))
+                })
+            })
+            .transpose()?;
+        let op_cgroup = match (&handover.op_cgroup, cgroups) {
+            (Some(leaf), Some(cgroups)) => Some(cgroups.adopt_op(leaf)?),
+            (Some(leaf), None) => {
+                tracing::warn!(
+                    dir = %leaf.dir.display(),
+                    "operation cgroups are unavailable after the update; the handed-over command keeps only process-group containment"
+                );
+                None
+            }
+            (None, _) => None,
+        };
+        Ok((
+            Self {
+                anchor: UnixProc::adopt(handover.anchor),
+                runner_lease,
+                child: UnixProc::adopt(handover.child),
+                pgid: handover.pgid,
+                running: handover.running,
+                reservation: crate::current_work_reservation(),
+                wait_killed_group: handover.wait_killed_group,
+                background_children_stopped: handover.background_children_stopped,
+                termination_requested: handover.termination_requested,
+                op_cgroup,
+            },
+            (stdin, stdout, stderr),
+        ))
     }
 }
 
@@ -495,7 +769,6 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
             // A successful command result does not establish that every member
             // exited. Keep ordinary exec behavior, but refuse an update whose
             // process-tree cleanup could not be proved.
-            mark_unsettled_work();
             tracing::debug!(
                 group_id = pgid,
                 "group kill reported EPERM (unsignalable member); owned members were signaled"
@@ -511,65 +784,91 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
 /// can terminate the complete job even after its direct leader exits.
 #[cfg(windows)]
 struct ExecProcessGroup {
-    child: AsyncGroupChild,
+    child: tokio::process::Child,
+    job: opengeni_agent_windows_ffi::ProcessJob,
+    cleanup_wait: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     running: bool,
     reservation: Option<crate::WorkReservation>,
+    background_children_stopped: bool,
+    termination_requested: bool,
 }
 
 #[cfg(windows)]
 impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
-        // `command_group` wraps the spawn in a Job Object; kill-on-drop terminates
-        // the whole job (the direct child + every descendant) on cancel.
-        let child = command
-            .group()
+        let job = opengeni_agent_windows_ffi::ProcessJob::new()?;
+        // As before, no user code runs until the suspended child joins its job.
+        let mut child = command
+            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED)
             .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                // The opaque dependency can fail after creating/assigning a child.
-                // It exposes no same-job settlement handle for that partial spawn.
-                mark_unsettled_work();
-                error
-            })?;
+            .spawn()?;
+        if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
+            let _ = child.start_kill();
+            let reservation = crate::current_work_reservation();
+            let witness = crate::work_scope::CleanupWitness::new(
+                reservation.clone(),
+                format!("Windows suspended child {:?}", child.id()),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(crate::with_work_reservation(reservation, async move {
+                    let mut witness = witness;
+                    loop {
+                        match child.wait().await {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }));
+            }
+            return Err(error);
+        }
         Ok(Self {
             child,
+            job,
+            cleanup_wait: None,
             running: true,
             reservation: crate::current_work_reservation(),
+            background_children_stopped: false,
+            termination_requested: false,
         })
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`].
     fn take_pipes(&mut self) -> ContainedPipes {
-        let child = self.child.inner();
+        let child = &mut self.child;
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     }
 
-    /// Terminates the whole Job Object (idempotent — a repeat kill, or a kill after
-    /// the job already exited, is InvalidInput/NotFound and treated as success).
+    /// Terminates the exact owned Job Object, including any remaining children.
     fn terminate(&mut self) -> std::io::Result<()> {
-        match self.child.start_kill() {
-            Ok(()) => Ok(()),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
-                ) =>
-            {
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        self.termination_requested = true;
+        self.job.terminate()
     }
 
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
-        // command-group 5.0.1 treats any job completion notification as exit;
-        // it exposes neither that notification nor the job's active count.
-        // Preserve normal command results, but never use this ambiguous receipt
-        // to authorize replacing a runner that may still own descendants.
-        if let Some(reservation) = &self.reservation {
-            reservation.mark_unsettled();
+        if !self.running {
+            return Ok(status);
         }
+        if self.cleanup_wait.is_none() {
+            let had_children = !self.termination_requested && self.job.active_processes()? > 0;
+            self.terminate()?;
+            self.background_children_stopped = had_children;
+            let job = self.job.clone();
+            self.cleanup_wait = Some(crate::spawn_blocking_reserved(move || job.wait_empty()));
+        }
+        // Keep one producer across cancel-safe select polls. Only the kernel's
+        // actual active-process count, not any job-port packet, proves cleanup.
+        self.cleanup_wait
+            .as_mut()
+            .expect("cleanup waiter")
+            .await
+            .map_err(std::io::Error::other)??;
+        self.cleanup_wait = None;
         self.running = false;
         Ok(status)
     }
@@ -581,11 +880,8 @@ impl Drop for ExecProcessGroup {
         if !self.running {
             return;
         }
-        if let Some(reservation) = &self.reservation {
-            reservation.mark_unsettled();
-        }
         let group_id = self.child.id();
-        if let Err(error) = self.child.start_kill() {
+        if let Err(error) = self.job.terminate() {
             if !matches!(
                 error.kind(),
                 std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
@@ -593,13 +889,27 @@ impl Drop for ExecProcessGroup {
                 tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
             }
         }
-    }
-}
-
-#[cfg(any(unix, windows))]
-fn mark_unsettled_work() {
-    if let Some(reservation) = crate::current_work_reservation() {
-        reservation.mark_unsettled();
+        let job = self.job.clone();
+        let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("Windows exec job for {group_id:?}"),
+        );
+        let _ = std::thread::Builder::new()
+            .name("exec-job-cleanup".into())
+            .spawn(move || {
+                let mut witness = witness;
+                loop {
+                    match job.wait_empty() {
+                        Ok(()) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
     }
 }
 
@@ -645,6 +955,13 @@ pub struct ContainedExec {
 }
 
 impl ContainedExec {
+    /// Whether normal shell-exit teardown stopped observed remaining children.
+    /// Explicit cancellation/deadline and unknown cleanup never claim this.
+    #[must_use]
+    pub fn background_children_stopped(&self) -> bool {
+        !self.group.running && self.group.background_children_stopped
+    }
+
     /// Waits for the direct command to exit, then tears the contained group down
     /// (Unix: SIGKILL the process group, then reap the stopped anchor fence;
     /// Windows: the Job Object is reaped on drop). Returns the command's exit status.
@@ -670,6 +987,75 @@ impl ContainedExec {
     pub fn terminate(&mut self) -> std::io::Result<()> {
         self.group.terminate()
     }
+
+    /// Gives this exec (running, or exited but not yet torn down) to a
+    /// successor process image, with whichever of its `stdin`/`stdout`/
+    /// `stderr` handles are still open. Nothing is signaled. Every carried
+    /// descriptor stays close-on-exec until [`crate::ExecHandover::prepare_exec`]
+    /// runs immediately before `exec`, so a command spawned meanwhile cannot
+    /// inherit the death lease or a pipe.
+    ///
+    /// # Errors
+    ///
+    /// The child's state could not be read or a pipe could not be duplicated.
+    /// The exec is returned untouched, still owned by this process.
+    #[cfg(unix)]
+    #[allow(clippy::result_large_err)] // a cold path; the caller must get the exec back unchanged
+    pub fn into_handover(mut self) -> Result<crate::ExecHandover, (Self, std::io::Error)> {
+        use std::os::fd::AsFd as _;
+
+        let prepared = (|| {
+            let anchor = self.group.anchor.carried()?;
+            let child = self.group.child.carried()?;
+            let stdin = self
+                .stdin
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            let stdout = self
+                .stdout
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            let stderr = self
+                .stderr
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            std::io::Result::Ok((anchor, child, [stdin, stdout, stderr]))
+        })();
+        match prepared {
+            Err(error) => Err((self, error)),
+            Ok((anchor, child, pipes)) => {
+                // The duplicates keep every pipe open; these registrations go.
+                self.stdin = None;
+                self.stdout = None;
+                self.stderr = None;
+                Ok(self.group.finish_handover(anchor, child, pipes))
+            }
+        }
+    }
+
+    /// Takes over an exec a predecessor process image of this agent handed
+    /// over, with its pipe ends in `stdin`/`stdout`/`stderr`.
+    ///
+    /// # Errors
+    ///
+    /// A carried descriptor or the operation cgroup could not be claimed; the
+    /// operation has then been killed by its anchor.
+    #[cfg(unix)]
+    pub fn adopt(
+        handover: &crate::ExecHandover,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<Self> {
+        let (group, (stdin, stdout, stderr)) = ExecProcessGroup::adopt(handover, cgroups)?;
+        Ok(Self {
+            stdin,
+            stdout,
+            stderr,
+            group,
+        })
+    }
 }
 
 /// Spawns `command` inside a fresh containment group with piped stdio, returning a
@@ -693,7 +1079,7 @@ pub fn spawn_contained(
     command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
 ) -> std::io::Result<ContainedExec> {
-    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default())
+    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default(), None)
 }
 
 /// Policy-aware form of [`spawn_contained`]. `requested_policy` is one
@@ -703,6 +1089,7 @@ fn spawn_contained_with_policy(
     mut command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
     requested_policy: OpCgroupConfig,
+    run_as: Option<&RunAsChild>,
 ) -> std::io::Result<ContainedExec> {
     command
         .kill_on_drop(true)
@@ -710,9 +1097,15 @@ fn spawn_contained_with_policy(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy)?;
+    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy, run_as)?;
     #[cfg(windows)]
     let mut group = {
+        if run_as.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "run_as requires Linux",
+            ));
+        }
         // Job Objects give the whole-tree kill; per-op cgroup leaves are Linux-only.
         let _ = (cgroups, requested_policy);
         ExecProcessGroup::spawn(command)?
@@ -738,6 +1131,10 @@ impl Platform for NativePlatform {
 
     fn operation_resource_policy_supported(&self) -> bool {
         self.cgroups.is_some()
+    }
+
+    fn run_as_supported(&self) -> bool {
+        crate::run_as::supported()
     }
 
     fn operation_cpu_quota_supported(&self) -> bool {
@@ -766,11 +1163,16 @@ impl Platform for NativePlatform {
         let registry = self.stream_registry.as_ref().ok_or_else(|| {
             PlatformError::Unsupported("pty_open: no relay stream registrar is wired".to_string())
         })?;
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut resolved = req.clone();
-        resolved.cwd = self
-            .resolve_process_cwd(&req.cwd, "pty")?
-            .to_string_lossy()
-            .into_owned();
+        // A run-as terminal without a cwd starts where that user's login would
+        // (the PTY layer picks the user's home); every other cwd resolves here.
+        if !(req.cwd.is_empty() && identity.is_some()) {
+            resolved.cwd = self
+                .resolve_process_cwd(&req.cwd, "pty", identity.as_ref())?
+                .to_string_lossy()
+                .into_owned();
+        }
         registry.open_pty(&resolved, &self.default_shell()).await
     }
 
@@ -780,6 +1182,11 @@ impl Platform for NativePlatform {
     /// down after the anchor reap in `wait()`, and cancellation-safe in `Drop`.
     fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
         self.spawn_exec_with_policy(req, None)
+    }
+
+    #[cfg(unix)]
+    fn adopt_exec(&self, handover: &crate::ExecHandover) -> std::io::Result<ContainedExec> {
+        ContainedExec::adopt(handover, self.cgroups.as_deref())
     }
 
     fn spawn_exec_with_policy(
@@ -794,6 +1201,7 @@ impl Platform for NativePlatform {
             });
         }
 
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut cmd = if req.shell {
             crate::shell_command(&req.command)
         } else {
@@ -802,7 +1210,17 @@ impl Platform for NativePlatform {
             command
         };
 
-        cmd.current_dir(self.resolve_process_cwd(&req.cwd, "exec")?);
+        let cwd = self.resolve_process_cwd(&req.cwd, "exec", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
+        }
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
@@ -819,7 +1237,13 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
-        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy).map_err(|e| {
+        spawn_contained_with_policy(
+            cmd,
+            self.cgroups.as_deref(),
+            requested_policy,
+            run_as.as_ref(),
+        )
+        .map_err(|e| {
             PlatformError::from_io(
                 &format!(
                     "spawn or apply execution containment for {}",
@@ -879,6 +1303,7 @@ impl Platform for NativePlatform {
                         stderr: prost::bytes::Bytes::from_static(b"timed out"),
                         timed_out: true,
                         duration_ms: elapsed_millis(started),
+                        background_children_stopped: false,
                     });
                 }
             }
@@ -894,40 +1319,15 @@ impl Platform for NativePlatform {
             stderr: prost::bytes::Bytes::from(output.stderr),
             timed_out: false,
             duration_ms: elapsed_millis(started),
+            background_children_stopped: contained.background_children_stopped(),
         })
     }
 
     async fn fs_read(&self, req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let offset = req.offset;
-        let length = req.length;
-        let (content, total_size) = crate::spawn_blocking_reserved(move || {
-            use std::io::{copy, sink, Read};
-
-            let read = || -> std::io::Result<(Vec<u8>, u64)> {
-                let mut file = std::fs::File::open(&path)?;
-                // Drain unrequested bytes without retaining them. Metadata is
-                // not the byte count for procfs/sysfs and other virtual files;
-                // keep the existing actual-stream total_size contract.
-                let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
-                let mut content = Vec::new();
-                let selected = if length == 0 {
-                    file.read_to_end(&mut content)?
-                } else {
-                    file.by_ref().take(length).read_to_end(&mut content)?
-                };
-                let remaining = copy(&mut file, &mut sink())?;
-                Ok((content, skipped + selected as u64 + remaining))
-            };
-            read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
-        })
-        .await
-        .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
-
-        Ok(v1::FsReadResponse {
-            content: prost::bytes::Bytes::from(content),
-            total_size,
-        })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let (offset, length) = (req.offset, req.length);
+        crate::run_as::run(identity, move || fs_read_at(path, offset, length)).await
     }
 
     fn transactional_fs_write_supported(&self) -> bool {
@@ -938,118 +1338,63 @@ impl Platform for NativePlatform {
         &self,
         req: &v1::FsWriteBegin,
     ) -> PlatformResult<Box<dyn crate::transactional_write::TransactionalWrite>> {
-        crate::transactional_write::begin(&self.resolve_path(&req.path)?, req)
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let Some(identity) = identity else {
+            return crate::transactional_write::begin(&path, req);
+        };
+        // The whole transaction runs as the user (their permissions, their
+        // ownership): staging, publication and the cleanup of an unpublished
+        // write, with the content unnamed until the verified inode is linked.
+        crate::run_as::begin_transactional_write(&identity, path, req.clone())
     }
 
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
-        let path = self.resolve_path(&req.path)?;
-        if req.create_parents {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
-                })?;
-            }
-        }
-
-        let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(true).create(true);
-        if req.append {
-            opts.append(true);
-        } else {
-            opts.truncate(true);
-        }
-        apply_mode(&mut opts, req.mode);
-
-        let mut file = opts
-            .open(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
-        file.write_all(&req.content)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
-        file.flush()
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
-
-        Ok(v1::FsWriteResponse {
-            bytes_written: req.content.len() as u64,
-        })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let req = req.clone();
+        crate::run_as::run(identity, move || fs_write_at(path, req)).await
     }
 
     async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse> {
-        let root = self.resolve_path(&req.path)?;
-        let mut entries = Vec::new();
-        list_dir(&root, &root, req.recursive, &mut entries).await?;
-        Ok(v1::FsListResponse { entries })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let root = self.resolve_path(&req.path, identity.as_ref())?;
+        let recursive = req.recursive;
+        crate::run_as::run(identity, move || async move {
+            let mut entries = Vec::new();
+            list_dir(&root, &root, recursive, &mut entries).await?;
+            Ok(v1::FsListResponse { entries })
+        })
+        .await
     }
 
     async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let result = if req.parents {
-            tokio::fs::create_dir_all(&path).await
-        } else {
-            tokio::fs::create_dir(&path).await
-        };
-        result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
-        set_mode(&path, req.mode).await?;
-        Ok(v1::FsMkdirResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let (parents, mode) = (req.parents, req.mode);
+        crate::run_as::run(identity, move || fs_mkdir_at(path, parents, mode)).await
     }
 
     async fn fs_move(&self, req: &v1::FsMoveRequest) -> PlatformResult<v1::FsMoveResponse> {
-        let from = self.resolve_path(&req.from)?;
-        let to = self.resolve_path(&req.to)?;
-        if !req.overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
-            return Err(PlatformError::Os {
-                message: format!("move: destination exists: {}", to.display()),
-                detail: BTreeMap::new(),
-            });
-        }
-        tokio::fs::rename(&from, &to).await.map_err(|e| {
-            PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
-        })?;
-        Ok(v1::FsMoveResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let from = self.resolve_path(&req.from, identity.as_ref())?;
+        let to = self.resolve_path(&req.to, identity.as_ref())?;
+        let overwrite = req.overwrite;
+        crate::run_as::run(identity, move || fs_move_at(from, to, overwrite)).await
     }
 
     async fn fs_stat(&self, req: &v1::FsStatRequest) -> PlatformResult<v1::FsStatResponse> {
-        let path = self.resolve_path(&req.path)?;
-        match tokio::fs::symlink_metadata(&path).await {
-            Ok(meta) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Ok(v1::FsStatResponse {
-                    exists: true,
-                    entry: Some(metadata_to_entry(&name, &req.path, &meta)),
-                })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
-                exists: false,
-                entry: None,
-            }),
-            Err(e) => Err(PlatformError::from_io(
-                &format!("stat {}", path.display()),
-                &e,
-            )),
-        }
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let requested = req.path.clone();
+        crate::run_as::run(identity, move || fs_stat_at(path, requested)).await
     }
 
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let meta = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
-        let result = if meta.is_dir() {
-            if req.recursive {
-                tokio::fs::remove_dir_all(&path).await
-            } else {
-                tokio::fs::remove_dir(&path).await
-            }
-        } else {
-            tokio::fs::remove_file(&path).await
-        };
-        result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
-        Ok(v1::FsRemoveResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let recursive = req.recursive;
+        crate::run_as::run(identity, move || fs_remove_at(path, recursive)).await
     }
 
     /// Builds the git argv (op-aware) and spawns it inside the shared
@@ -1065,9 +1410,20 @@ impl Platform for NativePlatform {
         req: &v1::GitRequest,
         policy: Option<&v1::OperationResourcePolicy>,
     ) -> PlatformResult<ContainedExec> {
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut cmd = tokio::process::Command::new("git");
-        cmd.args(git_args(req.op(), &req.args))
-            .current_dir(self.resolve_process_cwd(&req.cwd, "git")?);
+        cmd.args(git_args(req.op(), &req.args));
+        let cwd = self.resolve_process_cwd(&req.cwd, "git", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
+        }
         let requested_policy = requested_policy(policy)?;
         if requested_policy.has_limits()
             && self
@@ -1080,8 +1436,13 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
-        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy)
-            .map_err(|e| PlatformError::from_io("spawn git", &e))
+        spawn_contained_with_policy(
+            cmd,
+            self.cgroups.as_deref(),
+            requested_policy,
+            run_as.as_ref(),
+        )
+        .map_err(|e| PlatformError::from_io("spawn git", &e))
     }
 
     async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
@@ -1214,6 +1575,149 @@ fn parse_status_entry(line: &str) -> Option<v1::GitFileStatus> {
         }
         _ => None,
     }
+}
+
+// --- File operations on resolved paths ---------------------------------------
+// Each runs on the calling task, or on a run-as thread for a request with
+// `run_as` (crate::run_as::run), so the kernel applies that user's identity.
+
+async fn fs_read_at(path: PathBuf, offset: u64, length: u64) -> PlatformResult<v1::FsReadResponse> {
+    let (content, total_size) = crate::spawn_blocking_reserved(move || {
+        use std::io::{copy, sink, Read};
+
+        let read = || -> std::io::Result<(Vec<u8>, u64)> {
+            let mut file = std::fs::File::open(&path)?;
+            // Drain unrequested bytes without retaining them. Metadata is
+            // not the byte count for procfs/sysfs and other virtual files;
+            // keep the existing actual-stream total_size contract.
+            let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
+            let mut content = Vec::new();
+            let selected = if length == 0 {
+                file.read_to_end(&mut content)?
+            } else {
+                file.by_ref().take(length).read_to_end(&mut content)?
+            };
+            let remaining = copy(&mut file, &mut sink())?;
+            Ok((content, skipped + selected as u64 + remaining))
+        };
+        read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
+    })
+    .await
+    .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
+
+    Ok(v1::FsReadResponse {
+        content: prost::bytes::Bytes::from(content),
+        total_size,
+    })
+}
+
+async fn fs_write_at(
+    path: PathBuf,
+    req: v1::FsWriteRequest,
+) -> PlatformResult<v1::FsWriteResponse> {
+    if req.create_parents {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
+            })?;
+        }
+    }
+
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    if req.append {
+        opts.append(true);
+    } else {
+        opts.truncate(true);
+    }
+    apply_mode(&mut opts, req.mode);
+
+    let mut file = opts
+        .open(&path)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
+    file.write_all(&req.content)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
+    file.flush()
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
+
+    Ok(v1::FsWriteResponse {
+        bytes_written: req.content.len() as u64,
+    })
+}
+
+async fn fs_mkdir_at(
+    path: PathBuf,
+    parents: bool,
+    mode: u32,
+) -> PlatformResult<v1::FsMkdirResponse> {
+    let result = if parents {
+        tokio::fs::create_dir_all(&path).await
+    } else {
+        tokio::fs::create_dir(&path).await
+    };
+    result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
+    set_mode(&path, mode).await?;
+    Ok(v1::FsMkdirResponse {})
+}
+
+async fn fs_move_at(
+    from: PathBuf,
+    to: PathBuf,
+    overwrite: bool,
+) -> PlatformResult<v1::FsMoveResponse> {
+    if !overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
+        return Err(PlatformError::Os {
+            message: format!("move: destination exists: {}", to.display()),
+            detail: BTreeMap::new(),
+        });
+    }
+    tokio::fs::rename(&from, &to).await.map_err(|e| {
+        PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
+    })?;
+    Ok(v1::FsMoveResponse {})
+}
+
+async fn fs_stat_at(path: PathBuf, requested: String) -> PlatformResult<v1::FsStatResponse> {
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(meta) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(v1::FsStatResponse {
+                exists: true,
+                entry: Some(metadata_to_entry(&name, &requested, &meta)),
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
+            exists: false,
+            entry: None,
+        }),
+        Err(e) => Err(PlatformError::from_io(
+            &format!("stat {}", path.display()),
+            &e,
+        )),
+    }
+}
+
+async fn fs_remove_at(path: PathBuf, recursive: bool) -> PlatformResult<v1::FsRemoveResponse> {
+    let meta = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
+    let result = if meta.is_dir() {
+        if recursive {
+            tokio::fs::remove_dir_all(&path).await
+        } else {
+            tokio::fs::remove_dir(&path).await
+        }
+    } else {
+        tokio::fs::remove_file(&path).await
+    };
+    result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
+    Ok(v1::FsRemoveResponse {})
 }
 
 /// Recursively (or shallowly) lists a directory into `entries`, with each
@@ -1350,6 +1854,124 @@ mod tests {
         let mut platform = NativePlatform::with_root(root.path());
         platform.home_dir = Some(home.path().to_path_buf());
         (platform, root, home)
+    }
+
+    #[test]
+    fn workspace_root_keeps_a_chosen_directory_and_replaces_a_filesystem_root() {
+        // Host-native absolute paths: a Windows path needs its drive.
+        let (root, home, work) = if cfg!(windows) {
+            (r"C:\", r"C:\Users\me", r"C:\srv\work")
+        } else {
+            ("/", "/Users/me", "/srv/work")
+        };
+        let home = Path::new(home);
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(work)), Some(home), None),
+            PathBuf::from(work)
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(home), None),
+            home.to_path_buf()
+        );
+        assert_eq!(
+            resolve_workspace_root(None, Some(home), None),
+            home.to_path_buf()
+        );
+        // Without a usable home there is nothing better than the directory we have.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), None, None),
+            PathBuf::from(root)
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new(root)), None),
+            PathBuf::from(root)
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new("relative")), None),
+            PathBuf::from(root)
+        );
+    }
+
+    #[test]
+    fn workspace_root_replaces_the_windows_system_directory() {
+        // Host-native absolute paths; the comparison ignores case and separators.
+        let (system, launch, home, other) = if cfg!(windows) {
+            (
+                r"C:\Windows",
+                r"C:\WINDOWS\system32",
+                r"C:\Users\me",
+                r"C:\WindowsApps",
+            )
+        } else {
+            ("/Windows", "/WINDOWS/system32", "/Users/me", "/WindowsApps")
+        };
+        let (system, home) = (Path::new(system), Path::new(home));
+        // A service started in the system directory works from the user's home.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(launch)), Some(home), Some(system)),
+            home.to_path_buf()
+        );
+        // A sibling that merely shares the prefix is kept.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(other)), Some(home), Some(system)),
+            PathBuf::from(other)
+        );
+        // A system account's profile lives under the system directory too, so it
+        // is no better: keep the launch directory.
+        let system_profile = system.join("system32").join("config").join("systemprofile");
+        assert_eq!(
+            resolve_workspace_root(
+                Some(PathBuf::from(launch)),
+                Some(&system_profile),
+                Some(system)
+            ),
+            PathBuf::from(launch)
+        );
+    }
+
+    /// A service manager that starts the agent at `/` (launchd without a
+    /// `WorkingDirectory`) must still give it a writable workspace: the process
+    /// moves into the user's home and reports that as its workspace root. Runs in
+    /// a child copy of this test binary because the working directory is
+    /// process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn agent_started_at_the_filesystem_root_works_in_the_users_home() {
+        const CHILD: &str = "OPENGENI_TEST_FILESYSTEM_ROOT_CWD_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let moved = adopt_workspace_working_directory().expect("adopt home");
+            let platform = NativePlatform::new();
+            println!("moved={}", moved.is_some());
+            println!("cwd={}", std::env::current_dir().expect("cwd").display());
+            println!("root={}", platform.workspace_root());
+            return;
+        }
+        let home = tempfile::tempdir().expect("home tempdir");
+        let home_path = home.path().canonicalize().expect("canonical home");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "native::tests::agent_started_at_the_filesystem_root_works_in_the_users_home",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .current_dir("/")
+            .env(CHILD, "1")
+            .env("HOME", &home_path)
+            .env_remove("USERPROFILE")
+            .output()
+            .expect("run child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        assert!(stdout.contains("moved=true"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("cwd={}\n", home_path.display())),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("root={}\n", home_path.display())),
+            "{stdout}"
+        );
     }
 
     /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.
@@ -1653,19 +2275,37 @@ mod tests {
     #[test]
     fn path_resolution_expands_only_the_current_users_tilde() {
         let (platform, root, home) = rooted_with_home();
-        assert_eq!(platform.resolve_path("").expect("empty"), root.path());
-        assert_eq!(platform.resolve_path("~").expect("home"), home.path());
+        assert_eq!(platform.resolve_path("", None).expect("empty"), root.path());
+        assert_eq!(platform.resolve_path("~", None).expect("home"), home.path());
         assert_eq!(
-            platform.resolve_path("~/repo/src").expect("home child"),
+            platform
+                .resolve_path("~/repo/src", None)
+                .expect("home child"),
             home.path().join("repo/src")
         );
         assert_eq!(
-            platform.resolve_path("repo/src").expect("relative"),
+            platform.resolve_path("repo/src", None).expect("relative"),
             root.path().join("repo/src")
         );
         assert_eq!(
-            platform.resolve_path("~someone/repo").expect("named tilde"),
+            platform
+                .resolve_path("~someone/repo", None)
+                .expect("named tilde"),
             root.path().join("~someone/repo")
+        );
+        let identity = crate::run_as::RunAsIdentity {
+            name: "dev".into(),
+            uid: 1000,
+            gid: 1000,
+            groups: vec![1000],
+            home: root.path().join("dev-home"),
+            shell: "/bin/sh".into(),
+        };
+        assert_eq!(
+            platform
+                .resolve_path("~/repo", Some(&identity))
+                .expect("run-as tilde"),
+            root.path().join("dev-home/repo")
         );
     }
 
@@ -1765,6 +2405,72 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn failed_spawn_does_not_permanently_disable_updates() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let (platform, _dir) = rooted();
+        crate::with_work_reservation(Some(drain.reserve_work(None).unwrap()), async {
+            let error = platform
+                .exec(&ExecRequest {
+                    command: vec!["opengeni-command-that-does-not-exist".into()],
+                    shell: false,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, PlatformError::NotFound(_)));
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed spawn cleanup must settle without restarting the agent");
+        assert_eq!(
+            drain.reserve_update("after-failed-spawn"),
+            UpdateReservation::Started
+        );
+        assert!(drain.seal_update("after-failed-spawn"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_exec_retains_cleanup_until_updates_can_safely_resume() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.mark_handover();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let group = crate::with_work_reservation_sync(Some(work), || {
+            spawn_contained(command, None).unwrap()
+        });
+        drop(group);
+        assert_eq!(
+            drain.reserve_update("after-drop"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update_with_handover("after-drop"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned cancellation cleanup must settle");
+        assert!(drain.seal_update_with_handover("after-drop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn exec_missing_direct_command_is_not_found() {
         let (platform, _dir) = rooted();
         let err = platform
@@ -1845,6 +2551,10 @@ mod tests {
             resp.exit_code, resp.stdout, resp.stderr
         );
         assert_eq!(resp.exit_code, -1);
+        assert!(
+            !resp.background_children_stopped,
+            "explicit deadlines need no shell-exit notice"
+        );
         let descendant_pid = recorded_pid(&pid_file).await;
         assert_process_exits(descendant_pid, "timed-out exec").await;
     }
@@ -1868,7 +2578,39 @@ mod tests {
         assert!(!resp.timed_out, "early leader exit must complete normally");
         assert_eq!(resp.exit_code, 0);
         let descendant_pid = recorded_pid(&pid_file).await;
+        assert!(
+            resp.background_children_stopped,
+            "observed live descendants must be reported"
+        );
         assert_process_exits(descendant_pid, "early-exit exec").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_cleanup_reports_only_live_background_children() {
+        let (platform, _dir) = rooted();
+        for (shell, expected) in [
+            ("sleep 60 >/dev/null 2>&1 & printf done", true),
+            ("(sleep 60) >/dev/null 2>&1 & printf done", true),
+            ("nohup sleep 60 >/dev/null 2>&1 & printf done", true),
+            ("sleep 0.01 & wait; printf done", false),
+            ("printf done", false),
+        ] {
+            let request = ExecRequest {
+                command: vec![shell.into()],
+                shell: true,
+                ..Default::default()
+            };
+            let response = retry_transient_spawn(|| platform.exec(&request))
+                .await
+                .expect("shell fixture");
+            assert_eq!(response.background_children_stopped, expected, "{shell}");
+            assert_eq!(response.stdout.as_ref(), b"done");
+            assert!(
+                response.stderr.is_empty(),
+                "cleanup evidence must not contaminate stderr"
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -2065,6 +2807,7 @@ mod tests {
             .expect("write");
         let read = platform
             .fs_read(&FsReadRequest {
+                run_as: String::new(),
                 path: "f".to_string(),
                 offset: 3,
                 length: 4,
@@ -2102,6 +2845,7 @@ mod tests {
         ] {
             let response = platform
                 .fs_read(&FsReadRequest {
+                    run_as: String::new(),
                     path: "ranges".to_string(),
                     offset,
                     length,
@@ -2123,6 +2867,7 @@ mod tests {
         assert!(expected.len() > 4);
         let response = platform
             .fs_read(&FsReadRequest {
+                run_as: String::new(),
                 path: path.to_string(),
                 offset: 1,
                 length: 3,
@@ -2169,6 +2914,7 @@ mod tests {
         // Stat the directory exists.
         let stat = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "a/b/c".to_string(),
             })
             .await
@@ -2187,6 +2933,7 @@ mod tests {
             .expect("write");
         let listing = platform
             .fs_list(&FsListRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: false,
             })
@@ -2199,6 +2946,7 @@ mod tests {
         // Recursive list reaches the nested dir.
         let deep = platform
             .fs_list(&FsListRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: true,
             })
@@ -2209,6 +2957,7 @@ mod tests {
         // Remove recursively.
         platform
             .fs_remove(&FsRemoveRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: true,
             })
@@ -2216,6 +2965,7 @@ mod tests {
             .expect("remove");
         let gone = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
             })
             .await
@@ -2237,6 +2987,7 @@ mod tests {
         // Without overwrite, the move is refused.
         let err = platform
             .fs_move(&FsMoveRequest {
+                run_as: String::new(),
                 from: "from".to_string(),
                 to: "to".to_string(),
                 overwrite: false,
@@ -2248,6 +2999,7 @@ mod tests {
         // With overwrite it succeeds and the destination now holds the source.
         platform
             .fs_move(&FsMoveRequest {
+                run_as: String::new(),
                 from: "from".to_string(),
                 to: "to".to_string(),
                 overwrite: true,
@@ -2269,6 +3021,7 @@ mod tests {
         let (platform, _dir) = rooted();
         let stat = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "ghost".to_string(),
             })
             .await

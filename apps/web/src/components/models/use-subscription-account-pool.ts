@@ -3,8 +3,12 @@ import { toast } from "sonner";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SubscriptionPoolSettings } from "@opengeni/sdk";
 import { ApiError } from "@/api";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
-import { invalidateSharedQueries, useSharedQuery, type SharedQueryKey } from "@/lib/shared-query";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
+import {
+  invalidateSharedQueries,
+  useSharedQuery,
+  type SharedQueryKey,
+} from "@opengeni/react/app/lib/shared-query";
 
 export type SubscriptionPoolAccount = {
   id: string;
@@ -33,6 +37,21 @@ export function subscriptionAccountName(account: SubscriptionPoolAccount) {
   return account.label ?? account.email ?? account.subject;
 }
 
+/**
+ * Whether this pool's scope can change (and live-refresh) one listed account.
+ * A workspace list also carries the organization's shared accounts that serve
+ * it; only the organization manages those, and the workspace routes refuse
+ * them (409), so a workspace never treats them as its own.
+ */
+export function managesSubscriptionAccount(
+  pool: { canManageAccounts: boolean; organizationId?: string | null | undefined },
+  account: Pick<SubscriptionPoolAccount, "scope">,
+) {
+  return (
+    pool.canManageAccounts && (Boolean(pool.organizationId) || account.scope !== "organization")
+  );
+}
+
 /** Shared-cache key prefix for one provider's subscription pools (every scope). */
 export const subscriptionPoolQueryPrefix = (providerName: string) =>
   ["subscription-pool", providerName] as SharedQueryKey;
@@ -40,7 +59,7 @@ export const subscriptionPoolQueryPrefix = (providerName: string) =>
 /**
  * The same list, mutations and scope-epoch fencing for every subscription provider.
  * The list is read through the client-scoped shared cache: revisiting a page
- * renders the retained accounts at once and re-reads in the background, and
+ * renders fresh retained accounts without another read for five minutes, and
  * every account change invalidates the provider's pools in every scope
  * (organization changes can change what a workspace inherits).
  */
@@ -53,6 +72,8 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   workspaceId?: string | undefined;
   canManage: boolean;
   enabled?: boolean | undefined;
+  /** Providers whose listing follows a live status probe can refresh while visible. */
+  pollIntervalMs?: number | undefined;
   /** Other shared-cache prefixes an account change makes wrong. */
   relatedQueryPrefixes?: readonly SharedQueryKey[] | undefined;
 }) {
@@ -81,7 +102,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
       input.organizationId ?? input.workspaceId ?? input.identity,
     ],
     () => input.operations.load(),
-    { enabled },
+    { enabled, staleTimeMs: 5 * 60_000, pollIntervalMs: input.pollIntervalMs },
   );
   const [mutation, setMutation] = useState<{ epoch: Epoch; working: string | null }>({
     epoch: current,
@@ -95,9 +116,11 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   const invalidateLists = useCallback(
     () =>
       Promise.all(
-        [subscriptionPoolQueryPrefix(input.providerName), ...(relatedQueryPrefixes ?? [])].map(
-          (prefix) => invalidateSharedQueries(current.client, prefix),
-        ),
+        [
+          subscriptionPoolQueryPrefix(input.providerName),
+          ["model-settings"],
+          ...(relatedQueryPrefixes ?? []),
+        ].map((prefix) => invalidateSharedQueries(current.client, prefix)),
       ).then(() => undefined),
     [current, input.providerName, relatedQueryPrefixes],
   );
@@ -158,6 +181,11 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
   const data = query.error ? null : (query.data as SubscriptionAccountPoolData<Account> | null);
   const inherited = !input.organizationId && data?.source === "organization";
   const canManageAccounts = input.canManage && !inherited;
+  const managesAccount = (account: Account) =>
+    managesSubscriptionAccount(
+      { canManageAccounts, organizationId: input.organizationId },
+      account,
+    );
   return {
     data,
     accounts: data?.accounts ?? [],
@@ -182,7 +210,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.resolve(),
     activate: (account: Account) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `activate:${account.id}`,
             () => input.operations.activate(account),
@@ -190,17 +218,17 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.resolve(),
     setAllocator: (account: Account, allocatorEnabled: boolean) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `allocator:${account.id}`,
             () => input.operations.allocator(account, allocatorEnabled),
             allocatorEnabled
-              ? `${subscriptionAccountName(account)} is used for new work again`
-              : `${subscriptionAccountName(account)} won't be used for new work`,
+              ? `${subscriptionAccountName(account)} enabled`
+              : `${subscriptionAccountName(account)} disabled`,
           )
         : Promise.resolve(),
     rename: (account: Account, label: string) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `rename:${account.id}`,
             () => input.operations.rename(account, label.trim() || null),
@@ -209,7 +237,7 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
           )
         : Promise.reject(new Error("Manage this account in its owning scope.")),
     disconnect: (account: Account) =>
-      canManageAccounts
+      managesAccount(account)
         ? mutate(
             `disconnect:${account.id}`,
             () => input.operations.disconnect(account),

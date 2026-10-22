@@ -14,6 +14,9 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -24,7 +27,7 @@ import type {
    the right words given the dispatch logic lives in JSX.
    -------------------------------------------------------------------------- */
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser
@@ -174,7 +177,7 @@ describe("allowance refusal rendering", () => {
           ? "An organization admin can raise the workspace budget."
           : "A workspace admin can raise this limit.",
       );
-      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(text).toContain(`Resets ${formatAllowanceDate(englishText, refusal.resetsAt)}.`);
       expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
       expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
         "status",
@@ -334,9 +337,84 @@ describe("context compaction rendering", () => {
       await r.unmount();
     }
   });
+
+  test("a compaction cut short by worker shutdown reads as interrupted, not failed", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("turn.started", {}),
+          timelineEvent("session.context.compaction.started", {
+            trigger: "proactive",
+            implementation: "responses_compaction_v2",
+            estimatedTokensBefore: 291_549,
+          }),
+          timelineEvent("session.context.compaction.skipped", { reason: "interrupted" }),
+          timelineEvent("turn.recovery.requested", { reason: "worker_shutdown" }),
+        ]}
+        status="recovering"
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Compaction interrupted"),
+      );
+      expect(status?.textContent).toContain("Compaction interrupted · Auto");
+      expect(status?.textContent).toContain(
+        "It will retry if still needed. Chat history is unchanged.",
+      );
+      expect(status?.className).not.toContain("og-status-failed");
+      expect(r.container.textContent).not.toContain("Couldn’t compact conversation history");
+      expect(r.container.querySelector("[data-og-compaction-details]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
 });
 
 describe("structured human-input history", () => {
+  test("an answered question keeps its link clickable and wrapped inside the card", async () => {
+    timelineSequence = 0;
+    const url = `https://example.com/oauth/authorize?client_id=${"x".repeat(120)}&scope=a+b`;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-link",
+              questions: [
+                {
+                  id: "code",
+                  kind: "text",
+                  label: "Sign-in code",
+                  prompt: `Open this link and approve: ${url}. Then paste the code.`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-link",
+            response: { outcome: "answered", answers: [{ questionId: "code", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-link"]');
+      const anchor = history?.querySelector<HTMLAnchorElement>(`a[href="${url}"]`);
+      expect(anchor).not.toBeNull();
+      expect(anchor?.getAttribute("target")).toBe("_blank");
+      expect(anchor?.parentElement?.className).toContain("[overflow-wrap:anywhere]");
+      expect(history?.textContent).toContain(`${url}. Then paste the code.`);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("keeps an answered request visible outside the collapsed steps", async () => {
     timelineSequence = 0;
     const r = await renderComponent(
@@ -881,9 +959,7 @@ function timelineEventAt(
 }
 
 function turnSummaryTriggers(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll("button")).filter((button) =>
-    /\d+ steps?/.test(button.textContent ?? ""),
-  );
+  return Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-og-work-header]"));
 }
 
 function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
@@ -1920,6 +1996,30 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("unconfigured computer offers never turn event URLs or variables into a terminal setup fallback", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://example.test/install?command=curl",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use my computer",
+            requiredVariables: ["OPENGENI_ENROLL_TOKEN"],
+          },
+        })}
+      />,
+    );
+    expect(r.container.textContent).toContain("This app hasn't enabled computer setup here");
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(r.container.textContent).not.toContain("OPENGENI_ENROLL_TOKEN");
+    await r.unmount();
+  });
+
   test("lets the authenticated host render setup inline and preserves the fallback", async () => {
     const row = authNeededItem();
     const custom = await renderComponent(
@@ -2197,8 +2297,8 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(r.container.textContent).not.toContain("Narration: one fixture needs a quick patch.");
 
     const trigger = turnSummaryTrigger(r.container);
-    expect(trigger?.textContent).toContain("2 steps");
-    expect(trigger?.textContent).toContain("2 commands");
+    // Duration only: steps and commands are not counted.
+    expect(trigger?.textContent).toBe("6s");
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -2256,7 +2356,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
     expect(r.container.textContent).toContain("Waiting: child still running");
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -2394,7 +2494,7 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(visibleOutcome?.isConnected).toBe(true);
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -3729,9 +3829,9 @@ describe("StartupPhaseRow", () => {
       );
       await flush();
       expect(r.container.textContent).toContain("Ready.");
-      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
-        (candidate) => candidate.textContent?.includes("Preparation"),
-      );
+      // The startup-only turn folds behind its duration.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("6s");
       expect(summary?.getAttribute("aria-expanded")).toBe("false");
       await act(async () => summary?.click());
       await flush();
@@ -3766,6 +3866,66 @@ describe("StartupPhaseRow", () => {
     expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(2);
     expect(r.container.querySelectorAll(".text-og-status-failed").length).toBeGreaterThan(0);
     await r.unmount();
+  });
+
+  test("compacting before the first model request is a calm step, not a preparation failure", async () => {
+    const attemptId = "0c4d3b8e-5f7a-4e21-9d6c-2b8a1f3e7c90";
+    const receipt = (type: string, payload: unknown) => ({
+      ...timelineEvent(type, payload),
+      turnAttemptId: attemptId,
+    });
+    const compacting = [
+      receipt("turn.started", {}),
+      receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+      receipt("turn.startup.phase.failed", {
+        phase: "model_preparation",
+        durationMs: 145,
+        expectedTransition: true,
+        failureCategory: "context_compaction",
+        failureStage: "context_compaction",
+        failureCode: "compaction_required",
+        retryable: true,
+      }),
+      receipt("session.context.compaction.started", { trigger: "threshold" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={compacting} status="running" />);
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Compacting conversation first");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+      expect(r.container.querySelectorAll(".text-og-status-failed")).toHaveLength(0);
+
+      // The same attempt reopens preparation for the retried request.
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...compacting,
+            receipt("session.context.compacted", { trigger: "threshold" }),
+            receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+            receipt("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 90 }),
+            receipt("agent.model.request", { phase: "started" }),
+            receipt("agent.model.request", { phase: "first_byte", durationMs: 125 }),
+            receipt("turn.completed", { output: "Continued." }),
+          ]}
+          status="idle"
+        />,
+      );
+      await flush();
+      expect(r.container.textContent).toContain("Continued.");
+      // The startup-only turn folds behind its compaction facet.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("compacted");
+      if (summary?.getAttribute("aria-expanded") === "false") {
+        await act(async () => summary.click());
+        await flush();
+      }
+      expect(r.container.textContent).toContain("Model request dispatched");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+    } finally {
+      await r.unmount();
+    }
   });
 
   test("an expected preparation wait leaves a lost command failed with retained output", async () => {

@@ -23,6 +23,8 @@ import {
   type SubscriptionCoreConnectionToken,
   type SubscriptionCoreOperationCandidate,
 } from "./subscription-core/operation-connections";
+import { subscriptionCorePersonalConnections } from "./subscription-core/personal-connections";
+import type { SubscriptionCoreTurnIdentity } from "./subscription-core/turns";
 import {
   subscriptionCoreOperations,
   type SubscriptionCoreConnectionCredential,
@@ -285,6 +287,7 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
   deps: SubscriptionCoreCodexConnectionResolverDeps = {},
 ): {
   getToken: () => Promise<CodexCredentialTokenSnapshot>;
+  getFreshToken: () => Promise<CodexCredentialTokenSnapshot | null>;
   refresh: () => Promise<CodexCredentialTokenSnapshot>;
 } {
   const bound = coreResolver(deps);
@@ -298,6 +301,10 @@ export function buildSubscriptionCoreCodexConnectionTokenResolver(
   );
   return {
     getToken: async () => codexTokenSnapshot(await resolver.getToken()),
+    getFreshToken: async () => {
+      const token = await resolver.getFreshToken();
+      return token === null ? null : codexTokenSnapshot(token);
+    },
     refresh: async () => codexTokenSnapshot(await resolver.refresh()),
   };
 }
@@ -388,4 +395,42 @@ export async function fetchSubscriptionCoreCodexUsage(
     default:
       return { usage: errorUsagePayload(), recovered: false };
   }
+}
+
+/**
+ * Re-read `/wham/usage` for each exhausted shared Codex connection of the
+ * workspace's pool not observed within `minIntervalMs`, through the same core
+ * probe as `fetchSubscriptionCoreCodexUsage` (design 5.3, EP-N22). Returns
+ * the connections whose exhaustion ended (the caller wakes waiters).
+ */
+export async function refreshExhaustedSubscriptionCoreCodexQuota(
+  db: Database,
+  settings: Settings,
+  scope: Extract<SubscriptionCoreCodexOperationScope, { kind: "workspace" }>,
+  deps: Parameters<
+    ReturnType<typeof subscriptionCoreOperationConnections>["refreshExhaustedSubscriptionCoreQuota"]
+  >[3] = {},
+): Promise<string[]> {
+  return await subscriptionCoreOperationConnections(
+    SUBSCRIPTION_CORE_CODEX,
+  ).refreshExhaustedSubscriptionCoreQuota(db, settings, scope, deps);
+}
+
+/**
+ * The same re-read for the personal Codex connections placement's personal
+ * authorization admits for one exact accepted turn, each read as its owner.
+ */
+export async function refreshExhaustedSubscriptionCoreCodexTurnPersonalQuota(
+  db: Database,
+  settings: Settings,
+  identity: SubscriptionCoreTurnIdentity,
+  deps: Parameters<
+    ReturnType<
+      typeof subscriptionCorePersonalConnections
+    >["refreshExhaustedSubscriptionCoreTurnPersonalQuota"]
+  >[3] = {},
+): Promise<string[]> {
+  return await subscriptionCorePersonalConnections(
+    SUBSCRIPTION_CORE_CODEX,
+  ).refreshExhaustedSubscriptionCoreTurnPersonalQuota(db, settings, identity, deps);
 }

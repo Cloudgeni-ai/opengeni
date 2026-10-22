@@ -9,10 +9,10 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { humanizeName, skillBody, skillSummary } from "@/components/capabilities/skill-copy";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { Notice } from "@/components/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { Notice } from "@opengeni/react/ui/notice";
 
 /* ----------------------------------------------------------------------------
    A skill from skills.sh or GitHub before it is installed: the author's own
@@ -82,7 +82,11 @@ export function SkillSourcePage({
             size="sm"
             className="rounded-[10px] pointer-coarse:h-11"
             disabled={!canManage || installing || Boolean(validationError)}
-            title={!canManage ? "Only workspace admins can install skills." : undefined}
+            title={
+              !canManage
+                ? "You need permission to manage workspace documents to install skills."
+                : undefined
+            }
             onClick={onInstall}
           >
             {installing ? <Loader2Icon className="animate-spin" aria-hidden="true" /> : null}
@@ -147,7 +151,9 @@ export function SkillSourcePage({
             </p>
             <p className="mt-3 mb-0 text-xs leading-4.5 text-fg-muted">
               Skills add instructions only. They never get credentials or connect accounts.
-              {!canManage ? " Only workspace admins can install skills." : ""}
+              {!canManage
+                ? " You need permission to manage workspace documents to install skills."
+                : ""}
             </p>
             {validationError ? (
               <p className="mt-3 mb-0 text-xs leading-4.5 text-danger">{validationError}</p>

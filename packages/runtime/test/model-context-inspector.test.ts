@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities, ModelContextInstructionLayer } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import {
   CODE_SEARCH_DIRECTIVE,

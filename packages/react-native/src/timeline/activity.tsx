@@ -9,6 +9,7 @@ import type {
 import {
   pathBasename,
   pathDirname,
+  presentsToolOutputPreview,
   sandboxRowTitle,
   startupDuration,
   startupPhaseTitle,
@@ -17,12 +18,14 @@ import {
   toolRowPresentation,
   workerRowTitle,
   type ToolBody,
+  type ToolDetails,
   type ToolIconKind,
   type ToolPreview,
   type ToolRowPresentation,
   type WebSearchResult,
 } from "@opengeni/react/timeline-model";
-import { createContext, useContext, type ReactNode } from "react";
+import { useOpenGeniText } from "@opengeni/react/messages";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { Icon, type NativeIconName } from "./icon";
 import {
@@ -37,6 +40,7 @@ import {
 } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { annotationSourceTestId } from "./text-selection";
 
 /* ----------------------------------------------------------------------------
    Native activity rows. Tool rows draw from the shared presentation model
@@ -60,6 +64,11 @@ export interface NativeActivityOptions {
   renderTool?: NativeToolRenderer | undefined;
   /** Active compute label for exec previews ("on <label> · …"). */
   computeLabel?: string | null | undefined;
+  /**
+   * `"plain"` keeps every tool step visible with its plain name and status but
+   * never shows raw arguments, output or JSON. Defaults to `"full"`.
+   */
+  toolDetails?: ToolDetails | undefined;
   renderMarkdown?:
     | ((text: string, options: { tone: "body" | "muted"; streaming?: boolean }) => ReactNode)
     | undefined;
@@ -97,6 +106,7 @@ const TOOL_ICON: Record<ToolIconKind, NativeIconName> = {
 };
 
 function PreviewNode({ preview, compact }: { preview: ToolPreview; compact: boolean }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const mono = { ...fontStyle(theme, 400, "mono"), fontSize: theme.size.sm, lineHeight: 18 };
   switch (preview.kind) {
@@ -124,7 +134,9 @@ function PreviewNode({ preview, compact }: { preview: ToolPreview; compact: bool
     case "files":
       return (
         <Text numberOfLines={1} style={mono}>
-          <Text style={{ color: theme.colors["fg-muted"] }}>{preview.count} files</Text>
+          <Text style={{ color: theme.colors["fg-muted"] }}>
+            {t("native.timeline.activity.countvalueFiles", { countValue: preview.count })}
+          </Text>
           <Text
             style={{ color: theme.colors["fg-subtle"] }}
           >{`  +${preview.add} −${preview.del}`}</Text>
@@ -156,6 +168,7 @@ function keyedResults(results: readonly WebSearchResult[]) {
 }
 
 function ToolBodyView({ body }: { body: ToolBody }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   switch (body.kind) {
     case "term":
@@ -196,7 +209,7 @@ function ToolBodyView({ body }: { body: ToolBody }) {
       );
     case "web-results":
       if (!body.results?.length) {
-        return <BodyNote>results folded into model context — no list available.</BodyNote>;
+        return <BodyNote>{t("native.timeline.activity.resultsFoldedIntoModelContext")}</BodyNote>;
       }
       return (
         <View style={{ gap: 8 }}>
@@ -228,6 +241,8 @@ function ToolBodyView({ body }: { body: ToolBody }) {
           ))}
         </View>
       );
+    case "none":
+      return null;
     case "listing":
       return (
         <>
@@ -283,7 +298,7 @@ function ToolBodyView({ body }: { body: ToolBody }) {
                     color: theme.colors["fg-muted"],
                   }}
                 >
-                  +{body.more} more
+                  {t("native.timeline.activity.moreMore", { more: body.more })}
                 </Text>
               ) : null}
             </View>
@@ -375,9 +390,12 @@ function PatchView({
 export function PresentedToolRow({
   presentation: p,
   compact = false,
+  outputPreview,
 }: {
   presentation: ToolRowPresentation;
   compact?: boolean;
+  /** The row's output preview, when its output is not exact. */
+  outputPreview?: ToolCallItem["outputPreview"];
 }) {
   return (
     <ActivityDisclosure
@@ -391,6 +409,8 @@ export function PresentedToolRow({
       cancelled={p.cancelled}
       compact={compact}
       preview={p.preview ? previewContent(p.preview, compact) : undefined}
+      expandable={p.body.kind !== "none"}
+      outputPreview={outputPreview}
     >
       <ToolBodyView body={p.body} />
     </ActivityDisclosure>
@@ -398,21 +418,67 @@ export function PresentedToolRow({
 }
 
 function ToolCallRow({ item, compact }: { item: ToolCallItem; compact: boolean }) {
+  const t = useOpenGeniText();
   const options = useNativeActivityOptions();
-  const presentation = toolRowPresentation(item, { computeLabel: options.computeLabel ?? null });
+  const presentation = toolRowPresentation(t, item, {
+    computeLabel: options.computeLabel ?? null,
+    details: options.toolDetails ?? "full",
+  });
   const leaf = item.name.includes("__")
     ? item.name.slice(item.name.lastIndexOf("__") + 2)
     : item.name;
   const custom = options.toolRenderers?.[item.name] ?? options.toolRenderers?.[leaf];
-  for (const renderer of [custom, options.renderTool]) {
-    if (!renderer) continue;
-    const node = renderer({ item, presentation, compact });
-    if (node != null) return <>{node}</>;
+  const outputPreview = item.outputPreview ?? null;
+  // Custom renderers and presentations that parse their result need the
+  // exact output first; a failed read falls back to the built-in row, which
+  // says it is a preview.
+  const exactFirst =
+    outputPreview !== null &&
+    (custom !== undefined || options.renderTool !== undefined || !presentsToolOutputPreview(item));
+  if (exactFirst && outputPreview.load && outputPreview.state !== "error") {
+    return <ToolOutputExactRow item={item} preview={outputPreview} compact={compact} />;
   }
-  return <PresentedToolRow presentation={presentation} compact={compact} />;
+  if (!exactFirst) {
+    for (const renderer of [custom, options.renderTool]) {
+      if (!renderer) continue;
+      const node = renderer({ item, presentation, compact });
+      if (node != null) return <>{node}</>;
+    }
+  }
+  return (
+    <PresentedToolRow presentation={presentation} compact={compact} outputPreview={outputPreview} />
+  );
+}
+
+/** A tool row reading its exact output before it renders. */
+function ToolOutputExactRow({
+  item,
+  preview,
+  compact,
+}: {
+  item: ToolCallItem;
+  preview: NonNullable<ToolCallItem["outputPreview"]>;
+  compact: boolean;
+}) {
+  const t = useOpenGeniText();
+  const pending = preview.state === "preview";
+  const load = preview.load;
+  useEffect(() => {
+    if (pending) load?.();
+  }, [pending, load]);
+  return (
+    <ActivityDisclosure
+      icon="wrench"
+      title={toolDisplayName(t, item.name)}
+      preview={t("timeline.toolRenderers.loadingOutput")}
+      compact={compact}
+      expandable={false}
+    />
+  );
 }
 
 function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const options = useNativeActivityOptions();
@@ -435,7 +501,7 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
       title={
         item.streaming ? (
           <ShimmerText style={titleStyle} numberOfLines={1}>
-            Thinking
+            {t("native.timeline.activity.thinking")}
           </ShimmerText>
         ) : (
           <Text
@@ -447,40 +513,44 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
               color: theme.colors["fg-subtle"],
             }}
           >
-            Thought
+            {t("native.timeline.activity.thought")}
           </Text>
         )
       }
       accessibilityLabel={item.streaming ? m.thinking : m.thought}
       preview={plain || undefined}
     >
-      {options.renderMarkdown ? (
-        options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
-      ) : (
-        <Text
-          style={{
-            ...fontStyle(theme),
-            fontSize: theme.size.base,
-            lineHeight: 24,
-            color: theme.colors["fg-muted"],
-          }}
-        >
-          {item.text}
-        </Text>
-      )}
+      <View testID={annotationSourceTestId(undefined)} collapsable={false}>
+        {options.renderMarkdown ? (
+          options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
+        ) : (
+          <Text
+            selectable
+            style={{
+              ...fontStyle(theme),
+              fontSize: theme.size.base,
+              lineHeight: 24,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {item.text}
+          </Text>
+        )}
+      </View>
     </ActivityDisclosure>
   );
 }
 
 function SandboxRow({ item, compact }: { item: SandboxItem; compact: boolean }) {
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   return (
     <ActivityDisclosure
       icon="square-terminal"
       iconTone={
         item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"
       }
-      title={sandboxRowTitle(item, (name) => toolDisplayName(name))}
+      title={sandboxRowTitle(t, item, (name) => toolDisplayName(t, name))}
       running={item.status === "running"}
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
@@ -502,6 +572,7 @@ function StartupPhaseRow({
 }) {
   const m = useNativeTimelineMessages();
   const failed = item.status === "failed";
+  const t = useOpenGeniText();
   const running = item.status === "running";
   const duration = startupDuration(item.durationMs);
   return (
@@ -510,8 +581,8 @@ function StartupPhaseRow({
       iconTone={failed ? "failed" : running ? "running" : "muted"}
       title={
         item.blockedReason
-          ? STARTUP_WAIT_TITLES[item.blockedReason]
-          : startupPhaseTitle(item.phase, item.status, item.outcome)
+          ? STARTUP_WAIT_TITLES(t)[item.blockedReason]
+          : startupPhaseTitle(t, item.phase, item.status, item.outcome)
       }
       preview={item.phase === "model_preparation" ? m.startupDetail : undefined}
       running={running}
@@ -525,12 +596,13 @@ function StartupPhaseRow({
 }
 
 function WorkerRow({ item, compact }: { item: WorkerItem; compact: boolean }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const options = useNativeActivityOptions();
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
-  const title = workerRowTitle(item);
+  const title = workerRowTitle(t, item);
   if (compact) {
     return (
       <ActivityDisclosure
@@ -649,11 +721,16 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
       <View style={{ marginTop: 4 }}>
         <Icon name="message-square-text" size={14} color={theme.colors["fg-subtle"]} />
       </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
+      <View
+        testID={annotationSourceTestId(item.annotationSource?.eventId)}
+        collapsable={false}
+        style={{ flex: 1, minWidth: 0 }}
+      >
         {options.renderMarkdown ? (
           options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
         ) : (
           <Text
+            selectable
             style={{
               ...fontStyle(theme),
               fontSize: theme.size.sm,

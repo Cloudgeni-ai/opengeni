@@ -7,15 +7,11 @@ import AxeBuilder from "@axe-core/playwright";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { createDb, getWorkspace, withWorkspaceRls } from "@opengeni/db";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  freePort,
-  startProcess,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const shots = process.env.OPENGENI_TIMER_SCREENSHOTS ?? "/tmp/opengeni-pause-timer-screenshots";
 const workflowClient: SessionWorkflowClient = {

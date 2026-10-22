@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --cwd ../browser-extension build && vite dev --port 3000",
-    "build": "bun run --cwd ../browser-extension build && vite build && bun run --cwd ../../packages/react demo:build:deployed && bun ../../scripts/precompress-web-dist.ts dist",
+    "build": "bun run --cwd ../browser-extension build && vite build && vite build --config vite.office.config.ts && bun run --cwd ../../packages/react demo:build:deployed && bun ../../scripts/precompress-web-dist.ts dist",
     "start": "bun src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "@codemirror/lang-css": "^6.3.1",
@@ -26,6 +26,7 @@
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",
     "@opengeni/connect": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/desktop": "workspace:*",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@pierre/diffs": "1.2.11",

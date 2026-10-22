@@ -409,11 +409,11 @@ function numberFromFile(path: string): number | null {
   }
 }
 
-function cgroupV2Io(): { readBytes: number; writeBytes: number } | null {
+function cgroupV2Io(root: string): { readBytes: number; writeBytes: number } | null {
   try {
     let readBytes = 0;
     let writeBytes = 0;
-    for (const line of readFileSync("/sys/fs/cgroup/io.stat", "utf8").trim().split("\n")) {
+    for (const line of readFileSync(join(root, "io.stat"), "utf8").trim().split("\n")) {
       for (const field of line.split(/\s+/).slice(1)) {
         const [name, raw] = field.split("=");
         const value = Number(raw);
@@ -452,22 +452,31 @@ function cgroupV1Io(): { readBytes: number; writeBytes: number } | null {
   return null;
 }
 
-function cgroupV2Cpu(): number | null {
+function cgroupV2Cpu(root: string): number | null {
   try {
-    const match = readFileSync("/sys/fs/cgroup/cpu.stat", "utf8").match(/^usage_usec\s+(\d+)$/m);
+    const match = readFileSync(join(root, "cpu.stat"), "utf8").match(/^usage_usec\s+(\d+)$/m);
     return match ? Number(match[1]) * 1_000 : null;
   } catch {
     return null;
   }
 }
 
-function cgroupSnapshot(): CgroupSnapshot {
-  const io = cgroupV2Io() ?? cgroupV1Io();
+export function cgroupSnapshot(root = currentResourceScope()): CgroupSnapshot {
+  // Match the live sampler's actual membership. A nested runner must never
+  // report CPU/I/O from its host root or miss its own memory accounting.
+  if (root !== null) {
+    const io = cgroupV2Io(root);
+    return {
+      memoryBytes: numberFromFile(join(root, "memory.current")),
+      cpuNanoseconds: cgroupV2Cpu(root),
+      readBytes: io?.readBytes ?? null,
+      writeBytes: io?.writeBytes ?? null,
+    };
+  }
+  const io = cgroupV1Io();
   return {
-    memoryBytes:
-      numberFromFile("/sys/fs/cgroup/memory.current") ??
-      numberFromFile("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
-    cpuNanoseconds: cgroupV2Cpu() ?? numberFromFile("/sys/fs/cgroup/cpuacct/cpuacct.usage"),
+    memoryBytes: numberFromFile("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    cpuNanoseconds: numberFromFile("/sys/fs/cgroup/cpuacct/cpuacct.usage"),
     readBytes: io?.readBytes ?? null,
     writeBytes: io?.writeBytes ?? null,
   };

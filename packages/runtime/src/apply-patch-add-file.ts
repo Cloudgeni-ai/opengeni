@@ -152,7 +152,7 @@ export function withCodexAddFilePatch(patch: string): string {
   if (rawLines[0] !== BEGIN_PATCH) return patch;
   const lines = withLenientPatchFraming(rawLines);
   if (lines[0] !== BEGIN_PATCH || lines.length < 2 || lines.at(-1) !== END_PATCH) return patch;
-  const output = [lines[0]];
+  const output: string[] = [lines[0]];
   let inAddFile = false;
   let addFileLines = 0;
   for (let index = 1; index < lines.length; index += 1) {

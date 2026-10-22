@@ -16,7 +16,7 @@ import {
   withWorkspaceOpenRouterCredential,
 } from "@opengeni/config";
 import { resolveTurnModel } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import {
   CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID,

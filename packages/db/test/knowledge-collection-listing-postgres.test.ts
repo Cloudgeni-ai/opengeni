@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { readFile } from "node:fs/promises";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   installListingBaseline,
   listingDatabase,

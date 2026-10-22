@@ -1,4 +1,5 @@
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
+import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianTask,
@@ -12,7 +13,9 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceCodexCompactionDefault,
+  resolveWorkspaceDefaultExecutionTarget,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
+  SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
   SessionMemoryScope,
@@ -48,6 +51,7 @@ import {
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
   recordUserMessageAccepted,
@@ -57,6 +61,7 @@ import {
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
   bindScheduledTaskRunSessionInTransaction,
+  checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
   recordScheduledTaskAdmissionRefusal,
@@ -91,6 +96,7 @@ import {
   initializeSessionStartAtomically,
   materializeScheduledTaskReusableSessionFromRun,
   listInstalledApiIntegrationServerIdsForDelegations,
+  isWorkspaceAgentActivityPaused,
   markScheduledTaskRunFailedIfQueued,
   markScheduledTaskRunSkippedIfQueued,
   recordUsageEvent,
@@ -102,6 +108,7 @@ import {
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
+  withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -315,7 +322,7 @@ export async function stampScheduledSessionTitle(
 }
 
 export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {
-  return {
+  const activities = {
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
@@ -590,18 +597,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           })
         : task.agentConfig.tools;
       let taskTools = withFirstPartyTools(settings, runTools);
-      // A task created by a live agent attempt froze its creator's effective
-      // first-party selection, permission set, and session access policy;
-      // its generated sessions inherit that boundary under today's
-      // deployment ceiling. A human/API-created task (null policy) keeps the
-      // deployment default exactly as before.
+      // Preserve explicit creator choices and permissions. Default-following
+      // schedules resolve today's defaults, just like ordinary chats.
       const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
-      // A person-chosen Slack channel adds only the two bot posting tools;
-      // they post nowhere else, whatever the creator's own selection was.
+      // Scheduled work preserves the ordinary capability selection. A saved
+      // Slack destination never grants tools excluded by the creator.
       let firstPartyMcpTools = withScheduledSlackBotPostingTools(
         creatorPolicy?.firstPartyMcpTools
           ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
-          : resolveFirstPartyMcpToolPolicy(settings).default,
+          : resolveSessionFirstPartyMcpTools(
+              settings,
+              {
+                firstPartyMcpTools: [],
+                toolPolicy: {
+                  mode: "explicit",
+                  inheritedFromSessionId: null,
+                  firstPartyMode: "workspace_default",
+                },
+              },
+              (await requireWorkspace(db, task.workspaceId)).settings,
+            ),
         task.agentConfig,
         resolveFirstPartyMcpToolPolicy(settings).allowed,
       );
@@ -635,7 +650,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             productServerIds: runTools.map((tool) => tool.id),
           });
           firstPartyMcpTools = written.firstPartyMcpTools;
-          taskTools = written.tools;
+          taskTools = newSessionKnowledgeSearchTools(
+            written.tools,
+            resolvedAgentConfig,
+            firstPartyMcpTools,
+          );
         } catch (error) {
           const status =
             error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
@@ -777,17 +796,49 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         creatorPolicy?.sessionPolicy ?? null,
       );
       let acceptedPersonalMachine = false;
-      if (generatedTarget && task.agentConfig.machineTarget) {
+      let resolvedMachineTarget = task.agentConfig.machineTarget ?? null;
+      if (generatedTarget && task.agentConfig.executionTarget === "workspace_default") {
+        const workspace = await requireWorkspace(db, task.workspaceId);
+        let target;
+        try {
+          target = resolveWorkspaceDefaultExecutionTarget(workspace.settings);
+        } catch {
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            "workspace default machine setting is invalid",
+          );
+        }
+        if (
+          target?.kind === "managed" &&
+          (settings.sandboxBackend === "none" || settings.sandboxBackend === "selfhosted")
+        ) {
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            "Managed sandbox is not available in this deployment",
+          );
+        }
+        resolvedMachineTarget =
+          target?.kind === "machine" ? { targetSandboxId: target.targetSandboxId } : null;
+      }
+      if (generatedTarget && resolvedMachineTarget) {
+        if (
+          task.agentConfig.executionTarget === "workspace_default" &&
+          (!settings.sandboxOwnershipEnabled || !settings.sandboxSelfhostedEnabled)
+        ) {
+          return await refuseAdmission(
+            "machine_target_unavailable",
+            false,
+            "Connected Machines are not enabled in this deployment",
+          );
+        }
         const access = {
           accountId: task.accountId,
           workspaceId: task.workspaceId,
           subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
         };
-        const machine = await getSandbox(
-          db,
-          access,
-          task.agentConfig.machineTarget.targetSandboxId,
-        );
+        const machine = await getSandbox(db, access, resolvedMachineTarget.targetSandboxId);
         // A personal machine runs only its owner's Only me schedule. The scoped
         // lookup returns a personal machine to its owner alone, and every attempt
         // re-proves the owner's membership, workspace access and grant in the
@@ -796,7 +847,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           !machine ||
           machine.kind !== "selfhosted" ||
           !machine.enrollmentId ||
-          (machine.scope === "user" && !personalMachineScheduleOwner(task, access.subjectId))
+          (machine.scope === "user" &&
+            (task.agentConfig.executionTarget === "workspace_default" ||
+              !personalMachineScheduleOwner(task, access.subjectId)))
         ) {
           return await refuseAdmission(
             "machine_target_unavailable",
@@ -1171,6 +1224,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         // skip this occurrence visibly; a later one is admitted normally.
         return await refuseAdmission(admissionDenial, true, "agent run admission denied");
       }
+      if (acceptedTargetSessionId && targetSessionExecutionBase) {
+        // An occurrence that targets an existing task tree counts against
+        // that task's usage limit. A reached limit skips the occurrence
+        // visibly (no message, turn or wake is appended) until a person raises
+        // or clears the limit; an unreadable state throws for activity retry,
+        // never admitting as unlimited.
+        const usageLimit = await checkSessionUsageLimitAdmission(db, {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          sessionId: acceptedTargetSessionId,
+          runtime: true,
+        });
+        if (!usageLimit.allowed) {
+          return await refuseAdmission(
+            "session_usage_limit",
+            true,
+            "the target task reached its usage limit",
+          );
+        }
+      }
       const acceptedModel = targetSessionExecution?.model ?? model;
       const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;
       const acceptedLatencyMode = targetSessionExecution?.latencyMode ?? "standard";
@@ -1179,11 +1252,24 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : null;
       const beforeFreshAgentRunCommit = acceptedCustomModel
         ? async (tx: Database): Promise<void> => {
-            const active = await lockActiveCustomModelForAdmission(tx, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              reference: acceptedCustomModel,
-            });
+            // Admission reads the task's accepted Claude authority (its
+            // carrier) as the person accountable for the task. The subject is
+            // scoped to this check and restored afterwards.
+            const active = await withWorkspaceSubjectRls(
+              tx,
+              task.workspaceId,
+              causalHumanSubjectId ?? task.ownerSubjectId ?? task.createdBy.subjectId,
+              async (scoped) =>
+                await lockActiveCustomModelForAdmission(scoped, {
+                  accountId: task.accountId,
+                  workspaceId: task.workspaceId,
+                  reference: acceptedCustomModel,
+                  claudeAuthority: {
+                    authoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                    scheduledTaskId: task.id,
+                  },
+                }),
+            );
             if (!active) {
               throw new ScheduledRunTerminalAuthorityError(
                 "scheduled_model_unavailable",
@@ -1236,6 +1322,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         const admittedRunId = crypto.randomUUID();
         const generatedSessionBinding = generatedTarget
           ? {
+              toolPolicy: {
+                mode: "explicit" as const,
+                inheritedFromSessionId: null,
+                ...(!creatorPolicy?.firstPartyMcpTools
+                  ? {
+                      firstPartyMode: "workspace_default" as const,
+                      ...(scheduledSlackBotConnectionId(task.agentConfig)
+                        ? { firstPartyAdditions: [...SCHEDULED_SLACK_BOT_POSTING_TOOLS] }
+                        : {}),
+                    }
+                  : {}),
+              },
               createIdempotencyKey:
                 alertResponderSessionCreateIdempotencyKey ??
                 (task.runMode === "reusable_session"
@@ -1257,6 +1355,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           turnExecutionPolicy,
           resolvedSandboxBackend: sandboxBackend,
           resolvedSandboxOs: sandboxOs,
+          resolvedMachineTarget,
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
           resolvedFirstPartyMcpPermissions: firstPartyMcpPermissions,
@@ -1434,6 +1533,25 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             task.runMode === "new_session_per_run" ||
             (task.runMode === "reusable_session" && !existingSessionId)
           ) {
+            // A workspace Pause holds every new chat, so a run skips rather than
+            // leave a chat waiting behind it. A run that already got its chat
+            // keeps it and is refused below like any other paused chat.
+            if (
+              !run.sessionId &&
+              (await isWorkspaceAgentActivityPaused(dispatchDb, task.workspaceId))
+            ) {
+              await markScheduledTaskRunSkippedIfQueued(dispatchDb, {
+                workspaceId: task.workspaceId,
+                runId: run.id,
+                sessionId: null,
+                error: "scheduled_workspace_paused",
+              });
+              return {
+                kind: "blocked" as const,
+                result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
+                run: { ...run, status: "skipped" as const, error: "scheduled_workspace_paused" },
+              };
+            }
             // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
             // an attached variableSet must still exist here; fail closed if not.
             const variableSet = acceptedVariableSet;
@@ -1475,6 +1593,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 resources: task.agentConfig.resources,
                 bundledSkillIds: task.agentConfig.bundledSkillIds,
                 tools: taskTools,
+                toolPolicy: generatedSessionBinding!.toolPolicy,
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
                 ...(resolvedAgentConfig ? { agentConfig: resolvedAgentConfig } : {}),
@@ -1637,6 +1756,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               bus,
               settings,
               task,
+              target: resolvedMachineTarget,
               runId: run.id,
               session,
               deferPublications,
@@ -1858,6 +1978,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               },
               {
                 requireIdleSession: task.overlapPolicy === "skip" && !sessionCreated,
+                // A Pause refuses every overlap policy: queued behind it the
+                // occurrence could neither run nor settle. A chat created for
+                // this run was checked above and is never left empty.
+                refusePaused: !sessionCreated,
                 ...(incidentPreflightRequired
                   ? {
                       prepareSource: async (tx, sessionId) =>
@@ -1876,7 +2000,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             );
             if (
               scheduledUpdate.reason === "session_cancelled" ||
-              scheduledUpdate.reason === "session_not_idle"
+              scheduledUpdate.reason === "session_not_idle" ||
+              scheduledUpdate.reason === "session_paused" ||
+              scheduledUpdate.reason === "workspace_paused"
             ) {
               const error = scheduledSessionRejectionError(scheduledUpdate.reason);
               return {
@@ -1992,6 +2118,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               },
               {
                 requireIdleSession: task.overlapPolicy === "skip",
+                refusePaused: true,
                 prepareSource: async (tx, sessionId) => {
                   const goalEvents =
                     task.runMode === "reusable_session" && goalSpec && run.status === "queued"
@@ -2026,7 +2153,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 },
               },
             );
-            if (bundled.reason === "session_cancelled" || bundled.reason === "session_not_idle") {
+            if (
+              bundled.reason === "session_cancelled" ||
+              bundled.reason === "session_not_idle" ||
+              bundled.reason === "session_paused" ||
+              bundled.reason === "workspace_paused"
+            ) {
               const error = scheduledSessionRejectionError(bundled.reason);
               return {
                 kind: "blocked" as const,
@@ -2116,7 +2248,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         }
         const terminalError = scheduledRunRecoveryTerminalError(error);
         if (terminalError?.code === "scheduled_model_unavailable") {
-          return scheduledRunTerminalResult(terminalError.code);
+          // The fresh-run admission rolled back the run insert. Record the
+          // refusal as a visible run so the schedule never fails silently.
+          return await refuseAdmission("scheduled_model_unavailable", false, terminalError.message);
         }
         throw error;
       }
@@ -2150,6 +2284,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       }
       return result;
     },
+  };
+  return {
+    dispatchScheduledTaskRun: (input: DispatchScheduledTaskRunInput) =>
+      retryScheduledTaskAdmission(() => activities.dispatchScheduledTaskRun(input)),
   };
 }
 
@@ -2306,8 +2444,19 @@ function scheduledRunTerminalResult(
 }
 
 function scheduledSessionRejectionError(
-  rejectionReason: "session_cancelled" | "session_not_idle" | null,
-): "session_cancelled" | "scheduled_session_not_idle" {
+  rejectionReason:
+    | "session_cancelled"
+    | "session_not_idle"
+    | "session_paused"
+    | "workspace_paused"
+    | null,
+):
+  | "session_cancelled"
+  | "scheduled_session_not_idle"
+  | "scheduled_session_paused"
+  | "scheduled_workspace_paused" {
+  if (rejectionReason === "session_paused") return "scheduled_session_paused";
+  if (rejectionReason === "workspace_paused") return "scheduled_workspace_paused";
   return rejectionReason === "session_not_idle"
     ? "scheduled_session_not_idle"
     : "session_cancelled";
@@ -2446,11 +2595,26 @@ async function scheduledPersonalMachineOwner(
   throw new Error("scheduled personal Connected Machine authority is not active");
 }
 
+/** Historical receipts retain their explicit task target; new receipts freeze null too. */
+export function acceptedScheduledMachineTarget(
+  execution: ScheduledTaskRunAcceptedExecution,
+): ScheduledTask["agentConfig"]["machineTarget"] | null {
+  if (execution.resolvedMachineTarget !== undefined) return execution.resolvedMachineTarget;
+  if (execution.task.agentConfig.executionTarget === "workspace_default") {
+    throw new ScheduledRunTerminalAuthorityError(
+      "scheduled_machine_unavailable",
+      "accepted workspace default machine snapshot is missing",
+    );
+  }
+  return execution.task.agentConfig.machineTarget ?? null;
+}
+
 async function seedScheduledGeneratedSessionRoute(input: {
   db: Database;
   bus: ControlActivityServices["bus"];
   settings: ControlActivityServices["settings"];
   task: ScheduledTask;
+  target: ScheduledTask["agentConfig"]["machineTarget"] | null;
   runId: string;
   session: Awaited<ReturnType<typeof createSession>>;
   deferPublications: boolean;
@@ -2459,8 +2623,37 @@ async function seedScheduledGeneratedSessionRoute(input: {
     events: Awaited<ReturnType<typeof appendSessionEvents>>;
   }>;
 }): Promise<Awaited<ReturnType<typeof createSession>>> {
-  const target = input.task.agentConfig.machineTarget;
+  const target = input.target;
   if (!target) return input.session;
+  // Admission proves the revision authority equals ownerSubjectId and uses
+  // this exact subject for its scoped machine lookup. Recovery's task is the
+  // accepted immutable task snapshot, not a fresh head or credential owner.
+  const machineSubjectId = input.task.ownerSubjectId ?? input.task.createdBy.subjectId;
+  if (input.task.agentConfig.executionTarget === "workspace_default") {
+    if (!input.settings.sandboxOwnershipEnabled || !input.settings.sandboxSelfhostedEnabled) {
+      throw new ScheduledRunTerminalAuthorityError(
+        "scheduled_machine_unavailable",
+        "Connected Machines are not enabled in this deployment",
+      );
+    }
+    // Workspace defaults never confer personal-machine consent, including if
+    // an accepted machine was moved to personal scope before recovery.
+    const shared = await getSandbox(
+      input.db,
+      {
+        accountId: input.task.accountId,
+        workspaceId: input.task.workspaceId,
+        subjectId: machineSubjectId,
+      },
+      target.targetSandboxId,
+    );
+    if (!shared || shared.scope === "user") {
+      throw new ScheduledRunTerminalAuthorityError(
+        "scheduled_machine_unavailable",
+        "workspace default machine is no longer shared or available",
+      );
+    }
+  }
   const personalOwner = await scheduledPersonalMachineOwner(input.db, input.task, target);
   const seeded = await swapActiveSandbox(
     {
@@ -2474,8 +2667,11 @@ async function seedScheduledGeneratedSessionRoute(input: {
       sessionId: input.session.id,
       sessionBackend: input.session.sandboxBackend,
       sessionGroupId: input.session.sandboxGroupId,
-      // A personal machine attaches through the owner's scoped authorization.
-      ...(personalOwner ? { subjectId: personalOwner.subjectId } : {}),
+      // Keep the accepted subject for shared/organization lookup too: an
+      // organization machine can be installed in a different workspace. This
+      // subject does not itself grant personal-machine consent; that remains
+      // the independently proven owner grant below.
+      subjectId: machineSubjectId,
     },
     target.targetSandboxId,
     target.workingDir ?? null,
@@ -2635,6 +2831,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
       resources: task.agentConfig.resources,
       bundledSkillIds: task.agentConfig.bundledSkillIds,
       tools: input.acceptedExecution.resolvedTools,
+      toolPolicy: input.acceptedExecution.generatedSessionBinding?.toolPolicy ?? {
+        mode: "explicit",
+        inheritedFromSessionId: null,
+      },
       firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
       ...(input.acceptedExecution.resolvedAgentConfig
@@ -2752,6 +2952,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
       bus: input.bus,
       settings: input.settings,
       task,
+      target: acceptedScheduledMachineTarget(input.acceptedExecution),
       runId: input.run.id,
       session,
       deferPublications: false,
@@ -2813,7 +3014,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.policyRole !== null ||
       stableJson(session.skills) !== "[]" ||
       stableJson(session.toolPolicy) !==
-        stableJson({ mode: "explicit", inheritedFromSessionId: null }) ||
+        stableJson(
+          generatedBinding.toolPolicy ?? { mode: "explicit", inheritedFromSessionId: null },
+        ) ||
       session.toolPolicyVersion !== 1 ||
       session.mcpServers.length !== 0 ||
       session.parentSessionId !== null ||
@@ -2844,7 +3047,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
       creationPolicy.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
       session.sandboxBackend !== input.acceptedExecution.resolvedSandboxBackend ||
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
-      session.activeSandboxId !== (task.agentConfig.machineTarget?.targetSandboxId ?? null) ||
+      session.activeSandboxId !==
+        (acceptedScheduledMachineTarget(input.acceptedExecution)?.targetSandboxId ?? null) ||
       stableJson(session.resources) !== stableJson(task.agentConfig.resources) ||
       stableJson(session.tools) !== stableJson(input.acceptedExecution.resolvedTools) ||
       stableJson(session.firstPartyMcpTools) !==
@@ -2994,6 +3198,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     },
     {
       requireIdleSession: task.overlapPolicy === "skip" && !generatedSession,
+      refusePaused: !generatedSession,
       prepareSource: async (tx, sessionId) => {
         const goal = task.agentConfig.goal;
         const goalEvents =
@@ -3029,7 +3234,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
   );
   if (
     scheduledUpdate.reason === "session_cancelled" ||
-    scheduledUpdate.reason === "session_not_idle"
+    scheduledUpdate.reason === "session_not_idle" ||
+    scheduledUpdate.reason === "session_paused" ||
+    scheduledUpdate.reason === "workspace_paused"
   ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
   }

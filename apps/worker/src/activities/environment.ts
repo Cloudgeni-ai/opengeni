@@ -784,7 +784,15 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
           );
         }
         entry.installationId = installationId;
-        entry.repositoryIds.push(repositoryId);
+        // The same repository may legitimately be attached more than once
+        // (another ref or mount path), and sessions persisted before the
+        // web picker reconciled manual and catalog rows can hold an exact
+        // duplicate. One binding's token allowlist is the unique repository
+        // set; every resource keeps its own ref and mount above, and the
+        // GitHub token boundary still rejects duplicates from other callers.
+        if (!entry.repositoryIds.includes(repositoryId)) {
+          entry.repositoryIds.push(repositoryId);
+        }
       }
     }
     byBinding.set(bindingKey, entry);

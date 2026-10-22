@@ -494,6 +494,51 @@ describe("curated AI Gateway catalogue", () => {
     ).toThrow("Invalid AI Gateway inference cost");
   });
 
+  test("deployment margin override wins for built-in, explicit, and Gateway model rates", () => {
+    const base = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    const usage = { inputTokens: 100_000 };
+    expect(calculateModelUsageCostMicros(base, "gpt-5.6-luna", usage)).toBe(21_000);
+
+    const zero = { ...base, creditMarginBpsOverride: 0 };
+    expect(calculateModelUsageCostMicros(zero, "gpt-5.6-luna", usage)).toBe(20_000);
+    expect(
+      calculateGatewayReportedCostMicros(
+        zero,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_234_568);
+
+    const nonDefault = { ...base, creditMarginBpsOverride: 1_250 };
+    expect(calculateModelUsageCostMicros(nonDefault, "gpt-5.6-luna", usage)).toBe(22_500);
+    expect(
+      calculateGatewayReportedCostMicros(
+        nonDefault,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_388_889);
+
+    const explicitPrice = {
+      ...base,
+      modelPricingJson: JSON.stringify({
+        "gpt-5.6-luna": {
+          inputMicrosPerMillionTokens: 2_000_000,
+          outputMicrosPerMillionTokens: 12_000_000,
+          marginBps: 2_000,
+        },
+      }),
+    };
+    expect(calculateModelUsageCostMicros(explicitPrice, "gpt-5.6-luna", usage)).toBe(240_000);
+    expect(
+      calculateModelUsageCostMicros(
+        { ...explicitPrice, creditMarginBpsOverride: 1_250 },
+        "gpt-5.6-luna",
+        usage,
+      ),
+    ).toBe(225_000);
+  });
+
   test("reads exact Gateway provider cost without requiring a product price", () => {
     expect(calculateGatewayReportedProviderCostMicros("0.00000325")).toBe(4);
     expect(calculateGatewayReportedProviderCostMicros("1.23456789")).toBe(1_234_568);
@@ -1160,6 +1205,7 @@ describe("configuredModels", () => {
     expect(astra?.capabilities.latencyModes.map(({ id, runnable }) => ({ id, runnable }))).toEqual([
       { id: "standard", runnable: true },
       { id: "fast", runnable: true },
+      { id: "ultrafast", runnable: true },
     ]);
     expect(astra?.capabilities.inputModalities).toEqual(["text", "image"]);
   });
@@ -1883,7 +1929,7 @@ describe("turn execution policy V1", () => {
     };
     const newer = resolveTurnExecutionPolicyV1(current, input);
     expect(newer.definitionVersion).toBe(
-      "sha256:e5abc1c2cc619db0827f47241011aa90eeca0fe700071973b64f9ed3c32d7952",
+      "sha256:3728b7c579458cf7f853d0d2bf24942b93b56d793e432576125c0f8337dc7ab9",
     );
     // The same current definition accepted before the compaction trigger left
     // the digest.

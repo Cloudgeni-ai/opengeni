@@ -38,6 +38,7 @@ import {
 } from "react";
 
 import { DropdownMenu } from "radix-ui";
+import { containedPortal } from "../ui/portal-container";
 import { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
@@ -60,6 +61,9 @@ import {
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const DropdownMenuContainedPortal = containedPortal(DropdownMenu.Portal);
 
 // Queued prompts can be long; menu rows wrap instead of truncating.
 const QUEUE_MENU_ITEM_CLASS = `${MENU_ITEM_CLASS} whitespace-normal break-words`;
@@ -96,6 +100,7 @@ export function QueueSurface({
   readOnly = false,
   onRequestComposerFocus,
 }: QueueSurfaceProps) {
+  const t = useOpenGeniText();
   const [open, setOpen] = useState(false);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -123,12 +128,13 @@ export function QueueSurface({
   const collapsedPreview = useMemo(() => {
     const firstTurn = queue.queue[0];
     return firstTurn
-      ? queueTurnPreview(firstTurn, QUEUE_COLLAPSED_PREVIEW_CHARACTERS)
+      ? queueTurnPreview(t, firstTurn, QUEUE_COLLAPSED_PREVIEW_CHARACTERS)
       : queuePromptPreview(
+          t,
           queue.pendingInputs[0]?.summary ?? "",
           QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
         );
-  }, [queue.pendingInputs, queue.queue]);
+  }, [queue.pendingInputs, queue.queue, t]);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const displayedQueue = useMemo(() => {
@@ -153,20 +159,26 @@ export function QueueSurface({
         baseVersion: queue.snapshot?.version ?? null,
         turnIds: plan.turnIds,
       });
-      setAnnouncement(`Saving queued prompt at position ${boundedIndex + 1}.`);
+      setAnnouncement(
+        t("queueSurfaceImplementation.savingQueuedPromptAtPosition", {
+          boundedIndex: boundedIndex + 1,
+        }),
+      );
       try {
         const moved = await queue.moveTurn(turnId, beforeTurnId);
         setAnnouncement(
           moved
-            ? `Queued prompt moved to position ${boundedIndex + 1}.`
-            : "The queue changed before that prompt could be moved. Refreshed server order.",
+            ? t("queueSurfaceImplementation.queuedPromptMovedToPosition", {
+                boundedIndex: boundedIndex + 1,
+              })
+            : t("queueSurfaceImplementation.theQueueChangedBeforeThat"),
         );
         if (moved) focusQueueTurn(surfaceRef.current, turnId);
       } finally {
         setPendingMove(null);
       }
     },
-    [pendingMove, queue, surfaceRef],
+    [pendingMove, queue, surfaceRef, t],
   );
 
   const onDragEnd = useCallback(
@@ -175,13 +187,13 @@ export function QueueSurface({
       const activeId = String(event.active.id);
       const overId = event.over ? String(event.over.id) : null;
       if (!overId || activeId === overId) {
-        setAnnouncement("Queued prompt returned to its original position.");
+        setAnnouncement(t("queueSurfaceImplementation.queuedPromptReturnedToIts"));
         return;
       }
       const nextIndex = queue.queue.findIndex((turn) => turn.id === overId);
       if (nextIndex >= 0) void moveToIndex(activeId, nextIndex);
     },
-    [moveToIndex, queue.queue],
+    [moveToIndex, queue.queue, t],
   );
 
   const onDragStart = useCallback(
@@ -190,9 +202,14 @@ export function QueueSurface({
       const turnId = String(event.active.id);
       const position = queue.queue.findIndex((turn) => turn.id === turnId) + 1;
       setDraggedTurnId(turnId);
-      setAnnouncement(`Dragging queued prompt ${position} of ${queue.queue.length}.`);
+      setAnnouncement(
+        t("queueSurfaceImplementation.draggingQueuedPromptPositionOf", {
+          position,
+          length: queue.queue.length,
+        }),
+      );
     },
-    [queue.queue],
+    [queue.queue, t],
   );
 
   const onHandleKeyDown = useCallback(
@@ -205,7 +222,10 @@ export function QueueSurface({
         event.preventDefault();
         setKeyboardDrag({ turnId, projectedIndex: canonicalIndex });
         setAnnouncement(
-          `Lifted queued prompt ${canonicalIndex + 1} of ${count}. Use arrow keys to move it, then press Space to drop.`,
+          t("queueSurfaceImplementation.liftedQueuedPromptCanonicalindexOf", {
+            canonicalIndex: canonicalIndex + 1,
+            countValue: count,
+          }),
         );
         return;
       }
@@ -214,13 +234,17 @@ export function QueueSurface({
       if (event.key === "Escape") {
         event.preventDefault();
         setKeyboardDrag(null);
-        setAnnouncement("Queue reorder cancelled.");
+        setAnnouncement(t("queueSurfaceImplementation.queueReorderCancelled"));
         return;
       }
       if (event.key === " ") {
         event.preventDefault();
         const targetIndex = keyboardDrag.projectedIndex;
-        setAnnouncement(`Moving queued prompt to position ${targetIndex + 1}.`);
+        setAnnouncement(
+          t("queueSurfaceImplementation.movingQueuedPromptToPosition", {
+            targetIndex: targetIndex + 1,
+          }),
+        );
         void moveToIndex(turnId, targetIndex).finally(() => setKeyboardDrag(null));
         return;
       }
@@ -234,26 +258,31 @@ export function QueueSurface({
         Math.min(edge ?? keyboardDrag.projectedIndex + direction, count - 1),
       );
       setKeyboardDrag({ turnId, projectedIndex });
-      setAnnouncement(`Queued prompt projected to position ${projectedIndex + 1} of ${count}.`);
+      setAnnouncement(
+        t("queueSurfaceImplementation.queuedPromptProjectedToPosition", {
+          projectedIndex: projectedIndex + 1,
+          countValue: count,
+        }),
+      );
     },
-    [count, keyboardDrag, moveToIndex, queue.queue],
+    [count, keyboardDrag, moveToIndex, queue.queue, t],
   );
 
   const edit = useCallback(
     async (turn: SessionTurn, replaceDraft: boolean) => {
       if (!composer || !canEditInComposer) return;
-      setAnnouncement("Moving queued prompt to the composer…");
+      setAnnouncement(t("queueSurfaceImplementation.movingQueuedPromptToThe"));
       const restored = await queue.editTurn(turn.id, {
         expectedDraftRevision: composer.draftRevision,
         replaceDraft,
       });
       if (!restored) {
-        setAnnouncement("That prompt changed before it could be moved to the composer.");
+        setAnnouncement(t("queueSurfaceImplementation.thatPromptChangedBeforeIt"));
         return;
       }
       composer.applyDraft(restored);
       setReplaceDraftFor(null);
-      setAnnouncement("Queued prompt moved back to the composer for editing.");
+      setAnnouncement(t("queueSurfaceImplementation.queuedPromptMovedBackTo"));
       window.requestAnimationFrame(() => {
         if (onRequestComposerFocus) {
           onRequestComposerFocus();
@@ -266,7 +295,7 @@ export function QueueSurface({
         input?.focus();
       });
     },
-    [canEditInComposer, composer, onRequestComposerFocus, queue],
+    [canEditInComposer, composer, onRequestComposerFocus, queue, t],
   );
 
   const requestEdit = useCallback(
@@ -298,26 +327,34 @@ export function QueueSurface({
           onClick={() => setOpen((value) => !value)}
           aria-description={!open && totalCount > 0 ? collapsedPreview.summary : undefined}
           aria-expanded={open}
-          aria-label={`${count} queued prompt${count === 1 ? "" : "s"}${
+          aria-label={[
             pendingInputCount > 0
-              ? ` and ${pendingInputCount} pending machine input${pendingInputCount === 1 ? "" : "s"}`
-              : ""
-          }${readOnly ? " Read-only" : ""}`}
+              ? t("queueSurfaceImplementation.queuedPromptsAndPendingInputs", {
+                  count,
+                  pending: t("queueSurfaceImplementation.pendingMachineInputs", {
+                    count: pendingInputCount,
+                  }),
+                })
+              : t("queueSurfaceImplementation.queuedPrompts", { count }),
+            readOnly ? t("queueSurfaceImplementation.readOnly") : null,
+          ]
+            .filter(Boolean)
+            .join(" ")}
         >
           <ChevronDownIcon
             aria-hidden="true"
             className={`size-3.5 shrink-0 text-fg-subtle transition-transform ${open ? "rotate-180" : ""}`}
           />
           <span className="text-og-control font-medium text-fg">
-            {count > 0 ? `${count} queued prompt${count === 1 ? "" : "s"}` : null}
+            {count > 0 ? t("queueSurfaceImplementation.queuedPrompts", { count }) : null}
             {count > 0 && pendingInputCount > 0 ? " · " : null}
             {pendingInputCount > 0
-              ? `${pendingInputCount} incoming update${pendingInputCount === 1 ? "" : "s"}`
+              ? t("queueSurfaceImplementation.incomingUpdates", { count: pendingInputCount })
               : null}
           </span>
           {readOnly ? (
             <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-og-xs text-fg-subtle">
-              Read-only
+              {t("queueSurfaceImplementation.readOnly")}
             </span>
           ) : null}
           {!open && totalCount > 0 ? (
@@ -344,7 +381,7 @@ export function QueueSurface({
         {open && count > 0 && readOnly ? (
           <ol
             className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
-            aria-label="Queued prompts"
+            aria-label={t("queueSurfaceImplementation.queuedPrompts2")}
             data-testid="queue-list"
           >
             {queue.queue.map((turn, index) => (
@@ -357,7 +394,12 @@ export function QueueSurface({
                 }
                 onDisclosureChange={(expanded) =>
                   setAnnouncement(
-                    `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
+                    t(
+                      expanded
+                        ? "queueSurfaceImplementation.fullContentForQueuedPromptShown"
+                        : "queueSurfaceImplementation.fullContentForQueuedPromptHidden",
+                      { index: index + 1 },
+                    ),
                   )
                 }
               />
@@ -373,14 +415,14 @@ export function QueueSurface({
             onDragStart={onDragStart}
             onDragCancel={() => {
               setDraggedTurnId(null);
-              setAnnouncement("Queue reorder cancelled.");
+              setAnnouncement(t("queueSurfaceImplementation.queueReorderCancelled"));
             }}
             onDragEnd={onDragEnd}
           >
             <SortableContext items={ids} strategy={verticalListSortingStrategy}>
               <ol
                 className="max-h-[min(30rem,60dvh)] divide-y divide-border overflow-y-auto overscroll-contain border-t border-border"
-                aria-label="Queued prompts"
+                aria-label={t("queueSurfaceImplementation.queuedPrompts2")}
                 data-testid="queue-list"
               >
                 {displayedQueue.map((turn, index) => (
@@ -403,12 +445,12 @@ export function QueueSurface({
                     onConfirmReplace={() => void edit(turn, true)}
                     onCancelReplace={() => setReplaceDraftFor(null)}
                     onSteer={() => {
-                      setAnnouncement("Requesting this queued prompt as the next direction…");
+                      setAnnouncement(t("queueSurfaceImplementation.requestingThisQueuedPromptAs"));
                       void queue.steerTurn(turn.id).then((steered) => {
                         setAnnouncement(
                           steered
-                            ? "Queued prompt is now the next direction."
-                            : "That prompt changed before it could be steered.",
+                            ? t("queueSurfaceImplementation.queuedPromptIsNowThe")
+                            : t("queueSurfaceImplementation.thatPromptChangedBeforeIt2"),
                         );
                         if (steered) {
                           focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
@@ -416,12 +458,12 @@ export function QueueSurface({
                       });
                     }}
                     onDelete={() => {
-                      setAnnouncement("Deleting queued prompt…");
+                      setAnnouncement(t("queueSurfaceImplementation.deletingQueuedPrompt"));
                       void queue.removeTurn(turn.id).then((removed) => {
                         setAnnouncement(
                           removed
-                            ? "Queued prompt deleted."
-                            : "That prompt changed before it could be deleted.",
+                            ? t("queueSurfaceImplementation.queuedPromptDeleted")
+                            : t("queueSurfaceImplementation.thatPromptChangedBeforeIt3"),
                         );
                         if (removed) {
                           focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
@@ -430,7 +472,12 @@ export function QueueSurface({
                     }}
                     onDisclosureChange={(expanded) =>
                       setAnnouncement(
-                        `Full content for queued prompt ${index + 1} ${expanded ? "shown" : "hidden"}.`,
+                        t(
+                          expanded
+                            ? "queueSurfaceImplementation.fullContentForQueuedPromptShown"
+                            : "queueSurfaceImplementation.fullContentForQueuedPromptHidden",
+                          { index: index + 1 },
+                        ),
                       )
                     }
                   />
@@ -450,6 +497,7 @@ export function QueueSurface({
                   >
                     {
                       queueTurnPreview(
+                        t,
                         queue.queue.find((turn) => turn.id === draggedTurnId),
                         QUEUE_ROW_PREVIEW_CHARACTERS,
                       ).summary
@@ -479,12 +527,13 @@ function PendingMachineInputs({
   inputs: SessionPendingInputPreview[];
   attached?: boolean;
 }) {
+  const t = useOpenGeniText();
   return (
     <section className="border-t border-border px-3 py-2">
       <p className="text-og-xs font-medium text-fg-subtle">
         {attached
-          ? `${inputs.length} update${inputs.length === 1 ? "" : "s"} will join this prompt`
-          : "Incoming updates waiting to run"}
+          ? t("queueSurfaceImplementation.updatesWillJoinThisPrompt", { count: inputs.length })
+          : t("queueSurfaceImplementation.incomingUpdatesWaitingToRun")}
       </p>
       <ol className="mt-1 space-y-1">
         {inputs.map((input) => (
@@ -516,19 +565,23 @@ function QueuePrompt({
   index: number;
   onDisclosureChange: (expanded: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   const [expanded, setExpanded] = useState(false);
   const fullContentId = useId();
   const content = queueItemContent(prompt, annotations.length);
   const preview = useMemo(
-    () => queueContentPreview(prompt, annotations.length, QUEUE_ROW_PREVIEW_CHARACTERS),
-    [annotations.length, prompt],
+    () => queueContentPreview(t, prompt, annotations.length, QUEUE_ROW_PREVIEW_CHARACTERS),
+    [annotations.length, prompt, t],
   );
 
   return (
     <div className="w-full min-w-0 max-w-full">
       {prompt ? (
         <div
-          aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
+          aria-label={t("queueSurfaceImplementation.queuedPromptIndexSummarySummary", {
+            index: index + 1,
+            summary: preview.summary,
+          })}
           className="max-w-full overflow-hidden text-og-control leading-5 text-fg"
           data-testid={`queue-prompt-preview-${index + 1}`}
           dir="auto"
@@ -576,7 +629,7 @@ function QueuePrompt({
           className="text-og-control leading-5 text-fg-muted italic"
           data-testid={`queue-prompt-unavailable-${index + 1}`}
         >
-          {QUEUE_ITEM_CONTENT_UNAVAILABLE}
+          {QUEUE_ITEM_CONTENT_UNAVAILABLE(t)}
         </p>
       ) : null}
       {prompt ? (
@@ -584,7 +637,11 @@ function QueuePrompt({
           type="button"
           aria-controls={fullContentId}
           aria-expanded={expanded}
-          aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
+          aria-label={
+            expanded
+              ? t("queueSurfaceImplementation.hideFullContentForPrompt", { number: index + 1 })
+              : t("queueSurfaceImplementation.showFullContentForPrompt", { number: index + 1 })
+          }
           className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-og-xs font-medium text-fg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
           data-testid={`queue-prompt-disclosure-${index + 1}`}
           onClick={() => {
@@ -597,14 +654,18 @@ function QueuePrompt({
             aria-hidden="true"
             className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
           />
-          {expanded ? "Hide full prompt" : "View full prompt"}
+          {expanded
+            ? t("queueSurfaceImplementation.hideFullPrompt")
+            : t("queueSurfaceImplementation.viewFullPrompt")}
         </button>
       ) : null}
       {expanded && prompt ? (
         <pre
           id={fullContentId}
           role="region"
-          aria-label={`Full content for queued prompt ${index + 1}`}
+          aria-label={t("queueSurfaceImplementation.fullContentForQueuedPrompt2", {
+            index: index + 1,
+          })}
           className="mt-1.5 max-h-64 w-full min-w-0 max-w-full overflow-auto overscroll-contain rounded-md border border-border bg-surface-2/60 p-2 whitespace-pre-wrap break-all font-mono text-og-control leading-5 text-fg [unicode-bidi:plaintext]"
           data-testid={`queue-prompt-full-${index + 1}`}
           dir="auto"
@@ -628,6 +689,7 @@ function ReadOnlyQueueRow({
   attachedInputs: SessionPendingInputPreview[];
   onDisclosureChange: (expanded: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   return (
     <li className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2">
       <span className="mt-1 shrink-0 font-mono text-og-xs text-fg-subtle">{index + 1}</span>
@@ -644,12 +706,12 @@ function ReadOnlyQueueRow({
         <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
           {turn.resources.length > 0 ? (
             <span className="shrink-0">
-              {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
+              {t("queueSurfaceImplementation.resources", { count: turn.resources.length })}
             </span>
           ) : null}
           {turn.tools.length > 0 ? (
             <span className="shrink-0">
-              {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
+              {t("queueSurfaceImplementation.tools", { count: turn.tools.length })}
             </span>
           ) : null}
           <span className="min-w-0 truncate">{modelDisplayName(turn.model)}</span>
@@ -697,6 +759,7 @@ function SortableQueueRow({
   onDelete: () => void;
   onDisclosureChange: (expanded: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   const sortable = useSortable({
     id: turn.id,
     disabled: reorderDisabled || keyboardDragging,
@@ -721,8 +784,10 @@ function SortableQueueRow({
           onKeyDown={onHandleKeyDown}
           disabled={reorderDisabled}
           className="col-start-1 row-start-1 mt-0.5 inline-flex size-7 shrink-0 touch-none items-center justify-center rounded-md text-fg-subtle hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-[44px]"
-          aria-label={`Reorder queued prompt ${index + 1}`}
-          title="Drag to reorder. Press Space, arrows, then Space to drop."
+          aria-label={t("queueSurfaceImplementation.reorderQueuedPromptIndex", {
+            index: index + 1,
+          })}
+          title={t("queueSurfaceImplementation.dragToReorderPressSpace")}
         >
           <GripVerticalIcon className="size-3.5" />
         </button>
@@ -742,12 +807,12 @@ function SortableQueueRow({
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-og-xs text-fg-subtle">
             {turn.resources.length > 0 ? (
               <span className="shrink-0">
-                {turn.resources.length} resource{turn.resources.length === 1 ? "" : "s"}
+                {t("queueSurfaceImplementation.resources", { count: turn.resources.length })}
               </span>
             ) : null}
             {turn.tools.length > 0 ? (
               <span className="shrink-0">
-                {turn.tools.length} tool{turn.tools.length === 1 ? "" : "s"}
+                {t("queueSurfaceImplementation.tools", { count: turn.tools.length })}
               </span>
             ) : null}
             <span className="min-w-0 truncate">{modelDisplayName(turn.model)}</span>
@@ -764,7 +829,7 @@ function SortableQueueRow({
                 aria-hidden="true"
                 className="size-3 shrink-0 animate-spin motion-reduce:animate-none"
               />
-              {queueMutationPendingLabel(pending)}
+              {queueMutationPendingLabel(t, pending)}
             </div>
           ) : null}
         </div>
@@ -773,9 +838,11 @@ function SortableQueueRow({
             type="button"
             disabled={pending !== null}
             onClick={onSteer}
-            aria-label={`Steer queued prompt ${index + 1}`}
+            aria-label={t("queueSurfaceImplementation.steerQueuedPromptIndex", {
+              index: index + 1,
+            })}
             data-analytics-action="steer"
-            title="Steer — interrupt the current turn and send this message now"
+            title={t("queueSurfaceImplementation.steerInterruptTheCurrentTurn")}
             className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-og-control font-medium text-fg outline-hidden transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
             {pending === "steer" ? (
@@ -783,14 +850,16 @@ function SortableQueueRow({
             ) : (
               <ZapIcon className="size-3.5" />
             )}
-            <span className="hidden sm:inline">Steer</span>
+            <span className="hidden sm:inline">{t("queueSurfaceImplementation.steer")}</span>
           </button>
           <button
             type="button"
             disabled={pending !== null}
             onClick={onDelete}
-            aria-label={`Delete queued prompt ${index + 1}`}
-            title="Delete this queued prompt"
+            aria-label={t("queueSurfaceImplementation.deleteQueuedPromptIndex", {
+              index: index + 1,
+            })}
+            title={t("queueSurfaceImplementation.deleteThisQueuedPrompt")}
             className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-hidden transition-colors hover:bg-surface-2 hover:text-status-failed focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
           >
             {pending === "delete" ? (
@@ -804,7 +873,9 @@ function SortableQueueRow({
               <button
                 type="button"
                 disabled={pending !== null}
-                aria-label={`More actions for queued prompt ${index + 1}`}
+                aria-label={t("queueSurfaceImplementation.moreActionsForQueuedPrompt", {
+                  index: index + 1,
+                })}
                 className="inline-flex size-7 shrink-0 items-center justify-center rounded-md outline-hidden transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-[44px]"
               >
                 {pending && pending !== "steer" && pending !== "delete" ? (
@@ -814,19 +885,21 @@ function SortableQueueRow({
                 )}
               </button>
             </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
+            <DropdownMenuContainedPortal>
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
                 collisionPadding={8}
-                className={`${MENU_SURFACE_CLASS} og-root z-50 max-h-(--radix-dropdown-menu-content-available-height) w-52 max-w-[calc(100vw-16px)] overflow-x-hidden overflow-y-auto`}
+                className={t("queueSurfaceImplementation.menuSurfaceClassOgRoot", {
+                  MENU_SURFACE_CLASS,
+                })}
                 style={portalTokenStyle}
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
                 {onEdit ? (
                   <>
                     <DropdownMenu.Item className={QUEUE_MENU_ITEM_CLASS} onSelect={onEdit}>
-                      <PencilIcon /> Edit in composer
+                      <PencilIcon /> {t("queueSurfaceImplementation.editInComposer")}
                     </DropdownMenu.Item>
                     <DropdownMenu.Separator className={MENU_SEPARATOR_CLASS} />
                   </>
@@ -836,52 +909,52 @@ function SortableQueueRow({
                   disabled={index === 0}
                   onSelect={() => onMove(0)}
                 >
-                  <ArrowUpToLineIcon /> Move to top
+                  <ArrowUpToLineIcon /> {t("queueSurfaceImplementation.moveToTop")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === 0}
                   onSelect={() => onMove(index - 1)}
                 >
-                  Move up
+                  {t("queueSurfaceImplementation.moveUp")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(index + 1)}
                 >
-                  Move down
+                  {t("queueSurfaceImplementation.moveDown")}
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(count - 1)}
                 >
-                  <ArrowDownToLineIcon /> Move to bottom
+                  <ArrowDownToLineIcon /> {t("queueSurfaceImplementation.moveToBottom")}
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
-            </DropdownMenu.Portal>
+            </DropdownMenuContainedPortal>
           </DropdownMenu.Root>
         </div>
       </div>
       {confirmingReplace ? (
         <div className="mx-3 mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-og-control text-fg">
-          <p>{QUEUE_REPLACE_DRAFT_COPY.title}</p>
-          <p className="mt-0.5 text-fg-muted">{QUEUE_REPLACE_DRAFT_COPY.detail}</p>
+          <p>{QUEUE_REPLACE_DRAFT_COPY(t).title}</p>
+          <p className="mt-0.5 text-fg-muted">{QUEUE_REPLACE_DRAFT_COPY(t).detail}</p>
           <div className="mt-2 flex justify-end gap-1.5">
             <button
               type="button"
               className="rounded-md px-2 py-1 font-medium hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40"
               onClick={onCancelReplace}
             >
-              {QUEUE_REPLACE_DRAFT_COPY.keep}
+              {QUEUE_REPLACE_DRAFT_COPY(t).keep}
             </button>
             <button
               type="button"
               className="rounded-md border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-ring/40"
               onClick={onConfirmReplace}
             >
-              {QUEUE_REPLACE_DRAFT_COPY.replace}
+              {QUEUE_REPLACE_DRAFT_COPY(t).replace}
             </button>
           </div>
         </div>
@@ -890,16 +963,16 @@ function SortableQueueRow({
   );
 }
 
-function queueMutationPendingLabel(kind: QueueMutationKind): string {
+function queueMutationPendingLabel(t: OpenGeniText, kind: QueueMutationKind): string {
   switch (kind) {
     case "move":
-      return "Saving new position…";
+      return t("queueSurfaceImplementation.savingNewPosition");
     case "edit":
-      return "Moving to composer…";
+      return t("queueSurfaceImplementation.movingToComposer");
     case "steer":
-      return "Changing direction…";
+      return t("queueSurfaceImplementation.changingDirection");
     case "delete":
-      return "Deleting…";
+      return t("queueSurfaceImplementation.deleting");
   }
 }
 

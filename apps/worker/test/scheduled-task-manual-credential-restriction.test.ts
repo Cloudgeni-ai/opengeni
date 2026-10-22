@@ -8,7 +8,8 @@ import {
 } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
 import * as admission from "../src/activities/agent-run-admission";
 import {
   createScheduledTaskActivities,
@@ -23,6 +24,10 @@ import {
   scheduledTaskDispatchInput,
   type ScheduledTaskFireWorkflowInput,
 } from "../src/workflows/scheduled-tasks";
+
+// The existing-session occurrence path reads the target task's usage limit;
+// this fixture's fake database has no usage-limit state (no limit).
+useNoSessionUsageLimitForFakeDatabases();
 
 const scope = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -248,6 +253,7 @@ async function acceptanceFixture(
       if (options.runMode === "existing_session") throw stopAfterCapture;
       return runRow;
     }),
+    spyOn(db, "isWorkspaceAgentActivityPaused").mockResolvedValue(false),
     spyOn(db, "createSessionWithIdempotencyKeyResult").mockImplementation(async (_db, input) => {
       createdMetadata = input.metadata ?? {};
       throw stopAfterCapture;

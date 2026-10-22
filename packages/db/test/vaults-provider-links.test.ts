@@ -2,7 +2,7 @@
 // provider_vault_sync_target as the application role, plus the mirror and
 // sync-status routines they feed.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createConnection,
   createDb,
@@ -116,6 +116,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         providerConnectionId: sharedConnection.id,
         providerVaultRef: "vaultrw0001",
         providerContentVersion: null,
+        providerCacheEpoch: "0",
         rateLimitedUntil: null,
       });
 
@@ -188,6 +189,8 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       await mirror(["item0001"]);
       const target = await getProviderVaultSyncTarget(w.db, w.context, linked.id);
       expect(target.providerContentVersion).toBe("12");
+      // Every complete mirror replacement (six so far) advances the durable cache epoch.
+      expect(target.providerCacheEpoch).toBe("6");
 
       const until = new Date(Date.now() + 60_000).toISOString();
       await setVaultSyncStatus(w.db, w.context, {

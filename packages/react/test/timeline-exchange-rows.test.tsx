@@ -207,7 +207,7 @@ describe("readable per-turn rows", () => {
       expect(topLevelMessages(r.container)).toEqual(["Final response"]);
       const trigger = statusTrigger(r.container);
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
-      expect(trigger.textContent).toContain("2 steps");
+      expect(trigger.textContent).toBe("Worked for 35s");
       await act(async () => trigger.click());
       const details = r.container.querySelector("[data-og-fold-content]")!;
       expect(details.querySelector("strong")?.textContent).toBe("progress");
@@ -400,6 +400,50 @@ describe("readable per-turn rows", () => {
       expect(r.container.querySelector("[data-og-exchange-status]")).toBeNull();
       expect(r.container.textContent).toContain("Conversation history compacted");
       expect(r.container.querySelector("[data-og-fold-content]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("finished work that compacted first stays folded", async () => {
+    sequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          event("user.message", { text: "Research this" }, null),
+          event("turn.started", {}),
+          event("turn.startup.phase.started", { phase: "model_preparation" }),
+          event("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 60,
+            expectedTransition: true,
+            failureCategory: "context_compaction",
+            failureStage: "context_compaction",
+            failureCode: "compaction_required",
+            retryable: true,
+          }),
+          event("session.context.compaction.started", { trigger: "auto" }),
+          event("session.context.compacted", { trigger: "auto" }),
+          event("turn.startup.phase.started", { phase: "model_preparation" }),
+          event("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 90 }),
+          ...tool("search", "exec_command"),
+          ...tool("read", "exec_command"),
+          event("agent.message.completed", { text: "Here it is.", phase: "final_answer" }),
+          event("turn.completed", {}),
+          event("session.status.changed", { status: "idle" }, null),
+        ]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Here it is.");
+      // An expected compaction wait is not an interruption to reveal.
+      const worked = [...r.container.querySelectorAll("[aria-expanded]")].find((element) =>
+        element.textContent?.startsWith("Worked for"),
+      );
+      expect(worked?.textContent).toContain("compacted");
+      expect(worked?.getAttribute("aria-expanded")).toBe("false");
     } finally {
       await r.unmount();
     }

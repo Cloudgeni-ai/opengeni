@@ -1,5 +1,6 @@
 import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import "./app-host";
 import {
   AuthApiError,
   checkDeploymentRevision,
@@ -1093,6 +1094,41 @@ describe("web API auth helpers", () => {
       } else {
         Reflect.deleteProperty(performance, "getEntriesByType");
       }
+      jest.useRealTimers();
+    }
+  });
+
+  test("reconnects an HTTP/1 batch that carried events sooner than an empty one", async () => {
+    jest.useFakeTimers();
+    try {
+      const settles = async (body: string, advanceMs: number) => {
+        const response = managedActorTrackedResponse(
+          new Response(body),
+          new AbortController().signal,
+          () => {},
+          undefined,
+          4_000,
+        );
+        const reader = response.body!.getReader();
+        if (body.length > 0) expect((await reader.read()).done).toBe(false);
+        let done = false;
+        const terminal = reader.read().then((result) => {
+          done = result.done;
+        });
+        for (let microtask = 0; microtask < 5; microtask += 1) await Promise.resolve();
+        jest.advanceTimersByTime(advanceMs);
+        for (let microtask = 0; microtask < 5; microtask += 1) await Promise.resolve();
+        const settled = done;
+        jest.advanceTimersByTime(4_000);
+        await terminal;
+        return settled;
+      };
+      // A streaming answer keeps arriving: the next poll follows at once.
+      expect(await settles('id: 7\ndata: {"sequence":7}\n\n', 250)).toBe(true);
+      // Nothing new: keep the idle grace so queued reads win the slot.
+      expect(await settles("", 250)).toBe(false);
+      expect(await settles("", 4_000)).toBe(true);
+    } finally {
       jest.useRealTimers();
     }
   });

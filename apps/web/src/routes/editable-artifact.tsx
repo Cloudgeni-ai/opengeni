@@ -1,4 +1,5 @@
-import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { ArtifactSessionPage } from "@opengeni/react/app/components/session/artifact-session-page";
 import { editableArtifactKernelRuntime as documentRuntime } from "@opengeni/artifact-kernel-wasm-document";
 import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/artifact-kernel-wasm-presentation";
 import { editableArtifactKernelRuntime as spreadsheetRuntime } from "@opengeni/artifact-kernel-wasm-spreadsheet";
@@ -14,15 +15,18 @@ import type { AccessContext, Workspace } from "@opengeni/sdk";
 import artifactWorkerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&url";
 
 import { apiBaseUrl, authHeadersForAccessKey, getStoredAccessKey } from "@/api";
-import { useAppContext } from "@/context";
-import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import {
+  ARTIFACT_ACCESS_REQUIRED,
+  isArtifactReadDenied,
+} from "@opengeni/react/app/lib/artifact-access";
 import {
   createConsoleEditableArtifactReplicaId,
   createConsoleEditableArtifactAuthority,
   resolveConsoleEditableArtifactWorkerUrl,
 } from "@/lib/editable-artifact-browser";
 import { editableArtifactClient } from "@/lib/editable-artifact-client";
-import { downloadSpreadsheet } from "@/lib/editable-spreadsheet-download";
+import { downloadEditableArtifact } from "@/lib/editable-artifact-download";
 
 const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
 
@@ -72,8 +76,8 @@ function EditableArtifactContent({
           context.accessContext,
         ])}
         showHeader={!embedded}
-        downloadSpreadsheet={(opened, signal) =>
-          downloadSpreadsheet(editableArtifactClient, workspaceId, opened, signal)
+        downloadArtifact={(opened, signal) =>
+          downloadEditableArtifact(editableArtifactClient, workspaceId, opened, signal)
         }
         describeError={(error): ArtifactLoadErrorView =>
           isArtifactReadDenied(error, context.accessContext, workspaceId)
@@ -82,7 +86,7 @@ function EditableArtifactContent({
                 message: ARTIFACT_ACCESS_REQUIRED,
                 retryable: false,
               }
-            : artifactLoadErrorView(error, "editable")
+            : artifactLoadErrorView(t, error, "editable")
         }
         open={() =>
           loadArtifact({

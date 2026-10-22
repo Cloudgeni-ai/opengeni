@@ -1,8 +1,15 @@
-import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  observedSessionSequence,
+  type SessionEvent,
+  type SessionGoal,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
+  projectionReadThrough,
   useDebouncedCallback,
   useMutationRunner,
   usePageLiveActivity,
@@ -82,6 +89,8 @@ export function useGoal(
   const [goal, setGoal] = useState<SessionGoal | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
+  // The latest read (or a delete) established that this conversation has no goal.
+  const [readAbsent, setReadAbsent] = useState(false);
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
@@ -114,6 +123,7 @@ export function useGoal(
     loadAbort.current?.abort();
     const controller = new AbortController();
     loadAbort.current = controller;
+    let fetchedGoal: SessionGoal | null = null;
     try {
       // findGoal reads a goal-less session as a successful null, so no failed
       // request reaches the browser console. Custom clients without it keep
@@ -122,8 +132,10 @@ export function useGoal(
         typeof client.findGoal === "function"
           ? await client.findGoal(workspaceId, sessionId, { signal: controller.signal })
           : await client.getGoal(workspaceId, sessionId, { signal: controller.signal });
+      fetchedGoal = fetched;
       if (ticket === generation.current) {
         goalAbsentRef.current = fetched === null;
+        setReadAbsent(fetched === null);
         setGoal(fetched);
         setError(null);
         setLoading(false);
@@ -135,6 +147,7 @@ export function useGoal(
       if (cause instanceof OpenGeniApiError && cause.status === 404) {
         // No goal is a normal state, not an error.
         goalAbsentRef.current = true;
+        setReadAbsent(true);
         setGoal(null);
         setError(null);
       } else {
@@ -146,6 +159,18 @@ export function useGoal(
     }
     if (ticket !== generation.current || pendingRefreshRef.current === "none") {
       return;
+    }
+    // Events arrived during this read, but a goal read that reports the session
+    // sequence it reflects already includes every one at or below it. Only a
+    // shared feed shows which events those were; a self-stream re-reads.
+    const readThrough = fetchedGoal ? observedSessionSequence(fetchedGoal) : undefined;
+    if (readThrough !== undefined && sharedEventsRef.current !== undefined) {
+      const events = sharedEventsRef.current;
+      const newest = events[events.length - 1];
+      if (!newest || newest.sequence <= readThrough) {
+        pendingRefreshRef.current = "none";
+        return;
+      }
     }
     // Events arrived during this read. A shared feed's first batch reports only
     // its latest match, so a goal.* event behind newer turn traffic is visible
@@ -172,6 +197,7 @@ export function useGoal(
       targetKeyRef.current = targetKey;
       goalAbsentRef.current = false;
       pendingRefreshRef.current = "none";
+      setReadAbsent(false);
       setGoal(null);
       setError(null);
     }
@@ -240,6 +266,10 @@ export function useGoal(
       goalAbsentRef.current ? isGoalEvent(event) : isGoalRefreshEvent(event),
     [],
   );
+  const refreshGoal = useCallback(() => {
+    pendingRefreshRef.current = "goal";
+    scheduleRefresh();
+  }, [scheduleRefresh]);
   const onRefreshEvent = useCallback(
     (event: SessionEvent) => {
       if (isGoalEvent(event)) pendingRefreshRef.current = "goal";
@@ -251,11 +281,61 @@ export function useGoal(
   useSessionEventTrigger(client, workspaceId, sessionId, isRefreshEvent, onRefreshEvent, {
     enabled,
     ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
+    // The load settles events that arrive during its read itself (above).
+    readThrough: projectionReadThrough(goal, false),
+    refresh: refreshGoal,
   });
+  // Until the first read lands, show the goal as it was when this conversation
+  // was last left (only when the host retains reads).
+  const retainedGoal = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "goal",
+    loading ? null : goal,
+    { enabled, discard: readAbsent || deniesRetainedView(error) },
+  );
+  const visibleGoal = loading ? (goal ?? retainedGoal) : goal;
+
+  // A retained goal is shown before this open's read lands. A command issued
+  // then waits for that read and runs only if the goal it was aimed at is
+  // still the current objective; another actor may have replaced it meanwhile.
+  const goalRef = useRef(goal);
+  const shownRetainedRef = useRef<SessionGoal | null>(null);
+  const readWaitersRef = useRef<Array<() => void>>([]);
+  useLayoutEffect(() => {
+    goalRef.current = goal;
+    shownRetainedRef.current = loading && goal === null ? retainedGoal : null;
+  });
+  useEffect(() => {
+    if (loading) return;
+    const waiters = readWaitersRef.current;
+    readWaitersRef.current = [];
+    for (const resolve of waiters) resolve();
+  }, [loading]);
+  useEffect(
+    () => () => {
+      // Leaving the conversation settles waiting commands as not applicable.
+      goalRef.current = null;
+      const waiters = readWaitersRef.current;
+      readWaitersRef.current = [];
+      for (const resolve of waiters) resolve();
+    },
+    [workspaceId, sessionId],
+  );
+  const aimedAtCurrentGoal = useCallback(async (): Promise<boolean> => {
+    const shown = shownRetainedRef.current;
+    if (!shown) return true;
+    await new Promise<void>((resolve) => readWaitersRef.current.push(resolve));
+    const fresh = goalRef.current;
+    return (
+      fresh !== null && fresh.id === shown.id && fresh.objectiveRevision === shown.objectiveRevision
+    );
+  }, []);
 
   const pause = useCallback(
     async (rationale?: string): Promise<SessionGoal | null> => {
-      if (!sessionId) {
+      if (!sessionId || !(await aimedAtCurrentGoal())) {
         return null;
       }
       const result = await run(() =>
@@ -269,11 +349,11 @@ export function useGoal(
       }
       return result;
     },
-    [client, workspaceId, sessionId, run],
+    [client, workspaceId, sessionId, run, aimedAtCurrentGoal],
   );
 
   const resume = useCallback(async (): Promise<SessionGoal | null> => {
-    if (!sessionId) {
+    if (!sessionId || !(await aimedAtCurrentGoal())) {
       return null;
     }
     const result = await run(() => client.updateGoal(workspaceId, sessionId, { status: "active" }));
@@ -281,10 +361,10 @@ export function useGoal(
       setGoal(result);
     }
     return result;
-  }, [client, workspaceId, sessionId, run]);
+  }, [client, workspaceId, sessionId, run, aimedAtCurrentGoal]);
 
   const clearGoal = useCallback(async (): Promise<void> => {
-    if (!sessionId) {
+    if (!sessionId || !(await aimedAtCurrentGoal())) {
       return;
     }
     // deleteGoal resolves void, so distinguish success (a truthy sentinel) from
@@ -298,17 +378,18 @@ export function useGoal(
     });
     if (ok) {
       retireLoads();
+      setReadAbsent(true);
       setGoal(null);
       setError(null);
     }
-  }, [client, workspaceId, sessionId, run, retireLoads]);
+  }, [client, workspaceId, sessionId, run, retireLoads, aimedAtCurrentGoal]);
 
   return {
-    goal,
-    isActive: goal?.status === "active",
-    isPaused: goal?.status === "paused",
-    isCompleted: goal?.status === "completed",
-    loading,
+    goal: visibleGoal,
+    isActive: visibleGoal?.status === "active",
+    isPaused: visibleGoal?.status === "paused",
+    isCompleted: visibleGoal?.status === "completed",
+    loading: loading && retainedGoal === null,
     error,
     refresh: load,
     pause,

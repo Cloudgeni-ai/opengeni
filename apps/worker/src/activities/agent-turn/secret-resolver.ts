@@ -15,6 +15,7 @@ import {
   createSecretResolver,
   createWorkspaceVaultProviderRegistry,
   type OnePasswordVaultProviderFactory,
+  type ExternalVaultProviderFactories,
 } from "@opengeni/core";
 import { listVaultsForSubject, type Database } from "@opengeni/db";
 import {
@@ -22,6 +23,7 @@ import {
   type ProviderCallBudget,
   type VaultProvider,
   type VaultProviderRegistry,
+  type VaultProviderAuthority,
 } from "@opengeni/vaults";
 
 /**
@@ -49,6 +51,8 @@ export function createAttemptVaultAccess(input: {
   subjectId: string | null;
   hostVaultProvider: VaultProvider | null | undefined;
   onePasswordVaultProvider: OnePasswordVaultProviderFactory | null | undefined;
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
+  executionContext?: Pick<VaultProviderAuthority, "sessionId" | "turnId" | "attemptId" | "siteId">;
 }): AttemptVaultAccess {
   return {
     providers: createWorkspaceVaultProviderRegistry({
@@ -58,6 +62,8 @@ export function createAttemptVaultAccess(input: {
       subjectId: input.subjectId,
       hostVaultProvider: input.hostVaultProvider ?? null,
       onePasswordVaultProvider: input.onePasswordVaultProvider ?? null,
+      externalVaultProviders: input.externalVaultProviders ?? null,
+      ...(input.executionContext ? { executionContext: input.executionContext } : {}),
     }),
     attemptBudget: createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt),
   };
@@ -109,7 +115,7 @@ const SAVE_TO_OWNER = { user: "user", task: "task", workspace: "workspace" } as 
 
 /**
  * Ask-card vault check (Q-05): a named vault must be reachable by this
- * attempt, belong to the chosen saveTo scope, and be a writable OpenGeni vault.
+ * attempt, belong to the chosen saveTo scope, and be a writable Opengeni vault.
  * Returns a model-facing reason, or null when the vault can take the answer.
  */
 export function attemptQuestionVaultValidator(

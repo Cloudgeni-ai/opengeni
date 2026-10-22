@@ -153,18 +153,29 @@ tell the model to inspect actual state before replay. Accepted Pause/Steer
 interruptions retain their independent receipt gate.
 
 **Requests a crashed worker left behind no longer pin the box.** A
-turn admission whose attempt closed `lease_lost_recoverable` or `failed` (worker
-death, redispatch exhaustion, credential-lease loss), whose turn holder is gone,
-that was never adopted as a retained process and whose provider outcome is still
-unknown (`crashedWorkerOrphanAdmissionSql`) has no owner that can admit more work,
-and nothing reliably settles it. It used to refuse every capture, idle drain,
-idle containment and provider-deadline containment of its box, and to hold its
-attempt's quiescence open, until the provider killed the box uncaptured.
-The predicate does not prove the worker is dead; safety comes
-from what each caller does with it. Only a point-in-time (Modal native) capture
-may run around such a request: a drain, which terminates the box right after, and
-a warm capture, which records itself as having run around writers so the archive
-stays one generation behind. Tar-style captures keep it as a blocker. Containment
+request whose holder is gone, that was never adopted as a retained process and
+whose provider outcome is still unknown (`crashedWorkerOrphanAdmissionSql`) has
+no owner that can admit more work, and nothing reliably settles it. Two owners
+leave it: a turn attempt closed `lease_lost_recoverable` or `failed` (worker
+death, redispatch exhaustion, credential-lease loss), and an API-direct request
+(Files, Terminal, Browser and similar surfaces) whose API process died
+mid-operation. A live direct request heartbeats its holder throughout and
+settles before releasing it, so its admission outlives the holder only when the
+holder reaper removed a dead request's holder. Such a request used to refuse
+every capture, idle drain, idle containment and provider-deadline containment
+of its box, and to hold its attempt's quiescence open, until the provider killed
+the box uncaptured; a Docker box has no provider deadline, so its lease stayed
+draining for good. The predicate does not prove the owner is dead; safety comes
+from what each caller does with it. Only a point-in-time capture may run around
+such a request: a drain, which terminates the box right after, and a warm
+capture, which records itself as having run around writers so the archive stays
+one generation behind. A drain is point-in-time for Modal native snapshots and
+for Docker, which removes the exact container before it reads the host
+workspace (`providerDrainCaptureIsPointInTime`). The Docker stop needs the
+durable ownership receipt in the lease envelope: if the capture then fails, the
+next drain attempt re-attaches to the stopped container's workspace through that
+receipt, and a returning turn restores the container on the same workspace.
+Other tar-style captures keep the request as a blocker. Containment
 enrollment and the containment/deadline quiescence checks ignore it. The drain's
 cold commit rejects the exact request only after the reaper stopped the box (or
 proved it gone), so a late settlement by a still-running owner is fenced, and
@@ -196,6 +207,46 @@ did not prove it gone is retried with exponential backoff (5 minutes doubling to
 6 hours), so a box that never yields proof costs a probe a few times a day, not
 every tick. Tuples with an active process stay with retained-process
 reconciliation.
+
+**Unknown sandbox setup on a retired box resumes once the box is proven gone.**
+A turn whose setup start outcome is unknown waits, recovering, for physical
+proof that nothing it may have started still runs. The exit of the setup's
+retained process is one proof. A start that failed before any process was
+recorded leaves nothing to exit, so the same terminated observation of the
+exact historical box is the other: the reaper lists such turns through
+`opengeni_private.list_sandbox_ended_epoch_setup_uncertainties(limit)` (an
+active recovering turn of a directly unpaused session, its closed and quiesced
+attempt, no active process, and every setup request on one Modal box whose
+lease has a later epoch and a different instance), probes that box with the
+same per-box backoff, and on a terminated observation calls
+`reconcileCompletedSandboxSetup` with that exact box. It revalidates every
+condition under the canonical locks, retires the marker, appends
+`turn.recovery.requested` (`sandbox_setup_physically_settled`) and wakes the
+session, so the same turn reruns its idempotent setup. Nothing is replayed.
+Running, NotFound, a different box, or a lease still on that epoch is never
+proof, and a refused reconciliation backs off by turn.
+
+That box must actually go away. Its setup request never settles while the box
+lives (no exit can be observed for an unknown Start), and the idle drain
+refuses to capture around an unsettled request, so before October 16, 2026 a
+box with no holder ran until the provider deadline. For a point-in-time (Modal
+snapshot) capture, the draining capture claim now treats a home-route setup
+request (`lazyOwnedSandboxSetup`/`eagerOwnedSandboxSetup`) as abandoned once
+its owner attempt has been closed for the idle grace
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, at least one minute), its turn is recovering
+with no active attempt, on the attempt's generation, with the exact
+`sandboxSetupOutcomeUnknown` marker for that attempt, and no process of that
+attempt is active. Only when every remaining unsettled request qualifies are
+they recorded in `deadline_forced_admission_ids` and handled exactly like the
+mandatory pre-deadline save: the workspace is captured around them, the box is
+terminated, and the cold commit settles them. The ended-epoch recovery above
+then resumes the turn on that saved workspace. Any other unsettled request, and
+every tar-style capture (which could read a box that is still writing), keeps
+waiting; the scope is deliberately limited to the case whose turn is known to
+wait for the box. The mandatory pre-deadline save itself no longer requires a
+stamped rotation on a draining lease: due rotations are only stamped on warm
+leases, so a lease that was already draining was killed uncaptured at the
+deadline and its resumed turn failed as unrecoverable.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
@@ -297,7 +348,11 @@ exists, `new_session_drafts` owns the next session. Inside a session,
 `composer_drafts` owns the next message for that actor/session; navigation and
 workspace defaults do not copy policy between them. Send/Steer submits one exact
 inside draft revision and the server rotates that row to a blank next revision
-in the same transaction that freezes the queued turn. Every queued turn therefore
+in the same transaction that freezes the queued turn. A human/operator composer
+submission also saves its model, reasoning and latency as the chat's defaults,
+with the existing `session.model_settings.updated` boundary. Autosaving alone
+does not change those defaults; failed submissions and retries cannot reapply
+an older choice. Web and native use this same admission path. Every queued turn therefore
 retains its own text, resources, model, reasoning, and latency. Editing a queued
 turn checks that exact snapshot back into the inside composer atomically, and a
 nonempty composer is replaced only after explicit confirmation. An independent
@@ -307,11 +362,13 @@ does not invent defaults or consult either composer.
 Session detail/list and Insights model labels project the newest turn with a
 durable `turn.started` event. Fresh actor drafts, omitted follow-up fields, voice
 delegations and voice-end handoffs inherit that same model, reasoning and latency
-policy through `packages/db/src/session-execution-policy.ts`. Creation settings
-are used only before any turn starts. Existing drafts and accepted queued turns
+policy through `packages/db/src/session-execution-policy.ts`, unless a newer
+explicit settings/composer-submission boundary selects the stored defaults.
+Turns accepted before that boundary cannot undo it by starting later.
+Existing drafts and accepted queued turns
 keep their explicit settings; a rejected admission never changes inheritance.
-The stored session creation fields are not rewritten. Scheduled generated-session
-recovery validates those stored fields, not the public latest-turn projection. API admission freezes its
+The stored session model settings change on an explicit settings command or
+accepted composer submission, not merely when a turn starts. API admission freezes its
 resolved policy so billing validation and the accepted turn cannot disagree if
 another turn starts before the prompt transaction commits. A removed or blocked
 inherited model requires a new selection, never a silent switch to the original.
@@ -380,7 +437,7 @@ Send: the primary click starts or ends the call, while the disclosure holds the
 supported realtime-model choice, connection status, recovery actions, and dev
 diagnostics. Realtime-model choice is intentionally independent from the
 ordinary session model and remembers the user's last workspace choice. The
-catalog groups OpenGeni-managed Gateway, Connected Codex, and workspace-owned
+catalog groups Opengeni-managed Gateway, Connected Codex, and workspace-owned
 Gateway models; unconfigured credentials remain visible but disabled.
 The owner operation and browser proof are
 scoped to session storage and never rendered or logged. Reload replays that
@@ -388,9 +445,75 @@ same operation and rotates only the dead browser connection. Without matching
 proof, the surface truthfully remains lost-owner until an end/expiry event;
 there is no status API or newly invented logical mode. Canonical:
 `packages/sdk/src/codex-realtime-controller.ts`,
-`packages/sdk/src/gateway-realtime-transport.ts`,
+`packages/sdk/src/realtime-websocket-transport.ts`,
 `packages/react/src/realtime/realtime-control.tsx`, and
-`apps/web/src/routes/session.tsx`.
+`packages/react/src/app/routes/session.tsx`.
+
+Codex Live and Azure live voice negotiate WebRTC. Every other voice model uses
+one WebSocket path: `POST …/realtime/websocket` asks the provider registry in
+`apps/api/src/realtime-websocket.ts` for the model's provider, which mints a
+short-lived client secret and returns the socket URL, subprotocols, wire
+dialect (`openai` or `ai-gateway`), and the complete session update the browser
+sends unchanged. The browser transport only speaks the two wire dialects; it
+holds no provider-specific configuration. A new OpenAI-compatible provider is
+one registry entry. `/realtime/gateway` and `/realtime/supergrok` remain as
+aliases of the same handler for older clients.
+
+Eleven Realtime (`workspace-elevenlabs/eleven_realtime_v1_max`, the default,
+and `…_v1_mini`) is one such entry, billed to the workspace's own ElevenLabs
+API-key connection (`api.elevenlabs.io`, credential role `elevenlabs`). The
+mint is authoritative: ElevenLabs applies the minted instructions, delegation
+tool and audio settings at `session.created`, so the entry returns no session
+update. ElevenLabs accepts only `semantic_vad` turn detection (we use high
+eagerness). Its conversation language (`audio.input.transcription.language`)
+sets both what the model hears and the language it replies in; without one it
+guesses, and for example hears Norwegian as Danish and answers in Danish. The
+catalog therefore lists the 90 languages Eleven Realtime accepts as the
+model's `languages`, and for such models the browser sends the person's
+language with every connect request: their choice from the voice menu's
+Language page, else the app locale, else the browser language. The broker maps
+that BCP 47 tag to ElevenLabs' code (`nb-NO` and `nn` become `no`, `pt-BR`
+becomes `pt-br`) and omits an unsupported one, since ElevenLabs refuses unknown
+codes. Models that detect the spoken language are sent none. Its transcripts
+carry expressive audio tags such as `[calm]`, so the answer sets
+`transcriptAudioTags` and the browser strips them before ledger sync.
+
+Voice settings are generic across WebSocket providers. Each registry entry
+declares what it offers (`voiceOptions`): Eleven Realtime takes its built-in
+voices (default `brian`) or the id of any voice in the ElevenLabs account's My
+Voices (`customVoice`; a voice-library voice must be added there first, or
+ElevenLabs rejects it and the connect fails with
+`ELEVENLABS_REALTIME_VOICE_UNAVAILABLE`), a conversation language and turn
+eagerness (`low`, `medium`, `high`; default `high`); AI Gateway models
+take their upstream family's built-in voices (OpenAI or xAI); SuperGrok takes
+the xAI voices (default `eve`). Speed is not offered: no provider accepts it on
+this path. The realtime model catalog lists these as `voices`, `customVoice`,
+`languages`, `turnEagerness` and `voiceDefaults`, plus the workspace's saved
+values as `workspaceVoiceSettings`. Workspaces save settings per model in the
+workspace setting `realtimeVoice` (merged per model id; `null` removes one),
+from Settings > Models > Voice or `updateWorkspaceSettings`. A connect request
+can carry its own `voiceSettings` (an embedding app's settings, with the
+language the person picked in the voice menu on top). The broker resolves each
+field from the request's `voiceSettings`, else the workspace's setting for the
+model, else the provider default; the language falls back further to the
+request's `language` (the person's app language). A value the provider does not
+offer is dropped, never sent. The workspace read runs alongside the provider's
+credential load, so it adds no time to connecting.
+
+Voice startup overlaps its waits. Starting voice from the new-chat page calls
+`prestartSessionRealtime` right after the session is created, so begin,
+negotiation and the socket open while the session page loads; that page's
+`useSessionRealtime` adopts the running controller (same workspace, session and
+model) and consumes its `?realtime=` autostart instead of starting a second
+call. The controller asks for the microphone alongside the begin request, and
+the WebSocket transport prepares capture while the server mints the provider
+session; audio is sent only once the socket is open and configured. Capture
+uses an AudioWorklet that sends 20 ms frames (a 4096-sample ScriptProcessor is
+the fallback where blob worklet modules are refused), so the provider hears the
+end of speech without waiting for a large capture block. A delegated turn's
+result is pulled as soon as the session reports the turn's outcome (agent
+message completed or a terminal turn event); the one-second ledger sync remains
+the fallback.
 
 Finite provider calls are hidden behind connection generations, not new
 realtime modes. On Opengeni's configured conservative proactive-rotation interval, or after a dead or
@@ -567,7 +690,7 @@ turn.
 That same exact calling-turn boundary supplies an agent-spawned child's omitted
 model and reasoning effort. Explicit child values may override them. A
 Codex-subscription manager therefore keeps its external billing path for workers
-by default instead of falling back to the deployment's OpenGeni-credit model.
+by default instead of falling back to the deployment's Opengeni-credit model.
 Omitted latency mode instead defaults to `standard` for every fresh session;
 `fast` and `priority` require an explicit, model-supported selection. The initial
 policy records this default as `deployment`, not `continuation`. Keyed replay
@@ -717,8 +840,19 @@ exactly idempotent transaction on these SQLSTATEs; connector-ledger
 transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
-business state. Missing and RLS-hidden rows are indistinguishable; neither is
-evidence of deletion, completion, or permission to resume. An unavailable
+business state. An absent observer read alone is not deletion evidence. Behind
+`session-close-deleted-v1`, a separate control lookup verifies the workspace's
+account and a subject-free worker RLS scope before proving session absence;
+an absent workspace also proves deletion. Wrong-account or actor-filtered reads
+stay unavailable, and database failures retry. A proven deletion closes the
+workflow without idle settlement, goal continuation, or parent notification.
+Old histories retain the unavailable result and timer command order until a live
+cycle records the patch. Idle/failure, dispatch recovery, input-wait settlement,
+interruption/quiescence and goal-continuation retries also re-prove deletion
+after a failed lookup and return harmlessly if deletion won the race. Session
+tree deletion is quiescence-gated database deletion, not Temporal termination;
+the control observer provides closure without a cross-system delete transaction.
+An unavailable
 observer retains a signal-interruptible 30-second control wait because restoring
 visibility is not guaranteed to produce a wake. The wake outbox retains its
 revision with `session_unavailable` and its existing bounded retry schedule.
@@ -1026,7 +1160,7 @@ and failures prevent downstream preparation without bypassing execution fences.
 
 An explicitly empty effective first-party permission ceiling is zero delegated
 authority. Before eager/deferred preparation, runtime omits only remote
-OpenGeni-delegated MCP matches; it neither signs an empty token nor pads the
+Opengeni-delegated MCP matches; it neither signs an empty token nor pads the
 grant. Empty broad tool selection is silent; requested first-party tools and
 dedicated `files`/`docs` stay unavailable with the existing `insufficient_scope`
 advisory. External-host, local-registration, connection-backed and
@@ -1232,6 +1366,15 @@ regardless of a stale idle/queued session projection. Its scoped repair uses
 capacity and sandbox setup/lifecycle blockers. Current runnable recovery wakes
 cannot be acknowledged merely because Temporal accepted a signal; claim of that
 same turn consumes the obligation.
+A quiesced turn parked by Pause (direct, ancestor or workspace) is a durable
+wait for Resume, not a lost wake: migration 0880 omits it from that inventory
+once its projection is no longer `recovering`, and likewise omits quiesced
+turns behind a durable admission block or a sandbox setup outcome-unknown or
+recovery-exhausted marker. Each of those blockers commits its own wake when it
+clears, and the state-derived predicate rediscovers the session as soon as it
+does. A paused turn whose projection still says `recovering` stays
+discoverable; its repair wake (`cancellation-wait` peek) runs the DB-only
+projection settlement that parks it idle, after which it leaves the inventory.
 
 Historical retirement is an explicit operator operation, never a reaper age
 heuristic. Supply `MigrationRuntimeOptions.interruptedTurnRetirement` or a private
@@ -1261,6 +1404,79 @@ context byte-for-byte. Deploy the notification-only retirement implementation
 before applying a manifest: replay of an older actionable retirement receipt
 fails closed rather than claiming that no parent execution occurred. Migration
 0764's frozen SQL is unchanged; this is the migration runner's operator hook.
+
+**Empty queued shells are projection repair, not turn retirement.** Session
+creation now reserves an `idle` shell. Only `initializeSessionStartAtomically`
+installs its first queued turn, events and wake. A failure before initialization
+therefore leaves no imaginary queue, and a retry of the explicit create still
+initializes exactly once. Never synthesize a turn from a shell's retained initial
+message during maintenance.
+
+For historical shells, the same manifest also accepts `emptyQueuedSessions`:
+an array of `{accountId, workspaceId, sessionId, expectedLastSequence}`. Use
+`targets: []` when repairing only shells. The combined manifest requires 1–1,000
+unique sessions. Under the canonical locks each shell must still be `queued`,
+have the reviewed canonical event sequence, and have no turn history or
+`session.created` event, active pointer, active goal, pending input/outbox,
+capacity waiter, live voice lease, admission block, input wait, compaction,
+unfinished scheduled run or live physical writer. Every target passes in the
+same all-or-nothing transaction as ordinary retirement. A stale target aborts
+the batch rather than widening the selection.
+
+Shell repair appends one `session.status.changed` audit event with
+`code: empty_queue_projection_repaired`, `retirementOperationId` and
+`repairedLastSequence`, then sets only the status projection to `idle`. It does
+not change Pause, create a turn/attempt/history item/input/wake, or notify a
+parent. An exact receipt replay never rewrites newer work. Ordinary upgrades
+without a manifest perform no shell repair.
+
+**Unwanted, never-run prompts require explicit withdrawal.** The same manifest
+accepts `unstartedQueues`, with one entry per session:
+`{accountId, workspaceId, sessionId, expectedLastSequence, turns: [{turnId, expectedVersion}]}`.
+Every selected prompt must still be a queued human/API prompt with generation
+zero, no attempt, no start time and no scheduled-run binding. The session must
+be active under effective control (Pause is never changed), have no active turn
+and retain the exact reviewed event cursor. All other accepted work, active
+goals, waits, voice leases, physical writers, pending deliveries and unfinished
+scheduled runs cause the complete manifest transaction to roll back. Include
+the entire queue: an omitted sibling is never released by clearing the block.
+
+The hook marks these prompts `cancelled` with `cancelReason: operator_not_run`,
+appends ordinary queue-deletion audit events and one `unstarted_queue_retired`
+status receipt, clears the admission block and leaves the session idle. It
+creates no attempt, history item, executable input, parent notice or wake.
+Existing prompt text, accepted authority and prior model context remain intact.
+The exact operation/cursor/turn-version receipt makes retries harmless even
+after a new human message arrives. This is not automatic error recovery, and
+does not authorize replay of any retired message.
+
+Skip-overlap schedule admission independently verifies an empty stale `queued`
+projection under the session lock rather than trusting its label forever.
+Accepted turns, pending input, active goals, live voice, waits and physical
+writers still overlap; Pause still blocks. This admits only the new occurrence,
+never replays historical work or changes the accepted account selection of a
+capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
+requires an authorized account change; time or a deploy cannot override it.
+
+Scheduled admission refuses an effectively paused session under every overlap
+policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
+could neither run nor settle. Under the same session lock it distinguishes a
+Pause of the chat or an ancestor (`session_paused`), a workspace Pause alone
+(`workspace_paused`) and, for skip, busy work (`session_not_idle`). The
+scheduler records `scheduled_session_paused` or `scheduled_workspace_paused` on
+the skipped occurrence, and its detail page and run badge explain what must be
+resumed. This describes the recorded skip, not a live assertion that the chat
+is still paused. Opening the chat does not resume it, and skipped occurrences
+are never replayed. A chat the run just created is never refused (it would be
+left empty); a new-chat run checks the workspace Pause before creating it.
+
+An explicit account pin whose allocator is disabled is classified as
+`pinned_account_disabled`, not temporary quota exhaustion. It remains a durable
+wait with actionable guidance to enable the account or change the pin; another
+healthy account is never substituted. Reconciliation of an existing waiter
+appends one new status event when the reason changes, so old waits receive the
+same guidance without rewriting previous events or model context. Unchanged
+polls add no event. Effective Pause still fences reconciliation and dispatch.
 
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
@@ -1408,6 +1624,21 @@ own socket idle timeout) classify as retryable `provider_unavailable` and use
 the recovery below. Codex, SuperGrok, and Anthropic Messages keep their own
 transport timers and classification.
 
+Required first-party MCP connect/tools-list connectivity failures are the narrow
+exception to finite provider recovery. The runtime stamps setup provenance only
+at the verified required first-party boundary; generic socket errors, third-party
+servers and tool invocations cannot acquire it. `first_party_mcp_setup_unavailable`
+keeps the accepted turn recovering at a 30-second minimum pace until the API
+returns, without a count or elapsed-time cutoff. History and quiescence gates,
+Pause/Cancel and authority checks remain unchanged. Checkpoint database recovery
+uses the next count only as an exact-state witness and preserves pacing; these
+waits never spend or reset the model provider’s retry count. A durable wait
+instant suspends its elapsed-time recovery window; the next provider recovery
+resumes the remaining window, and a completed model response clears both clocks.
+Authentication and protocol rejections retain their existing failure policy.
+This does not replay tool mutations or repair already-failed
+historical turns.
+
 Default automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
@@ -1531,7 +1762,9 @@ effective admission gate. An active goal adds an optional id/version fence; it
 does not own the waiter or the turn.
 
 The workflow waits for the earliest authoritative provider reset or a bounded
-value-free metadata refresh. Capacity-affecting writes increment a
+recheck. A provider whose usage read can end an exhaustion early (Codex,
+SuperGrok) rechecks on a 1 to 15 minute backoff and re-reads usage for the
+exhausted connections the turn may use before re-evaluating. Capacity-affecting writes increment a
 same-transaction wake revision before a best-effort Temporal signal.
 Duplicate/lost signals are harmless: row-locked re-evaluation is the sole
 resume writer, and unobserved revisions repair commit-to-signal loss after
@@ -1549,7 +1782,15 @@ waiter plus workflow-wake outbox.
 
 Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
-`signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
+`signalWithStart` wake reconstructs it. Session and workspace Resume, and a
+Steer that automatically resumes a paused branch, register that wake for
+every unblocked session with a shared-core waiter, a legacy waiter, or an
+active turn still `waiting_capacity`. While the waiter is
+effectively paused (direct, ancestor or workspace Pause under the override
+algebra), capacity changes still advance its wake revision but deliver neither
+the typed capacity wake nor a generic session wake, so a paused waiter starts
+no workflow run per capacity change; the run Resume starts sees the unobserved
+revision as an immediately due check. Steer, cancellation, and changes to the
 optional goal, downstream accepted credential-policy hash, or blocked-turn
 generation supersede the waiter/turn under their durable fences. Background
 Codex rotation or pin settings do not replace the accepted snapshot. An explicit
@@ -1602,6 +1843,18 @@ Steer cooperatively settles the ordinary turn as `superseded` before another
 model request. A claimed standalone compaction instead completes its maintenance
 turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
 interruption fences.
+A compaction cut short by its own attempt's cancellation (graceful worker
+shutdown during a deploy, or any other Temporal activity cancellation) is not a
+summarization failure. The worker classifies it structurally, from the attempt's
+aborted cancellation signal or a typed turn cancellation error and never from
+message text, and settles the started landmark as
+`session.context.compaction.skipped(reason="interrupted")` without consuming an
+explicit `/compact` request, then lets the cancellation propagate unchanged. The
+landmark write is best effort: if a control already closed the attempt, or the
+write fails, nothing is recorded and the cancellation still wins. Same-turn
+recovery is unchanged; the recovered attempt re-evaluates the threshold or the
+still-pending request and compacts again if needed
+(`apps/worker/src/activities/agent-turn/compaction-interruption.ts`).
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -1682,8 +1935,17 @@ without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
 
-A newly committed completed-tool receipt, followed by its durable structural
-output event, permits final acknowledgement of that exact tool's completed
+A tool call's pending receipt and structural created event commit together
+under one exact-attempt fence. Each completed result likewise commits its
+receipt and exact structural output event together; it does not wait for its
+parallel siblings. The batcher carries the database-only mutation with that
+structural event through its ordered drain. Internal SDK registration items
+without a timeline projection retain their standalone receipt path.
+Once the SDK's entire parallel batch is stable, its canonical history append
+and proven receipt retirement share one transaction. History content, ordering,
+prefix verification and the call/result-pair proof are unchanged.
+
+A newly committed completed-tool checkpoint permits final acknowledgement of that exact tool's completed
 Connected Machine foreground operations. It does not wait for parallel SDK
 history to stabilize: attempt-ending recovery preserves the recorded result.
 Missing or duplicate receipts do not permit this incremental release. The
@@ -1696,9 +1958,9 @@ observing model completion. Publish success is a retry milestone; only an exact
 native absence observation settles release. Missing retained output before
 capture is recorded as unavailable, never inferred consumed.
 
-Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
+Standalone pending-call registration retries PostgreSQL-confirmed deadlock (`40P01`)
 or serialization (`40001`) rollback, with three total attempts and 25/50 ms
-backoff. The worker supplies the root database handle: each attempt re-enters a
+backoff. Its caller supplies the root database handle: each attempt re-enters a
 fresh RLS transaction and checks the current turn attempt fence. Passing a
 caller-owned transaction would use savepoints instead and is not this contract.
 A duplicate must match the same tenant/session/turn/call identity, call type,
@@ -1709,6 +1971,11 @@ even a nested rollback SQLSTATE and stops retries. No transport/ambiguous-commit
 recovery is supported, and inference/tool execution stays outside this
 database-only boundary. Exhaustion uses the canonical sanitized persistence-error
 projection; the original cause remains internal diagnostic evidence.
+Atomic receipt/event checkpoints use the existing event-append transaction
+retry boundary, not a nested receipt transaction. Its transaction-local receipt
+helpers require the same allowed fence and verify the locked identity. Transport
+evidence takes precedence over older rollback causes in that shared retry path
+too, so a lost commit acknowledgement cannot replay a checkpoint.
 
 A completed pending tool receipt retains two deliberately separate lossless
 projections: the bounded SDK result item that may become model-visible history,
@@ -1879,6 +2146,11 @@ symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
 the configured-catalog history lifecycle above. It is fixed for the bound capability; reads
 observe live edits or report missing files, and rebinding refreshes discovery.
+When discovery meets a typed unreachable workspace (a Connected Machine
+`agentOffline` or control-timeout `SelfhostedControlError`), the bound
+capability memoizes an explicitly unavailable, empty index and contributes a
+short notice instead of failing instruction preparation; the next run rebinds
+and discovers again. Every other discovery failure still fails the turn.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves
@@ -1927,6 +2199,12 @@ workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
 when the write is control-aware, then the actual `workspaces` row
 `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
 turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+Connection-use validation follows the same order but shares the session, turn
+and attempt read fences (`FOR SHARE`): it changes none of those rows. Independent
+connection uses can therefore validate concurrently, while lifecycle mutations
+still conflict. The resolver joins the existing shared workspace-control advisory
+queue before its control row, so new validators cannot bypass queued control
+mutations. Its physical-request advisory lock still serializes audit replay.
 Child-answer read acknowledgments use the same session/cursor/turn/attempt
 prefix before updating turn metadata. The imported-archive write guard also
 locks the session on a turn update; a turn-only acknowledgment would therefore
@@ -2586,6 +2864,65 @@ replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
 
+### Current workspace retry and deliberate empty continuation
+
+A degraded/unrecoverable verdict describes one restore attempt, not a permanent
+ban on the conversation. A new cold election may revalidate the exact CURRENT
+complete archive when its archive generation equals the workspace generation.
+It never implicitly selects `archive.previous` or accepts a generation gap.
+The cold election stamps the backend from the accepted session route; the source
+archive envelope retains its original backend/provenance. Live instances and
+outcome-unknown provider creates cannot be retargeted. Portable host archives can
+restore into a remote provider after an object-store migration: the configured
+store resolves the retained key, byte count and SHA are checked, and the hydrated
+content-tree fingerprint must match before warm publication. Native provider
+checkpoints retain their provider/binding constraints.
+
+The existing session `sandbox-recovery` GET/POST surface also exposes `retry`
+and `continue_fresh` actions to the canonical managed or built-in local human.
+The latter requires `acceptEmptyWorkspace: true`, control of EVERY group member
+under the exclusive workspace control fence, and a quiescent group. Group identity
+is immutable: no private chat is detached to evade another member's authority.
+Mixed-ownership groups require the operator path below. Both actions bind an
+operation UUID to the exact GET `target` (session/group/route/authority/lease
+epochs, generations, archive revision and restore verdict). A repeated identical
+operation replays; stale selections and changed payloads fail. An uncertain POST
+outcome is reconciled by read-only GET, never by automatically issuing new consent.
+
+`retry` retains the archive and clears only the failed attempt verdict so the
+normal verifier can run. `continue_fresh` explicitly authorizes an empty workspace,
+retains the old archive and generation-gap evidence, and writes an immutable
+receipt and `sandbox.recovery.selected` notice to every group member. It neither
+rewrites messages nor rolls back external effects nor replays commands. The normal
+restore/creation path still has to prove readiness. Empty publication advances
+the workspace generation once; its receipt also retains the abandoned revision,
+excluding that revision from ordinary and automatic historical recovery after a
+later provider loss. An operator may still explicitly authorize historical recovery.
+Every future agent attempt receives the discontinuity from its durable receipt
+as a new turn-scoped operational notice at the history tail. Earlier items and
+the legacy session-instruction prefix are never rewritten by this decision;
+compaction does not erase the receipt. Migration 0871 requires
+warning protocol v4 on affected turn claims, so older workers cannot silently
+omit the new reason during a rolling deployment; ordinary sessions are unaffected.
+
+Operators use the same decision seam through:
+
+```sh
+bun scripts/operator/sandbox-recovery.ts preview /private/recovery-scope.json
+bun scripts/operator/sandbox-recovery.ts apply /private/recovery-request.json
+```
+
+The private preview JSON contains `accountId`, `workspaceId`, `sessionId`, and
+`subjectId`. The application database configuration supplies operator authority;
+`subjectId` attributes the audit and is not a grant by itself. The apply JSON adds
+`request: { operationId, action: "retry", target }`, copying the exact preview target.
+For deliberate empty continuation use `action: "continue_fresh"` and also set
+`acceptEmptyWorkspace: true`. Preview is provider-free; apply persists the choice
+but does not dispatch a turn. Retry the chat or send a new message afterwards.
+If the group is active, quiesce its work normally and preview again. Do not edit
+lease JSON, remove archive references, fabricate provider success, or reuse a
+stale target. The historical-checkpoint CLI filename remains a compatibility alias.
+
 An operator may explicitly authorize recovery from an older, verified checkpoint
 after the provider is gone. `scripts/operator/historical-checkpoint-recovery.ts`
 accepts `preview` or `authorize` and a private JSON input file. Preview needs
@@ -2609,19 +2946,24 @@ resume a turn, modify session history, or claim recovery of unavailable writes.
 The managed browser exposes a separate public contract at
 `GET|POST /v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery`.
 GET is a bounded, provider-free projection. POST requires the canonical managed
-human cookie, current session-control authority, an operation UUID, explicit
-historical-checkpoint acceptance, and the exact selection returned by GET.
+human cookie or an organization key acting as one verified external user on
+that user's own behalf (`asUser`), current session-control authority, an
+operation UUID, explicit historical-checkpoint acceptance, and the exact
+selection returned by GET. The external proof is request-local: a copied grant
+or another workspace never qualifies.
 The exact built-in local human may read GET to see the system-selected Retry
 route; local mode cannot submit POST consent.
-Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
-routes, legacy/unregistered archives, and `archive.previous` are unsupported.
+Agents, delegated bearers, bare API keys, service initiators, shared groups,
+non-Modal homes, active foreign routes, legacy/unregistered archives, and
+`archive.previous` are unsupported.
 
 The selection binds session/group, tenancy and route epochs, lease identity/epoch,
 CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
 The generation gap is not a count of missing edits or files. Conversation and tool
 receipts remain; changes after the checkpoint are unavailable and external effects
-are not undone. Consent never resets to an empty workspace or replays commands
-(the separate system lane below is the only empty-workspace continuation).
+are not undone. Historical checkpoint consent never resets to an empty workspace
+or replays commands; the explicit current-workspace action above and the separate
+system lane below are distinct decisions.
 
 Consent takes the existing workspace tenancy fence exclusively before checking
 complete group membership, including actor-hidden sessions. It then takes the
@@ -2697,13 +3039,16 @@ No cancellation/reaper protocol changes are included.
 
 This is separate from human consent. Before agent construction (including
 on-demand sandbox turns), an exact live attempt may decide how a definitively
-lost managed Modal sandbox continues. A lost box never dead-ends its sessions:
+lost managed sandbox continues, on every backend Opengeni manages (Modal,
+Docker, compute and the other hosted providers; not self-hosted or none). A
+lost box never dead-ends its sessions:
 the decision covers the complete sandbox group at once, including parents,
 shared children and members private to another human.
 
 **Loss evidence.** Both lanes need durable proof that this lease lineage's
 provider object was definitively lost: the reaper's missing-before-capture
-cold commit or an exact warm-instance `NOT_FOUND`. Each records
+cold commit, an exact warm-instance `NOT_FOUND`, or a failed same-lease
+continuity restore (source `continuity_restore`). Each records
 `opengeniProviderLoss` on the lease (source, lost epoch and instance, workspace
 generation, observation time, stamped provider deadline); cold and warming
 rebuilds carry it and a verified warm publication ends it. A failed or reset
@@ -2716,7 +3061,9 @@ shape) or, when a replacement attempt overwrote that record (older code wrote
 `sandbox.provider_missing_before_capture` audit for the same lease and unchanged
 workspace generation, so stuck sessions recover on their next turn or Retry. A
 plain `not_created` (an ordinary drain, operator restore or capture failure)
-never revives an older loss. Turn start takes the workspace-control fence only
+never revives an older loss. A warming rebuild that fails while it carries a
+loss record keeps the loss on the cold lease rather than clearing it into a
+clean lease, which used to restart the session on a silent empty workspace. Turn start takes the workspace-control fence only
 for a lease with an incomplete archive and a loss-shaped provider record (or a
 pending decision), so the ordinary resume of a complete archive stays unlocked. A decision pins the evidence it used. Provider
 `unknown`, `creating` or `exists`, an unresolved provider create, an explicit
@@ -2735,8 +3082,10 @@ call is live while its attempt is open or awaits quiescence, or while its turn i
 not terminal; a row stranded by a terminal turn whose attempt settled is not a
 writer.
 
-The decision prefers the latest registered CURRENT native Modal checkpoint
-older than the lost workspace (lane `checkpoint`; singleton or shared). It
+The decision prefers the latest registered CURRENT checkpoint older than the
+lost workspace (lane `checkpoint`; singleton or shared): a native Modal
+checkpoint on Modal, a verified portable tar checkpoint (which has no native
+artifact, so its selection's `artifactId` is `null`) on the other backends. It
 records a system-attributed audit, one immutable `sandbox.recovery.automatic`
 receipt per member (the deciding attempt is the actor for its own session, the
 system recovery subject for the others) and a lease marker. Restore then uses
@@ -2759,15 +3108,33 @@ When the loss leaves no checkpoint Opengeni can restore automatically (no
 archive, an unverified archive, a legacy or unregistered descriptor, an invalid
 artifact, or a definitive integrity failure of the selected checkpoint), the
 decision is lane `fresh_workspace`: continue on a new EMPTY workspace. Because
-that is irreversible for the running sandbox, it also waits until the lost
-object is past its hard provider lifetime: its stamped provider deadline plus a
-one-hour create grace, or, for rows without one, the loss observation plus 24
-hours. Opengeni validates the Modal timeout to at most 24 hours (Modal's own
-cap) and never renews it, so no Modal sandbox can outlive that bound in any
-workspace. A misconfigured credential or namespace that turned a live box into
-a false `NOT_FOUND` therefore cannot cause an empty reset; this deadline proof
-subsumes a provider-binding check and needs no provider call on the turn path.
-Staging's 24-hour deadline kills satisfy it at loss time. The decision writes
+that is irreversible for the running sandbox, it also needs per-backend proof
+that the lost object is really gone:
+
+- Modal: the lost object is past its hard provider lifetime: its stamped
+  provider deadline plus a one-hour create grace, or, for rows without one, the
+  loss observation plus 24 hours. Opengeni validates the Modal timeout to at
+  most 24 hours (Modal's own cap) and never renews it, so no Modal sandbox can
+  outlive that bound in any workspace. Staging's 24-hour deadline kills satisfy
+  it at loss time.
+- Compute: the loss observation itself, because the compute control plane is
+  authoritative for its own sandboxes and its deletion is final.
+- Docker: a `workspace_absent` proof written when the continuity restore finds
+  the workspace gone on the same daemon: the durable ownership receipt names
+  that daemon, the daemon reports the exact container missing, and both owned
+  host roots are absent (`ENOENT`) while the directory that held them exists,
+  so an unmounted volume or another host's filesystem never passes.
+- Other hosted providers with a configured hard or renewable lifetime: a
+  `provider_lifetime` proof stamped at loss as the observation plus that
+  lifetime plus the one-hour create grace.
+
+Without such proof the lane is unavailable (`provider_death_unproven`): a
+transient or false `NOT_FOUND` (a misconfigured credential or namespace, or a
+host under memory pressure) can at most restore a checkpoint, never empty the
+workspace by itself. The session is still not stranded: the lease keeps its
+loss, so the public projection offers a person who controls the complete group
+Retry or an explicit fresh-workspace consent. This proof needs no provider call
+on the turn path. The decision writes
 its own audit (`sandbox.fresh_workspace_recovery.authorized`), one immutable
 `sandbox.recovery.fresh_workspace` receipt per member naming the loss time and
 reason, and a pending lease marker, and retires any late-capture receipt in the
@@ -2877,6 +3244,20 @@ rule when heartbeat authority rejects a closed attempt. It does not refresh the
 closed holder, renew execution authority, or extend the capture deadline; the
 finalizer releases after physical settlement. Epoch replacement and expired
 captures still release promptly.
+A drain attempt stops waiting for its capture at its drain budget, but the
+capture is not abandoned: it keeps reading and can publish late through its
+claim's provider-request lineage, after which a retry tears down from that
+archive. Inside one worker, a retry of the same lease epoch and instance defers
+while an earlier drain capture is still reading, publishing or removing its
+spool: it neither replaces that claim nor starts a second capture, so a capture
+slower than the retry interval no longer gains another full read and host spool
+per retry. Other leases are unaffected, an already published archive still
+resumes teardown, a capture that failed releases its claim for a fresh one, and
+an entry older than the one-hour capture ceiling stops deferring. The deferral
+is per worker: another worker that receives the retry replaces the claim under
+the ordinary takeover rules, so each worker runs at most one such capture. Host
+spool reads also honour a capture's abort signal in the archive re-read and
+inventory verification passes.
 Migration 0497 repairs the global Modal orphan inventory for non-bypass migration
 owners. Its private backend-PID/transaction read capability opens only inside the
 inventory function, preserves cross-tenant warming/warm/draining attribution,
@@ -2978,6 +3359,16 @@ retry that finds the root already absent (crash between release and the cold
 commit) completes teardown without recapture, but only when the capture is
 published, the daemon matches and the exact container is gone. Other providers
 and elected normal cold-continuity owners retain their existing rules.
+A drain that commits cold without capturing because the probe or attach
+reported the container missing (a mutation still in progress, a capture
+takeover, or a NotFound observed while the daemon was unhealthy) never released
+the host directory, so the workspace still exists. That cold commit keeps the
+lease's Docker continuity receipt (the same one a warm lost instance keeps), the
+exact provider state and a pending restore, instead of the archive-only shape
+that declared the workspace unrecoverable. The elected next owner restarts a
+container on that exact owned directory, or reattaches the one a false NotFound
+missed, and the chat continues without consent. Without an owned host root the
+commit stays unrecoverable as before.
 `bun run dev:clean` likewise removes the SDK workspace directories of the
 sandbox containers it force-removes (its database is deleted with them);
 plain `dev:down` keeps them for continuity.
@@ -3036,23 +3427,39 @@ during that wait returns inline and never becomes session background state.
 Only providers whose process locator is controllable from another worker may
 end that wait with a second, exact-attempt-fenced adoption transaction that
 inserts its session-owned command row immediately before the model receives the
-live locator. The SDK Local and Docker locators index an in-memory table on one
-worker session object. After the bounded foreground wait, those providers return
-an explicitly turn-scoped handle so the agent can test a running server. The
-shell remains registered with the exact turn cancellation fence: ordinary
-completion, Pause, Steer, and cancellation stop it and settle its process holder
-before workspace capture. It is not registered as a session background command,
-does not create terminal background notifications, and cannot be reused by a
-successor attempt. Never wait for an indefinitely running server to exit before
-returning control to its owning agent. On every managed backend, a yielded
-`exec_command` whose final step is a bare stdin-driven shell (`bash`,
-`sh -i`, `bash --noprofile --norc`; no `-c`, script, or other argument, as
-decided by `isBareInteractiveShellCommand` in
-`packages/runtime/src/sandbox/turn-tool-cancellation.ts`) takes the same
-turn-scoped path instead of adoption, also on later `write_stdin` reads: the
-agent drives it during the turn, and finalization stops it through the exact
-marker kill. Such a shell never exits on its own, so adopting it would keep the
-sandbox busy and block idle drain after the turn. A yielded
+live locator. On Docker and Unix-local boxes every command runs under a small
+POSIX `sh` supervisor inside the box
+(`packages/runtime/src/sandbox/durable-shell-process.ts`): stdin is a FIFO,
+output goes to a file with a committed read offset, and the exit status is
+written next to them, under `${TMPDIR:-/tmp}/opengeni-exec-<uid>/<namespace>/<id>`.
+Its handles are random numbers of at least 1,000,000, and any later session
+object for the same container or workspace (another turn, another worker, the
+reaper) reads, writes and stops the command with one short shell invocation, so
+these handles are adopted like Modal's. Interactive shells (`bash`, `sh -i`) are
+adopted too: a person who steers or whose turn ends expects what the agent
+started to keep running, and idle command containment (below) still drains a
+box nobody uses. A later turn reaches an adopted command by the handle the model
+was given: `write_stdin` and `command_input` first look up the session's running
+background command with that handle on the exact home lease epoch and provider
+instance (`findRunningSessionBackgroundProcess`) and bind it to the routing
+session; it stays session-owned and that turn neither adopts nor finalizes it.
+Only handles nothing outside one worker can reach stay turn-scoped: the SDK's
+own small in-memory Local and Docker handles (a `runAs` user, a terminal without
+util-linux `script`, or a box without `mkfifo` and fractional `sleep`) and
+OpenSandbox handles. After the bounded foreground wait those return an
+explicitly turn-scoped handle, stay registered with the exact turn cancellation
+fence, and are stopped and settled by ordinary completion, Pause, Steer and
+cancellation before workspace capture. A supervised Docker or local command is
+retained with `reconciler_version = 2` (migration 0840): a worker built before
+the supervisor would look for it in its own memory and settle a live command as
+lost, so the original three-argument
+`claim_terminal_retained_processes(uuid,integer,bigint)`, which such a worker
+calls, now returns only version 1 rows, and current workers call the
+four-argument claim with `RETAINED_PROCESS_RECONCILER_VERSION`. During a rolling
+deploy an older reaper therefore leaves these commands to a newer one. Bump the
+version, never reuse it, when a later process kind needs a newer reaper.
+Never wait for an indefinitely running
+server to exit before returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
@@ -3342,7 +3749,7 @@ observation window is never substituted for termination proof.
 box through a non-expiring interaction holder, so before migration 0705 an
 open browser or desktop that nobody used kept its Modal box warm until the
 provider deadline. They now follow the general idle grace
-(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default 15 minutes, never under one minute);
+(`OPENGENI_SANDBOX_IDLE_GRACE_MS`, default one minute, never under one minute);
 there is no separate window.
 
 Activity is deliberate and durable: the newest of the interaction holder's
@@ -3399,15 +3806,72 @@ counts inspections (`checkpointing` when browser saves were prepared,
 `inspection_failed`). A person returning exactly as the box is being released
 may see the browser `suspending`, then resume it.
 
-**Idle command containment.** A legacy retained command keeps its Modal box
-warm through a non-expiring process holder, so the zero-holder idle drain never
-runs for it and the box would stay up until the provider deadline kills it
-uncaptured. One rule contains such commands: running, stopping, unobservable,
+**Browsers and desktops on a retired instance.** A browser or desktop
+controller runs inside one exact provider instance (`placement_instance_id`),
+and nothing rebinds it to a successor. When its lease no longer runs that
+instance (the provider reported it missing, a drain or rotation retired it, or
+a replacement box was created) the controller is gone: it can no longer
+heartbeat, act or end there. Before migration 0883 such a resource stayed
+`active` and its interaction holder kept every later box of the sandbox warm,
+on every provider. The interaction reaper (`reap_stale_interaction_transitions`)
+now closes a live browser or desktop bound to an instance its lease no longer
+runs: prepared operations fail, dispatched ones settle `outcome_unknown`, the
+resource becomes `lost` with failure code `placement_instance_lost`, and its
+controller binding is cleared. The orphan sweep in the same transaction
+deletes its holder, so the lease drains by the ordinary idle rule. A resource
+on the lease's current instance, or not yet bound to one, is untouched; age is
+never the criterion.
+
+**Full browser controllers.** One browser controller runs per workspace and
+placement (a Connected Machine or a box). Its browser limit defaults to half
+of the machine's memory (or the tightest memory limit on the controller's own
+cgroup or any of its ancestors, cgroup v1 or v2, when lower; each hierarchy is
+found through `/proc/self/mountinfo`, so a mount of a non-root cgroup or at
+another mount point is read correctly) at
+300 MiB per browser, about the p90 resident size of live agent browsers, and
+never under 8: 27 browsers on 16 GiB, 81 on 48 GiB, 147 on 86 GiB.
+`OPENGENI_BROWSERD_MAX_SESSIONS` overrides it. When a create reaches a full
+controller, the API saves the least recently used checkpoint-capable browser
+on that same controller instance that has been unused for at least five
+minutes and has no lifecycle operation in flight, through the same private
+checkpoint as an explicit suspend (actor `system:browser-capacity`), then
+retries the create once under its own operation. The candidate is claimed
+under its row lock: the save is prepared only while the browser is still
+active on the same controller instance and generation, still unused since the
+cutoff, and free of other lifecycle operations; a browser that was used, saved
+or changed meanwhile is skipped, and a browser some other request already
+saved never counts as capacity this create freed. Signing the state upload and
+provisioning the controller happen before the save is dispatched, so a failure
+there returns the candidate to active instead of stranding it in
+`suspending`. Up to three candidates are tried; when none can be saved, the
+create fails with the controller's `capacity_exhausted` error as before.
+Nothing happens below the limit. The saved browser resumes from its working
+copy on its next open; a resume that reaches a full controller makes room the
+same way, once, without saving the browser being resumed.
+
+Downloads kept when a browser is saved (by capacity, an explicit suspend or a
+deadline checkpoint) follow the browser's chat, whoever's request stops it:
+a private chat's downloads become files private to that chat's owner, and a
+shared chat's become workspace files. The owner is read with system authority
+from the chat that created the browser, since a capacity save may come from a
+person who cannot see that private chat; the read only decides file
+ownership. Keeping downloads runs inside the save's heartbeat, so slow exports
+never let the transition expire before capture. Listing and saving kept
+downloads read them as the chat's owner only after the request is authorized
+for that chat, and nobody is charged for the capacity save's kept downloads.
+
+**Idle command containment.** An unsupervised retained command (a legacy Modal
+command, or any Docker or local background command) keeps its box warm through
+a non-expiring process holder, so the zero-holder idle drain never runs for it.
+A Modal box would stay up until the provider deadline kills it uncaptured;
+Docker and local boxes have no deadline at all, so a shell left open would keep
+them warm for ever. One rule contains such commands: running, stopping, unobservable,
 or repeatedly failing observation all qualify, as long as the command printed no
 output inside the window. The reaper reads a new inventory,
 `list_command_containment_candidates(limit, idle window)` from migrations
-0547/0599/0687,
-which lists enrolled drains, rotating leases, and warm or draining Modal leases
+0547/0599/0687/0839,
+which lists enrolled drains, rotating leases, and warm or draining Modal, Docker
+and local leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
 holder-set change or admission in the group within the window. Exact
@@ -4296,45 +4760,37 @@ advances a cursor over an event it did not return.
 Session discovery is a separate compact monitoring projection, not a list of
 full session rows. `sessions_list` defaults to deterministic descending
 `(created_at, id)` order and can instead use the durable descending
-`(activity_revision, updated_at, id)` activity order. `updated_at` is the
-display/keyset suffix, not the snapshot clock. Revision zero is the untouched
-legacy bucket and still traverses by exact PostgreSQL timestamp/UUID suffix.
-Both paths use opaque, versioned, snapshot-bound keyset cursors and matching
-workspace-prefixed indexes. The workspace activity counter is created with the
-workspace, so an updated-order page reads its complete multi-query projection
-through one short read-only repeatable-read MVCC snapshot and never takes a
-counter or workspace-control lock. The page returns that decimal snapshot as
-`updatedThrough`; the next incremental scan passes it as
-`updatedAfter`, so application-clock timestamps, equal timestamps, inserts,
-and repeated updates cannot create a handoff gap. Semantic writers acquire only
-their domain locks while doing work. Their outermost database wrapper opens one
-workspace-scoped activity gate, lets row triggers tag the changed session set
-with the current full transaction id, settles every deferred constraint, and
-then finalizes exactly once: one counter increment and one shared revision
-stamped onto exactly that transaction's pending sessions. Low-level session
-writers accept only the branded gate handle, while the SQL trigger catches raw
-or stale callers at runtime. The finalizer clears the pending set in the same
-transaction. A zero-change
-transaction leaves the counter untouched; a semantic writer outside a matching
-gate, a conflicting nested workspace, a manual revision write, or an open gate
-without its finalizer fails closed and rolls back. A new gate must begin at the
-outer transaction boundary; same-workspace nested scopes reuse that owner, while
-an unrelated outer transaction is rejected. The counter therefore enters
-the lock graph only after other transaction work is complete, while discovery
-never enters that graph at all. Raw deltas do not mark a session pending. Known
-targets should be read with exact-ID `session_get`, whose model-facing
+`(activity_xid, updated_at, id)` activity order. `updated_at` is the
+display/keyset suffix, not the monitoring clock. Xid zero is the untouched
+pre-expansion bucket and traverses by exact PostgreSQL timestamp/UUID suffix.
+Updated ordering uses a live keyset, not a retained row snapshot; relevance
+alone freezes a numeric snapshot-xmax ceiling. Writers stamp the top-level
+transaction ID in a BEFORE trigger, in the original row write. Scoped writer
+handles retain tenant/actor proofs and domain fences but never advance a shared
+workspace counter or perform a second activity-finalization write.
+
+An incremental page captures snapshot xmin in the same statement as its rows
+and returns its tagged decimal token as `updatedThrough`. The next scan passes
+that value as `updatedAfter` and includes visible xids at or above it, with no
+upper bound. Continuation pages retain the first page's watermark. Lower xids
+that commit late remain eligible on the next scan: delivery is gap-free and
+at least once, not exact once or an event log. Finish every continuation before
+advancing the token. Legacy revision tokens restart conservatively on new
+readers; old readers and new tokens have an explicitly limited mixed-rollout
+compatibility window. See [session activity transaction IDs](session-activity-xid.md)
+for token encoding, cache invalidation, rolling safety and the subsequent
+contract cleanup. Known targets should be read with exact-ID `session_get`, whose model-facing
 projection independently bounds every aggregate and the complete pretty-printed
 response to 64 KiB; the REST session detail contract remains unchanged.
 
 `sessions.updated_at` records semantic monitoring activity time, while
-`sessions.activity_revision` is its transactional monotonic ordering fact; raw
+`sessions.activity_xid` records the writing transaction's allocation order; raw
 stream volume advances neither. A batch containing only raw message, reasoning,
 sandbox-command-output, or PTY
 deltas advances `last_sequence` but does not advance `updated_at` or
-`activity_revision`. A semantic event or explicit session mutation advances
-the timestamp, marks that session pending inside the activity gate, and shares
-the transaction's single finalized workspace revision with every other changed
-session. This keeps
+`activity_xid`. A semantic event or explicit session mutation advances
+the timestamp and stamps the same top-level xid on every session changed by
+that transaction. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.

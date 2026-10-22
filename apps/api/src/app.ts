@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { z } from "zod";
 
 import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
+import { registerSubscriptionUsagePoolRoutes } from "./routes/subscription-usage-pool";
 import { isPreparedMcpConnectPath } from "./prepared-mcp-permissions";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
@@ -28,6 +30,10 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
+
+import { siteFrameGuard } from "./site-frame-guard";
+import { registerSiteSessionAccessRoutes } from "./routes/site-session-access";
+import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
 import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
@@ -67,8 +73,6 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveAgentToolFamilies,
-  resolveWorkspaceMemoryEnabled,
-  resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   WorkspaceVoiceInputSettings,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
@@ -80,6 +84,7 @@ import {
   ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
+  type ClientSitesConfig,
   type ErrorCode,
   type FirstPartyMcpToolName,
   type Session,
@@ -108,7 +113,6 @@ import {
   getWorkspace,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
-  resolveSessionMemoryAgentScope,
   resolveSessionAdminAuthority,
   rlsContextForWorkspace,
 } from "@opengeni/db";
@@ -116,6 +120,7 @@ import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import {
   createObservability,
+  errorCauseAttributes,
   failureDiagnostic,
   withTraceContext,
   withMcpTelemetry,
@@ -124,7 +129,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
@@ -140,6 +145,7 @@ import {
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
   scheduledTaskTargetAccessHttpError,
+  sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -158,6 +164,7 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
+import { sessionUsageLimitsProducerEnabled } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -217,7 +224,11 @@ import {
   assertOrganizationUserSetupQueryTransportConfigured,
 } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
-import { buildOpenGeniMcpServer } from "./mcp/server";
+import {
+  buildOpenGeniMcpProtocolServer,
+  buildOpenGeniMcpServer,
+  isOpenGeniMcpProtocolOnlyMessage,
+} from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
@@ -266,7 +277,11 @@ import {
   localBrowserRequestHost,
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
-import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
+import {
+  alongsideAuthorization,
+  requireLiveAgentAttemptGrant,
+  withAccessGrantSessionRlsContext,
+} from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -309,6 +324,7 @@ import {
   isPersonalGitHubGitBrokerRequest,
   registerPersonalGitHubGitBrokerRoutes,
 } from "./routes/personal-github-git-broker";
+import { registerDesktopDistributionRoutes } from "./routes/desktop-distribution";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
@@ -337,7 +353,12 @@ import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
+import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
+import { registerSitePublishingRoutes } from "./routes/site-publishing";
+import { configuredSitesDomain } from "./site-publishing/service";
+import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
+import { registerSiteSqlRoutes } from "./routes/site-sql";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
@@ -357,6 +378,7 @@ import {
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
@@ -571,6 +593,7 @@ export function createAppComposition(deps: AppDependencies): {
         reapExpiredManagedAuthSessionSets(deps.db, 100),
       ]).catch((error) => {
         observability.error("Managed isolated-auth orphan reap failed", {
+          error,
           errorClass: error instanceof Error ? error.name : "UnknownError",
         });
       });
@@ -617,6 +640,7 @@ export function createAppComposition(deps: AppDependencies): {
           entitlements: deps.entitlements ?? null,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
+          usageLimitMetrics: observability,
         })
       : deps.modelCalls;
   registerProductUsageMetricBaselines(observability);
@@ -685,6 +709,7 @@ export function createAppComposition(deps: AppDependencies): {
         origin: "api",
         reasonKind: diagnostic?.causes[0]?.kind ?? "Response",
         ...(diagnostic ? { diagnosticId: diagnostic.diagnosticId } : {}),
+        ...(error === undefined ? {} : errorCauseAttributes(error)),
       });
       observability.incrementCounter({
         name: "opengeni_http_errors_total",
@@ -763,9 +788,15 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Chunk-Sha256",
       "X-OpenGeni-Chunk-Start-Milliseconds",
       "X-OpenGeni-Correlation-Id",
+      // Set by the console inside a desktop app; only changes where a finished
+      // browser sign-in returns.
+      "X-OpenGeni-Desktop-App",
       "X-OpenGeni-Session-Csrf",
       // Session scope for a session proxy; the API itself ignores it.
       "X-OpenGeni-Session-Id",
+      // Set by Site bridges on every bridged request (Site Data frame clamp).
+      "X-OpenGeni-Site-Frame",
+      "X-OpenGeni-Site-Frame-Id",
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
@@ -780,6 +811,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
+      "X-OpenGeni-Conversation-Filter",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Covered-First",
       "X-OpenGeni-Covered-Last",
@@ -787,6 +819,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Event-Mode",
       "X-OpenGeni-Event-Result",
       "X-OpenGeni-Event-Result-Mode",
+      "X-OpenGeni-Export-Next-Cursor",
+      "X-OpenGeni-Export-Truncated",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",
@@ -795,6 +829,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Page-Max-Bytes",
       "X-OpenGeni-Page-Truncated",
       "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Session-Sequence",
       "X-OpenGeni-Truncated-By",
     ],
   };
@@ -850,12 +885,13 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    // The anonymous web beacons enforce their own small limits on the
-    // streamed body; the generic ceiling would buffer far more first.
+    // The anonymous web beacons and Site Data uploads enforce their own limits
+    // on the streamed body; the generic ceiling would buffer far more first.
     if (
       isClientErrorReportRequest(c.req.method, pathname) ||
       isAnalyticsConsentReportRequest(c.req.method, pathname) ||
-      isSessionHistoryImportRequest(c.req.method, pathname)
+      isSessionHistoryImportRequest(c.req.method, pathname) ||
+      isSiteDataFileUploadRequest(c.req.method, pathname)
     ) {
       await next();
       return;
@@ -1070,7 +1106,7 @@ export function createAppComposition(deps: AppDependencies): {
       return c.json(
         {
           code: "API_CONTRACT_CHANGED",
-          message: "Opengeni updated. Reload this client before changing state.",
+          message: "The service was updated. Reload this client before changing state.",
           apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         },
         409,
@@ -1103,6 +1139,7 @@ export function createAppComposition(deps: AppDependencies): {
     } finally {
       await releaseManagedAuthRequestActorLease(c.req.raw).catch((error) => {
         observability.error("Managed actor mutation lease release failed", {
+          error,
           errorClass: error instanceof Error ? error.name : "UnknownError",
         });
       });
@@ -1369,8 +1406,11 @@ export function createAppComposition(deps: AppDependencies): {
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
-    if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
-      throw new HTTPException(422, { message: "workspaceId must not be empty" });
+    if (
+      requestedWorkspaceId !== undefined &&
+      !z.string().uuid().safeParse(requestedWorkspaceId).success
+    ) {
+      throw new HTTPException(422, { message: "workspaceId must be a UUID" });
     }
     const callerScoped =
       requestedWorkspaceId !== undefined ||
@@ -1474,6 +1514,7 @@ export function createAppComposition(deps: AppDependencies): {
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
+        connectedMachines: deps.settings.sandboxSelfhostedEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel,
@@ -1503,6 +1544,11 @@ export function createAppComposition(deps: AppDependencies): {
             }
           : {}),
         agentConfig: clientAgentConfig(deps.settings),
+        // Producer capability for per-task usage limits. Clients only offer a
+        // new limit when enabled; existing limits stay visible and removable.
+        sessionUsageLimits: {
+          enabled: sessionUsageLimitsProducerEnabled(deps.settings),
+        },
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -1549,6 +1595,7 @@ export function createAppComposition(deps: AppDependencies): {
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
         structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
+        sites: clientSitesConfig(deps.settings),
       }),
     );
   });
@@ -1654,27 +1701,34 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
-  app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
-    const workspaceId = c.req.param("workspaceId");
-    if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
-      const grant = await requireAccessGrant(c, routeDeps, workspaceId);
-      await validateCodexAccountTarget(c.req.raw);
+  app.use(
+    "/v1/workspaces/:workspaceId/*",
+    nativeWorkspaceMiddleware(async (c, next) => {
+      const workspaceId = c.req.param("workspaceId")!;
+      if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
+        const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+        await validateCodexAccountTarget(c.req.raw);
+        await withAccessGrantSessionRlsContext(routeDeps, grant, next);
+        return;
+      }
+      if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
+        await next();
+        return;
+      }
+      // Match Hono's decoded routing path before first-use membership and RLS.
+      const permission =
+        c.req.method === "PUT" &&
+        /^\/v1\/workspaces\/[^/]+\/artifact-catalog\/[^/]+\/[^/]+\/pin$/.test(c.req.path)
+          ? "artifacts:publish"
+          : undefined;
+      const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
       await withAccessGrantSessionRlsContext(routeDeps, grant, next);
-      return;
-    }
-    if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
-      await next();
-      return;
-    }
-    // Match Hono's decoded routing path before first-use membership and RLS.
-    const permission =
-      c.req.method === "PUT" &&
-      /^\/v1\/workspaces\/[^/]+\/artifact-catalog\/[^/]+\/[^/]+\/pin$/.test(c.req.path)
-        ? "artifacts:publish"
-        : undefined;
-    const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
-    await withAccessGrantSessionRlsContext(routeDeps, grant, next);
-  });
+    }),
+  );
+
+  // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
+  // the frame's own sessions, and the validated Site origin as provenance.
+  app.use("/v1/workspaces/:workspaceId/*", nativeWorkspaceMiddleware(siteFrameGuard(routeDeps)));
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1759,6 +1813,28 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // MCP handshakes (initialize, ping, notifications) read and disclose
+    // nothing scoped. A session-bound agent attempt still proves it is the
+    // live attempt, but skips the catalog and admin reads
+    // that building the tool surface costs on every tools/* POST.
+    if (
+      c.req.method === "POST" &&
+      grant.principalKind === "agent_attempt" &&
+      typeof grant.metadata?.sessionId === "string" &&
+      (await isProtocolOnlyMcpRequest(boundedRequest))
+    ) {
+      await requireLiveAgentAttemptGrant(routeDeps, grant);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      const mcp = buildOpenGeniMcpProtocolServer(grant);
+      try {
+        await mcp.connect(transport);
+        return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      } finally {
+        await mcp.close().catch(() => undefined);
+      }
+    }
     // Admin actions dispatch back into this API as a person. Capture the
     // context now, before this request takes on the agent's database and
     // billing scope, so none of it carries into those actions.
@@ -1768,7 +1844,8 @@ export function createAppComposition(deps: AppDependencies): {
     return await withSessionAuthorizationReadReuse((reads) =>
       withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
         const boundSessionId = grant.metadata?.sessionId;
-        if (typeof boundSessionId === "string") {
+        const authorizeBoundSession = async () => {
+          if (typeof boundSessionId !== "string") return;
           try {
             await requireSessionAuthorization(routeDeps, grant, {
               sessionId: boundSessionId,
@@ -1786,16 +1863,14 @@ export function createAppComposition(deps: AppDependencies): {
             }
             throw error;
           }
-        }
-        if (c.req.method === "GET") return unsupportedGet();
-        reads.handOffToToolDispatch();
-        const workspace = await getWorkspace(routeDeps.db, workspaceId);
-        const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-        const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
+        };
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
         });
-        if (!grantUsesAttemptScopedMcp(grant)) {
+        if (c.req.method === "GET" || !grantUsesAttemptScopedMcp(grant)) {
+          await authorizeBoundSession();
+          if (c.req.method === "GET") return unsupportedGet();
+          reads.handOffToToolDispatch();
           const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
           const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
           try {
@@ -1809,44 +1884,37 @@ export function createAppComposition(deps: AppDependencies): {
             await Promise.allSettled([mcp.close(), prepared.close()]);
           }
         }
-        const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-        // The bound session's frozen Memory selector (migration 0427) decides
-        // which Memory tools the attempt receives and which typed layers they
-        // read and write. A missing row resolves to no Memory tools.
-        const sessionMemory =
-          typeof boundSessionId === "string"
-            ? ((await resolveSessionMemoryAgentScope(
-                routeDeps.db,
-                workspaceId,
-                boundSessionId,
-                grant.metadata,
-              )) ?? {
-                mode: "off" as const,
-                userSubjectId: null,
-                rootSessionId: null,
-              })
-            : null;
-        // Checked live: allowed by the organization, given to this session,
-        // and the person who gave it is still an owner or admin.
-        const sessionAdminAccess =
-          typeof boundSessionId === "string" &&
-          (await resolveSessionAdminAuthority(routeDeps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId: boundSessionId,
-          }))
-            ? {
-                origin: new URL(c.req.url).origin,
-                dispatch: (request: Request) =>
-                  outsideAgentContext(async () => await app.fetch(request, c.env)),
-                signal: c.req.raw.signal,
-              }
-            : null;
+        // Only the current model catalog and admin access shape this surface.
+        // Legacy Memory settings/selectors no longer register tools; Knowledge
+        // resolves its own scope at execution. Keep the bound-session check
+        // alongside these reads and before anything reaches the response.
+        const [, [mcpDeps, sessionAdminAuthority]] = await alongsideAuthorization(
+          authorizeBoundSession(),
+          () =>
+            Promise.all([
+              resolveWorkspaceMcpRouteDeps(routeDeps, grant),
+              // Checked live: allowed by the organization, given to this
+              // session, and the person who gave it is still an owner or admin.
+              typeof boundSessionId === "string"
+                ? resolveSessionAdminAuthority(routeDeps.db, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    sessionId: boundSessionId,
+                  })
+                : false,
+            ]),
+        );
+        reads.handOffToToolDispatch();
+        const sessionAdminAccess = sessionAdminAuthority
+          ? {
+              origin: new URL(c.req.url).origin,
+              dispatch: (request: Request) =>
+                outsideAgentContext(async () => await app.fetch(request, c.env)),
+              signal: c.req.raw.signal,
+            }
+          : null;
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
-          workspaceMemoryEnabled,
-          workspaceMemoryPromptMode,
-          sessionMemory,
           sessionAdminAccess,
         });
         // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
@@ -2116,7 +2184,12 @@ export function createAppComposition(deps: AppDependencies): {
       throw new HTTPException(400, { message: "Invalid Codemode call" });
     }
     try {
-      const submission = await submitAndDispatchCodemodeCall(routeDeps, grant, parsed.data);
+      const submission = await submitAndDispatchCodemodeCall(
+        routeDeps,
+        grant,
+        parsed.data,
+        c.req.raw.signal,
+      );
       const terminal = ["completed", "failed", "outcome_unknown", "cancelled"].includes(
         submission.operation.state,
       );
@@ -2159,8 +2232,20 @@ export function createAppComposition(deps: AppDependencies): {
   const interactionSecrets = createVaultInteractionSecretsPort({
     db: routeDeps.db,
     encryptionKey: environmentsEncryptionKeyBytes(routeDeps.settings) ?? null,
-    providersFor: (workspaceId, subjectId) =>
-      vaultProviderRegistryFor(routeDeps, { workspaceId, subjectId }),
+    providersFor: (workspaceId, subjectId, principal) =>
+      vaultProviderRegistryFor(routeDeps, {
+        workspaceId,
+        subjectId,
+        ...(principal
+          ? {
+              executionContext: {
+                sessionId: principal.sessionId,
+                turnId: principal.turnId,
+                attemptId: principal.attemptId,
+              },
+            }
+          : {}),
+      }),
   });
   registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
@@ -2168,9 +2253,11 @@ export function createAppComposition(deps: AppDependencies): {
   registerKnowledgeRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
+  registerDesktopDistributionRoutes(app, routeDeps);
   registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerUsageAllowanceRoutes(app, routeDeps);
+  registerOfficeWorkbookRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerInsightsUsageRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
@@ -2182,7 +2269,11 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
+  registerSiteDataRoutes(app, routeDeps);
+  registerSitePublishingRoutes(app, routeDeps);
+  registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
+  registerSiteSqlRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
@@ -2211,6 +2302,7 @@ export function createAppComposition(deps: AppDependencies): {
   // only classifies the session module's own paths.
   registerInboxRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
@@ -2228,6 +2320,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerClaudeSubscriptionAccountRoutes(app, routeDeps);
+  registerSubscriptionUsagePoolRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerChatCompletionRoutes(app, { ...routeDeps, modelCalls });
   registerEditableArtifactRoutes(app, routeDeps);
@@ -2272,7 +2365,8 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (allowanceExhaustedHttpError(rawError) ??
+        : (sessionUsageLimitHttpError(rawError) ??
+          allowanceExhaustedHttpError(rawError) ??
           subscriptionSettingsLockedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           scheduledTaskTargetAccessHttpError(rawError) ??
@@ -2371,14 +2465,30 @@ const publicWorkspaceBrowserRoutePatterns = [
   /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
 ] as const;
 
+/** All native-workspace middleware shares one namespace boundary, not route exemption lists. */
+function nativeWorkspaceMiddleware(middleware: MiddlewareHandler): MiddlewareHandler {
+  return async (c, next) => {
+    // Hono's wildcard also captures the external namespace. Only an actual
+    // registered external handler may resolve that organization-local identity.
+    // Unknown paths/methods must not fall through to a native workspace handler.
+    const route = registeredHandlerRoutePath(c);
+    if (route && /^\/v1\/workspaces\/external(?:\/|$)/.test(route)) {
+      await next();
+      return;
+    }
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        c.req.param("workspaceId") ?? "",
+      )
+    ) {
+      throw new HTTPException(404, { message: "workspace not found" });
+    }
+    return await middleware(c, next);
+  };
+}
+
 export function workspaceActorContextExempt(method: string, pathname: string): boolean {
-  // The account-scoped provisioning route shares the workspace collection prefix.
-  // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
-  // the route performs its own organization API-key authorization.
-  if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
-  // Import adapters apply their own exact create/control gates and request-local
-  // RLS in core. Tenant mirrors first resolve the organization-local mapping;
-  // "external" itself is not a native workspace id.
+  // Import adapters apply their own exact create/control gates and request-local RLS in core.
   if (isSessionHistoryImportRequest(method, pathname)) return true;
   // Organization budget authority is independent of ordinary workspace
   // membership; these routes apply their own exact account/workspace gate.
@@ -2387,23 +2497,6 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
       /^\/v1\/workspaces\/[^/]+\/allowance$/.test(pathname)) ||
     (method === "GET" && /^\/v1\/workspaces\/[^/]+\/allowance\/state$/.test(pathname)) ||
     (method === "POST" && /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/.test(pathname))
-  )
-    return true;
-  // Allowance tenant mirrors resolve the workspace by exact organization-local
-  // external identity before applying the ordinary workspace authorization.
-  if (
-    (["GET", "PUT", "DELETE"].includes(method) &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/.test(pathname)) ||
-    (method === "GET" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/.test(pathname)) ||
-    (method === "POST" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/.test(pathname)) ||
-    (method === "GET" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage(?:\/me)?$/.test(pathname)) ||
-    (method === "PUT" &&
-      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/(?:[^/]+|external\/[^/]+\/[^/]+)\/allowance$/.test(
-        pathname,
-      ))
   )
     return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
@@ -2433,6 +2526,19 @@ async function validateCodexAccountTarget(request: Request): Promise<void> {
       message: 'target is required ("auto" or an account id)',
     });
   }
+}
+
+/** Whether a POST carries only MCP protocol messages that touch no tool. */
+async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself, on the full path.
+    return false;
+  }
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
 }
 
 async function requireMcpAccessGrantAuthorization(
@@ -2632,10 +2738,11 @@ function codemodeHttpError(error: unknown): HTTPException {
   // nothing and the client may resubmit the same operation id.
   const contention = databaseContentionHttpError(error, "POST", { outcomeUnknown: false });
   if (contention) return contention;
-  if (error instanceof SiteSessionPathError) {
-    // The proxied Site/SDK surface is an explicit allowlist; a route outside
-    // it (tool policy, visibility, forks, Steer, control, ...) does not exist
-    // for this caller rather than being a server fault.
+  if (error instanceof SiteSessionPathError || error instanceof SiteDataUnsupportedError) {
+    // Site frame requests are held to the SITE_OPERATIONS allowlist and the
+    // agent's own SDK requests to its workspace; a route outside them (or Site
+    // Data on a host without a published Site) does not exist for this
+    // caller rather than being a server fault.
     return new HTTPException(404, { message: error.message, cause: error });
   }
   if (error instanceof SessionAuthorizationDeniedError) {
@@ -2801,10 +2908,10 @@ function publicErrorMessage(error: unknown, status: number): string {
     return "Connection setup changed or is still in progress. Reload its current status before retrying.";
   if (error instanceof ConnectAttemptNotFoundError) return "Connection setup not found.";
   if (status === 502 || status === 503 || status === 504) {
-    return "Opengeni is temporarily unavailable — retry.";
+    return "The workspace is temporarily unavailable — retry.";
   }
   if (status >= 500) {
-    return "Opengeni could not complete the request.";
+    return "The workspace could not complete the request.";
   }
   if (error instanceof HTTPException) {
     return boundedPublicMessage(error.message) ?? "Request failed.";
@@ -3990,12 +4097,27 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/enrollments/token/exchange" ||
     // The runner authenticates this protocol with its install-key proof, not
     // a browser cookie or the product-client revision header.
-    pathname === "/v1/enrollments/renew"
+    pathname === "/v1/enrollments/renew" ||
+    // The Site gateway's signed protocol carries its own signature version (v1).
+    pathname.startsWith("/v1/site-runtime/")
   ) {
     return false;
   }
   const segments = pathname.split("/");
   return !segments.includes("mcp") && !segments.includes("codemode");
+}
+
+/** Published Sites deployment facts for the console; null while publishing is off. */
+function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
+  const domain = configuredSitesDomain(settings);
+  if (!domain) return null;
+  return {
+    domain,
+    publicEnabled: settings.sitesPublicEnabled,
+    publicAgentsEnabled: settings.sitesPublicAgentsEnabled,
+    loginOnly: settings.sitesLoginOnly,
+    forceNoindex: settings.sitesForceNoindex,
+  };
 }
 
 /** Client-safe agent-configuration projection. */

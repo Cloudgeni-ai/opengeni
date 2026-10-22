@@ -230,7 +230,7 @@ describe("Opengeni Codemode interaction facade", () => {
   test("exposes compact observation, explicit full tree, and focused reads", async () => {
     const fake = fakeClient((path) => {
       if (path === "interaction.browser.observe") {
-        return result({ semantic: null, agentView: { kind: "compact", nodes: [] } });
+        return result({ agentView: { sourceKind: "snapshot", nodes: [] } });
       }
       if (path === "interaction.browser.read") {
         return result({
@@ -244,7 +244,7 @@ describe("Opengeni Codemode interaction facade", () => {
     const tab = createOpenGeniCodemode(fake.client)
       .browsers.use(browserSessionId)
       .tabs.use("tab-1");
-    expect((await tab.observe()).agentView?.kind).toBe("compact");
+    expect((await tab.observe()).agentView.sourceKind).toBe("snapshot");
     await tab.observeFull();
     const focused = await tab.read({ role: "button", nameContains: "Save", limit: 4 });
     if (focused.source !== "accessibility") throw new Error("expected accessibility read");
@@ -383,6 +383,51 @@ describe("Opengeni Codemode interaction facade", () => {
             permission: "geolocation",
             setting: "denied",
           },
+        },
+        options: {},
+      },
+    ]);
+  });
+
+  test("tab.navigate passes waitUntil in the action and keeps call options separate", async () => {
+    const fake = fakeClient((path) => {
+      if (path === "interaction.browser.open") {
+        return result({ session: { id: browserSessionId }, targets: [] });
+      }
+      if (path === "interaction.browser.tabs") {
+        return result({
+          browserSessionId,
+          controllerGeneration: "controller-1",
+          targets: [{ id: "tab-1", selected: true }],
+        });
+      }
+      if (path === "interaction.browser.act") {
+        return result({ operationId: "operation-1", state: "completed" });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const tab = await (await createOpenGeniCodemode(fake.client).browsers.open()).tabs.selected();
+    await tab.navigate("https://example.test/a", {
+      waitUntil: "network_idle",
+      operationId: "44444444-4444-4444-8444-444444444444",
+    });
+    await tab.navigate("https://example.test/b");
+    expect(fake.calls.slice(-2)).toEqual([
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: { type: "navigate", url: "https://example.test/a", waitUntil: "network_idle" },
+        },
+        options: { operationId: "44444444-4444-4444-8444-444444444444" },
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: { type: "navigate", url: "https://example.test/b" },
         },
         options: {},
       },

@@ -21,7 +21,6 @@
 import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import { subscriptionPersonalAuthorityForProviderV2 } from "@opengeni/contracts";
-import { quotaCapacity } from "@opengeni/subscriptions";
 import { rawRows, withRlsContext, type Database } from "../database";
 import { namedSubjectPersonalWorkspaceId } from "../slack-routing-personal-workspace";
 import { decodeSubscriptionQuota } from "../subscription-core-repository";
@@ -31,6 +30,7 @@ import {
   subscriptionCoreAdministeredConnections,
   type SubscriptionCoreAdministeredProbeDeps,
 } from "./administered-connections";
+import { subscriptionCoreQuotaBlocksNow } from "./operations";
 import { memoByProvider, subscriptionCoreProviderId } from "./provider";
 import { subscriptionCoreTurns, type SubscriptionCoreTurnIdentity } from "./turns";
 
@@ -123,11 +123,11 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
    * current for an exact accepted turn (design 5.3, EP-N22 for personal
    * connections): of the connections placement's personal authorization
    * admits for that turn (see `turnPersonalConnectionIds`), each active one
-   * whose stored quota is exhausted now and was not observed within
-   * `minIntervalMs` is probed on
-   * its own, as the owner in their own Personal workspace. Probe failures
-   * keep the stored exhaustion. Returns the connections whose exhaustion
-   * ended (the caller wakes waiters).
+   * whose stored quota blocks now (`subscriptionCoreQuotaBlocksNow`) and was
+   * not observed within `minIntervalMs` is probed on its own, as the owner in
+   * their own Personal workspace. Probe failures keep the stored state.
+   * Returns the connections whose exhaustion or cooldown ended (the caller
+   * wakes waiters).
    */
   async function refreshExhaustedSubscriptionCoreTurnPersonalQuota(
     db: Database,
@@ -152,7 +152,7 @@ export const subscriptionCorePersonalConnections = memoByProvider((provider) => 
     const stale = rows.filter((row) => {
       if (!granted.has(row.id) || row.status !== "active") return false;
       const quota = decodeSubscriptionQuota(row);
-      if (!quota || quotaCapacity(quota, now).kind !== "exhausted") return false;
+      if (!subscriptionCoreQuotaBlocksNow(provider.adapter, quota, now)) return false;
       const updatedAt = row.quota_updated_at ? new Date(row.quota_updated_at).getTime() : 0;
       return now - updatedAt >= minIntervalMs;
     });

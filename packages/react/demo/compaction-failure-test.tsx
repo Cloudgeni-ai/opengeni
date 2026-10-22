@@ -7,6 +7,9 @@ import { FailedSessionBanner } from "@/components/session/failed-session-banner"
 // @ts-expect-error -- dev-only: the demo Vite alias resolves this to the web app's source.
 import { timelineShowsFailure } from "@/lib/timeline-failure-owner";
 import "../../../apps/web/src/styles.css";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /*
  * A turn whose automatic compaction the model provider rejected, replayed
@@ -85,7 +88,7 @@ const events: SessionEvent[] = [
 ];
 
 const failedEvent = events.at(-1)!;
-const items = cleared ? [] : buildTimeline(events);
+const items = cleared ? [] : buildTimeline(englishText, events);
 
 function App() {
   const banner = (

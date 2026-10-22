@@ -1,10 +1,7 @@
 import { legacyWorkspaceCodexSubscriptionActive as workspaceCodexSubscriptionActive } from "./fixtures/legacy-codex";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import { readCodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
