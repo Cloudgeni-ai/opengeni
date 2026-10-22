@@ -66,7 +66,7 @@ test("the document ledger attributes requests to the document that issued them",
   expect(ledger.replacing({})).toBe(false);
 });
 
-test("a cancellation reported before its replacing navigation is attributed after one round trip", async () => {
+test("a cancellation reported before its replacing navigation is attributed once the navigation arrives", async () => {
   const ledger = new DocumentRequestLedger();
   const document = {};
   ledger.request(document, "http://127.0.0.1/a");
@@ -116,28 +116,64 @@ test("a cancellation reported before its replacing navigation is attributed afte
     }),
   ).toBe(true);
 
+  // Firefox delivers the navigation from its parent process, which a round
+  // trip to the page does not order: it can take several round trips.
+  const lateRead = {};
+  ledger.request(lateRead, null);
+  const lateNavigation = {};
+  let lateRoundTrips = 0;
+  expect(
+    await cancelledWithReplacedDocument(ledger, lateRead, false, async () => {
+      lateRoundTrips += 1;
+      if (lateRoundTrips === 3) ledger.request(lateNavigation, "http://127.0.0.1/d");
+    }),
+  ).toBe(true);
+  expect(lateRoundTrips).toBe(3);
+  ledger.response(lateNavigation);
+  expect(ledger.mainFrameNavigated("http://127.0.0.1/d")).toBe(true);
+
   // A cancellation no navigation explains stays unexplained, including when
   // the round trip fails or delivers a navigation that never replaces it.
   const aborted = {};
   ledger.request(aborted, null);
-  expect(await cancelledWithReplacedDocument(ledger, aborted, false, async () => {})).toBe(false);
+  expect(await cancelledWithReplacedDocument(ledger, aborted, false, async () => {}, 50)).toBe(
+    false,
+  );
   expect(
-    await cancelledWithReplacedDocument(ledger, aborted, false, async () => {
-      throw new Error("execution context was destroyed");
-    }),
+    await cancelledWithReplacedDocument(
+      ledger,
+      aborted,
+      false,
+      async () => {
+        throw new Error("execution context was destroyed");
+      },
+      50,
+    ),
   ).toBe(false);
   const failedNavigation = {};
   expect(
-    await cancelledWithReplacedDocument(ledger, aborted, false, async () => {
-      ledger.request(failedNavigation, "http://127.0.0.1/c");
-      ledger.failed(failedNavigation);
-    }),
+    await cancelledWithReplacedDocument(
+      ledger,
+      aborted,
+      false,
+      async () => {
+        ledger.request(failedNavigation, "http://127.0.0.1/c");
+        ledger.failed(failedNavigation);
+      },
+      50,
+    ),
   ).toBe(false);
   // An unknown request is never claimed, even while a navigation is pending.
   expect(
-    await cancelledWithReplacedDocument(ledger, {}, false, async () => {
-      ledger.request({}, "http://127.0.0.1/e");
-    }),
+    await cancelledWithReplacedDocument(
+      ledger,
+      {},
+      false,
+      async () => {
+        ledger.request({}, "http://127.0.0.1/e");
+      },
+      50,
+    ),
   ).toBe(false);
 });
 
