@@ -103,6 +103,7 @@ export interface Cohort {
   compositionComplete: boolean;
   equivalent: boolean;
   adapterReady: boolean;
+  adapterCheck: AdapterCheck | null;
   members: {
     number: number;
     actualShape: string;
@@ -293,6 +294,8 @@ export function fifoCohorts(
   pulls: MergedPull[],
   cap: number,
   order: Map<string, number>,
+  adapterBoundaries: ReadonlySet<string> = new Set(),
+  adapterStarts: ReadonlySet<string> = new Set(),
 ): MergedPull[][] {
   if (!Number.isInteger(cap) || cap < 1 || cap > 16) throw new Error("Cohort cap must be 1..16");
   const unique = new Map<number, MergedPull>();
@@ -316,7 +319,8 @@ export function fifoCohorts(
     current = [];
   };
   for (const p of sorted) {
-    if (p.headRef === "changeset-release/main") {
+    if (adapterStarts.has(p.mergeSha)) drain();
+    if (p.headRef === "changeset-release/main" || adapterBoundaries.has(p.mergeSha)) {
       drain();
       cohorts.push([p]);
     } else {
@@ -334,21 +338,102 @@ async function commitInfo(git: GitStore, sha: string) {
   ]);
   return { tree: assertSha(tree), parents: parents.split(" ").slice(1) };
 }
-export async function adapterPresent(git: GitStore, base: string, tip: string): Promise<boolean> {
+export interface AdapterCheck {
+  baseSha: string;
+  tipSha: string;
+  ready: boolean;
+  firstFailure: {
+    path: string;
+    reason: "changed-or-invalid-object" | "not-a-tree" | "unavailable-object";
+    before: string | null;
+    after: string | null;
+  } | null;
+}
+export async function inspectAdapter(
+  git: GitStore,
+  base: string,
+  tip: string,
+): Promise<AdapterCheck> {
+  const check: AdapterCheck = {
+    baseSha: assertSha(base),
+    tipSha: assertSha(tip),
+    ready: false,
+    firstFailure: null,
+  };
   for (const path of ADAPTER_PATHS) {
+    let before: string | null = null,
+      after: string | null = null;
     try {
-      const before = await git.exec(["rev-parse", `${assertSha(base)}:${path}`]);
-      const after = await git.exec(["rev-parse", `${assertSha(tip)}:${path}`]);
+      before = await git.exec(["rev-parse", `${check.baseSha}:${path}`]);
+      after = await git.exec(["rev-parse", `${check.tipSha}:${path}`]);
       // Do not run newly introduced or changed verifier bytes in historical cohorts.
-      if (!/^[a-f0-9]{40}$/.test(before) || before !== after) return false;
-      if (path === "scripts" && (await git.exec(["cat-file", "-t", before])) !== "tree")
-        return false;
+      if (!/^[a-f0-9]{40}$/.test(before) || before !== after) {
+        check.firstFailure = { path, reason: "changed-or-invalid-object", before, after };
+        return check;
+      }
+      if (path === "scripts" && (await git.exec(["cat-file", "-t", before])) !== "tree") {
+        check.firstFailure = { path, reason: "not-a-tree", before, after };
+        return check;
+      }
     } catch (e) {
-      if (e instanceof GitFailure) return false;
+      if (e instanceof GitFailure) {
+        check.firstFailure = { path, reason: "unavailable-object", before, after };
+        return check;
+      }
       throw e;
     }
   }
-  return true;
+  check.ready = true;
+  return check;
+}
+export async function adapterPresent(git: GitStore, base: string, tip: string): Promise<boolean> {
+  return (await inspectAdapter(git, base, tip)).ready;
+}
+
+/** Segmentation is only a selection aid: synthetic candidates still pass the exact guard. */
+async function findAdapterBoundaries(
+  git: GitStore,
+  pulls: MergedPull[],
+  order: Map<string, number>,
+) {
+  const boundaries = new Set<string>();
+  const starts = new Set<string>();
+  let previous: string | undefined;
+  for (const [pull] of fifoCohorts(pulls, 1, order)) {
+    const sha = pull!.mergeSha;
+    if (!order.has(sha)) {
+      boundaries.add(sha);
+      continue;
+    }
+    try {
+      const actual = await commitInfo(git, sha);
+      if (
+        previous &&
+        actual.parents[0] &&
+        order.get(previous)! < order.get(sha)! &&
+        (await git.exec([
+          "log",
+          "--first-parent",
+          "--format=%H",
+          `${previous}..${actual.parents[0]}`,
+          "--",
+          ...ADAPTER_PATHS,
+        ]))
+      )
+        starts.add(sha);
+      if (
+        !actual.parents[0] ||
+        (await git.exec(["diff", "--name-only", actual.parents[0], sha, "--", ...ADAPTER_PATHS]))
+      )
+        boundaries.add(sha);
+    } catch (error) {
+      if (!(error instanceof GitFailure)) throw error;
+      // Keep unavailable members visible as isolated cohorts, never silently drop them.
+      boundaries.add(sha);
+    }
+    previous = sha;
+  }
+  return { boundaries, starts };
 }
 export async function replayTraffic(
   git: GitStore,
@@ -365,6 +450,12 @@ export async function replayTraffic(
   );
   const order = new Map(history.map((sha, i) => [sha, i]));
   const selected = new Set(input.pulls.map((p) => p.mergeSha));
+  const mergeMembers = new Map<string, Set<number>>();
+  for (const pull of input.pulls) {
+    const members = mergeMembers.get(pull.mergeSha) ?? new Set<number>();
+    members.add(pull.number);
+    mergeMembers.set(pull.mergeSha, members);
+  }
   const observed = new Set(input.observedMerges?.map((p) => p.mergeSha) ?? []);
   const earliestSelected = Math.min(...input.pulls.map((p) => order.get(p.mergeSha) ?? Infinity));
   const mainRows = (await git.exec(["log", "--first-parent", "--format=%H%x09%cI%x09%s", mainSha]))
@@ -406,7 +497,8 @@ export async function replayTraffic(
   if (collectionCoverage.unrepresented.length || collectionCoverage.selectedNotOnMain.length)
     collectionCoverage.status = "unmapped-main-commits";
   const cohorts: Cohort[] = [];
-  for (const pulls of fifoCohorts(input.pulls, cap, order)) {
+  const { boundaries, starts } = await findAdapterBoundaries(git, input.pulls, order);
+  for (const pulls of fifoCohorts(input.pulls, cap, order, boundaries, starts)) {
     const at = performance.now(),
       actualTipSha = pulls.at(-1)!.mergeSha;
     const cohort: Cohort = {
@@ -426,6 +518,7 @@ export async function replayTraffic(
       compositionComplete: false,
       equivalent: false,
       adapterReady: false,
+      adapterCheck: null,
       members: [],
       mainRuns: input.runs.filter((r) => r.headSha === actualTipSha),
       buildMilliseconds: 0,
@@ -434,6 +527,7 @@ export async function replayTraffic(
     try {
       const indices = pulls.map((p) => order.get(p.mergeSha));
       if (
+        pulls.some((p) => mergeMembers.get(p.mergeSha)!.size > 1) ||
         indices.some((i) => i === undefined) ||
         indices.some((i, n) => n > 0 && i! <= indices[n - 1]!)
       ) {
@@ -553,7 +647,8 @@ export async function replayTraffic(
       cohort.treeEqual = cohort.candidateTree === cohort.actualTree;
       cohort.equivalent =
         cohort.treeEqual && cohort.compositionComplete && cohort.members.every((m) => m.treeEqual);
-      cohort.adapterReady = await adapterPresent(git, cohort.baseSha, manifest.tipSha);
+      cohort.adapterCheck = await inspectAdapter(git, cohort.baseSha, manifest.tipSha);
+      cohort.adapterReady = cohort.adapterCheck.ready;
       cohort.status = "built";
       cohort.reason = cohort.equivalent
         ? null
@@ -1284,6 +1379,41 @@ export async function publishOneTraffic(
       : "Queue-only viable remainder with reserved headroom; historical outcome is NOT equivalent",
     chosen.manifest.batchId,
   );
+}
+
+export const TRAFFIC_LOG_LIMIT_BYTES = 2 * 1024 * 1024;
+export const TRAFFIC_LOG_CHUNK_BYTES = 64 * 1024;
+
+/** Existing structured stdout sinks provide retention; this performs no cloud API writes.
+ * The supervisor must emit these records: it deliberately discards child stdout.
+ * Encoding prevents embedded newlines from impersonating separate log entries.
+ */
+export function trafficEvidenceRecords(evidence: TrafficReport & { publication?: unknown }) {
+  const bytes = Buffer.from(canonical(evidence));
+  const reportDigest = digest(evidence);
+  if (bytes.length > TRAFFIC_LOG_LIMIT_BYTES)
+    return [
+      {
+        event: "traffic_report_overflow",
+        reportDigest,
+        bytes: bytes.length,
+        limitBytes: TRAFFIC_LOG_LIMIT_BYTES,
+        fullReportRetained: false,
+      },
+    ];
+  const chunks = Math.ceil(bytes.length / TRAFFIC_LOG_CHUNK_BYTES);
+  return Array.from({ length: chunks }, (_, index) => ({
+    event: "traffic_report_chunk",
+    reportDigest,
+    observedAt: evidence.observedAt,
+    index,
+    chunks,
+    bytes: bytes.length,
+    encoding: "base64-json",
+    data: bytes
+      .subarray(index * TRAFFIC_LOG_CHUNK_BYTES, (index + 1) * TRAFFIC_LOG_CHUNK_BYTES)
+      .toString("base64"),
+  }));
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env): Promise<void> {

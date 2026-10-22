@@ -11,6 +11,9 @@ import { verifyResult } from "../merge-batcher/result";
 import {
   ADAPTER_PATHS,
   adapterPresent,
+  inspectAdapter,
+  trafficEvidenceRecords,
+  TRAFFIC_LOG_LIMIT_BYTES,
   TRAFFIC_PREFIX,
   TRAFFIC_STATE,
   collectTraffic,
@@ -166,6 +169,179 @@ function run(tip: string, branch: string, patch: Partial<Run> = {}): Run {
 }
 
 describe("merged traffic replay", () => {
+  async function segmentedFixture(count: number, changes: number[] = [], versions: number[] = []) {
+    const f = await fixture({ adapter: true });
+    let parent = f.base;
+    const files = { ...f.files };
+    const pulls: MergedPull[] = [];
+    for (let n = 1; n <= count; n++) {
+      files[`member-${n}.txt`] = `member ${n}\n`;
+      if (changes.includes(n)) files["scripts/adapter-helper.ts"] = `adapter ${n}\n`;
+      const oid = await tree(f.origin, files);
+      const head = await f.origin.commit(oid, [parent], `head ${n}`, date(n));
+      const merge = await f.origin.commit(oid, [parent], `squash (#${n})`, date(n));
+      await f.origin.exec(["update-ref", `refs/heads/member-${n}`, head]);
+      pulls.push({
+        ...f.pulls[0]!,
+        number: n,
+        headSha: head,
+        mergeSha: merge,
+        headRef: versions.includes(n) ? "changeset-release/main" : `member-${n}`,
+        mergedAt: date(n),
+        readiness: { ...f.pulls[0]!.readiness, at: date(n) },
+      });
+      parent = merge;
+    }
+    await f.origin.exec(["update-ref", "refs/heads/main", parent]);
+    return { ...f, input: { ...f.input, until: date(59), pulls, observedMerged: count } };
+  }
+
+  test("mixed and consecutive adapter changes are isolated without dropping or reordering PRs", async () => {
+    const f = await segmentedFixture(7, [3, 4]);
+    const refs = await f.git.remoteRefs(f.origin.dir);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    expect(report.cohorts.map((c) => c.pulls.map((p) => p.number))).toEqual([
+      [1, 2],
+      [3],
+      [4],
+      [5, 6, 7],
+    ]);
+    expect(report.cohorts.map((c) => c.adapterReady)).toEqual([true, false, false, true]);
+    expect(report.cohorts.every((c) => c.equivalent && c.compositionComplete)).toBe(true);
+    expect(report.cohorts.flatMap((c) => c.pulls)).toEqual(f.input.pulls);
+    for (const c of report.cohorts) {
+      expect(c.adapterCheck).toMatchObject({
+        baseSha: c.baseSha,
+        tipSha: c.manifest!.tipSha,
+        ready: c.adapterReady,
+      });
+      expect(
+        c.pulls.every(
+          (p) => p.readiness.kind === "merged-at-proxy" && !p.readiness.admissionEvidence,
+        ),
+      ).toBe(true);
+      if (!c.adapterReady) expect(c.adapterCheck!.firstFailure?.path).toBe("scripts");
+    }
+    expect(await f.git.remoteRefs(f.origin.dir)).toEqual(refs);
+  });
+
+  test("unchanged runs retain maximum16 and Version singleton barriers", async () => {
+    const f = await segmentedFixture(20);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    expect(report.cohorts.map((c) => c.pulls.length)).toEqual([16, 4]);
+    expect(report.cohorts.every((c) => c.adapterReady && c.equivalent)).toBe(true);
+    f.input.pulls[8]!.headRef = "changeset-release/main";
+    const version = await replayTraffic(f.git, f.origin.dir, f.input);
+    expect(version.cohorts.map((c) => c.pulls.map((p) => p.number))).toEqual([
+      [1, 2, 3, 4, 5, 6, 7, 8],
+      [9],
+      [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+    ]);
+  });
+
+  test("unselected adapter main boundary splits neighbors while preserving collection gap evidence", async () => {
+    const f = await segmentedFixture(5, [3]);
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: f.input.pulls.filter((p) => p.number !== 3),
+    });
+    expect(report.cohorts.map((c) => c.pulls.map((p) => p.number))).toEqual([
+      [1, 2],
+      [4, 5],
+    ]);
+    expect(report.cohorts.every((c) => c.adapterReady && c.equivalent)).toBe(true);
+    expect(report.collectionCoverage.unrepresented.map((r) => r.sha)).toContain(
+      f.input.pulls[2]!.mergeSha,
+    );
+    expect(report.cohorts[1]!.baseSha).toBe(f.input.pulls[2]!.mergeSha);
+  });
+
+  test("ambiguous shared merge projections remain unavailable after singleton segmentation", async () => {
+    const f = await segmentedFixture(2, [1]);
+    const aliased = { ...f.input.pulls[0]!, number: 99 };
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: [...f.input.pulls, aliased],
+    });
+    expect(
+      report.cohorts
+        .flatMap((c) => c.pulls)
+        .map((p) => p.number)
+        .sort((a, b) => a - b),
+    ).toEqual([1, 2, 99]);
+    const ambiguous = report.cohorts.filter((c) =>
+      c.pulls.some((p) => p.number === 1 || p.number === 99),
+    );
+    expect(
+      ambiguous.every((c) => c.status === "unavailable" && !c.manifest && !c.adapterReady),
+    ).toBe(true);
+  });
+
+  test("actual-main segmentation never substitutes for the synthetic-tip adapter guard", async () => {
+    const f = await fixture({ adapter: true });
+    const changedHead = await f.origin.commit(
+      await tree(f.origin, {
+        ...f.files,
+        "one.txt": "one\n",
+        "scripts/merge-batcher/model.ts": "unlanded change\n",
+      }),
+      [f.base],
+      "changed historical head",
+      date(2),
+    );
+    await f.origin.exec(["update-ref", "refs/heads/changed-head", changedHead]);
+    const report = await replayTraffic(f.git, f.origin.dir, {
+      ...f.input,
+      pulls: [{ ...f.pulls[0]!, headSha: changedHead }],
+    });
+    expect(report.cohorts[0]!.adapterReady).toBe(false);
+    expect(report.cohorts[0]!.equivalent).toBe(false);
+    expect(report.cohorts[0]!.adapterCheck!.firstFailure).toMatchObject({
+      path: "scripts",
+      reason: "changed-or-invalid-object",
+    });
+    const missing = await fixture();
+    expect(
+      (await inspectAdapter(missing.origin, missing.base, missing.base)).firstFailure,
+    ).toMatchObject({ path: ".github/workflows/batch-ci.yml", reason: "unavailable-object" });
+  });
+
+  test("full evidence log chunks roundtrip with bounded entries, explicit overflow and no environment projection", async () => {
+    const f = await segmentedFixture(3, [2]);
+    const report = await replayTraffic(f.git, f.origin.dir, f.input);
+    const evidence = { ...report, publication: { action: "wait", reason: "bounded evidence" } };
+    const records = trafficEvidenceRecords(evidence);
+    expect(records.every((r) => r.event === "traffic_report_chunk")).toBe(true);
+    const data = records.map((r) => ("data" in r ? r.data : "")).join("");
+    // Decode independently per chunk: base64 padding is chunk-local.
+    const decoded = Buffer.concat(
+      records.map((r) => Buffer.from("data" in r ? r.data! : "", "base64")),
+    ).toString();
+    expect(JSON.parse(decoded)).toEqual(evidence);
+    expect(data.length).toBeGreaterThan(0);
+    expect(records.every((r) => Buffer.byteLength(JSON.stringify(r)) < 100000)).toBe(true);
+    expect(decoded).not.toContain("GH_TOKEN");
+    const large = { ...evidence, readinessMeaning: "x".repeat(100000) };
+    const multi = trafficEvidenceRecords(large);
+    expect(multi.length).toBeGreaterThan(1);
+    expect(
+      JSON.parse(
+        Buffer.concat(
+          multi.map((r) => Buffer.from("data" in r ? r.data! : "", "base64")),
+        ).toString(),
+      ),
+    ).toEqual(large);
+    const overflow = trafficEvidenceRecords({
+      ...evidence,
+      readinessMeaning: "x".repeat(TRAFFIC_LOG_LIMIT_BYTES),
+    });
+    expect(overflow).toHaveLength(1);
+    expect(overflow[0]).toMatchObject({
+      event: "traffic_report_overflow",
+      fullReportRetained: false,
+    });
+  });
+
   test("post-base main ancestry is a historical replay artifact, not live queue infeasibility", async () => {
     const f = await fixture();
     const changed = { ...f.files, "one.txt": "changed after squash\n", "two.txt": "two\n" };
