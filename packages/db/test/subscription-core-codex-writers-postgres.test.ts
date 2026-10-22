@@ -1176,14 +1176,15 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       managed_by_workspace_id: org.sharedWorkspaceId,
       allow_personal_workspaces: false,
     });
-    const [policy] = await shared!.admin<{ inference_pool: string; managed: string }[]>`
-      select inference_pool, managed_by_workspace_id::text as managed
-      from subscription_connection_assignment_policies
-      where connection_id = ${local.id}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
-    expect(policy).toEqual({
-      inference_pool: "workspace",
-      managed: org.sharedWorkspaceId,
-    });
+    // It reaches only its workspace; no per-workspace policy rows are written.
+    const assigned = await shared!.admin<{ workspace_id: string }[]>`
+      select workspace_id::text as workspace_id from subscription_connection_workspaces
+      where connection_id = ${local.id}::uuid`;
+    expect(assigned.map((entry) => entry.workspace_id)).toEqual([org.sharedWorkspaceId]);
+    const [policies] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from subscription_connection_assignment_policies
+      where connection_id = ${local.id}::uuid`;
+    expect(policies?.count).toBe(0);
     const projection = await withSessionRlsActorContext({ subjectId: manager.subjectId }, () =>
       getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
         accountId: org.accountId,
@@ -1229,11 +1230,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       select workspace_id::text as workspace_id from subscription_connection_workspaces
       where connection_id = ${own.id}::uuid`;
     expect(reach.map((entry) => entry.workspace_id)).toEqual([org.sharedWorkspaceId]);
-    const [ownPolicy] = await shared!.admin<{ inference_pool: string; managed: string }[]>`
-      select inference_pool, managed_by_workspace_id::text as managed
-      from subscription_connection_assignment_policies
-      where connection_id = ${own.id}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
-    expect(ownPolicy).toEqual({ inference_pool: "workspace", managed: org.sharedWorkspaceId });
+    expect(await row(own.id)).toMatchObject({ managed_by_workspace_id: org.sharedWorkspaceId });
     const managed = await withSessionRlsActorContext({ subjectId: manager.subjectId }, () =>
       getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
         accountId: org.accountId,
@@ -1276,12 +1273,18 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     );
     // Once the organization widens an account to another workspace it is no
     // longer the workspace's own: only an organization administrator removes it.
-    await shared!.admin`
-      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
-      values (${org.accountId}::uuid, ${local.id}::uuid, ${org.otherWorkspaceId}::uuid)`;
-    expect(
-      (await disconnect(org, manager.subjectId, org.sharedWorkspaceId, local.id)).outcome,
-    ).toBe("forbidden");
+    // (Written directly, as the organization's access editor stores it.)
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update subscription_connections set managed_by_workspace_id = null
+        where id = ${local.id}::uuid`;
+      await tx`
+        insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+        values (${org.accountId}::uuid, ${local.id}::uuid, ${org.otherWorkspaceId}::uuid)`;
+    });
+    await expect(
+      disconnect(org, manager.subjectId, org.sharedWorkspaceId, local.id),
+    ).rejects.toBeInstanceOf(SubscriptionCoreCodexOrganizationManagedError);
     expect(await row(local.id)).not.toBeNull();
     // The workspace administrator removes the workspace's own account.
     expect(await disconnect(org, manager.subjectId, org.sharedWorkspaceId, own.id)).toMatchObject({
@@ -1294,8 +1297,8 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       disconnect(org, org.ownerSubjectId, org.sharedWorkspaceId, organizationAccount.id),
     ).rejects.toBeInstanceOf(SubscriptionCoreCodexOrganizationManagedError);
     expect(await row(local.id)).not.toBeNull();
-    // The administrator removes the workspace account.
-    const removed = await disconnect(org, org.ownerSubjectId, org.sharedWorkspaceId, local.id);
+    // The organization administrator removes it on the organization's route.
+    const removed = await disconnect(org, org.ownerSubjectId, null, local.id);
     expect(removed).toMatchObject({
       outcome: "removed",
       connectionId: local.id,

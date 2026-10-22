@@ -197,9 +197,15 @@ async function sharedConnection(
       managed_by_workspace_id
     ) values (
       ${org.accountId}::uuid, ${FAKE_API_KEY_PROVIDER}, 'api_key', ${credential(`sk-${label}`)},
-      'shared', 'organization', true, ${`${label}-${crypto.randomUUID()}`}, ${label}, ${label},
+      'shared', ${options.managedByWorkspaceId ? "workspaces" : "organization"},
+      ${!options.managedByWorkspaceId}, ${`${label}-${crypto.randomUUID()}`}, ${label}, ${label},
       ${options.managedByWorkspaceId ?? null}::uuid
     ) returning id::text as id`;
+  // A workspace's own connection reaches only that workspace.
+  if (options.managedByWorkspaceId)
+    await shared.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${options.managedByWorkspaceId}::uuid)`;
   return row!.id;
 }
 

@@ -624,7 +624,7 @@ describe.skipIf(!realDb)("subscription settings with lockable workspace override
     expect(rotation).toBeInstanceOf(SubscriptionSettingsLockedError);
     expect((rotation as SubscriptionSettingsLockedError).settings).toEqual(["rotation"]);
     const source = await rejected(
-      setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "workspace" }),
+      setSubscriptionCoreWorkspaceCodexSource(client!.db, { ...admin, mode: "disabled" }),
     );
     expect(source).toBeInstanceOf(SubscriptionSettingsLockedError);
     expect((source as SubscriptionSettingsLockedError).settings).toEqual(["providers"]);

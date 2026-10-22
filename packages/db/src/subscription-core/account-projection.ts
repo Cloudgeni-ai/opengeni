@@ -1,6 +1,8 @@
 /** Stable public account metadata projected from the provider-neutral core. */
 export type SubscriptionCorePoolAccount = {
   allowedModelIds?: string[] | null;
+  /** Organization list only: who the account reaches. */
+  reach?: import("./administration").SubscriptionCoreConnectionReach;
   id: string;
   scope: "workspace" | "user" | "organization";
   providerAccountId: string | null;

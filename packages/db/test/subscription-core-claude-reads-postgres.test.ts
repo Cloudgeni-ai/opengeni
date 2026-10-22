@@ -172,10 +172,10 @@ async function ensureTestClaudeRegistration(): Promise<void> {
   expect(row!.registered).toBe(true);
 }
 
-async function setSource(org: Org, inferenceSource: "automatic" | "workspace" | "organization") {
+async function setEnabled(org: Org, enabled: boolean) {
   await shared.admin`
     update subscription_settings
-    set providers = ${shared.admin.json({ claude: { inferenceSource } })}::jsonb
+    set providers = ${shared.admin.json(enabled ? {} : { claude: { enabled: false } })}::jsonb
     where account_id = ${org.accountId}::uuid and workspace_id is null`;
 }
 
@@ -205,24 +205,22 @@ async function sharedConnection(
   org: Org,
   label: string,
   options: {
+    /** `workspace`: the workspace's own account, reaching only that workspace. */
     pool?: "organization" | "workspace";
     kind?: "oauth" | "setup";
     allowedModelIds?: string[] | null;
-    /** Assignment policies per pool (default: one for `pool`, allowing every model). */
-    policies?: Array<{ pool: "organization" | "workspace"; allowedModelIds: string[] | null }>;
-    /** Further workspaces assigned to the connection (organization pool). */
-    workspaceIds?: string[];
   } = {},
 ): Promise<string> {
   const pool = options.pool ?? "organization";
   const [row] = await shared.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, provider_state, expires_at, label, allowed_model_ids,
-      managed_by_workspace_id
+      allow_personal_workspaces, provider_account_id, provider_state, expires_at, label,
+      allowed_model_ids, managed_by_workspace_id
     ) values (
       ${org.accountId}::uuid, 'claude', 'subscription', ${credential(label, options.kind)},
-      'shared', 'organization', ${`claude-${label}-${crypto.randomUUID()}`},
+      'shared', ${pool === "workspace" ? "workspaces" : "organization"}, ${pool !== "workspace"},
+      ${`claude-${label}-${crypto.randomUUID()}`},
       ${shared.admin.json({
         oauthScopes: options.kind === "setup" ? [] : ["user:inference", "user:profile"],
       })}::jsonb,
@@ -230,15 +228,10 @@ async function sharedConnection(
       ${options.allowedModelIds ?? null}::text[],
       ${pool === "workspace" ? org.workspaceId : null}::uuid
     ) returning id::text as id`;
-  for (const workspaceId of [org.workspaceId, ...(options.workspaceIds ?? [])])
-    for (const policy of options.policies ?? [{ pool, allowedModelIds: null }])
-      await shared.admin`
-        insert into subscription_connection_assignment_policies (
-          account_id, connection_id, workspace_id, inference_pool, allowed_model_ids
-        ) values (
-          ${org.accountId}::uuid, ${row!.id}::uuid, ${workspaceId}::uuid, ${policy.pool},
-          ${policy.allowedModelIds}::text[]
-        )`;
+  if (pool === "workspace")
+    await shared.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.workspaceId}::uuid)`;
   return row!.id;
 }
 
@@ -743,7 +736,8 @@ describe("on the Claude core route", () => {
     const org = await organization();
     await setCutover(org, true);
     const other = await secondWorkspace(org);
-    const connectionId = await sharedConnection(org, "keyed", { workspaceIds: [other] });
+    // Organization scope reaches both workspaces.
+    const connectionId = await sharedConnection(org, "keyed");
     const refresh = async (workspaceId: string, fetchImpl: typeof fetch) => {
       const scope = { accountId: org.accountId, workspaceId, subjectId: org.ownerSubjectId };
       return (
@@ -919,46 +913,14 @@ describe("on the Claude core route", () => {
         "workspace-claude-subscription/": [allowed],
       },
     });
-    // The workspace source serves only the workspace pool.
-    await setSource(org, "workspace");
-    expect((await read()).organization).toBe(false);
-    expect((await read()).workspace).toBe(true);
-    await setSource(org, "automatic");
+    // Switching the provider off serves neither.
+    await setEnabled(org, false);
+    expect(await read()).toMatchObject({ workspace: false, organization: false });
+    await setEnabled(org, true);
     // A personal connection counts only for its owner in their own Personal workspace.
     await personalConnection(org, "ready-personal");
     expect((await read(org.personalWorkspaceId)).workspace).toBe(true);
     expect((await read(org.personalWorkspaceId, null)).workspace).toBe(false);
-  });
-
-  test("each prefix reads only its own pool's assignment policies", async () => {
-    const org = await organization();
-    await setCutover(org, true);
-    const opus = `organization-claude-subscription/${org.opus}`;
-    // One connection in both pools: the organization pool allows only Opus,
-    // the workspace pool every model.
-    await sharedConnection(org, "two-pools", {
-      policies: [
-        { pool: "organization", allowedModelIds: [opus] },
-        { pool: "workspace", allowedModelIds: null },
-      ],
-    });
-    expect(
-      await readSubscriptionCoreClaudeCatalogReadiness(client.db, {
-        accountId: org.accountId,
-        workspaceId: org.workspaceId,
-        subjectId: org.ownerSubjectId,
-      }),
-    ).toEqual({
-      workspace: true,
-      organization: true,
-      restrictions: {
-        "organization-claude-subscription/": [opus],
-        "workspace-claude-subscription/": null,
-      },
-    });
-    // The workspace pool's policy never widens organization admission.
-    expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
-    expect(await admit(org, org.sonnet, organizationSnapshot)).toBeNull();
   });
 
   test("organization admission: the effective source and a live organization-pool connection", async () => {
@@ -1003,10 +965,10 @@ describe("on the Claude core route", () => {
     expect(
       await admit(org, org.opus, { ...organizationSnapshot, scheduledTaskId: crypto.randomUUID() }),
     ).toBeNull();
-    // The workspace source excludes organization connections.
-    await setSource(org, "workspace");
+    // A provider switched off admits nothing.
+    await setEnabled(org, false);
     expect(await admit(org, org.opus, organizationSnapshot)).toBeNull();
-    await setSource(org, "organization");
+    await setEnabled(org, true);
     expect(await admit(org, org.opus, organizationSnapshot)).toBe(org.opus);
     // Liveness: a paused or relogin-pending connection does not serve.
     await shared.admin`update subscription_connections set status = 'needs_relogin'
@@ -1099,8 +1061,8 @@ describe("on the Claude core route", () => {
     await compatRecord(org, { kind: "scheduled_task", id: taskId }, "workspace");
     expect(await admit(org, org.opus, task)).toBeNull();
 
-    // A carrier that admits still needs the current source and a live connection.
-    await setSource(org, "workspace");
+    // A carrier that admits still needs the provider on and a live connection.
+    await setEnabled(org, false);
     expect(await admit(org, org.opus, { sessionId: organizationRecord.sessionId })).toBeNull();
   });
 

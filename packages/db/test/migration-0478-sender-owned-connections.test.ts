@@ -135,6 +135,8 @@ const withheldMigrations = [
   "0897_workspace_owner_administers_subscriptions.sql",
   // Restricts the predicate 0897 creates.
   "0900_workspace_admin_predicate_privileges.sql",
+  // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
+  "0907_subscription_connection_one_owner.sql",
   // The schedule list trigger reads the audience column of 0720, withheld
   // with the allowance tail below; replay after it.
   "0888_session_list_invalidation.sql",

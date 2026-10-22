@@ -1,11 +1,10 @@
 import type { CodexAccount } from "@opengeni/sdk";
 import { ModelSettingsPlaceholder } from "@opengeni/react/app/components/models/model-settings-placeholder";
-import { useOrganizationCodexOverview } from "./use-organization-codex-overview";
 import {
   EnableAccountRow,
   SubscriptionAccountRow,
 } from "@/components/models/subscription-account-ui";
-import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -29,20 +28,17 @@ import {
 } from "@/components/connection-access-settings";
 import {
   ModelsFormPage,
-  NOT_IN_USE,
   ProviderTile,
-  organizationReachLabel,
+  accountReachLabel,
   RenameAccountDialog,
   resetsLabel,
   type ModelsScopeLabels,
   useModelsListLabel,
 } from "@opengeni/react/app/components/models/models-ui";
-import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import { Button } from "@opengeni/react/ui/button";
-import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { copyText } from "@opengeni/react/ui/copy-field";
 import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
@@ -100,6 +96,8 @@ export interface CodexPlaces {
 export interface OrganizationCodexPool {
   codex: OrganizationCodexSubscriptions;
   workspace: { id: string; personal: boolean };
+  /** A workspace's name in the organization, for an account's tag. */
+  workspaceName: (workspaceId: string) => string | undefined;
   openAccount: (accountId: string) => void;
 }
 
@@ -129,146 +127,29 @@ function editable(codex: CodexSubscriptions, account: CodexAccount): boolean {
    Codex section's setting rows.
    -------------------------------------------------------------------------- */
 
-/**
- * The organization gives this workspace accounts besides its own. Sharing a
- * workspace's own account with the organization gives the workspace an
- * organization copy of it too, so `organizationAvailable` alone can't tell;
- * older servers don't report the count.
- */
-function organizationOthersAvailable(source: CodexSubscriptions["source"]): boolean {
-  if (!source) return false;
-  return source.organizationCount !== undefined
-    ? source.organizationCount > 0
-    : source.organizationAvailable;
-}
-
-/**
- * Which accounts new work uses, and which are set aside. Picked
- * automatically, new work uses this workspace's own accounts and the
- * organization's together; only an explicit choice of one pool sets the other
- * aside.
- */
-function poolState(codex: CodexSubscriptions) {
-  const source = codex.source;
-  const inUse = source?.effectiveSource ?? "workspace";
-  const mode = source?.mode ?? "automatic";
-  return {
-    inUse,
-    mode,
-    /** The organization shares accounts that new work here doesn't use. */
-    organizationSetAside: mode === "workspace" && organizationOthersAvailable(source),
-    /** This workspace has accounts that new work here doesn't use. */
-    workspaceSetAside:
-      mode === "organization" && Boolean(source?.workspaceSetAside ?? source?.workspaceAvailable),
-  };
-}
-
-/**
- * The organization's accounts other than this workspace's own. An account a
- * shared workspace connected is also an organization account (design 5.4);
- * on that workspace's page it is listed once, as its own (or in the "set
- * aside" row of its own accounts while the organization's are used).
- */
-export function organizationOnlyCodexAccounts(
-  organizationAccounts: readonly CodexAccount[],
-  codex: CodexSubscriptions,
-  workspaceId: string,
-): CodexAccount[] {
-  const own = new Set(
-    codex.accounts.filter((account) => account.source !== "organization").map((a) => a.id),
-  );
-  return organizationAccounts.filter(
-    (account) => !own.has(account.id) && !account.ownInWorkspaceIds?.includes(workspaceId),
-  );
-}
-
-/**
- * For servers that don't report `source.organizationCount`: the
- * organization's accounts the pool notice counts here, those other than this
- * workspace's own, leaving out another workspace's own account unless this
- * workspace's pool lists it (only then is it known to reach here).
- */
-export function organizationNoticeCodexCount(
-  organizationAccounts: readonly CodexAccount[],
-  codex: CodexSubscriptions,
-  workspaceId: string,
-): number {
-  const listed = new Set(codex.accounts.map((account) => account.id));
-  return organizationOnlyCodexAccounts(organizationAccounts, codex, workspaceId).filter(
-    (account) => !account.ownInWorkspaceIds?.length || listed.has(account.id),
-  ).length;
-}
-
 /** How many rows Codex adds to the Accounts list once loaded. */
-export function codexListedCount(
-  codex: CodexSubscriptions,
-  organization: OrganizationCodexPool | null = null,
-): number {
+export function codexListedCount(codex: CodexSubscriptions): number {
   if (codex.loading) return 0;
   if (codex.loadError || codex.sourceDisabled) return 1;
-  const pool = poolState(codex);
-  const own = codex.accounts.filter((account) => account.source !== "organization").length;
-  // The organization's list failing still lists its error row (with Try again).
-  const shared = organization
-    ? organization.codex.loadError
-      ? 1
-      : organizationOnlyCodexAccounts(organization.codex.accounts, codex, organization.workspace.id)
-          .length
-    : codex.accounts.length - own + (pool.organizationSetAside ? 1 : 0);
-  return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
-}
-
-/** The ⋯ item that keeps new work on only the organization's accounts, when it would change something. */
-function alwaysOrganizationItem(codex: CodexSubscriptions, places: CodexPlaces): ReactNode {
-  const mode = codex.source?.mode;
-  if (!codex.canManage || (mode !== "automatic" && mode !== "workspace")) return null;
-  return (
-    <DropdownMenuItem
-      disabled={codex.busy}
-      onSelect={() =>
-        void codex.setSourceMode(
-          "organization",
-          `New work in ${places.workspaceName} now uses only the organization's Codex accounts`,
-        )
-      }
-    >
-      <BuildingIcon />
-      Use only the organization's accounts
-    </DropdownMenuItem>
-  );
+  return codex.accounts.length + (codex.pending ? 1 : 0);
 }
 
 /**
- * A row's report: still reading its access, or the account's name when this
- * workspace keeps it as its own and it is limited to chosen people (else
- * null); `undefined` when the row goes away.
- */
-export type KeptForPeopleReport = { pending: true } | { pending: false; keptName: string | null };
-export type KeptForPeopleReporter = (
-  accountId: string,
-  report: KeptForPeopleReport | undefined,
-) => void;
-
-/**
- * Codex's rows in the Accounts list: the accounts new work uses, then the
- * other pool's accounts, muted with "Not in use". People who manage the
- * organization's accounts see each of them, in use here or not; everyone else
- * sees the organization's accounts only while new work here uses them, and one
- * summary row while they are set aside.
+ * Codex's rows in the Accounts list: every account that reaches this
+ * workspace, its own and the organization's, each once. For people who manage
+ * the organization's accounts, an organization account's tag says who else it
+ * reaches, and the row opens its organization page.
  */
 export function CodexAccountRows({
   codex,
   places,
   organization = null,
-  onKeptForPeople,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
   organization?: OrganizationCodexPool | null;
-  /** Reports, per organization row, whether this workspace keeps it as its own for chosen people. */
-  onKeptForPeople?: KeptForPeopleReporter | undefined;
 }) {
-  if (codex.loading || organization?.codex.loading) return <ListRowSkeleton count={1} />;
+  if (codex.loading) return <ListRowSkeleton count={1} />;
   if (codex.loadError) {
     return (
       <li className="col-span-full list-none px-3 py-3">
@@ -282,57 +163,6 @@ export function CodexAccountRows({
       </li>
     );
   }
-  const pool = poolState(codex);
-  const alwaysOrganization = alwaysOrganizationItem(codex, places);
-  const own = codex.accounts.filter((account) => account.source !== "organization");
-  const sharedInUse = codex.accounts.filter((account) => account.source === "organization");
-  const ownRows = own.map((account) =>
-    organization?.codex.accounts.some((candidate) => candidate.id === account.id) ? (
-      <OwnOrganizationCodexRow
-        key={account.id}
-        codex={codex}
-        account={account}
-        places={places}
-        organization={organization}
-      />
-    ) : (
-      <CodexRow
-        key={account.id}
-        codex={codex}
-        account={account}
-        places={places}
-        // When the organization's list can't say whether it is shared wider, no
-        // "<workspace> only" tag (the list loads before these rows render); a
-        // Personal workspace's account never is.
-        scopeLabel={
-          organization && !organization.workspace.personal && organization.codex.loadError
-            ? ""
-            : undefined
-        }
-        onOpen={() => places.openAccount(account.id)}
-      />
-    ),
-  );
-  const pendingRow = codex.pending ? (
-    <ListRow
-      leading={<ProviderTile provider="codex" size="lg" />}
-      title="Signing in to ChatGPT…"
-      meta={["Finish signing in to add the account"]}
-      indicator="open"
-      onOpen={places.openConnect}
-    />
-  ) : null;
-  const workspaceSetAsideRow = pool.workspaceSetAside ? (
-    <ListRow
-      disabled
-      leading={<ProviderTile provider="codex" size="lg" />}
-      title="This workspace's Codex accounts"
-      // The notice above says why; "Set aside" stays readable on a phone.
-      meta={[places.scope.workspace, "Set aside"]}
-      cells={{ usage: NOT_IN_USE }}
-    />
-  ) : null;
-
   if (codex.sourceDisabled) {
     return (
       <ListRow
@@ -342,449 +172,49 @@ export function CodexAccountRows({
       />
     );
   }
-
-  if (organization) {
-    if (organization.codex.loadError) {
-      return (
-        <>
-          {ownRows}
-          <li className="col-span-full list-none px-3 py-3">
-            <ErrorMessage
-              variant="inline"
-              title="Couldn't load the organization's Codex accounts."
-              action={
-                <RowButton onClick={() => void organization.codex.refresh()}>Try again</RowButton>
-              }
-            >
-              {organization.codex.loadError}
-            </ErrorMessage>
-          </li>
-        </>
-      );
-    }
-    return (
-      <>
-        {organizationOnlyCodexAccounts(
-          organization.codex.accounts,
-          codex,
-          organization.workspace.id,
-        ).map((account) => {
-          const live = sharedInUse.find((candidate) => candidate.id === account.id);
-          return live ? (
-            <SharedCodexInUseRow
-              key={account.id}
-              codex={codex}
-              account={live}
-              places={places}
-              organization={organization}
-            />
-          ) : (
-            <SharedCodexSetAsideRow
-              key={account.id}
-              account={account}
-              organization={organization}
-              places={places}
-              ownInUse={pool.organizationSetAside}
-              workspaceOnly={codex.source?.mode === "workspace"}
-              organizationOnly={codex.source?.mode === "organization"}
-              menu={pool.organizationSetAside ? alwaysOrganization : null}
-              onKeptForPeople={onKeptForPeople}
-            />
-          );
-        })}
-        {ownRows}
-        {pendingRow}
-        {workspaceSetAsideRow}
-      </>
-    );
-  }
-
+  const organizationAccounts =
+    organization && !organization.codex.loading && !organization.codex.loadError
+      ? new Map(organization.codex.accounts.map((account) => [account.id, account]))
+      : null;
   return (
     <>
-      {sharedInUse.map((account) => (
-        <CodexRow
-          key={account.id}
-          codex={codex}
-          account={account}
-          places={places}
-          onOpen={() => places.openAccount(account.id)}
-        />
-      ))}
-      {ownRows}
-      {pendingRow}
-      {pool.organizationSetAside ? (
+      {codex.accounts.map((account) => {
+        const shared = account.source === "organization";
+        const listed = organizationAccounts?.get(account.id);
+        // Until the organization's list says who else an account reaches, its
+        // tag waits in place rather than changing under the reader.
+        const scopeLabel =
+          !shared || !organization ? undefined : listed?.reach ? (
+            accountReachLabel(places.scope, listed.reach, organization.workspaceName)
+          ) : organization.codex.loading ? (
+            <ModelSettingsPlaceholder />
+          ) : undefined;
+        return (
+          <CodexRow
+            key={account.id}
+            codex={codex}
+            account={account}
+            places={places}
+            scopeLabel={scopeLabel}
+            onOpen={() =>
+              shared && organization && listed
+                ? organization.openAccount(account.id)
+                : places.openAccount(account.id)
+            }
+          />
+        );
+      })}
+      {codex.pending ? (
         <ListRow
-          disabled
           leading={<ProviderTile provider="codex" size="lg" />}
-          title="Shared Codex accounts"
-          meta={[places.scope.organization, "Set aside"]}
-          cells={{ usage: NOT_IN_USE }}
-          menu={alwaysOrganization}
-          menuLabel="More actions for the organization's Codex accounts"
+          title="Signing in to ChatGPT…"
+          meta={["Finish signing in to add the account"]}
+          indicator="open"
+          onOpen={places.openConnect}
         />
       ) : null}
-      {workspaceSetAsideRow}
     </>
   );
-}
-
-/**
- * This workspace's own account, which is also an organization account: tagged
- * with where the organization makes it available once that is known.
- */
-function OwnOrganizationCodexRow({
-  codex,
-  account,
-  places,
-  organization,
-}: {
-  codex: CodexSubscriptions;
-  account: CodexAccount;
-  places: CodexPlaces;
-  organization: OrganizationCodexPool;
-}) {
-  const access = useConnectionAccess({
-    client: organization.codex.client,
-    organizationId: organization.codex.organizationId,
-    kind: "codex",
-    connectionId: account.id,
-  });
-  return (
-    <CodexRow
-      codex={codex}
-      account={account}
-      places={places}
-      // No tag until its reach is known: "<workspace> only" may no longer be true.
-      scopeLabel={organizationReachLabel(places.scope, access.data)}
-      onOpen={() => places.openAccount(account.id)}
-    />
-  );
-}
-
-/** An organization account new work here uses, tagged with where it's available. */
-function SharedCodexInUseRow({
-  codex,
-  account,
-  places,
-  organization,
-}: {
-  codex: CodexSubscriptions;
-  account: CodexAccount;
-  places: CodexPlaces;
-  organization: OrganizationCodexPool;
-}) {
-  const access = useConnectionAccess({
-    client: organization.codex.client,
-    organizationId: organization.codex.organizationId,
-    kind: "codex",
-    connectionId: account.id,
-  });
-  return (
-    <CodexRow
-      codex={codex}
-      account={account}
-      places={places}
-      scopeLabel={organizationReachLabel(places.scope, access.data)}
-      onOpen={() => organization.openAccount(account.id)}
-    />
-  );
-}
-
-/**
- * An organization account new work here doesn't use, with the plain reason:
- * this workspace has its own accounts, or the account isn't available here.
- */
-function SharedCodexSetAsideRow({
-  account,
-  organization,
-  places,
-  ownInUse,
-  workspaceOnly,
-  organizationOnly,
-  menu,
-  onKeptForPeople,
-}: {
-  account: CodexAccount;
-  organization: OrganizationCodexPool;
-  places: CodexPlaces;
-  /** This workspace's own accounts are in use, which sets the organization's aside. */
-  ownInUse: boolean;
-  /** This workspace uses only its own accounts: chosen people's sessions here don't use it either. */
-  workspaceOnly: boolean;
-  /** This workspace uses only the organization's accounts. */
-  organizationOnly: boolean;
-  menu: ReactNode;
-  onKeptForPeople?: KeptForPeopleReporter | undefined;
-}) {
-  const overview = useOrganizationCodexOverview(
-    organization.codex.client,
-    organization.codex.organizationId,
-    account,
-  );
-  const resetCount =
-    overview.data?.resetCredits?.availableCount ?? account.resetCreditAvailableCount;
-  const access = useConnectionAccess({
-    client: organization.codex.client,
-    organizationId: organization.codex.organizationId,
-    kind: "codex",
-    connectionId: account.id,
-  });
-  // Chosen people's sessions use it here unless the workspace uses only its
-  // own. In a workspace that keeps it as its own (a copy 0689 merged), they
-  // use it through that copy: unless the workspace uses only the organization's.
-  const chosenPeople = (access.data?.policy.allowedPeople?.length ?? 0) > 0;
-  const keptHere = (access.data?.localWorkspaceIds ?? []).includes(organization.workspace.id);
-  const forPeople = chosenPeople && (keptHere ? !organizationOnly : !workspaceOnly);
-  // The pool notice names these: this workspace's own pool doesn't list them.
-  // Unread or unreadable: whether it is one isn't known.
-  const pending = !access.data;
-  // A failed read says so, with the way to read it again: until then whether it
-  // serves anyone here isn't known, and the pool notice waits too.
-  const failed = Boolean(access.error) && !access.data;
-  const keptName = chosenPeople && keptHere ? codexAccountName(account) : null;
-  useEffect(() => {
-    if (!onKeptForPeople) return;
-    onKeptForPeople(account.id, pending ? { pending: true } : { pending: false, keptName });
-    return () => onKeptForPeople(account.id, undefined);
-  }, [onKeptForPeople, account.id, pending, keptName]);
-  // Another workspace's own account, or one shared elsewhere, may not reach
-  // this workspace at all: then this workspace's own accounts set nothing aside.
-  const reaches = reachesWorkspace(access.data, organization.workspace);
-  const reason = forPeople
-    ? null
-    : chosenPeople
-      ? "Set aside"
-      : reaches === false
-        ? "Not available here"
-        : reaches && ownInUse
-          ? "Set aside"
-          : null;
-  return (
-    <ListRow
-      leading={<ProviderTile provider="codex" size="lg" />}
-      title={codexAccountName(account)}
-      meta={
-        // Unread, its reach and use here are unknown: no guessed tag, and a
-        // failed read says so in the tag's place.
-        failed
-          ? ["Couldn't check who can use it", planLabel(account.plan, "ChatGPT")]
-          : pending
-            ? [
-                <ModelSettingsPlaceholder key="reach" />,
-                planLabel(account.plan, "ChatGPT"),
-                resetsLabel(resetCount),
-              ]
-            : [
-                organizationReachLabel(places.scope, access.data),
-                // Before the plan, so it stays readable on a phone.
-                reason,
-                planLabel(account.plan, "ChatGPT"),
-                resetsLabel(resetCount),
-              ]
-      }
-      cells={forPeople || pending ? undefined : { usage: NOT_IN_USE }}
-      control={
-        failed ? (
-          <RowButton
-            aria-label={`Try again for ${codexAccountName(account)}`}
-            onClick={() => void access.reload()}
-          >
-            Try again
-          </RowButton>
-        ) : undefined
-      }
-      menu={!forPeople && (reaches || chosenPeople) ? menu : null}
-      indicator={
-        account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
-      }
-      onOpen={() => organization.openAccount(account.id)}
-    />
-  );
-}
-
-const NONE_KEPT: readonly string[] = [];
-
-/**
- * The one line above the Accounts list that says which Codex accounts new
- * work uses. It replaces a source control: the pool is picked automatically,
- * and an explicit choice saved earlier shows here with the way back.
- */
-export function CodexPoolNotice({
-  codex,
-  places,
-  organizationAccountCount,
-  keptForPeople = NONE_KEPT,
-  keptForPeoplePending = false,
-}: {
-  codex: CodexSubscriptions;
-  places: CodexPlaces;
-  /** How many accounts the organization shares, when known. */
-  organizationAccountCount?: number | undefined;
-  /** Names of this workspace's own accounts limited to chosen people (known to organization admins). */
-  keptForPeople?: readonly string[];
-  /** Some organization row hasn't read (or couldn't read) whether it is one of those. */
-  keptForPeoplePending?: boolean;
-}) {
-  const source = codex.source;
-  if (codex.loading || codex.loadError || !source || source.effectiveSource === "disabled") {
-    return null;
-  }
-  const ownCount = codex.accounts.filter((account) => account.source !== "organization").length;
-  // Until the rows know, "can't start" may be wrong: a kept copy may serve chosen people.
-  // A row whose read fails keeps it unknown, so the notice stays away.
-  if (keptForPeoplePending && source.effectiveSource === "workspace" && ownCount === 0) {
-    return null;
-  }
-  const explicit = source.mode !== "automatic";
-  if (!explicit && !organizationOthersAvailable(source)) return null;
-  const copy = codexPoolCopy({
-    mode: source.mode,
-    inUse: source.effectiveSource,
-    organizationAvailable: organizationOthersAvailable(source),
-    // Only the workspace's own: automatic also lists the organization's here.
-    workspaceCount: source.effectiveSource === "workspace" ? ownCount : 0,
-    organizationCount:
-      source.effectiveSource === "organization" ? codex.accounts.length : organizationAccountCount,
-    // The organization's accounts here are only this workspace's own, shared,
-    // and none of its own is set aside.
-    onlyOwnShared:
-      source.organizationCount === 0 &&
-      source.workspaceSetAside === false &&
-      codex.accounts.length > 0,
-    keptForPeople,
-    canConnect: codex.canManage,
-  });
-  return (
-    <Notice
-      tone={copy.blocked ? "waiting" : "muted"}
-      actionLayout="responsive"
-      className="mb-2"
-      action={
-        explicit && codex.canManage ? (
-          <RowButton
-            disabled={codex.busy}
-            onClick={() =>
-              void codex.setSourceMode(
-                "automatic",
-                `New work in ${places.workspaceName} picks Codex accounts automatically`,
-              )
-            }
-          >
-            Use automatically
-          </RowButton>
-        ) : undefined
-      }
-    >
-      {copy.text}
-    </Notice>
-  );
-}
-
-/** The pool line's words, for every source mode. Exported for tests and the kit. */
-export function codexPoolCopy({
-  mode,
-  inUse,
-  organizationAvailable,
-  workspaceCount,
-  organizationCount,
-  onlyOwnShared = false,
-  keptForPeople = [],
-  canConnect,
-}: {
-  mode: "automatic" | "workspace" | "organization" | "disabled";
-  inUse: "workspace" | "organization";
-  organizationAvailable: boolean;
-  workspaceCount: number;
-  organizationCount?: number | undefined;
-  /** The organization's accounts in use here are only this workspace's own, shared. */
-  onlyOwnShared?: boolean;
-  /**
-   * This workspace's own accounts limited to chosen people (copies an older
-   * migration merged): its pool doesn't list them, yet they serve those people
-   * here while it uses its own accounts.
-   */
-  keptForPeople?: readonly string[];
-  canConnect: boolean;
-}): { text: string; blocked: boolean } {
-  const orgOne = organizationCount === 1;
-  const orgAccounts = `the organization's ${orgOne ? "account" : "accounts"}`;
-  if (inUse === "organization") {
-    const used = `New work uses the organization's Codex ${orgOne ? "account" : "accounts"}`;
-    if (mode === "organization") {
-      return {
-        text: onlyOwnShared
-          ? `${used}, which here ${orgOne ? "is" : "are"} only this workspace's own.`
-          : `${used}, even when accounts are connected here.`,
-        blocked: false,
-      };
-    }
-    return {
-      text: canConnect
-        ? `${used}. Accounts connected here are used together with ${orgOne ? "it" : "them"}.`
-        : `${used}.`,
-      blocked: false,
-    };
-  }
-  const keptOne = keptForPeople.length === 1;
-  const keptNames = listNames(keptForPeople);
-  if (workspaceCount === 0 && keptForPeople.length > 0) {
-    return {
-      text: `New Codex work can start only for the people chosen for ${keptNames}, kept as this workspace's own. This workspace is set to use only its own accounts.`,
-      blocked: true,
-    };
-  }
-  if (workspaceCount === 0) {
-    return {
-      text: "New Codex work can't start. This workspace is set to use only its own accounts, and none are connected.",
-      blocked: true,
-    };
-  }
-  const here = `this workspace's Codex ${workspaceCount === 1 ? "account" : "accounts"}`;
-  if (keptForPeople.length > 0) {
-    // Named, since its row is listed among the organization's; the rest of
-    // the organization's are the "other" ones.
-    const kept = `${keptNames}, kept as this workspace's own, ${
-      keptOne ? "serves only the people chosen for it" : "serve only the people chosen for them"
-    }.`;
-    return {
-      text:
-        mode === "workspace"
-          ? `New work uses ${here}. ${kept}${
-              organizationAvailable
-                ? ` The organization's other ${orgOne ? "account is" : "accounts are"} never used here.`
-                : ""
-            }`
-          : `New work uses ${here}${
-              organizationAvailable
-                ? ` together with the organization's other ${orgOne ? "account" : "accounts"}`
-                : ""
-            }. ${kept}`,
-      blocked: false,
-    };
-  }
-  if (mode === "workspace") {
-    return {
-      text: organizationAvailable
-        ? `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} never used here, even if none are connected.`
-        : `New work uses only ${here}, never the organization's.`,
-      blocked: false,
-    };
-  }
-  return {
-    text: `New work uses ${here} together with ${orgAccounts}.`,
-    blocked: false,
-  };
-}
-
-/** "A", "A and B", "A, B and C". */
-function listNames(names: readonly string[]): string {
-  return names.length <= 1
-    ? (names[0] ?? "")
-    : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
-
-function capitalize(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** Codex shows its own section once there is something to set. */
@@ -1035,7 +465,6 @@ function CodexRow({
             />
           ),
       }}
-      menu={organizationAccount ? alwaysOrganizationItem(codex, places) : undefined}
       indicator={needsReconnect(account) ? { kind: "attention", label: "Needs reconnect" } : "open"}
       onOpen={onOpen}
     />
@@ -1503,13 +932,6 @@ export function CodexConnectPage({
   /** Why the sign-in can't start yet (a choice above is incomplete). */
   blockedReason?: string | null;
 }) {
-  const source = codex.source;
-  // Picked automatically, a new account is used together with the
-  // organization's. Only a workspace set to use just the organization's
-  // accounts asks, so the account isn't parked unnoticed.
-  const askSource = source?.mode === "organization";
-  const [useFor, setUseFor] = useState<"together" | "organization" | "">("");
-  const [useError, setUseError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
   useEffect(() => {
@@ -1538,12 +960,7 @@ export function CodexConnectPage({
       footerStart={footerStart}
       onSubmit={async () => {
         if (signingIn) return false;
-        if (askSource && !useFor) {
-          setUseError("Choose whether new work should use this account.");
-          return false;
-        }
         await codex.connect({
-          useFor: useFor || undefined,
           onConnected: (accountId) => {
             if (!active.current) return;
             setConnected(true);
@@ -1556,30 +973,6 @@ export function CodexConnectPage({
     >
       <FieldStack>
         {fields}
-        {askSource ? (
-          <ChoiceCards
-            label="Use this account for new work?"
-            description={`${places.workspaceName} is set to use only the organization's subscriptions.`}
-            value={useFor}
-            disabled={signingIn}
-            onValueChange={(value) => {
-              setUseFor(value as "together" | "organization");
-              setUseError(null);
-            }}
-            error={useError}
-          >
-            <ChoiceCard
-              value="together"
-              title="Use it with the organization's subscriptions"
-              description={`New work here uses this account and the subscriptions from ${places.organizationName}.`}
-            />
-            <ChoiceCard
-              value="organization"
-              title="Keep using only the organization's"
-              description="This account stays connected but isn't used until you change this."
-            />
-          </ChoiceCards>
-        ) : null}
         <DeviceSignInStatus
           provider="codex"
           connected={connected}

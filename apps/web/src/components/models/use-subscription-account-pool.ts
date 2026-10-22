@@ -17,6 +17,8 @@ export type SubscriptionPoolAccount = {
   email?: string | null;
   scope: "workspace" | "organization" | "user";
   allocatorVersion: number;
+  /** The organization's list only: who the account reaches. */
+  reach?: import("@opengeni/sdk").SubscriptionAccountReach;
 };
 export type SubscriptionAccountPoolData<Account extends SubscriptionPoolAccount> = {
   accounts: Account[];

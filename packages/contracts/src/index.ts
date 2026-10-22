@@ -14,6 +14,7 @@ import {
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
 } from "./claude-provider-account-authority";
 export {
+  SubscriptionAccountReach,
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionAccount,

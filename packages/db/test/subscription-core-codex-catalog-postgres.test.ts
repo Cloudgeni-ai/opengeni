@@ -133,16 +133,22 @@ async function sharedConnection(
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, plan_type, provider_state, expires_at, allowed_model_ids, label,
-      managed_by_workspace_id, allocator_enabled
+      allow_personal_workspaces, provider_account_id, plan_type, provider_state, expires_at,
+      allowed_model_ids, label, managed_by_workspace_id, allocator_enabled
     ) values (
       ${org.accountId}::uuid, 'codex', 'subscription', ${encryptedTokens(label)},
-      'shared', 'organization', ${`chatgpt-${label}`}, 'pro',
+      'shared', ${options.managedByWorkspaceId ? "workspaces" : "organization"},
+      ${!options.managedByWorkspaceId}, ${`chatgpt-${label}`}, 'pro',
       ${shared!.admin.json({ isFedramp: false })}::jsonb,
       ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz,
       ${options.allowedModelIds ?? null}::text[], ${label},
       ${options.managedByWorkspaceId ?? null}::uuid, ${options.allocatorEnabled ?? true}
     ) returning id::text as id`;
+  // A workspace's own connection reaches only that workspace.
+  if (options.managedByWorkspaceId)
+    await shared!.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${options.managedByWorkspaceId}::uuid)`;
   return row!.id;
 }
 
@@ -424,26 +430,24 @@ describe.skipIf(!realDb)("Codex readiness on the shared core after the cutover",
     }
   });
 
-  test("the model allowlist intersects the connection and the workspace assignment policy", async () => {
+  test("the model allowlist is the connection's own", async () => {
     const org = await organization();
     const ws = org.sharedWorkspaceId;
     const connectionId = await sharedConnection(org, "shared-allowlist", {
       allowedModelIds: ["codex/gpt-5.5", "codex/gpt-5.4"],
     });
-    await shared!.admin`
-      insert into subscription_connection_assignment_policies (
-        account_id, connection_id, workspace_id, inference_pool, allowed_model_ids
-      ) values (${org.accountId}::uuid, ${connectionId}::uuid, ${ws}::uuid, 'organization',
-        ${["codex/gpt-5.5", "codex/gpt-5.3"]}::text[])`;
     const [connection] = await serving(org, ws, org.ownerSubjectId);
     expect(connection?.connectionId).toBe(connectionId);
     expect(subscriptionCoreCodexConnectionAllowsModel(connection!, "codex/gpt-5.5")).toBe(true);
-    expect(subscriptionCoreCodexConnectionAllowsModel(connection!, "codex/gpt-5.4")).toBe(false);
+    expect(subscriptionCoreCodexConnectionAllowsModel(connection!, "codex/gpt-5.4")).toBe(true);
     expect(subscriptionCoreCodexConnectionAllowsModel(connection!, "codex/gpt-5.3")).toBe(false);
-    expect(subscriptionCoreCodexConnectionAllowlist(connection!)).toEqual(["codex/gpt-5.5"]);
+    expect(subscriptionCoreCodexConnectionAllowlist(connection!)).toEqual([
+      "codex/gpt-5.5",
+      "codex/gpt-5.4",
+    ]);
     expect(
       (await getWorkspaceConnectionModelRestrictions(client!.db, ws, org.ownerSubjectId))["codex/"],
-    ).toEqual(["codex/gpt-5.5"]);
+    ).toEqual(["codex/gpt-5.5", "codex/gpt-5.4"]);
   });
 
   test("a personal connection serves its owner in their own Personal workspace without fallback opt-in", async () => {

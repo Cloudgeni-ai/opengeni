@@ -120,6 +120,7 @@ function ProductionModels({
             organization={{
               codex: orgCodex,
               workspace: { id: currentWorkspace.id, personal: false },
+              workspaceName: () => undefined,
               openAccount: places.openAccount,
             }}
           />

@@ -355,23 +355,19 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
     expect((await settingsRow(org, null))?.primary_id).toBe(connectionId);
   });
 
-  test("an organization allocator switch refreshes the binding's provider-keyed reach", async () => {
+  test("an organization allocator switch is the connection's one switch, through any binding", async () => {
     const org = await organization();
     const connectionId = await connectOrganizationConnection(org, "allocator-gate");
-    const plain = await connectOrganizationConnection(org, "allocator-gate-plain");
-    // A reach row keeps the connection's allocator copy for workspaces
-    // created later. The shared core refreshes it through the
-    // provider-keyed routine for whichever provider the binding names; no
-    // binding supplies a hook of its own.
+    // A reach row for workspaces created later carries no switch of its own
+    // that matters (D-50): the connection's switch decides.
     await shared!.admin`
       insert into opengeni_private.subscription_core_auto_assignments (
         account_id, provider, connection_id, shared_workspaces, personal_workspaces,
         allocator_enabled, allowed_model_ids
       ) values (${org.accountId}::uuid, 'codex', ${connectionId}::uuid, true, false, true, null)`;
-    const reachAllocator = async (id: string) => {
+    const connectionAllocator = async (id: string) => {
       const [row] = await shared!.admin<{ allocator_enabled: boolean }[]>`
-        select allocator_enabled from opengeni_private.subscription_core_auto_assignments
-        where connection_id = ${id}::uuid`;
+        select allocator_enabled from subscription_connections where id = ${id}::uuid`;
       return row?.allocator_enabled ?? null;
     };
     const switchWith = (
@@ -393,19 +389,16 @@ describe.skipIf(!realDb)("subscription-core binding gates (PostgreSQL)", () => {
 
     const viaRegistered = await switchWith(registered(), connectionId, false, 1);
     expect(viaRegistered.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
-    expect(await reachAllocator(connectionId)).toBe(false);
+    expect(await connectionAllocator(connectionId)).toBe(false);
 
     // A variant binding of the same provider (as a future provider's binding
-    // differs) refreshes the same row the same way.
+    // differs) switches the same connection the same way.
     const variantBinding = variant((base) => ({ errors: { ...base.errors } }));
     const again = await switchWith(variantBinding, connectionId, true, 2);
     expect(again.result).toMatchObject({ kind: "updated", allocatorEnabled: true });
-    expect(await reachAllocator(connectionId)).toBe(true);
-
-    // A connection without a reach row is switched and gains none.
-    const withoutReach = await switchWith(registered(), plain, false, 1);
-    expect(withoutReach.result).toMatchObject({ kind: "updated", allocatorEnabled: false });
-    expect(await reachAllocator(plain)).toBeNull();
+    expect(await connectionAllocator(connectionId)).toBe(true);
+    const unchanged = await switchWith(registered(), connectionId, true, 2);
+    expect(unchanged.result).toMatchObject({ kind: "unchanged", allocatorEnabled: true });
   });
 
   test("only a provider with the apps capability reports the Apps designations a disconnect clears", async () => {
