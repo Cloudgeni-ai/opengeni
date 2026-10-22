@@ -1,4 +1,4 @@
-import type { AccessGrant, FileAsset } from "@opengeni/contracts";
+import type { AccessGrant, FileAsset, SessionAuthorizationSurface } from "@opengeni/contracts";
 import {
   getSessionAuthorityProjection,
   getFilesForSubject,
@@ -17,13 +17,14 @@ export async function readSessionAttachmentFiles(
   grant: AccessGrant,
   sessionId: string,
   fileIds: readonly string[],
+  surface: SessionAuthorizationSurface = "core",
 ): Promise<FileAsset[]> {
   const authority = await getSessionAuthorityProjection(deps.db, grant.workspaceId, sessionId);
   if (!authority) return [];
   const authorization = await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: "session.read",
-    surface: "core",
+    surface,
   });
   const ordinary = await getFilesForSubject(deps.db, {
     accountId: grant.accountId,

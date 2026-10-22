@@ -69,7 +69,7 @@ const memberPermissions = [
 async function fixture(
   testShared: SharedTestDatabase = shared,
   testDb: DbClient = db,
-  hostDeniesSource = false,
+  hostDeniesSource: boolean | "http" = false,
 ) {
   const [account] =
     await testShared.admin`insert into managed_accounts (name) values ('File visibility fixture') returning id`;
@@ -123,7 +123,10 @@ async function fixture(
     ...(hostDeniesSource
       ? {
           sessionAuthorization: {
-            authorizeSession: async () => ({ allowed: false, reason: "revoked" }),
+            authorizeSession: async ({ surface }: { surface: string }) =>
+              hostDeniesSource === "http" && surface !== "http"
+                ? ({ allowed: true } as const)
+                : ({ allowed: false, reason: "revoked" } as const),
             resolveListScope: async () => ({ kind: "all" }),
           },
         }
@@ -1083,6 +1086,30 @@ test("a host denial also hides a shared source File ID and listing", async () =>
     files: [{ id: secondVisible }],
   });
 });
+
+test("HTTP File attachment reads honor an HTTP-specific host denial", async () => {
+  const f = await fixture(shared, db, "http");
+  const session = await createSession(db.db, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Example request",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+    createdByContext: {},
+  });
+  const fileId = await f.readyFile(null, f.owner.subjectId);
+  expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(200);
+  const suffix = `?sessionId=${session.id}`;
+  expect((await f.call(f.other, "GET", `/files/${fileId}${suffix}`)).status).toBe(404);
+  expect((await f.call(f.other, "POST", `/files/${fileId}/download-url${suffix}`)).status).toBe(
+    404,
+  );
+}, 180_000);
 
 test("host-filtered listing continues past denied rows with an opaque cursor", async () => {
   const f = await fixture(shared, db, true);

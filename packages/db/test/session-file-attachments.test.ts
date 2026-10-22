@@ -208,14 +208,17 @@ test("a private source upload remains readable only through its accepted target 
     db: client.db,
     sessionAuthorization: {
       resolveListScope: async () => ({ kind: "all" as const }),
-      authorizeSession: async (input: { target: { sessionId: string } }) =>
-        input.target.sessionId === f.session.id
+      authorizeSession: async (input: { target: { sessionId: string }; surface: string }) =>
+        input.target.sessionId === f.session.id && input.surface !== "http"
           ? { allowed: true as const }
           : { allowed: false as const, reason: "forbidden" as const },
     },
   } as Parameters<typeof readSessionAttachmentFiles>[0];
   const [accepted] = await readSessionAttachmentFiles(deps, viewer, f.session.id, [f.file.id]);
   expect(accepted?.id).toBe(f.file.id);
+  await expect(
+    readSessionAttachmentFiles(deps, viewer, f.session.id, [f.file.id], "http"),
+  ).rejects.toMatchObject({ reason: "forbidden" });
   expect(
     await fileSourceVisibleToHost(
       deps,
