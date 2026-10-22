@@ -431,6 +431,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_hostname_holds",
       "site_hostnames",
       "site_limit_profiles",
+      // Site opens (the Site rows in the sidebar).
+      "site_opens",
       "site_platform_brake",
       "site_platform_storage",
       "site_platform_totals",
