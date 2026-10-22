@@ -7106,14 +7106,36 @@ const SCROLL_POSITIONS_FUNCTION = `function() {
   return positions.join(",");
 }`;
 
+// Page-side helpers shared by the hit tests below. topHit is the element on
+// top at a point in the target's own tree scope. It uses elementsFromPoint:
+// for a shadow-DOM control whose label is text slotted in from the light DOM
+// (a web-component button), the single-element query answers with the host,
+// while elementsFromPoint answers with the control itself. owns follows the
+// flat tree (slot assignment, then parents, then shadow hosts), the tree that
+// pointer events travel, so slotted content counts as inside its slot's
+// element and shadow content as inside its host.
+const HIT_HELPERS = `
+  const topHit = (target, x, y) => {
+    const root = target.getRootNode();
+    const scope = root && typeof root.elementsFromPoint === "function" ? root : document;
+    return scope.elementsFromPoint(x, y)[0] ?? null;
+  };
+  const owns = (ancestor, node) => {
+    for (let current = node; current; ) {
+      if (current === ancestor) return true;
+      current = current.assignedSlot ?? current.parentNode ?? null;
+      if (current instanceof ShadowRoot) current = current.host;
+    }
+    return false;
+  };`;
+
 const HIT_TEST_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return false;
   const rect = element.getBoundingClientRect();
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  return Boolean(hit && (element === hit || element.contains?.(hit)));
+  ${HIT_HELPERS}
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && owns(element, hit));
 }`;
 
 // Describes the element on top at the target's centre by its nearest
@@ -7123,10 +7145,9 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  if (!hit || hit === element || element.contains(hit) || hit.contains(element)) return null;
+  ${HIT_HELPERS}
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!hit || owns(element, hit) || owns(hit, element)) return null;
   const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
   let node = hit;
   for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
@@ -7151,10 +7172,9 @@ const POINTER_TRANSPARENT_FUNCTION = `function() {
   if (!(element instanceof Element) || !element.isConnected) return false;
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return false;
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  return Boolean(hit && hit !== element && !element.contains(hit) && hit.contains(element));
+  ${HIT_HELPERS}
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && !owns(element, hit) && owns(hit, element));
 }`;
 
 // Whether the element at the target's centre belongs to a sticky element, or
@@ -7164,10 +7184,9 @@ const STICKY_COVER_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return false;
   const rect = element.getBoundingClientRect();
-  const root = element.getRootNode();
-  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
-  let node = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-  if (!node || element === node || element.contains(node)) return false;
+  ${HIT_HELPERS}
+  let node = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!node || owns(element, node)) return false;
   while (node instanceof Element) {
     const position = getComputedStyle(node).position;
     if (position === "sticky") return true;
