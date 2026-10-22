@@ -229,6 +229,9 @@ async function route(request: Request): Promise<Response> {
   if (path === "/app/bootstrap" && method === "GET") {
     return json(await bootstrap(requireString(workspaceParam, "workspaceId")));
   }
+  if (path === "/app/agents" && method === "GET") {
+    return json(await listAgentSessions(requireString(workspaceParam, "workspaceId")));
+  }
   if (path === "/app/state" && method === "GET") {
     return json(state(requireString(workspaceParam, "workspaceId")));
   }

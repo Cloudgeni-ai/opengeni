@@ -1,4 +1,4 @@
-import { OpenGeniClient, type SendMessageInput } from "@opengeni/sdk";
+import { OpenGeniClient, type SendMessageInput, type Session } from "@opengeni/sdk";
 
 type Reasoning = "low" | "medium" | "high";
 
@@ -104,6 +104,8 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
 export const appApi = {
   bootstrap: (workspaceId: string) =>
     request<Bootstrap>(`/app/bootstrap?workspaceId=${encodeURIComponent(workspaceId)}`),
+  agents: (workspaceId: string) =>
+    request<Session[]>(`/app/agents?workspaceId=${encodeURIComponent(workspaceId)}`),
   state: (workspaceId: string) =>
     request<AppState>(`/app/state?workspaceId=${encodeURIComponent(workspaceId)}`),
   setPrefs: (workspaceId: string, values: Record<string, string | null>) =>

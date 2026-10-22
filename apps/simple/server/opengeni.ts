@@ -174,12 +174,51 @@ export function isMainAgent(session: Session) {
   return metadata?.kind === "agent" && metadata.role === "main";
 }
 
+/**
+ * Every agent chat in the workspace. Agents are filed in the Agents project, so
+ * that project is read in full; the newest root chats and the agents this app
+ * already knows cover agents made before the project existed. A busy workspace
+ * therefore never pushes an agent out of the sidebar.
+ */
 export async function listAgentSessions(workspaceId: string) {
-  const sessions = await api.listSessions(workspaceId, {
-    parentSessionId: null,
-    limit: 200,
-  });
-  return sessions.filter((session) => simpleMetadata(session)?.kind === "agent");
+  const found = new Map<string, Session>();
+  const add = (session: Session) => {
+    if (simpleMetadata(session)?.kind === "agent") found.set(session.id, session);
+  };
+  const channelId = await agentsChannelId(workspaceId);
+  const [recent] = await Promise.all([
+    api.listSessions(workspaceId, { parentSessionId: null, limit: 200 }),
+    channelId ? readChannel(workspaceId, channelId, add) : null,
+  ]);
+  for (const session of recent) add(session);
+  const missing = listProfiles(workspaceId).filter((profile) => !found.has(profile.sessionId));
+  const known = await Promise.all(
+    missing.map((profile) => api.getSession(workspaceId, profile.sessionId).catch(() => null)),
+  );
+  for (const session of known) if (session) add(session);
+  return [...found.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+async function readChannel(workspaceId: string, channelId: string, add: (s: Session) => void) {
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page += 1) {
+    const result = await api
+      .listSessionPage(workspaceId, {
+        channelId,
+        parentSessionId: null,
+        limit: 200,
+        includePinned: false,
+        ...(cursor ? { cursor } : {}),
+      })
+      .catch((error: unknown) => {
+        console.warn("Could not read the Agents project", error);
+        return null;
+      });
+    if (!result) return;
+    for (const session of result.sessions) add(session);
+    if (!result.nextCursor) return;
+    cursor = result.nextCursor;
+  }
 }
 
 let ensuringMain = new Map<string, Promise<Session>>();

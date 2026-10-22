@@ -102,11 +102,7 @@ export function App({
   useEffect(loadBoot, [loadBoot]);
 
   const refreshSessions = useCallback(async () => {
-    const list = await client.listSessions(workspaceId, {
-      parentSessionId: null,
-      limit: 200,
-    });
-    setSessions(list);
+    setSessions(await appApi.agents(workspaceId));
   }, [workspaceId]);
   const refreshState = useCallback(async () => {
     setState(await appApi.state(workspaceId));
@@ -123,9 +119,19 @@ export function App({
   useEffect(() => {
     if (!boot?.mainSessionId) return;
     let stopped = false;
+    let loaded = false;
     const tick = () => {
       if (stopped) return;
-      void refreshSessions().catch(() => {});
+      // Later polls fail quietly; the first one must load, or the splash never ends.
+      void refreshSessions().then(
+        () => {
+          loaded = true;
+        },
+        (error: unknown) => {
+          if (!loaded && !stopped)
+            setBootError(error instanceof Error ? error.message : String(error));
+        },
+      );
     };
     tick();
     const sessionsTimer = setInterval(tick, SESSION_POLL_MS);
