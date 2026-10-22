@@ -101,6 +101,7 @@ import {
   filterUnmaterializedSandboxFileDownloads,
   sandboxFileMaterializationOutcome,
   sandboxFileDownloadsForRun,
+  fileResourceAgentGrant,
   objectStorageForSandboxDownloads,
 } from "./file-resources";
 import { TurnEventPublisher } from "./model-usage";
@@ -278,6 +279,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       catalogSourceSettings = settings,
       db,
       bus,
+      sessionAuthorization,
       runtime,
       summarizeContextForCompaction,
       requestWorkerDrain,
@@ -1561,6 +1563,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             db,
             observability,
+            sessionAuthorization,
             cancellationSignal,
             connectionCredentials,
             personalGitHubCredentials,
@@ -1656,6 +1659,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   fileAuthoritySubjectId,
                   turn.resources,
                   activeSandboxBackend ?? groupBoxBackend,
+                  { grant: fileResourceAgentGrant(input, turn), port: sessionAuthorization },
                 ),
                 cancellationSignal,
                 undefined,

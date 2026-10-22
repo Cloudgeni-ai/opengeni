@@ -662,6 +662,11 @@ Workspace permissions answer whether a principal may use a capability at all.
 An embedding host may additionally own per-session ownership, sharing, and
 revocation by binding `AppDependencies.sessionAuthorization`:
 
+Hosts that bind this port must also inject it as
+`TurnActivityDependencies.sessionAuthorization` in every turn worker. File
+resources are checked again against the live source-session decision before
+the worker issues a sandbox download URL or mounts the File.
+
 ```ts
 type SessionAuthorizationPort = {
   capabilities?: { modelAccountOperation?: boolean };

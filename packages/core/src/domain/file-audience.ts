@@ -2,6 +2,7 @@ import type {
   AccessGrant,
   FileAccess,
   FileAsset,
+  SessionAuthorizationSurface,
   WorkspaceArtifactVisibility,
   Workspace,
 } from "@opengeni/contracts";
@@ -71,6 +72,7 @@ export async function fileSourceVisibleToHost(
   requireFileRls = false,
   fileRlsSubjectId = grant.subjectId,
   authorizedFile?: FileAsset,
+  surface: SessionAuthorizationSurface = "http",
 ): Promise<boolean> {
   if (!deps.sessionAuthorization && !requireFileRls && !grantHasAgentAttemptAuthority(grant))
     return true;
@@ -107,7 +109,7 @@ export async function fileSourceVisibleToHost(
       {
         sessionId: source.sessionId,
         operation: "session.read",
-        surface: "http",
+        surface,
       },
     );
     return true;

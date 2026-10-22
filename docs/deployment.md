@@ -12,7 +12,8 @@ operator storage, outside the repository and deployment logs.
 For a source with a historical Slack event marker but no surviving interaction,
 verify its audience separately. Record `human_shared` only with proof of an
 independent human share, or `owner_only` with a verified `owner_subject_id`.
-The migration stops until every such File has one of those decisions.
+Every known-source `owner_only` decision requires that verified owner. The
+migration stops until every such File has one of those decisions.
 
 For each reviewed File, insert its ID into
 `opengeni_private.file_source_adjudications` as `human_shared` only with

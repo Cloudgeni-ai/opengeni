@@ -53,6 +53,7 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import {
   assertGitHubResourcesRemainAuthorized,
   assertFileResourcesRemainAuthorized,
+  fileResourceAgentGrant,
   assertGitHubTokenMintSelectionAuthorized,
   requiresSignedFileResourceDownloads,
 } from "./file-resources";
@@ -80,6 +81,7 @@ export type PrepareRunCredentialsDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  sessionAuthorization: ActivityServices["sessionAuthorization"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
   connectionCredentials: ActivityServices["connectionCredentials"];
@@ -118,6 +120,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     input,
     settings,
     db,
+    sessionAuthorization,
     observability,
     cancellationSignal,
     connectionCredentials,
@@ -297,6 +300,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       input.workspaceId,
       fileAuthoritySubjectId,
       turn.resources,
+      { grant: fileResourceAgentGrant(input, turn), port: sessionAuthorization },
     ),
   ]);
   // Computed exactly ONCE per turn and reused for BOTH the box manifest

@@ -17,6 +17,8 @@ import {
   stableJson,
   type RepositoryResourceRef,
   type AccessGrant,
+  type SessionAuthorizationPort,
+  type SessionAuthorizationSurface,
   type ResourceRef,
   type ScheduledTaskToolPolicy,
   type ToolRef,
@@ -503,6 +505,8 @@ export async function validateFileResources(
   resources: ResourceRef[],
   privateFileContext: SessionRlsActorContext | undefined,
   sourceGrant: AccessGrant,
+  sessionAuthorization?: SessionAuthorizationPort | null,
+  surface: SessionAuthorizationSurface = "core",
 ): Promise<void> {
   return withSessionRlsActorContext(
     privateFileContext ?? {
@@ -535,13 +539,14 @@ export async function validateFileResources(
         }
         if (
           !(await fileSourceVisibleToHost(
-            { db, sessionAuthorization: null },
+            { db, sessionAuthorization: sessionAuthorization ?? null },
             sourceGrant,
             file.id,
             file.workspaceId,
             true,
             privateFileContext?.initiatingHumanSubjectId ?? subjectId ?? sourceGrant.subjectId,
             file,
+            surface,
           ))
         ) {
           throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });

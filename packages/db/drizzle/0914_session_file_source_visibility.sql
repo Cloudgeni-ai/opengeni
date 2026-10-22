@@ -105,6 +105,18 @@ BEGIN
     RAISE EXCEPTION 'Conflicting file source sessions require review' USING ERRCODE='55000';
   END IF;
 END $conflicts$;
+-- A known producer cannot become owner-only without an attested owner.
+DO $known_source_owner_only_preflight$
+BEGIN
+  IF EXISTS (SELECT 1 FROM session_file_sources_0913 source
+    JOIN opengeni_private.file_source_adjudications a
+      ON a.file_id = source.file_id AND a.decision = 'owner_only'
+    WHERE a.owner_subject_id IS NULL)
+  THEN
+    RAISE EXCEPTION 'Known-source owner-only decision requires a verified owner'
+      USING ERRCODE='55000';
+  END IF;
+END $known_source_owner_only_preflight$;
 -- An older hard-deleted Slack connection cascaded its interaction row. The
 -- surviving Slack message marker proves origin but not its private audience.
 DO $missing_slack_audience_preflight$
@@ -742,13 +754,22 @@ ALTER FUNCTION resolve_document_original_file(uuid, uuid, text, uuid)
   RENAME TO resolve_document_original_file_authority_0914;
 REVOKE ALL ON FUNCTION resolve_document_original_file_authority_0914(uuid, uuid, text, uuid)
   FROM PUBLIC;
-DO $document_resolver_grant$
+DO $legacy_document_resolver_revoke$
+DECLARE recipient record;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    REVOKE ALL ON FUNCTION resolve_document_original_file_authority_0914(uuid, uuid, text, uuid)
-      FROM opengeni_app;
-  END IF;
-END $document_resolver_grant$;
+  FOR recipient IN SELECT DISTINCT recipient_role.rolname FROM pg_proc routine
+    CROSS JOIN LATERAL aclexplode(routine.proacl) privilege
+    JOIN pg_roles recipient_role ON recipient_role.oid = privilege.grantee
+    WHERE routine.oid = to_regprocedure(
+      'resolve_document_original_file_authority_0914(uuid,uuid,text,uuid)')
+      AND privilege.privilege_type = 'EXECUTE'
+      AND privilege.grantee <> routine.proowner
+  LOOP
+    EXECUTE format(
+      'REVOKE ALL ON FUNCTION resolve_document_original_file_authority_0914(uuid,uuid,text,uuid) FROM %I',
+      recipient.rolname);
+  END LOOP;
+END $legacy_document_resolver_revoke$;
 CREATE FUNCTION resolve_document_original_file(
   p_account_id uuid, p_request_workspace_id uuid, p_actor_id text, p_document_id uuid
 ) RETURNS SETOF files LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path FROM CURRENT AS $body$

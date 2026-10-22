@@ -5,6 +5,7 @@ import type {
   EntitlementsPort,
   KnowledgeSourceSyncRunSummary,
   ScheduledTaskTriggerType,
+  SessionAuthorizationPort,
   TurnInitiator,
 } from "@opengeni/contracts";
 import type {
@@ -98,6 +99,8 @@ export type SharedActivityServices = {
   db: Database;
   bus: EventBus;
   objectStorage: ObjectStorage | null;
+  /** Embedding hosts inject the same live session ACL used by the API. */
+  sessionAuthorization?: SessionAuthorizationPort | null;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
   /** Durable signalWithStart fallback used only after the activity's direct

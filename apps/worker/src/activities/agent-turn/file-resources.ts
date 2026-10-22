@@ -13,6 +13,29 @@ import {
 import type { TurnActivityServices as ActivityServices } from "../types";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { CAPABILITY_DESCRIPTORS, resourceMountPath, type ResourceRef } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
+import { fileSourceVisibleToHost } from "@opengeni/core";
+import type { RunAgentTurnInput } from "../types";
+import type { ClaimTurnOk } from "./claim";
+
+export function fileResourceAgentGrant(
+  input: RunAgentTurnInput,
+  turn: ClaimTurnOk["turn"],
+): AccessGrant {
+  return {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: "service:agent-turn",
+    permissions: ["files:read"],
+    principalKind: "agent_attempt",
+    metadata: {
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: turn.executionGeneration,
+    },
+  };
+}
 
 export function filterUnmaterializedSandboxFileDownloads(
   downloads: SandboxFileDownload[],
@@ -69,6 +92,7 @@ export async function assertFileResourcesRemainAuthorized(
   workspaceId: string,
   subjectId: string | null,
   resources: ResourceRef[],
+  authorization?: { grant: AccessGrant; port: ActivityServices["sessionAuthorization"] },
 ): Promise<void> {
   const fileIds = resources.flatMap((resource) =>
     resource.kind === "file" ? [resource.fileId] : [],
@@ -82,6 +106,24 @@ export async function assertFileResourcesRemainAuthorized(
   });
   if (authorized.length !== new Set(fileIds).size) {
     throw new Error("One or more file resources are unavailable or no longer authorized");
+  }
+  if (authorization) {
+    for (const file of authorized) {
+      if (
+        !(await fileSourceVisibleToHost(
+          { db, sessionAuthorization: authorization.port ?? null },
+          authorization.grant,
+          file.id,
+          file.workspaceId,
+          true,
+          subjectId ?? authorization.grant.subjectId,
+          file,
+          "core",
+        ))
+      ) {
+        throw new Error("One or more file resources are unavailable or no longer authorized");
+      }
+    }
   }
 }
 
@@ -134,6 +176,7 @@ export async function sandboxFileDownloadsForRun(
   subjectId: string | null,
   resources: ResourceRef[],
   activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
+  authorization?: { grant: AccessGrant; port: ActivityServices["sessionAuthorization"] },
 ): Promise<SandboxFileDownload[]> {
   if (!requiresSignedFileResourceDownloads(settings, activeSandboxBackend)) {
     return [];
@@ -162,6 +205,21 @@ export async function sandboxFileDownloadsForRun(
       subjectId,
       fileId: resource.fileId,
     });
+    if (
+      authorization &&
+      !(await fileSourceVisibleToHost(
+        { db, sessionAuthorization: authorization.port ?? null },
+        authorization.grant,
+        file.id,
+        file.workspaceId,
+        true,
+        subjectId ?? authorization.grant.subjectId,
+        file,
+        "core",
+      ))
+    ) {
+      throw new Error("One or more file resources are unavailable or no longer authorized");
+    }
     const url = await downloadStorage.createGetUrl({ key: file.objectKey });
     downloads.push({
       fileId: file.id,

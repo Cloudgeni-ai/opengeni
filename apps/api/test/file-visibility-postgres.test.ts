@@ -973,6 +973,62 @@ test("a host denial also hides a shared source File ID and listing", async () =>
     fileIds: [fileId],
   });
   expect(authorizedFile?.id).toBe(fileId);
+  const fileGrant = {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: f.other.subjectId,
+    permissions: ["files:read"],
+  } as AccessGrant;
+  const surfaces: string[] = [];
+  const surfacePort = {
+    authorizeSession: async ({ surface }: { surface: string }) => {
+      surfaces.push(surface);
+      return surface === "http"
+        ? ({ allowed: true } as const)
+        : ({ allowed: false, reason: "revoked" } as const);
+    },
+    resolveListScope: async () => ({ kind: "all" as const }),
+  };
+  expect(
+    await fileSourceVisibleToHost(
+      { db: db.db, sessionAuthorization: surfacePort },
+      fileGrant,
+      fileId,
+      f.workspace.id,
+      true,
+      f.other.subjectId,
+      authorizedFile,
+      "http",
+    ),
+  ).toBe(true);
+  expect(
+    await fileSourceVisibleToHost(
+      { db: db.db, sessionAuthorization: surfacePort },
+      fileGrant,
+      fileId,
+      f.workspace.id,
+      true,
+      f.other.subjectId,
+      authorizedFile,
+      "first_party_mcp",
+    ),
+  ).toBe(false);
+  expect(surfaces).toEqual(["http", "first_party_mcp"]);
+  await expect(
+    validateFileResources(
+      db.db,
+      f.workspace.accountId,
+      f.workspace.id,
+      f.other.subjectId,
+      [{ kind: "file", fileId }],
+      undefined,
+      fileGrant,
+      {
+        authorizeSession: async () => ({ allowed: false, reason: "revoked" }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+    ),
+  ).rejects.toThrow("unknown file resource");
   expect(
     await fileSourceVisibleToHost(
       {
@@ -1027,6 +1083,46 @@ test("a host denial also hides a shared source File ID and listing", async () =>
   });
 });
 
+test("migration removes legacy document resolver access from custom runtime roles", async () => {
+  const legacy = await acquireSharedTestDatabase("file-resolver-role", {
+    withheldMigrations: ["0914_session_file_source_visibility.sql"],
+  });
+  if (!legacy) throw new Error("File resolver role test requires real PostgreSQL");
+  const roleName = `og_test_resolver_${crypto.randomUUID().replaceAll("-", "")}`;
+  let roleCreated = false;
+  try {
+    const [row] = await legacy.admin`select current_schema() as schema_name`;
+    const schemaName = String(row!.schema_name);
+    await legacy.admin.unsafe(`CREATE ROLE "${roleName}"`);
+    roleCreated = true;
+    await legacy.admin.unsafe(`GRANT USAGE ON SCHEMA "${schemaName}" TO "${roleName}"`);
+    await legacy.admin.unsafe(
+      `GRANT EXECUTE ON FUNCTION "${schemaName}".resolve_document_original_file(uuid,uuid,text,uuid) TO "${roleName}"`,
+    );
+    const [before] = await legacy.admin`select has_function_privilege(
+      ${roleName}, ${`${schemaName}.resolve_document_original_file(uuid,uuid,text,uuid)`}, 'EXECUTE') as allowed`;
+    expect(before?.allowed).toBe(true);
+    await legacy.admin.unsafe(
+      await readFile(
+        new URL(
+          "../../../packages/db/drizzle/0914_session_file_source_visibility.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    const [after] = await legacy.admin`select has_function_privilege(
+      ${roleName}, ${`${schemaName}.resolve_document_original_file_authority_0914(uuid,uuid,text,uuid)`}, 'EXECUTE') as allowed`;
+    expect(after?.allowed).toBe(false);
+  } finally {
+    if (roleCreated) {
+      await legacy.admin.unsafe(`DROP OWNED BY "${roleName}"`);
+      await legacy.admin.unsafe(`DROP ROLE "${roleName}"`);
+    }
+    await legacy.release();
+  }
+}, 180_000);
+
 test("migration protects existing output and preserves a verified human share", async () => {
   const legacy = await acquireSharedTestDatabase("file-source-backfill", {
     withheldMigrations: ["0914_session_file_source_visibility.sql"],
@@ -1077,13 +1173,13 @@ test("migration protects existing output and preserves a verified human share", 
       where id = ${sharedSandboxId}`;
     await legacy.admin`insert into opengeni_private.file_source_adjudications
       (file_id, decision, attested_by) values
-      (${inheritedFileId}, 'owner_only', 'fixture-operator'),
       (${sharedFileId}, 'human_shared', 'fixture-operator'),
       (${oldAgentUploadId}, 'owner_only', 'fixture-operator'),
       (${humanUploadId}, 'human_shared', 'fixture-operator'),
       (${sharedSandboxId}, 'human_shared', 'fixture-operator')`;
     await legacy.admin`insert into opengeni_private.file_source_adjudications
       (file_id, decision, owner_subject_id, attested_by) values
+      (${inheritedFileId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator'),
       (${oldSpillId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator'),
       (${disputedOwnerId}, 'owner_only', ${f.other.subjectId}, 'fixture-operator')`;
     await legacy.admin`
@@ -1324,8 +1420,13 @@ test("migration refuses a source whose historical Slack audience was erased", as
       values (${f.workspace.accountId}, ${f.workspace.id}, ${privateFileId}, ${session.id})`;
     await legacy.admin`insert into opengeni_private.file_source_adjudications
       (file_id, decision, owner_subject_id, attested_by)
-      values (${fileId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator'),
+      values (${fileId}, 'owner_only', null, 'fixture-operator'),
         (${privateFileId}, 'owner_only', ${f.other.subjectId}, 'fixture-operator')`;
+    await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
+      "Known-source owner-only decision requires a verified owner",
+    );
+    await legacy.admin`update opengeni_private.file_source_adjudications
+      set owner_subject_id = ${f.owner.subjectId} where file_id = ${fileId}`;
     await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
       "Legacy private file owner conflicts with operator adjudication",
     );

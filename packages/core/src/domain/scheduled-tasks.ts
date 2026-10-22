@@ -1730,6 +1730,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       grant: input.grant,
       workspaceId: input.existing.workspaceId,
       ...(input.authorization ? { authorization: input.authorization } : {}),
+      sessionAuthorization: input.sessionAuthorization,
+      authorizationSurface: input.authorizationSurface,
       payload: {
         agentConfig: input.payload.agentConfig,
         runMode: nextRunMode,
@@ -2454,6 +2456,8 @@ async function validateScheduledTaskAgentConfig(input: {
   objectStorage: ObjectStorageDependency;
   grant: AccessGrant;
   authorization?: AccessGrantAuthorization;
+  sessionAuthorization?: SessionAuthorizationPort | null | undefined;
+  authorizationSurface?: SessionAuthorizationSurface | undefined;
   payload: {
     agentConfig: ScheduledTaskAgentConfig;
     runMode?: string;
@@ -2610,6 +2614,8 @@ async function validateScheduledTaskAgentConfig(input: {
           : null,
       },
       input.grant,
+      input.sessionAuthorization,
+      input.authorizationSurface ?? "core",
     );
   });
   if (input.payload.agentConfig.slackBotConnectionId) {

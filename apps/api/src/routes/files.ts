@@ -487,7 +487,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     let cursor = parsed.data.cursor;
     let lastVisibleCursor: string | null = null;
     let moreVisible = false;
-    while (true) {
+    // Bound host callbacks even when every row in a large catalog is hidden.
+    // A partial page without a visible continuation cannot expose a cursor
+    // for the hidden position, so ask the caller to narrow the listing.
+    for (let scannedPages = 0; scannedPages < 4; scannedPages++) {
       const page = await listPage(50, cursor).catch(onInvalidCursor);
       const visible = await Promise.all(
         page.files.map((file) => fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId)),
@@ -501,12 +504,17 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         files.push(page.files[index]!);
         lastVisibleCursor = page.fileCursors[index]!;
       }
-      if (moreVisible || !page.nextCursor) break;
+      if (moreVisible || !page.nextCursor) {
+        return c.json(
+          FileListResponse.parse({ files, nextCursor: moreVisible ? lastVisibleCursor : null }),
+        );
+      }
       cursor = page.nextCursor;
     }
-    return c.json(
-      FileListResponse.parse({ files, nextCursor: moreVisible ? lastVisibleCursor : null }),
-    );
+    if (files.length === limit) {
+      return c.json(FileListResponse.parse({ files, nextCursor: lastVisibleCursor }));
+    }
+    throw new HTTPException(503, { message: "File listing requires narrower selection" });
   });
 
   const readRequestedFile = async (
@@ -716,6 +724,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
+    await requireAgentSessionAccess(c, grant);
     const artifact = await getRetainedScreenshotArtifact(
       db,
       workspaceId,
@@ -725,7 +734,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
-    await requireAgentSessionAccess(c, grant);
     return c.json(retainedScreenshotMetadata(artifact));
   });
 
@@ -735,6 +743,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
       const artifactId = retainedArtifactId(c.req.param("artifactId"));
+      await requireAgentSessionAccess(c, grant);
       const artifact = await getRetainedScreenshotArtifact(
         db,
         workspaceId,
@@ -744,7 +753,6 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!artifact) {
         return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
       }
-      await requireAgentSessionAccess(c, grant);
       return await serveRetainedArtifactContent(
         c,
         objectStorage,

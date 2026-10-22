@@ -41,7 +41,10 @@ import {
 import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
 import { prepareDraftModel } from "./draft-model-preparation";
 
-type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
+type NewSessionDraftDependencies = Pick<
+  AppDependencies,
+  "settings" | "db" | "objectStorage" | "sessionAuthorization"
+>;
 
 function hasOwn(value: unknown, key: string): boolean {
   return typeof value === "object" && value !== null && Object.hasOwn(value, key);
@@ -346,6 +349,8 @@ async function saveActorNewSessionDraftInFileScope(
       ? await fileOwnerContextForAccess(deps, externalAuthorization, "sessions:create")
       : undefined,
     grant,
+    deps.sessionAuthorization,
+    "core",
   );
   assertConfiguredModel(deps.settings, input.model);
   await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, input.model);

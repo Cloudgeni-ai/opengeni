@@ -3299,6 +3299,8 @@ async function createSessionForRequestInFileScope(
         resources,
         ownerContext,
         grant,
+        unresolvedDeps.sessionAuthorization,
+        "core",
       );
       // Variable Sets were replaced by vaults (RM-1); a session never selects one.
       if (payload.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
@@ -4555,6 +4557,8 @@ async function acceptSessionUserMessageInFileScope(
       requestedResources,
       attachmentOwnerContext,
       grant,
+      deps.sessionAuthorization,
+      "core",
     );
     await validateGitHubRepositorySelection(db, workspaceId, [
       ...existingSession.resources,

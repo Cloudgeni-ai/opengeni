@@ -62,7 +62,18 @@ export function buildFilesMcpServer(
           subjectId: grant.subjectId,
           fileId,
         });
-        if (!(await fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId))) {
+        if (
+          !(await fileSourceVisibleToHost(
+            deps,
+            grant,
+            file.id,
+            file.workspaceId,
+            false,
+            grant.subjectId,
+            undefined,
+            "first_party_mcp",
+          ))
+        ) {
           throw new Error("file not found");
         }
         if (file.status !== "ready") {

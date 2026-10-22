@@ -87,6 +87,7 @@ export function createSharedActivityServices(
         db,
         bus,
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
+        sessionAuthorization: dependencies.sessionAuthorization ?? null,
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
         signalSessionAttemptQuiesced: dependencies.signalSessionAttemptQuiesced ?? null,

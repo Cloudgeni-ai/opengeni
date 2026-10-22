@@ -341,7 +341,17 @@ export function registerKnowledgeEntryTools(
             deps,
             context,
             fileId,
-            (file) => fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId, true),
+            (file) =>
+              fileSourceVisibleToHost(
+                deps,
+                grant,
+                file.id,
+                file.workspaceId,
+                true,
+                grant.subjectId,
+                undefined,
+                "first_party_mcp",
+              ),
             purpose,
           ),
         "knowledge",
