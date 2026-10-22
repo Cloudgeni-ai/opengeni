@@ -20,6 +20,8 @@ import {
   SelfhostedSession,
   SELFHOSTED_DRAINING_MAX_RETRIES,
   SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
+  SELFHOSTED_AGENT_UPDATE_DRAIN_REASON,
+  SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES,
   SELFHOSTED_RETRY_BACKOFF_BASE_MS,
   SELFHOSTED_RETRY_BACKOFF_CAP_MS,
   SELFHOSTED_TIMEOUT_MAX_RETRIES,
@@ -116,6 +118,39 @@ describe("decideSelfhostedRetry — the pure retry matrix", () => {
         jitter: 0,
       }).action,
     ).toBe("fail");
+  });
+
+  test("a self-update DRAIN is waited out patiently by every op kind", () => {
+    const updateDraining = () =>
+      agentErrorToControlError({
+        code: ErrorCode.ERROR_CODE_DRAINING,
+        message: "",
+        retryable: true,
+        detail: { reason: SELFHOSTED_AGENT_UPDATE_DRAIN_REASON },
+      });
+    for (const opKind of [...MUTATING_OPS, ...READONLY_OPS, "browserControlHttp"]) {
+      for (let n = 0; n < SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES; n++) {
+        expect(
+          decideSelfhostedRetry({
+            opKind,
+            error: updateDraining(),
+            drainingRetries: n,
+            timeoutRetries: 0,
+            jitter: 0,
+          }).action,
+        ).toBe("retry");
+      }
+      expect(
+        decideSelfhostedRetry({
+          opKind,
+          error: updateDraining(),
+          drainingRetries: SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES,
+          timeoutRetries: 0,
+          jitter: 0,
+        }).action,
+      ).toBe("fail");
+    }
+    expect(SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES).toBeGreaterThan(SELFHOSTED_DRAINING_MAX_RETRIES);
   });
 
   test("a TIMEOUT is retried once — and ONLY for a read-only idempotent op", () => {

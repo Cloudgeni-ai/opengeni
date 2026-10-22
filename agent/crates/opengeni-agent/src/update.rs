@@ -350,17 +350,28 @@ pub enum ManagedUpdatePhase {
     Applying,
 }
 
-/// Applies one exact signed release from one deployment origin. This is the same
-/// updater as the local CLI, narrowed by the control-plane request: the signed
-/// manifest must offer exactly `target_version`, then artifact minisign+sha256,
-/// atomic swap, startup health-gate, and rollback all run unchanged.
-pub fn apply_managed(
+/// One exact signed release, downloaded and verified but not yet installed.
+/// Preparing touches nothing on the machine, so it runs while the agent keeps
+/// accepting work; only [`apply_prepared`] needs the host quiet.
+#[derive(Debug)]
+pub struct PreparedManagedUpdate {
+    operation_id: String,
+    install_path: &'static Path,
+    expected_sha256: String,
+    pending: opengeni_agent_update::PendingUpdate,
+}
+
+/// Fetches one exact signed release from one deployment origin and verifies it.
+/// This is the same updater as the local CLI, narrowed by the control-plane
+/// request: the signed manifest must offer exactly `target_version`, and the
+/// artifact must pass minisign + sha256 before it is returned.
+pub fn prepare_managed(
     operation_id: &str,
     base_url: &str,
     channel: &str,
     target_version: &str,
     mut progress: impl FnMut(ManagedUpdatePhase),
-) -> Result<ManagedUpdateResult, String> {
+) -> Result<PreparedManagedUpdate, String> {
     let install_path = installed_executable()?;
     if uuid::Uuid::parse_str(operation_id).is_err() {
         return Err("invalid_update_operation".to_string());
@@ -402,6 +413,27 @@ pub fn apply_managed(
         .download(&source)
         .map_err(|error| managed_fetch_failure(operation_id, target_version, "artifact", &error))?;
     progress(ManagedUpdatePhase::Verifying);
+    Ok(PreparedManagedUpdate {
+        operation_id: operation_id.to_string(),
+        install_path,
+        expected_sha256,
+        pending,
+    })
+}
+
+/// Installs a prepared release: atomic swap, startup health gate, durable
+/// receipt and rollback, unchanged from the local CLI.
+pub fn apply_prepared(
+    prepared: PreparedManagedUpdate,
+    mut progress: impl FnMut(ManagedUpdatePhase),
+) -> Result<ManagedUpdateResult, String> {
+    let PreparedManagedUpdate {
+        operation_id,
+        install_path,
+        expected_sha256,
+        pending,
+    } = prepared;
+    let operation_id = operation_id.as_str();
     progress(ManagedUpdatePhase::Applying);
     #[cfg(target_os = "macos")]
     if opengeni_agent_update::app_bundle_root(install_path).is_some() {

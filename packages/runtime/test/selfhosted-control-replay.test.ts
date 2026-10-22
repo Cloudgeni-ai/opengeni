@@ -177,6 +177,50 @@ describe("control reply recovery", () => {
     expect(refusal.error?.detail.never_sent).toBeUndefined();
   });
 
+  test("a successor process that never issued the token gets the call again with a fresh one", async () => {
+    // An agent self-update hands the same subject to a new process. Tokens the
+    // old process issued are unknown to it, and it refuses them before running
+    // anything, so a call whose only transmission was refused is sent again.
+    let probes = 0;
+    const deliveries: string[] = [];
+    const refusal = ControlResponse.fromPartial({
+      requestId: mutation.requestId,
+      error: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "receipt expired or unknown",
+        retryable: false,
+        detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+      },
+    });
+    let successorTokens = new Set<string>();
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target) {
+        if (target === subject) {
+          probes++;
+          const reply = leaseReply();
+          if (probes > 1) {
+            const ping = ControlResponse.decode(reply.data).result;
+            if (ping?.$case === "ping") successorTokens = new Set(ping.ping.controlReplayTokens);
+          }
+          return reply;
+        }
+        deliveries.push(target);
+        const token = target.split(".replay.")[1]?.split(".")[0] ?? "";
+        if (!successorTokens.has(token)) return { data: ControlResponse.encode(refusal).finish() };
+        return { data: result };
+      },
+    }));
+    // The first call draws a token from the predecessor's batch.
+    expect((await rpc.request(subject, mutation, { timeoutMs: 100 })).error).toBeUndefined();
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries[0]).not.toBe(deliveries[1]);
+    expect(probes).toBe(2);
+    // Later calls use the successor's tokens directly.
+    expect((await rpc.request(subject, mutation, { timeoutMs: 100 })).error).toBeUndefined();
+    expect(deliveries).toHaveLength(3);
+  });
+
   test("a v2 peer that omits its lease fails before publishing the mutation", async () => {
     let calls = 0;
     const rpc = new NatsControlRpc(async () => ({
