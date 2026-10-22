@@ -1,5 +1,43 @@
 # @opengeni/react
 
+## 4.5.0
+
+### Minor Changes
+
+- f838cb7: A deployment that ships its own branded build of the browser extension can now name and link it. Set `OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`. Agent tool descriptions, setup notes and errors, `/v1/config/client` (`browserExtension`), the machine card's Chrome step and the browser panel's install hint then use that name and install link. Without them, everything still says Opengeni Browser and links its Chrome Web Store page, unchanged.
+- 1d65f48: The mobile app can search chats across all of a person's workspaces, like ⌘K on the web. A search button on the home screen opens the chat search, which matches chat titles in the current workspace first and in the person's other workspaces after, labelling each chat from another workspace with its workspace's name. Matching workspaces appear too, so a search can also switch workspace. Opening a chat from another workspace switches to that workspace. `SessionRow` accepts an optional `workspaceName`, and `@opengeni/react` exports the chat-title ranking helpers `rankLabel`, `foldForSearch` and `LOOSE_MATCH_BELOW`.
+- 4e8a749: Every Site is a sidebar row, not only Sites with conversations. A Site sits in the project of the chat that created it, and new Site conversations are filed there too. Opening a Site counts as activity for its row, so Sites in use rise and untouched ones sort down. Adds `recordSiteOpened` to the SDK (`POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`), returning `SiteOpenedResponse`.
+
+  `siteGroups[].conversations` can now be 0. An older `@opengeni/react` rail shows such a row with a "0" count until it is updated.
+
+- d0bc2d6: Sites with conversations are rows in the sidebar. Each Site row shows how many conversations it has and their status, sorts by latest activity with other rows and stays in its project. Its conversations are nested under it, collapsed by default, and no longer appear or disappear depending on which session is open. Session lists take a `siteConversations` option: `group` returns complete `siteGroups` for a root page, and `include` lists Site conversations as ordinary rows. Workspace list hints report the viewer's changed Site conversations separately in `siteSessionIds`.
+- 0b3b079: Opening a Site from the sidebar shows the Site with its conversations beside it. The newest conversation is open, the others are listed to switch between, and New starts another one in the Site. Opening one of a Site's conversations from the sidebar or from a chat's Site link shows the same view with that conversation selected.
+
+### Patch Changes
+
+- 6f9b6f5: An embedded session app (the `embed` preset) no longer shows Opengeni branding a product did not ask for. The mobile header respects the `brand` switch. A new `starters` switch, off in `embed`, hides Opengeni's suggested first tasks (connect Slack, GitHub, Linear and so on). Someone without GitHub access in the workspace no longer gets a "GitHub status unavailable" toast every time the window regains focus.
+- 7e5e08f: Every first-party tool step in the timeline now draws an icon that matches its words (a globe for the browser, a monitor for the screen, a spreadsheet for Excel, an hourglass for waiting, and so on) instead of the generic wrench. The mapping lives in one shared table keyed by tool step, so the web app, React Native and embedded chats all get the same icons; a new step without an icon fails to compile. Connector and custom tools keep their family icon or the wrench.
+- debd64e: When something you can fix blocks the agent, the setup card now appears in the same reply, so you no longer have to ask the agent how. The first case is your own Chrome: if the agent needs it and it isn't connected, a Chrome card shows one step at a time: connect a computer, add the Opengeni Browser extension, then continue. The existing card for allowing a chat to use your personal machine now goes through the same path.
+- 0910456: Holding ⌘ (Ctrl on Windows and Linux) for a moment in the desktop app shows each pinned chat's ⌘1 to ⌘9 key in place of its time, so the shortcut is discoverable. The numbers follow the order the Pinned section shows. Browsers keep ⌘1 to ⌘9 for their own tabs, so the hint appears only where those keys work.
+- 3e4426e: Ride out API rolling deploys and short network blips quietly. The SDK client now retries safe JSON reads (`GET`/`HEAD`) that fail with a transport error or a `502`, `503` or `504`: up to 4 attempts within 5 seconds with jittered backoff, honoring `Retry-After`. Tune it with the new `readRetry` client option or turn it off with `readRetry: false`; mutations are never retried. `isTransientRequestError` is exported for callers with their own retry loop.
+
+  In the console, session, session list and workspace reads, the session event stream and the session lookup page keep showing the loading state or the last loaded view through a transient failure and retry on their own, with no error toast. Only a failure that lasts more than 20 seconds shows an error, once, with a Try again action, and the page keeps retrying in the background and recovers by itself.
+
+- 60e9756: The Site view counts as its own `sites` page in web analytics and client signals, and it declares that its panes scroll themselves inside the app canvas.
+- d8179be: The timeline step for starting a worker now reads "Started a worker" instead of "Got help from another assistant", which claimed the help had arrived when the worker had only started. A worker started through `tool_invoke` now shows as the same worker card (title, status, link to the worker) as one started directly.
+- Updated dependencies [f838cb7]
+- Updated dependencies [debd64e]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/connect@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes
