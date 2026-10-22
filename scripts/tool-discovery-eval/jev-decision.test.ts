@@ -1,3 +1,8 @@
+// opengeni:test-wall-clock-sensitive
+// The command-wiring test below runs thirteen eval CLI processes in sequence
+// under one 30 s limit, and each spends most of its time loading the runtime
+// modules. Beside sibling test processes (such as a cargo build) that share
+// the CPUs, that startup slows enough to exceed the limit.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
