@@ -363,12 +363,17 @@ cancels or lands, and no base-purpose run exists until the controller publishes 
   config. Lint and format policy the pinned oxlint and oxfmt find by name in any
   directory is recipe too: every `.gitignore`, `.eslintignore`, `.prettierignore`,
   `.editorconfig`, nested or alternative oxlint/oxfmt config, and the local
-  `jsPlugins` an oxlint config loads (executed, with their harness imports).
-  Configs of product packages the harness does not execute are compiled as code
-  under comparison and stay unbound. An executed script, named policy input or
-  consulted config that is not tracked is bound as absent. Plan and ready jobs are
-  excluded. Missing or disagreeing evidence leaves the recipe unknown and the run
-  not comparable.
+  `jsPlugins` an oxlint config loads. The walk is a closed worklist over typed
+  edges: lint configs follow `extends` and `jsPlugins` (so a plugin declared in an
+  inherited policy is reached), and config modules and plugins are lint policy
+  code that follows every local import and every relative path its code names,
+  inside or outside `scripts/`. Lint policy code the walk cannot follow (a
+  computed `import()`/`require()`, an unresolvable import, unparseable code) fails
+  closed. Configs of product packages the harness does not execute are compiled as
+  code under comparison and stay unbound. An executed script, named policy input
+  or consulted config that is not tracked is bound as absent. Plan and ready jobs
+  are excluded. Missing or disagreeing evidence leaves the recipe unknown and the
+  run not comparable.
 - **Verification and verdict.** `verifyBaseRun` requires the batch workflow, the
   exact base branch and tip, the latest attempt, a completed run, a base-purpose
   result (`verifyRunResult`; `verifyResult` rejects every non-candidate purpose),

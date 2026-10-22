@@ -252,126 +252,166 @@ export function trackedBlobs(listing: string): Map<string, string> {
   return blobs;
 }
 
+const IMPORT_SUFFIXES = [".ts", ".tsx", ".js", ".mjs", ".cjs", "/index.ts", "/index.js"] as const;
+
 function resolveLocalImport(from: string, specifier: string, blobs: Map<string, string>) {
   const target = posix.normalize(posix.join(posix.dirname(from), specifier));
-  for (const candidate of [
-    target,
-    `${target}.ts`,
-    `${target}.tsx`,
-    `${target}.js`,
-    `${target}/index.ts`,
-  ])
+  for (const candidate of [target, ...IMPORT_SUFFIXES.map((suffix) => `${target}${suffix}`)])
     if (blobs.has(candidate)) return candidate;
   throw new Error(`Unresolvable batch harness import ${specifier} from ${from}`);
 }
 
 /**
- * Recipe identity: the transitive local import closure of every harness entry,
- * every harness script those files execute (subprocesses and root package
- * scripts, with their own imports and executions inside the harness tree), the
- * harness-owned policy inputs those sources read (`policyInputs`), the
- * configuration tools find by composed path (`harnessConfigs`), the lint and
- * format policy the tools find by name anywhere (`TOOL_POLICY`, with the local
- * plugins an oxlint config loads), the `extends` chain of every bound config,
- * the workflow, tool configuration, toolchain pins, lockfile and every package
- * manifest.
- * Package imports resolve through the lockfile and manifests, which are bound
- * here. An executed harness script, named policy input or consulted config that
- * is not tracked is bound as absent (null), so adding it later changes the recipe.
+ * How the recipe walk follows a file: harness entries and lint policy code
+ * follow every local import; executed harness scripts follow imports inside
+ * the harness tree; configs follow `extends` (lint configs also `jsPlugins`);
+ * the workflow names executed scripts; data has no edges.
+ */
+type RecipeKind = "entry" | "script" | "tool" | "workflow" | "tsconfig" | "lint" | "data";
+/** Code the walk parses for imports. */
+const CODE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+/** A dynamic `import()` or `require()` whose argument is not a plain string literal. */
+const COMPUTED_LOAD = /\b(?:import|require)\s*\(\s*(?!(["'])[^"'`$]*\1\s*[,)])/;
+/** A quoted relative path in code. */
+const RELATIVE_LITERAL = /["'`](\.{1,2}\/[^"'`$\s]*)["'`]/g;
+
+function fileKind(path: string, from: "tool" | null = null): RecipeKind {
+  if (/\.ya?ml$/.test(path)) return "workflow";
+  if (CONFIG.test(path)) return "tsconfig";
+  if (/(?:^|\/)\.(?:oxlintrc|oxfmtrc)\.jsonc?$/.test(path)) return "lint";
+  if (/(?:^|\/)(?:oxlint|oxfmt)\.config\.[cm]?[jt]s$/.test(path)) return "tool";
+  if (from === "tool") return CODE.test(path) ? "tool" : /\.jsonc?$/.test(path) ? "lint" : "data";
+  return "data";
+}
+
+/** A relative path named in lint policy code, resolved like an import; null when it names no file. */
+function resolveRelative(from: string, literal: string, blobs: ReadonlyMap<string, string>) {
+  const target = posix.normalize(posix.join(posix.dirname(from), literal));
+  for (const candidate of [target, ...IMPORT_SUFFIXES.map((suffix) => `${target}${suffix}`)])
+    if (blobs.has(candidate)) return candidate;
+  return /\.[A-Za-z0-9]+$/.test(target) && !target.endsWith("/") ? target : null;
+}
+
+/**
+ * Recipe identity: everything the batch steps execute or consult that is not
+ * the code under comparison, found as a closed worklist over typed edges until
+ * no edge remains:
+ * - harness entries and the code they import (local imports, unrestricted);
+ * - harness scripts that code or the workflow executes (subprocesses and root
+ *   package scripts) with their imports and executions inside the harness tree;
+ * - harness-owned policy inputs those sources read (`policyInputs`);
+ * - configuration tools find by composed path for every bound source
+ *   (`harnessConfigs`), and every config's `extends` chain;
+ * - lint and format policy the tools find by name anywhere (`TOOL_POLICY`): the
+ *   configs' `extends` and `jsPlugins`, config modules and plugins as lint
+ *   policy code with all their local imports and the relative paths their code
+ *   names, wherever they lead;
+ * - the workflow, tool configuration, toolchain pins, lockfile and every
+ *   package manifest (package imports resolve through these).
+ * An edge to an untracked file binds it as absent (null), so adding it later
+ * changes the recipe. A form the walk cannot follow fails closed: an
+ * unresolvable local import, unparseable lint policy code, or a dynamic
+ * `import()`/`require()` of a computed path in lint policy code leaves the
+ * recipe unknown, so the run is not comparable.
  */
 export function recipePaths(
   blobs: Map<string, string>,
   read: (path: string) => string,
 ): [string, string | null][] {
-  const transpiler = new Bun.Transpiler({ loader: "ts" });
+  const transpilers = {
+    ts: new Bun.Transpiler({ loader: "ts" }),
+    tsx: new Bun.Transpiler({ loader: "tsx" }),
+  };
+  const transpiler = (path: string) => (/\.[jt]sx$/.test(path) ? transpilers.tsx : transpilers.ts);
   // The transpiler rejects a leading shebang; it never carries imports.
+  const text = (path: string) => read(path).replace(/^#!.*/, "");
   const imports = (path: string) =>
-    transpiler
-      .scanImports(read(path).replace(/^#!.*/, ""))
+    transpiler(path)
+      .scanImports(text(path))
       .filter((item) => item.path.startsWith("."))
       .map((item) => item.path);
-  // Phase 1: the import closure of the entries, unrestricted as before.
-  const closure = new Set<string>();
-  const pending: string[] = [...RECIPE_ENTRIES];
-  while (pending.length) {
-    const path = pending.pop()!;
-    if (closure.has(path)) continue;
-    if (!blobs.has(path)) throw new Error(`Batch harness entry ${path} is not tracked`);
-    closure.add(path);
-    if (SOURCE.test(path))
-      for (const specifier of imports(path))
-        pending.push(resolveLocalImport(path, specifier, blobs));
-  }
-  // Phase 2: what that closure and the workflow execute, with the executed
-  // scripts' own imports and executions, inside the harness tree only.
   const manifest = blobs.has("package.json")
     ? (JSON.parse(read("package.json")) as { scripts?: unknown }).scripts
     : undefined;
   const scripts =
     manifest && typeof manifest === "object" ? (manifest as Record<string, string>) : {};
+  const bound = new Set<string>();
   const absent = new Set<string>();
-  const executed: string[] = [];
-  // Lint and format policy found by name anywhere; local oxlint plugins it
-  // loads are executed like spawned scripts.
-  const policy = [...blobs.keys()].filter((path) => TOOL_POLICY.test(path));
-  for (const path of policy)
-    if (/\/?\.oxlintrc\.jsonc?$/.test(path)) executed.push(...lintPlugins(path, read(path)));
-  const execute = (from: string, shell: boolean) => {
-    for (const path of executedScripts(read(from), shell, scripts))
-      if (path.startsWith(HARNESS_ROOT)) executed.push(path);
+  const visited = new Set<string>();
+  const pending: [string, RecipeKind][] = [
+    ...RECIPE_ENTRIES.map((path): [string, RecipeKind] => [path, "entry"]),
+    ...RECIPE_FILES.map((path): [string, RecipeKind] => [path, fileKind(path)]),
+    ...[...blobs.keys()]
+      .filter((path) => TOOL_POLICY.test(path))
+      .map((path): [string, RecipeKind] => [path, fileKind(path)]),
+  ];
+  const code = (path: string, kind: RecipeKind) => {
+    for (const script of executedScripts(read(path), false, scripts))
+      if (script.startsWith(HARNESS_ROOT)) pending.push([script, "script"]);
+    const inputs = policyInputs(path, read(path), blobs);
+    for (const input of [...inputs.tracked, ...inputs.absent])
+      pending.push([input, fileKind(input)]);
+    for (const config of harnessConfigs([path], blobs)) pending.push([config, "tsconfig"]);
+    if (kind !== "tool") return;
+    // Lint policy code: every relative path its code names is followed too
+    // (a config module's `jsPlugins`, a plugin's data); a load the walk cannot
+    // follow is not silently assumed away.
+    const compiled = transpiler(path).transformSync(text(path));
+    if (COMPUTED_LOAD.test(compiled))
+      throw new Error(`Unsupported computed module load in lint policy code ${path}`);
+    for (const match of compiled.matchAll(RELATIVE_LITERAL)) {
+      const target = resolveRelative(path, match[1]!, blobs);
+      if (target) pending.push([target, fileKind(target, "tool")]);
+    }
   };
-  for (const path of RECIPE_FILES)
-    if (blobs.has(path) && /\.ya?ml$/.test(path)) execute(path, true);
-  for (const path of closure) if (SOURCE.test(path)) execute(path, false);
-  while (executed.length) {
-    const path = executed.pop()!;
-    if (closure.has(path) || absent.has(path)) continue;
+  while (pending.length) {
+    const [path, kind] = pending.pop()!;
+    const key = `${kind}\0${path}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
     if (!blobs.has(path)) {
+      if (kind === "entry") throw new Error(`Batch harness entry ${path} is not tracked`);
       absent.add(path);
       continue;
     }
-    closure.add(path);
-    if (!SOURCE.test(path)) continue;
-    for (const specifier of imports(path)) {
-      const target = posix.normalize(posix.join(posix.dirname(path), specifier));
-      if (target.startsWith(HARNESS_ROOT))
-        executed.push(resolveLocalImport(path, specifier, blobs));
-    }
-    execute(path, false);
-  }
-  // Phase 3: harness-owned policy inputs the bound harness sources read directly.
-  for (const path of [...closure]) {
-    if (!SOURCE.test(path)) continue;
-    const inputs = policyInputs(path, read(path), blobs);
-    for (const input of inputs.tracked) closure.add(input);
-    for (const input of inputs.absent) absent.add(input);
-  }
-  // Phase 4: configuration found by composed path for the bound sources, and
-  // the extends chain of every bound config wherever it leads (a base config
-  // is harness configuration too).
-  const sources = [...closure].filter((source) => SOURCE.test(source));
-  for (const path of harnessConfigs(sources, blobs)) (blobs.has(path) ? closure : absent).add(path);
-  for (const path of policy) closure.add(path);
-  const configs = [...closure, ...RECIPE_FILES].filter(
-    (path) =>
-      (CONFIG.test(path) || /\.(?:oxlintrc|oxfmtrc)\.jsonc?$/.test(path)) && blobs.has(path),
-  );
-  while (configs.length) {
-    const path = configs.pop()!;
-    for (const target of configExtends(path, read(path), blobs)) {
-      if (closure.has(target) || absent.has(target)) continue;
-      if (!blobs.has(target)) {
-        absent.add(target);
-        continue;
-      }
-      closure.add(target);
-      configs.push(target);
+    bound.add(path);
+    switch (kind) {
+      case "entry":
+      case "tool":
+        if (!CODE.test(path)) break;
+        for (const specifier of imports(path))
+          pending.push([resolveLocalImport(path, specifier, blobs), kind]);
+        code(path, kind);
+        break;
+      case "script":
+        if (!CODE.test(path)) break;
+        for (const specifier of imports(path)) {
+          const target = posix.normalize(posix.join(posix.dirname(path), specifier));
+          if (target.startsWith(HARNESS_ROOT))
+            pending.push([resolveLocalImport(path, specifier, blobs), "script"]);
+        }
+        code(path, kind);
+        break;
+      case "workflow":
+        for (const script of executedScripts(read(path), true, scripts))
+          if (script.startsWith(HARNESS_ROOT)) pending.push([script, "script"]);
+        break;
+      case "tsconfig":
+        for (const target of configExtends(path, read(path), blobs))
+          pending.push([target, "tsconfig"]);
+        break;
+      case "lint":
+        for (const target of configExtends(path, read(path), blobs)) pending.push([target, "lint"]);
+        for (const plugin of lintPlugins(path, read(path))) pending.push([plugin, "tool"]);
+        break;
+      case "data":
+        break;
     }
   }
   const manifests = [...blobs.keys()].filter(
     (path) => path === "package.json" || path.endsWith("/package.json"),
   );
-  return [...new Set([...closure, ...absent, ...RECIPE_FILES, ...manifests])]
+  return [...new Set([...bound, ...absent, ...RECIPE_FILES, ...manifests])]
     .sort()
     .map((path) => [path, blobs.get(path) ?? null]);
 }

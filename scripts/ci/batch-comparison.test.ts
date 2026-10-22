@@ -514,6 +514,115 @@ describe("recipe identity", () => {
     expect(lintPlugins("a/.oxlintrc.json", '{"jsPlugins":"./x.js"}')).toEqual([]);
   });
 
+  test("lint policy graph: inherited plugins, config module imports, plugin helpers anywhere", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    // Each supported form, with the file whose change flips the pinned oxlint
+    // verdict (0 -> 1) while every linted file is unchanged.
+    const forms: { files: Record<string, string>; drop?: string; changed: string }[] = [
+      {
+        // A jsPlugin declared in a policy the root config extends.
+        files: {
+          ".oxlintrc.json": JSON.stringify({ extends: ["./scripts/lint/policy.json"] }),
+          "scripts/lint/policy.json": JSON.stringify({
+            jsPlugins: [{ name: "review", specifier: "./plugin.mjs" }],
+          }),
+          "scripts/lint/plugin.mjs": "export default {};\n",
+        },
+        changed: "scripts/lint/plugin.mjs",
+      },
+      {
+        // Rules a config module imports.
+        files: {
+          "oxlint.config.ts":
+            'import { rules } from "./scripts/lint/rules.ts";\nexport default { rules };\n',
+          "scripts/lint/rules.ts": 'export const rules = { "no-debugger": "off" };\n',
+        },
+        drop: ".oxlintrc.json",
+        changed: "scripts/lint/rules.ts",
+      },
+      {
+        // A plugin outside scripts/ importing its own helper.
+        files: {
+          ".oxlintrc.json": JSON.stringify({ jsPlugins: ["./lint/plugin.mjs"] }),
+          "lint/plugin.mjs": 'import { fail } from "./helper.mjs";\nexport default { fail };\n',
+          "lint/helper.mjs": "export const fail = false;\n",
+        },
+        changed: "lint/helper.mjs",
+      },
+      {
+        // A plugin a config module names by path rather than imports.
+        files: {
+          "oxlint.config.ts": 'export default { jsPlugins: ["./lint/named.mjs"] };\n',
+          "lint/named.mjs": "export default {};\n",
+        },
+        changed: "lint/named.mjs",
+      },
+    ];
+    for (const form of forms) {
+      const tree = new Map(blobs);
+      if (form.drop) tree.delete(form.drop);
+      for (const [path, text] of Object.entries(form.files)) tree.set(path, blobId(text));
+      const reader = (path: string) => form.files[path] ?? read(path);
+      const before = recipePaths(tree, reader);
+      for (const path of Object.keys(form.files))
+        expect(new Map(before).get(path)).toBe(blobId(form.files[path]!));
+      const after = recipePaths(new Map(tree).set(form.changed, "0".repeat(40)), reader);
+      expect(digest(after)).not.toBe(digest(before));
+      // The base side of a comparison holds instead of blaming the candidate.
+      expect(sourceStepComparison("guards", before, after)).toMatchObject({
+        verdict: "not-comparable",
+      });
+    }
+    // A plugin or named file that is not tracked is bound as absent.
+    const missing = new Map(blobs).set(".oxlintrc.json", "1".repeat(40));
+    const overlay = (path: string) =>
+      path === ".oxlintrc.json"
+        ? JSON.stringify({ extends: ["./lint/base.json"], jsPlugins: ["./lint/gone.mjs"] })
+        : read(path);
+    const absent = new Map(recipePaths(missing, overlay));
+    expect(absent.get("lint/base.json")).toBeNull();
+    expect(absent.get("lint/gone.mjs")).toBeNull();
+    // A config module naming a JSON policy reaches that policy's own plugins,
+    // and a path it names that is not tracked is bound as absent.
+    const files: Record<string, string> = {
+      "oxlint.config.ts":
+        'export default { extends: ["./lint/shared.json"], jsPlugins: ["./lint/later.mjs"] };\n',
+      "lint/shared.json": JSON.stringify({ jsPlugins: ["./inherited.mjs"] }),
+      "lint/inherited.mjs": "export default {};\n",
+    };
+    const tree = new Map(blobs);
+    for (const [path, text] of Object.entries(files)) tree.set(path, blobId(text));
+    const named = new Map(recipePaths(tree, (path) => files[path] ?? read(path)));
+    expect(named.get("lint/inherited.mjs")).toBe(blobId(files["lint/inherited.mjs"]!));
+    expect(named.has("lint/later.mjs")).toBe(true);
+    expect(named.get("lint/later.mjs")).toBeNull();
+  });
+
+  test("lint policy code the walk cannot follow fails closed", () => {
+    const blobs = head();
+    const read = (path: string) => readFileSync(path, "utf8");
+    const withModule = (source: string, extra: Record<string, string> = {}) => {
+      const files: Record<string, string> = { "oxlint.config.ts": source, ...extra };
+      const tree = new Map(blobs);
+      for (const [path, text] of Object.entries(files)) tree.set(path, blobId(text));
+      return () => recipePaths(tree, (path) => files[path] ?? read(path));
+    };
+    for (const source of [
+      "const name = process.env.RULES!;\nexport default await import(name);\n",
+      "export default require(`./lint/${process.env.RULES}.js`);\n",
+      "const load = (path: string) => import(path);\nexport default load;\n",
+    ])
+      expect(withModule(source)).toThrow("Unsupported computed module load");
+    expect(withModule('import "./lint/missing";\n')).toThrow("Unresolvable batch harness import");
+    expect(withModule("export default {;\n")).toThrow();
+    // Literal loads are followed, not rejected.
+    const literal = withModule('export default await import("./lint/rules.mjs");\n', {
+      "lint/rules.mjs": "export default {};\n",
+    })();
+    expect(new Map(literal).get("lint/rules.mjs")).toBe(blobId("export default {};\n"));
+  });
+
   test("an ignore policy change is a recipe change, so the comparison holds", () => {
     const blobs = head();
     const read = (path: string) => readFileSync(path, "utf8");
