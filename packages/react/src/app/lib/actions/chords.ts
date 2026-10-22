@@ -55,11 +55,19 @@ export function matchesChord(
   event: Pick<
     KeyboardEvent,
     "code" | "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey" | "repeat" | "isComposing"
-  >,
+  > &
+    Partial<Pick<KeyboardEvent, "getModifierState">>,
   chord: Chord,
   platform: ChordPlatform,
 ): boolean {
   if (event.repeat || event.isComposing) return false;
+  // Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt chord would take a
+  // character someone is typing: AltGr+A is "ą" on Polish keyboards and AltGr+B
+  // is "{" on Czech and Hungarian ones. Windows apps cannot tell the two apart
+  // either, so on those layouts the character wins.
+  if (platform === "other" && chord.mod && chord.alt && event.getModifierState?.("AltGraph")) {
+    return false;
+  }
   if (event.code === chord.code) {
     if (Boolean(chord.shift) !== event.shiftKey) return false;
   } else {

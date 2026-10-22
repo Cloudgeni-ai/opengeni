@@ -85,6 +85,38 @@ describe("chords", () => {
     ).toBe(false);
   });
 
+  test("AltGr typing on Windows never fires a Ctrl+Alt chord", () => {
+    // What Windows browsers report for AltGr+key: Ctrl and Alt, plus AltGraph.
+    const altGr = (code: string, character: string) => ({
+      ...key(code, { ctrl: true, alt: true, key: character }),
+      getModifierState: (modifier: string) => modifier === "AltGraph",
+    });
+    const chordFor = (id: string) =>
+      applicableChords(APP_ACTIONS.find((action) => action.id === id)!.chords, "web", "other")[0]!;
+    // "ą" on Polish keyboards and "{" on Czech and Hungarian ones; Pin uses the same shape.
+    expect(matchesChord(altGr("KeyA", "ą"), chordFor("chat.archive"), "other")).toBe(false);
+    expect(matchesChord(altGr("KeyB", "{"), chordFor("view.workspacePanel"), "other")).toBe(false);
+    expect(matchesChord(altGr("KeyP", "π"), chordFor("chat.pin"), "other")).toBe(false);
+    // A deliberate Ctrl+Alt on a layout without AltGr still works.
+    const plain = (code: string, character: string) => ({
+      ...key(code, { ctrl: true, alt: true, key: character }),
+      getModifierState: () => false,
+    });
+    expect(matchesChord(plain("KeyA", "a"), chordFor("chat.archive"), "other")).toBe(true);
+    expect(matchesChord(plain("KeyB", "b"), chordFor("view.workspacePanel"), "other")).toBe(true);
+    // Mac has no AltGr: ⌥⌘B with Option reported as AltGraph is still the chord.
+    expect(
+      matchesChord(
+        {
+          ...key("KeyB", { meta: true, alt: true, key: "∫" }),
+          getModifierState: (modifier: string) => modifier === "AltGraph",
+        },
+        chordFor("view.workspacePanel"),
+        "mac",
+      ),
+    ).toBe(true);
+  });
+
   test("shows each platform's notation", () => {
     const toggle: Chord = { code: "KeyS", mod: true, control: true };
     expect(chordKeys(toggle, "mac")).toEqual(["⌃", "⌘", "S"]);
