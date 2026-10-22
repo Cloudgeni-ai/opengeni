@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.115"
+version = "0.1.116"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.115"
+version = "0.1.116"
 dependencies = [
  "async-trait",
  "axum",
