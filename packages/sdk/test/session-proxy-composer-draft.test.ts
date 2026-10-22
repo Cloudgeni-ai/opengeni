@@ -483,11 +483,14 @@ describe("session proxy locked-model composer draft", () => {
       await expect(
         f.browser.saveComposerDraft(WORKSPACE_ID, SESSION_ID, saveInput()),
       ).rejects.toMatchObject({ status });
-      expect(f.requests.map(({ method }) => method)).toEqual(["GET"]);
+      // A 503 policy read is a transient safe read: the service client retries
+      // it (default 4 attempts) before failing closed. It never writes.
+      const reads: string[] = Array.from({ length: status === 503 ? 4 : 1 }, () => "GET");
+      expect(f.requests.map(({ method }) => method)).toEqual(reads);
       expect(
         (await f.browser.submitComposerDraft(WORKSPACE_ID, SESSION_ID, submitInput(saved))).replay,
       ).toBe(false);
-      expect(f.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+      expect(f.requests.map(({ method }) => method)).toEqual([...reads, "POST"]);
     },
   );
 

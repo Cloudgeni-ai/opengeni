@@ -2,6 +2,7 @@ import {
   isPresentedSessionToolName,
   isRetryableStreamError,
   isSessionModelResponsePhase,
+  isTransientRequestError,
   SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CONVERSATION_FILTER_VERSION,
@@ -22,7 +23,11 @@ import type { TimelineItem, TurnStepsItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { joinSessionDetailRead, sessionDetailReadMark } from "../lib/session-detail-read";
-import { usePageLiveActivity } from "./internal";
+import {
+  DEFAULT_TRANSIENT_READ_RETRY,
+  transientReadRetryStep,
+  usePageLiveActivity,
+} from "./internal";
 import { subscribePageWake } from "./page-wake";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
@@ -311,6 +316,13 @@ export function useSessionEvents(
   const [presentedPass, setPresentedPass] = useState(0);
   // A return to the live tip from history: catch up without replaying steps.
   const rejoinPendingRef = useRef(false);
+  // Consecutive transient failures to open this stream (a deploy or network
+  // blip): they restart it quietly before an error is shown.
+  const streamTransientStreakRef = useRef<{
+    since: number;
+    attempts: number;
+    surfaced: boolean;
+  } | null>(null);
 
   const commitStepStores = useCallback((next: TurnStepStores) => {
     stepStoresRef.current = next;
@@ -659,6 +671,7 @@ export function useSessionEvents(
       initialWindowLoadedRef.current = false;
       reconcileAfterPageResumeRef.current = false;
       rejoinPendingRef.current = false;
+      streamTransientStreakRef.current = null;
       stepGenerationRef.current += 1;
       stepStoresRef.current = EMPTY_STEP_STORES;
       setStepStores(EMPTY_STEP_STORES);
@@ -678,6 +691,9 @@ export function useSessionEvents(
     const generation = generationRef.current + 1;
     generationRef.current = generation;
     if (!sessionId || !streamEnabled) {
+      // A suspended stream starts a fresh transient streak when it resumes: a
+      // failure right after a wake must not count the hidden time.
+      streamTransientStreakRef.current = null;
       // A page that stayed hidden beyond the live-activity grace deliberately
       // closed its SSE connection. Replaying from the old cursor on return can
       // drip a large background backlog through React in many fast batches and
@@ -717,6 +733,15 @@ export function useSessionEvents(
       navigationIdentityRef.current.streamKey === streamKey &&
       navigationIdentityRef.current.enabled === enabled;
     streamAbortRef.current = controller;
+    // A quiet restart or reconciliation retry scheduled by this effect instance.
+    let transientRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleTransientRetry = (delayMs: number, retry: () => void) => {
+      if (transientRetryTimer !== null) clearTimeout(transientRetryTimer);
+      transientRetryTimer = setTimeout(() => {
+        transientRetryTimer = null;
+        if (isCurrent()) retry();
+      }, delayMs);
+    };
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event. Project every
     // event before retaining it here and synchronously flush at independent
@@ -962,6 +987,7 @@ export function useSessionEvents(
       skippedStepsThroughRef.current =
         retained.events.length === 0 && window.newestSequence > 0 ? window.newestSequence : null;
       initialWindowLoadedRef.current = true;
+      streamTransientStreakRef.current = null;
       setInitialHistoryReady(true);
       setError(null);
       if (status !== undefined) {
@@ -982,6 +1008,31 @@ export function useSessionEvents(
         markTurnlessOutputGap(workspaceId, sessionId);
       }
       liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
+    };
+
+    // Reconciliation after an open re-reads the API contract and projections.
+    // A transient failure (a reconnect during an API rollout often lands on a
+    // pod that is still starting) retries quietly; the error is shown only
+    // when it is definitive or outlasts the quiet window.
+    const reconcileAfterOpen = (
+      initialOpen: boolean,
+      streak: { since: number; attempts: number; surfaced: boolean } | null = null,
+    ) => {
+      void Promise.resolve()
+        .then(() => reconcileSession(sessionId, { initialOpen }))
+        .catch((cause) => {
+          if (!isCurrent()) return;
+          if (isTransientRequestError(cause)) {
+            const now = Date.now();
+            const current = streak ?? { since: now, attempts: 0, surfaced: false };
+            const step = transientReadRetryStep(current, now, DEFAULT_TRANSIENT_READ_RETRY);
+            if (step.quiet) {
+              scheduleTransientRetry(step.delayMs, () => reconcileAfterOpen(initialOpen, current));
+              return;
+            }
+          }
+          setError(normalizeError(cause));
+        });
     };
 
     // One bounded rejoin attempt: it is abandoned once no read completes for
@@ -1179,16 +1230,13 @@ export function useSessionEvents(
             const initialOpen = openedStreamKeyRef.current !== streamKey;
             openedStreamKeyRef.current = streamKey;
             strictFailures = 0;
+            // The outage is over: drop an error a long transient streak surfaced.
+            if (streamTransientStreakRef.current?.surfaced) setError(null);
+            streamTransientStreakRef.current = null;
             // Reconciliation repairs projections, but it must not block reading
             // the already-open SSE body. Otherwise live events accumulate in the
             // browser and appear as one delayed burst after every reconciler ends.
-            void Promise.resolve()
-              .then(() => reconcileSession(sessionId, { initialOpen }))
-              .catch((cause) => {
-                if (isCurrent()) {
-                  setError(normalizeError(cause));
-                }
-              });
+            reconcileAfterOpen(initialOpen);
           },
           onStateChange: (state) => {
             if (isCurrent()) {
@@ -1227,7 +1275,32 @@ export function useSessionEvents(
       } catch (cause) {
         if (isCurrent()) {
           flush();
-          setError(normalizeError(cause));
+          let announce = true;
+          if (isTransientRequestError(cause)) {
+            // The tail read or the stream failed transiently (an API rollout
+            // or a network blip). Restart quietly, keeping the loading state
+            // or the current view, and show the error only if it outlasts the
+            // quiet window. Afterwards keep retrying in the background.
+            const now = Date.now();
+            const streak = (streamTransientStreakRef.current ??= {
+              since: now,
+              attempts: 0,
+              surfaced: false,
+            });
+            const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY);
+            scheduleTransientRetry(step.delayMs, () => setStreamEpoch((epoch) => epoch + 1));
+            if (step.quiet) {
+              setConnectionState("connecting");
+              return;
+            }
+            // One stable error per streak: background retries that fail the
+            // same way must not re-announce it.
+            announce = !streak.surfaced;
+            streak.surfaced = true;
+          } else {
+            streamTransientStreakRef.current = null;
+          }
+          if (announce) setError(normalizeError(cause));
           setConnectionState("error");
           // A failed first compact-tail request has no later success path in
           // this effect instance. End the loading gate so hosts can render the
@@ -1239,6 +1312,7 @@ export function useSessionEvents(
 
     return () => {
       controller.abort();
+      if (transientRetryTimer !== null) clearTimeout(transientRetryTimer);
       if (generationRef.current === generation) {
         generationRef.current = generation + 1;
       }

@@ -151,6 +151,19 @@ import {
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
 import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
+import {
+  abortableReadRetryDelay,
+  isSafeReadMethod,
+  isTransientGatewayStatus,
+  invalidApiResponseError,
+  isTransientRequestError,
+  markTransportFailure,
+  parseRetryAfterMs,
+  readRetryDelayMs,
+  resolveReadRetryPolicy,
+  type OpenGeniReadRetryOptions,
+  type ReadRetryPolicy,
+} from "./read-retry";
 import type {
   SkillRecord,
   SkillSummary,
@@ -923,6 +936,15 @@ export type WorkspaceControlEventPage = {
   nextAfter: number | null;
 };
 
+/** What one safe-read attempt observed, for the retry decision. */
+type ReadAttemptOutcome = {
+  /** `fetch` or the response body rejected (reset connection, HTTP/2 error, ...). */
+  transportFailure: boolean;
+  /** A real 502, 503 or 504 response. */
+  gatewayFailure: boolean;
+  retryAfterMs: number | null;
+};
+
 export type OpenGeniClientOptions = {
   /** Explicit compatibility for an API predating targeted tool calls. No automatic downgrade. */
   toolGatewayMode?: "target" | "catalog";
@@ -962,6 +984,14 @@ export type OpenGeniClientOptions = {
    * `"compatible"` everywhere else.
    */
   apiContract?: "strict" | "compatible" | undefined;
+  /**
+   * Bounded quiet retry for safe JSON reads (`GET`/`HEAD`) that fail
+   * transiently: a transport error or a 502, 503 or 504 (honoring
+   * `Retry-After`). This rides out API rolling deploys and short network
+   * blips. Mutations are never retried. On by default (4 attempts within
+   * 5 seconds); pass `false` to turn it off or options to tune it.
+   */
+  readRetry?: OpenGeniReadRetryOptions | false | undefined;
 };
 
 function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "compatible" {
@@ -1198,6 +1228,7 @@ export class OpenGeniClient {
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
   private readonly apiContractStrict: boolean;
+  private readonly readRetryPolicy: ReadRetryPolicy | null;
   private readonly active = new Map<string, SingleFlightReadEntry>();
   private readonly generations = new Map<string, number>();
   private readonly queued = new Map<string, SingleFlightReadEntry>();
@@ -1220,6 +1251,7 @@ export class OpenGeniClient {
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
     this.apiContractStrict = defaultApiContractMode(options) === "strict";
+    this.readRetryPolicy = resolveReadRetryPolicy(options.readRetry);
     this.interaction = new OpenGeniInteractionClient(this);
     this.tools = createLazyToolsFacade(this);
   }
@@ -1334,7 +1366,7 @@ export class OpenGeniClient {
       options.signal ? { signal: options.signal } : {},
     );
     if (!isTranscriptionRecordingListResponse(body)) {
-      throw new OpenGeniApiError(502, "Invalid transcription recording list response.", {
+      throw invalidApiResponseError("Invalid transcription recording list response.", {
         code: "invalid_response",
       });
     }
@@ -4792,7 +4824,7 @@ export class OpenGeniClient {
       header.length > 64 * 1024
     ) {
       await cancelResponseBody(response, "browser frame metadata is invalid");
-      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+      throw invalidApiResponseError("browser frame metadata is invalid");
     }
     let metadata: BrowserFrameMetadata;
     try {
@@ -4801,7 +4833,7 @@ export class OpenGeniClient {
       );
     } catch {
       await cancelResponseBody(response, "browser frame metadata is invalid");
-      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+      throw invalidApiResponseError("browser frame metadata is invalid");
     }
     const data = await readBoundedResponseBytes(response, 24 * 1024 * 1024, null);
     if (
@@ -4809,7 +4841,7 @@ export class OpenGeniClient {
       metadata.targetId !== targetId ||
       metadata.mediaType !== mediaType
     ) {
-      throw new OpenGeniApiError(502, "browser frame evidence does not match its request");
+      throw invalidApiResponseError("browser frame evidence does not match its request");
     }
     return { ...metadata, data };
   }
@@ -4858,7 +4890,7 @@ export class OpenGeniClient {
       options,
     );
     if (state.browserSessionId !== browserSessionId || state.targetId !== targetId) {
-      throw new OpenGeniApiError(502, "browser target state belongs to another binding");
+      throw invalidApiResponseError("browser target state belongs to another binding");
     }
     return state;
   }
@@ -4885,7 +4917,7 @@ export class OpenGeniClient {
       result.documentGeneration !== request.expectedDocumentGeneration ||
       result.frameId !== request.expectedFrameId
     ) {
-      throw new OpenGeniApiError(502, "browser DOM read belongs to another binding");
+      throw invalidApiResponseError("browser DOM read belongs to another binding");
     }
     return result;
   }
@@ -5213,19 +5245,19 @@ export class OpenGeniClient {
     const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     if (mediaType !== "image/jpeg" && mediaType !== "image/png") {
       await cancelResponseBody(response, "computer frame media type is invalid");
-      throw new OpenGeniApiError(502, "computer frame media type is invalid");
+      throw invalidApiResponseError("computer frame media type is invalid");
     }
     const metadataHeader = response.headers.get("x-opengeni-computer-frame");
     if (!metadataHeader || metadataHeader.length > 32 * 1024) {
       await cancelResponseBody(response, "computer frame metadata is invalid");
-      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+      throw invalidApiResponseError("computer frame metadata is invalid");
     }
     let metadata: ReturnType<typeof decodeComputerFrameMetadataHeader>;
     try {
       metadata = decodeComputerFrameMetadataHeader(metadataHeader);
     } catch {
       await cancelResponseBody(response, "computer frame metadata is invalid");
-      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+      throw invalidApiResponseError("computer frame metadata is invalid");
     }
     const bytes = await readBoundedResponseBytes(response, 256 * 1024, null);
     const mismatchReason = computerFrameEvidenceMismatchReason(metadata, {
@@ -5235,7 +5267,7 @@ export class OpenGeniClient {
       sha256: await sha256Hex(bytes),
     });
     if (mismatchReason) {
-      throw new OpenGeniApiError(502, "computer frame evidence does not match its request");
+      throw invalidApiResponseError("computer frame evidence does not match its request");
     }
     return { ...metadata, data: bytes };
   }
@@ -7821,7 +7853,7 @@ export class OpenGeniClient {
       metadata.originalBytes <= 0 ||
       metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES
     ) {
-      throw new OpenGeniApiError(502, "retained screenshot metadata is invalid");
+      throw invalidApiResponseError("retained screenshot metadata is invalid");
     }
     const bytes = await this.downloadRetainedArtifactBytes(metadata, options);
     return { metadata, bytes };
@@ -7838,7 +7870,7 @@ export class OpenGeniClient {
     const bytes = new Uint8Array(artifact.originalBytes);
     const pageBytes = Math.min(artifact.retrieval.maxRangeBytes, RETAINED_OUTPUT_MAX_PAGE_BYTES);
     if (!Number.isSafeInteger(pageBytes) || pageBytes <= 0) {
-      throw new OpenGeniApiError(502, "retained artifact range metadata is invalid");
+      throw invalidApiResponseError("retained artifact range metadata is invalid");
     }
     for (let start = 0; start < bytes.byteLength; start += pageBytes) {
       options.signal?.throwIfAborted();
@@ -7861,7 +7893,7 @@ export class OpenGeniClient {
           }
         }
       }
-      if (!page) throw new OpenGeniApiError(502, "retained artifact range retry exhausted");
+      if (!page) throw invalidApiResponseError("retained artifact range retry exhausted");
       const expectedLength = end - start + 1;
       if (
         page.status !== 206 ||
@@ -7869,12 +7901,12 @@ export class OpenGeniClient {
         page.contentLength !== expectedLength ||
         page.contentRange !== `bytes ${start}-${end}/${artifact.originalBytes}`
       ) {
-        throw new OpenGeniApiError(502, "retained artifact range response is invalid");
+        throw invalidApiResponseError("retained artifact range response is invalid");
       }
       bytes.set(page.bytes, start);
     }
     if ((await sha256Hex(bytes)) !== artifact.sha256) {
-      throw new OpenGeniApiError(502, "retained artifact checksum mismatch");
+      throw invalidApiResponseError("retained artifact checksum mismatch");
     }
     return bytes;
   }
@@ -7914,7 +7946,7 @@ export class OpenGeniClient {
     }
     if (response.headers.get("accept-ranges") !== "bytes") {
       await cancelResponseBody(response, "retained artifact response omitted byte-range support");
-      throw new OpenGeniApiError(502, "retained artifact response omitted byte-range support");
+      throw invalidApiResponseError("retained artifact response omitted byte-range support");
     }
     let declaredLength: number | null;
     try {
@@ -11383,61 +11415,127 @@ export class OpenGeniClient {
     const correlationId = crypto.randomUUID();
     const abort = requestAbortSignal(options);
     try {
-      if (abort.signal?.aborted) {
-        throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
-      }
-      const headers = this.headers(correlationId);
-      let response: FetchResponse;
-      try {
-        response = await awaitWithAbort(
-          this.fetchImpl(this.url(path, query), {
-            method,
-            headers: {
-              ...headers,
-              Accept: "application/json",
-              ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-            },
-            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-            ...(abort.signal ? { signal: abort.signal } : {}),
-          }),
+      const retryPolicy = isSafeReadMethod(method) ? this.readRetryPolicy : null;
+      if (!retryPolicy) {
+        return await this.requestJsonAttempt<T>(
+          method,
+          path,
+          body,
+          query,
+          options,
           abort.signal,
+          correlationId,
+          null,
         );
-      } catch (error) {
-        if (options.signal?.aborted) throw error;
-        if (isMutationMethod(method)) {
-          throw mutationTransportError(correlationId);
-        }
-        throw error;
       }
-      assertApiContractResponse(response, this.apiContractStrict);
-      try {
-        if (!response.ok) {
-          throw await awaitWithAbort(
-            apiErrorFromResponse(response, { method, correlationId }),
+      // Safe reads only: a transient failure is retried quietly with jittered
+      // backoff (or the server's Retry-After) inside a small total budget.
+      const startedAt = Date.now();
+      for (let retry = 1; ; retry += 1) {
+        const attempt: ReadAttemptOutcome = {
+          transportFailure: false,
+          gatewayFailure: false,
+          retryAfterMs: null,
+        };
+        try {
+          return await this.requestJsonAttempt<T>(
+            method,
+            path,
+            body,
+            query,
+            options,
             abort.signal,
+            correlationId,
+            attempt,
           );
-        }
-        if (options.responseType === "void") {
-          await awaitWithAbort(
-            cancelResponseBody(response, "discarding void API response"),
-            abort.signal,
+        } catch (error) {
+          // Only the transport itself or a real 502/503/504 response is
+          // transient; a malformed success response is not retried.
+          const transient =
+            attempt.transportFailure || (attempt.gatewayFailure && isTransientRequestError(error));
+          if (abort.signal?.aborted || !transient) throw error;
+          const delay = readRetryDelayMs(
+            retryPolicy,
+            retry,
+            Date.now() - startedAt,
+            attempt.retryAfterMs,
           );
-          return undefined as T;
+          if (delay === null) throw error;
+          await abortableReadRetryDelay(delay, abort.signal);
         }
-        await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
-        const value = await awaitWithAbort(response.json(), abort.signal);
-        recordObservedSessionSequence(value, response.headers.get(SESSION_SEQUENCE_HEADER));
-        return value as T;
-      } catch (error) {
-        if (options.signal?.aborted) throw error;
-        if (error instanceof OpenGeniApiError) throw error;
-        if (isMutationMethod(method)) {
-          throw mutationTransportError(correlationId);
-        }
-        throw error;
       }
     } finally {
       abort.dispose();
+    }
+  }
+
+  private async requestJsonAttempt<T>(
+    method: string,
+    path: string,
+    body: unknown,
+    query: Record<string, string>,
+    options: OpenGeniRequestOptions,
+    signal: AbortSignal | undefined,
+    correlationId: string,
+    attempt: ReadAttemptOutcome | null,
+  ): Promise<T> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("Request aborted", "AbortError");
+    }
+    const headers = this.headers(correlationId);
+    let response: FetchResponse;
+    try {
+      response = await awaitWithAbort(
+        this.fetchImpl(this.url(path, query), {
+          method,
+          headers: {
+            ...headers,
+            Accept: "application/json",
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          ...(signal ? { signal } : {}),
+        }),
+        signal,
+      );
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      if (error instanceof TypeError && attempt) attempt.transportFailure = true;
+      markTransportFailure(error);
+      throw error;
+    }
+    assertApiContractResponse(response, this.apiContractStrict);
+    try {
+      if (!response.ok) {
+        if (attempt && isTransientGatewayStatus(response.status)) {
+          attempt.gatewayFailure = true;
+          attempt.retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        }
+        throw await awaitWithAbort(
+          apiErrorFromResponse(response, { method, correlationId }),
+          signal,
+        );
+      }
+      if (options.responseType === "void") {
+        await awaitWithAbort(cancelResponseBody(response, "discarding void API response"), signal);
+        return undefined as T;
+      }
+      await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), signal);
+      const value = await awaitWithAbort(response.json(), signal);
+      recordObservedSessionSequence(value, response.headers.get(SESSION_SEQUENCE_HEADER));
+      return value as T;
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      if (error instanceof OpenGeniApiError) throw error;
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      if (error instanceof TypeError && attempt) attempt.transportFailure = true;
+      markTransportFailure(error);
+      throw error;
     }
   }
 
@@ -11585,7 +11683,7 @@ function isTranscriptionRecordingResponse(value: unknown): value is Transcriptio
 
 function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
   if (isTranscriptionRecordingResponse(value)) return value;
-  throw new OpenGeniApiError(502, "Invalid transcription recording response.", {
+  throw invalidApiResponseError("Invalid transcription recording response.", {
     code: "invalid_response",
   });
 }
@@ -11725,7 +11823,7 @@ async function assertJsonResponse(
 ): Promise<void> {
   if (isJsonContentType(response.headers.get("content-type"))) return;
   await cancelResponseBody(response, "unexpected non-JSON API response");
-  throw new OpenGeniApiError(502, "", {
+  throw invalidApiResponseError("", {
     code: "upstream_unavailable",
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
@@ -11846,7 +11944,7 @@ function assertRetainedWorkspaceArtifactReceipt(
     !parseRetainedGeneratedImageReference(artifact, workspaceId) &&
     !parseRetainedWorkspaceFileReference(artifact, workspaceId)
   ) {
-    throw new OpenGeniApiError(502, "retained workspace artifact receipt is invalid");
+    throw invalidApiResponseError("retained workspace artifact receipt is invalid");
   }
 }
 
@@ -11857,16 +11955,16 @@ function assertSafeArtifactDownloadUrl(value: FileDownloadUrlResponse): void {
     typeof value.expiresAt !== "string" ||
     !Number.isFinite(Date.parse(value.expiresAt))
   ) {
-    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+    throw invalidApiResponseError("retained artifact download URL is invalid");
   }
   let parsed: URL;
   try {
     parsed = new URL(value.url);
   } catch {
-    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+    throw invalidApiResponseError("retained artifact download URL is invalid");
   }
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw new OpenGeniApiError(502, "retained artifact download URL is unsafe");
+    throw invalidApiResponseError("retained artifact download URL is unsafe");
   }
 }
 
@@ -11885,7 +11983,7 @@ function assertSafeVideoArtifactPlaybackSource(
     value.sizeBytes > GENERATED_VIDEO_MAX_BYTES ||
     !/^[0-9a-f]{64}$/.test(value.sha256)
   ) {
-    throw new OpenGeniApiError(502, "generated-video playback source is invalid");
+    throw invalidApiResponseError("generated-video playback source is invalid");
   }
   assertSafeArtifactDownloadUrl({ url: value.url, expiresAt: value.expiresAt });
 }
@@ -11893,11 +11991,11 @@ function assertSafeVideoArtifactPlaybackSource(
 function parseBoundedContentLength(value: string | null): number | null {
   if (value === null) return null;
   if (!/^\d+$/.test(value)) {
-    throw new OpenGeniApiError(502, "invalid retained artifact content-length");
+    throw invalidApiResponseError("invalid retained artifact content-length");
   }
   const length = Number(value);
   if (!Number.isSafeInteger(length) || length > RETAINED_OUTPUT_MAX_PAGE_BYTES) {
-    throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+    throw invalidApiResponseError("retained artifact response exceeds the SDK byte limit");
   }
   return length;
 }
@@ -11909,7 +12007,7 @@ async function readBoundedResponseBytes(
 ): Promise<Uint8Array> {
   if (!response.body) {
     if (expectedBytes !== null && expectedBytes !== 0) {
-      throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+      throw invalidApiResponseError("retained artifact response length mismatch");
     }
     return new Uint8Array();
   }
@@ -11925,7 +12023,7 @@ async function readBoundedResponseBytes(
         await reader
           .cancel("retained artifact response exceeded the SDK byte limit")
           .catch(() => undefined);
-        throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+        throw invalidApiResponseError("retained artifact response exceeds the SDK byte limit");
       }
       chunks.push(value);
     }
@@ -11933,7 +12031,7 @@ async function readBoundedResponseBytes(
     reader.releaseLock();
   }
   if (expectedBytes !== null && totalBytes !== expectedBytes) {
-    throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+    throw invalidApiResponseError("retained artifact response length mismatch");
   }
   const bytes = new Uint8Array(totalBytes);
   let offset = 0;
