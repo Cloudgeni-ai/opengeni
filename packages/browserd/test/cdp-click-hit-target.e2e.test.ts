@@ -123,3 +123,75 @@ e2e(
   },
   60_000,
 );
+
+// A page whose only content is a same-origin frame holding `content`; the
+// frame logs to the page's `log`, which outlives the frame.
+const framed = (content: string) =>
+  `<!doctype html><title>Framed</title><style>body{margin:0}iframe{border:0;width:400px;height:200px}</style><script>globalThis.log=[];</script><iframe title="Panel" srcdoc="${content.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}"></iframe>`;
+
+e2e(
+  "a press the guard held back stays refused when the page then removes the document",
+  async () => {
+    // Moving onto "Confirm" opens a cover over it, so the guard holds the
+    // press back. The page's own earlier capture listener then removes the
+    // frame on the release, before the guard can be read back.
+    const fixture = await openFixture(
+      framed(
+        '<style>body{margin:0}#cover{display:none;position:fixed;inset:0;background:#fff}</style><div style="padding:30px"><button id="target">Confirm</button></div><div id="cover" role="dialog" aria-label="Cover"></div><script>target.addEventListener("click",()=>parent.log.push("confirm"));target.addEventListener("mouseenter",()=>{cover.style.display="block"});addEventListener("pointerup",()=>{parent.log.push("removed");frameElement.remove()},true);</script>',
+      ),
+    );
+    try {
+      const view = await fixture.driver.observe(fixture.initial.target.id);
+      const refused = await fixture.click(view, "Confirm");
+      expect(refused.state).not.toBe("completed");
+      expect(refused.error?.message).toContain('covered by dialog "Cover"');
+      expect(await fixture.evaluate("log")).toEqual(["removed"]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a press that reached the target counts when the click then removes the document",
+  async () => {
+    const fixture = await openFixture(
+      framed(
+        '<style>body{margin:0}</style><div style="padding:30px"><button id="target">Confirm</button></div><script>target.addEventListener("pointerdown",()=>parent.log.push("pressed"));addEventListener("pointerup",()=>{parent.log.push("removed");frameElement.remove()},true);</script>',
+      ),
+    );
+    try {
+      const view = await fixture.driver.observe(fixture.initial.target.id);
+      const accepted = await fixture.click(view, "Confirm");
+      expect(accepted.error ?? null).toBeNull();
+      expect(accepted.state).toBe("completed");
+      expect(await fixture.evaluate("log")).toEqual(["pressed", "removed"]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);
+
+e2e(
+  "a click whose document disappears before the press reports an unknown outcome",
+  async () => {
+    // The pointer's arrival removes the frame holding "Confirm", so the press
+    // lands on whatever is left; nothing confirms where it went.
+    const fixture = await openFixture(
+      framed(
+        '<style>body{margin:0}</style><div style="padding:30px"><button id="target">Confirm</button></div><script>target.addEventListener("click",()=>parent.log.push("confirm"));target.addEventListener("mousemove",()=>{parent.log.push("removed");frameElement.remove()},{once:true});</script>',
+      ),
+    );
+    try {
+      const view = await fixture.driver.observe(fixture.initial.target.id);
+      const result = await fixture.click(view, "Confirm");
+      expect(result.state).toBe("outcome_unknown");
+      expect(await fixture.evaluate("log")).toEqual(["removed"]);
+    } finally {
+      await fixture.close();
+    }
+  },
+  60_000,
+);

@@ -393,7 +393,7 @@ type TargetState = {
   dialog: BrowserDialog | null;
   /** Hit-target guards a JavaScript dialog kept from being read back. Page
    * scripts are paused under the dialog, so they are removed once it closes. */
-  unsettledHitTargetGuards: string[];
+  unsettledHitTargetGuards: HitTargetGuard[];
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
@@ -4142,7 +4142,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
         if (current !== action.checked)
-          await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+          await this.clickNode(
+            state,
+            node.backendDOMNodeId,
+            "left",
+            1,
+            node.frameId ?? state.frame.id,
+          );
         return;
       }
       case "scroll": {
@@ -4329,7 +4335,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     let clicked = false;
     try {
-      await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+      await this.clickNode(state, node.backendDOMNodeId, "left", 1, frameId);
       clicked = true;
       const event = await Promise.race([chooser, dialog]);
       if (event === "dialog") throw new DialogOpenedSignal("upload control opened a dialog");
@@ -5107,11 +5113,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // an unresponsive tab), and reading the guard back now could wait on
       // the same page. The next action removes it, and it disarms itself
       // after a few seconds regardless.
-      if (guard !== null) state.unsettledHitTargetGuards.push(guard);
+      if (guard !== null) {
+        guard.stopReports();
+        state.unsettledHitTargetGuards.push(guard);
+      }
       throw error;
     }
     if (guard === null) return;
-    const blocked = await this.settleHitTargetGuard(state, guard);
+    const blocked = await this.settleHitTargetGuard(state, guard, count);
     if (blocked !== null) {
       // The pointer did move there, so whatever its arrival did stands, and
       // the refusal is reported as an unknown outcome.
@@ -5129,13 +5138,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * has no compositor hit testing to race) clicks unguarded; on Chromium a
    * guard that cannot be installed refuses the click instead of sending it
    * unverified. When the target's frame is known the listeners live in an
-   * isolated world, out of page scripts' reach.
+   * isolated world, out of page scripts' reach, and also report each press's
+   * verdict as it happens, so the verdict survives the document going away
+   * before it is read back.
    */
   private async installHitTargetGuard(
     state: TargetState,
     backendDOMNodeId: number | null,
     frameId: string | undefined,
-  ): Promise<string | null> {
+  ): Promise<HitTargetGuard | null> {
     if (this.engine === "lightpanda") return null;
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError(
@@ -5143,95 +5154,141 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser node cannot receive pointer input",
       );
     }
+    const connection = await this.ensureConnection();
+    const reportSession = this.commandSession(state, "Runtime.addBinding");
+    const token = randomUUID();
+    const verdicts: Array<string | null> = [];
+    let stopReports: () => void = () => undefined;
     let executionContextId: number | undefined;
     if (frameId !== undefined) {
       const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
         "Page.createIsolatedWorld",
-        { frameId, worldName: "opengeni-hit-target-guard" },
+        { frameId, worldName: HIT_TARGET_GUARD_WORLD },
       );
       if (!Number.isSafeInteger(world.executionContextId)) {
         throw new Error("CDP did not create an isolated world for the click guard");
       }
       executionContextId = world.executionContextId as number;
-    }
-    const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
-      backendNodeId: backendDOMNodeId,
-      ...(executionContextId === undefined ? {} : { executionContextId }),
-    });
-    if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
-      throw new InteractionDefiniteDriverError(
-        "locator_not_found",
-        "browser element is no longer present",
+      // Exposed only to the guard's isolated world; the page cannot see or
+      // call it. Chrome reports calls without the Runtime domain enabled.
+      await this.sendTarget(state, "Runtime.addBinding", {
+        name: HIT_TARGET_VERDICT_BINDING,
+        executionContextName: HIT_TARGET_GUARD_WORLD,
+      });
+      stopReports = connection.on(
+        "Runtime.bindingCalled",
+        (event) => {
+          if (event.params.name !== HIT_TARGET_VERDICT_BINDING) return;
+          if (typeof event.params.payload !== "string") return;
+          let report: unknown;
+          try {
+            report = JSON.parse(event.params.payload);
+          } catch {
+            return;
+          }
+          if (!isRecord(report) || report.token !== token) return;
+          verdicts.push(typeof report.blocked === "string" ? report.blocked : null);
+        },
+        reportSession,
       );
     }
-    const nodeObjectId = resolved.object.objectId;
     try {
-      const installed = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
-        state,
-        "Runtime.callFunctionOn",
-        { objectId: nodeObjectId, functionDeclaration: HIT_TARGET_GUARD_FUNCTION },
-      );
-      if (installed.exceptionDetails || !isRecord(installed.result)) {
-        throw new Error("browser click guard could not be installed");
-      }
-      if (typeof installed.result.objectId !== "string") {
-        // The guard function returns null only for a detached element.
+      const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+        backendNodeId: backendDOMNodeId,
+        ...(executionContextId === undefined ? {} : { executionContextId }),
+      });
+      if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
         throw new InteractionDefiniteDriverError(
           "locator_not_found",
           "browser element is no longer present",
         );
       }
-      return installed.result.objectId;
-    } finally {
-      await this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
-        () => undefined,
-      );
+      const nodeObjectId = resolved.object.objectId;
+      try {
+        const installed = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+          state,
+          "Runtime.callFunctionOn",
+          {
+            objectId: nodeObjectId,
+            functionDeclaration: HIT_TARGET_GUARD_FUNCTION,
+            arguments: [{ value: token }],
+          },
+        );
+        if (installed.exceptionDetails || !isRecord(installed.result)) {
+          throw new Error("browser click guard could not be installed");
+        }
+        if (typeof installed.result.objectId !== "string") {
+          // The guard function returns null only for a detached element.
+          throw new InteractionDefiniteDriverError(
+            "locator_not_found",
+            "browser element is no longer present",
+          );
+        }
+        return {
+          objectId: installed.result.objectId,
+          reported: executionContextId !== undefined,
+          verdicts,
+          stopReports,
+        };
+      } finally {
+        await this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
+          () => undefined,
+        );
+      }
+    } catch (error) {
+      stopReports();
+      throw error;
     }
   }
 
   /**
    * Removes the guard's listeners and returns what it held back, or null when
-   * every press reached the target. A readback that fails because the click
-   * replaced or detached the guarded document counts as delivered: a press the
-   * guard holds back is cancelled and stopped before page listeners see it,
-   * so it cannot have navigated the page. Any other failure leaves it unknown
-   * whether the click reached the target, and says so.
+   * every press reached the target. When the guarded document is gone before
+   * the readback (the click, a hover effect, a timer or a navigation replaced
+   * or detached it), the verdicts the guard reported as each press happened
+   * decide; without a verdict for every press, and on any other failure, it
+   * is unknown whether the click reached the target, and the error says so.
    */
   private async settleHitTargetGuard(
     state: TargetState,
-    guardObjectId: string,
+    guard: HitTargetGuard,
+    presses: number,
   ): Promise<string | null> {
+    const unknown = () =>
+      new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "browser click was sent, but whether it reached the element could not be confirmed; check the page before continuing",
+      );
     let settled: { result?: unknown; exceptionDetails?: unknown };
     try {
       settled = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
         state,
         "Runtime.callFunctionOn",
         {
-          objectId: guardObjectId,
+          objectId: guard.objectId,
           functionDeclaration: "function () { return this.settle(); }",
           returnByValue: true,
         },
       );
     } catch (error) {
+      guard.stopReports();
       if (error instanceof CdpProtocolError && GUARD_DOCUMENT_GONE.test(error.message)) {
-        return null;
+        const blocked = guard.verdicts.find((verdict) => verdict !== null);
+        if (blocked !== undefined) return blocked;
+        if (guard.reported && guard.verdicts.length >= presses) return null;
+        throw unknown();
       }
       if (!(error instanceof CdpProtocolError)) throw error;
-      throw new InteractionOutcomeUnknownDriverError(
-        "outcome_unknown",
-        "browser click was sent, but whether it reached the element could not be confirmed; check the page before continuing",
-      );
+      throw unknown();
     }
-    await this.sendTarget(state, "Runtime.releaseObject", { objectId: guardObjectId }).catch(
+    guard.stopReports();
+    await this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
     if (settled.exceptionDetails || (value !== null && typeof value !== "string")) {
-      throw new InteractionOutcomeUnknownDriverError(
-        "outcome_unknown",
-        "browser click was sent, but whether it reached the element could not be confirmed; check the page before continuing",
-      );
+      throw unknown();
     }
     return value === null || value === "" ? null : value;
   }
@@ -5244,10 +5301,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const guards = state.unsettledHitTargetGuards.splice(0);
     for (const guard of guards) {
       await this.sendTarget(state, "Runtime.callFunctionOn", {
-        objectId: guard,
+        objectId: guard.objectId,
         functionDeclaration: "function () { this.settle(); }",
       }).catch(() => undefined);
-      await this.sendTarget(state, "Runtime.releaseObject", { objectId: guard }).catch(
+      await this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
         () => undefined,
       );
     }
@@ -7389,13 +7446,28 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
 // Returns the guard object; its settle() removes the listeners and
 // reports what was held back. A guard that is never settled (a JavaScript
 // dialog interrupted the click) disarms itself after a few seconds.
-const HIT_TARGET_GUARD_FUNCTION = `function() {
+const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
+const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
+
+/** One click's guard: its object in the page, and the verdicts it reported
+ * for each press as it happened (null: the press reached the target; text:
+ * what it landed on instead). `reported` is false when the guard runs where
+ * it cannot report (no isolated world), so only its readback counts. */
+interface HitTargetGuard {
+  objectId: string;
+  reported: boolean;
+  verdicts: Array<string | null>;
+  stopReports: () => void;
+}
+
+const HIT_TARGET_GUARD_FUNCTION = `function(token) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const view = element.ownerDocument && element.ownerDocument.defaultView;
   if (!view) return null;
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
+  const report = globalThis.${HIT_TARGET_VERDICT_BINDING};
   const presses = ["pointerdown", "mousedown"];
   const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
   const types = [...presses, ...followers];
@@ -7409,11 +7481,19 @@ const HIT_TARGET_GUARD_FUNCTION = `function() {
     if (!event.isTrusted) return;
     if (presses.includes(event.type)) {
       const hit = event.composedPath()[0];
-      if (hit instanceof Node && owns(element, hit)) return;
-      // Seen from outside a closed shadow root, a press on the target is
-      // retargeted to that root's host.
-      if (hit instanceof Element && hit.shadowRoot === null && owns(hit, element) && element.getRootNode() !== hit.getRootNode()) return;
-      if (guard.blocked === null) guard.blocked = describe(hit);
+      const onTarget =
+        (hit instanceof Node && owns(element, hit)) ||
+        // Seen from outside a closed shadow root, a press on the target is
+        // retargeted to that root's host.
+        (hit instanceof Element && hit.shadowRoot === null && owns(hit, element) && element.getRootNode() !== hit.getRootNode());
+      const verdict = onTarget ? null : describe(hit);
+      // One report per physical press, before any page listener after this
+      // one can replace the document.
+      if (event.type === "pointerdown" && typeof report === "function") {
+        report(JSON.stringify({ token, blocked: verdict }));
+      }
+      if (onTarget) return;
+      if (guard.blocked === null) guard.blocked = verdict;
     } else if (guard.blocked === null) return;
     event.preventDefault();
     event.stopImmediatePropagation();
