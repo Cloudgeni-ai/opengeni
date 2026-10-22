@@ -267,7 +267,7 @@ DO $private_owner_conflict_preflight$
 BEGIN
   IF EXISTS (SELECT 1 FROM files f JOIN opengeni_private.file_source_adjudications a
       ON a.file_id = f.id AND a.decision = 'owner_only'
-    WHERE f.source_session_id IS NULL AND f.private_owner_subject_ids IS NOT NULL
+    WHERE f.private_owner_subject_ids IS NOT NULL
       AND a.owner_subject_id IS NOT NULL
       AND (cardinality(f.private_owner_subject_ids) <> 1
         OR f.private_owner_subject_ids[1] IS DISTINCT FROM a.owner_subject_id))

@@ -1318,9 +1318,19 @@ test("migration refuses a source whose historical Slack audience was erased", as
     await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
       "Missing historical Slack audience requires operator adjudication",
     );
+    const privateFileId = await f.readyFile(f.owner.subjectId);
+    await legacy.admin`insert into opengeni_private.sandbox_file_publications
+      (account_id, workspace_id, file_id, source_session_id)
+      values (${f.workspace.accountId}, ${f.workspace.id}, ${privateFileId}, ${session.id})`;
     await legacy.admin`insert into opengeni_private.file_source_adjudications
       (file_id, decision, owner_subject_id, attested_by)
-      values (${fileId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator')`;
+      values (${fileId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator'),
+        (${privateFileId}, 'owner_only', ${f.other.subjectId}, 'fixture-operator')`;
+    await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
+      "Legacy private file owner conflicts with operator adjudication",
+    );
+    await legacy.admin`update opengeni_private.file_source_adjudications
+      set owner_subject_id = ${f.owner.subjectId} where file_id = ${privateFileId}`;
     await legacy.admin.unsafe(migration);
     expect(
       await withSessionRlsActorContext(
