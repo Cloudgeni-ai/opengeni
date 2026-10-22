@@ -1772,10 +1772,25 @@ function classifyAgentRunFailurePayload(
     error.code !== undefined &&
     REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES.has(error.code)
   ) {
+    // Keep the cause on every retry and on an exhausted terminal: the
+    // checkpoint diagnostics (transport code, status, request), and for a
+    // timeout its own class, request and whether a response was observed.
+    const timeout =
+      error.code === CODEX_RESPONSE_TIMEOUT_ERROR_TYPE
+        ? classifyCodexResponseTimeoutError(error.cause ?? error)
+        : null;
     return {
       error: "The context checkpoint request did not finish. The same turn will retry it.",
       code: "provider_unavailable",
       retryable: true,
+      ...(timeout
+        ? {
+            timeoutClass: timeout.timeoutClass,
+            responseObserved: timeout.responseObserved,
+            ...(timeout.requestId ? { requestId: timeout.requestId } : {}),
+          }
+        : {}),
+      detail: error.message,
     };
   }
   const sizeError = findAnthropicRequestSizeError(error);
