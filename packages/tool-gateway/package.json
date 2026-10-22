@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/tool-gateway",
-  "version": "4.5.0",
+  "version": "4.6.1",
   "description": "Protocol-neutral catalog validation, authorization, and execution core for Opengeni tools.",
   "license": "Apache-2.0",
   "repository": {

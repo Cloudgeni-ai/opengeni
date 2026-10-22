@@ -1,5 +1,13 @@
 # @opengeni/desktop
 
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/agent-host@4.6.0
+
 ## 4.5.0
 
 ### Patch Changes

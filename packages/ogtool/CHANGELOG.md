@@ -1,5 +1,12 @@
 # @opengeni/ogtool
 
+## 4.6.1
+
+### Patch Changes
+
+- @opengeni/codemode@4.6.0
+- @opengeni/contracts@4.6.0
+
 ## 4.5.0
 
 ### Patch Changes
