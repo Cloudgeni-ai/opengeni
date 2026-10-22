@@ -137,19 +137,18 @@ const integrationMethods = [
   // admin scripts; the web console sets limits per Site.
   "getSiteLimitProfile",
   "updateSiteLimitProfile",
-  // The Excel add-in reaches its workbook tickets and list through a host's
-  // session proxy; the web console has no Office surface.
-  "createOfficeWorkbookTicket",
+  // Products' own Excel add-ins list connected workbooks through a host's
+  // session proxy (`office: true`). The console's Excel pane, scanned below,
+  // connects its workbook but never lists.
   "listOfficeWorkbooks",
 ];
 
-// The native app exchanges its sign-in code, signs out and manages its push
-// device through the public client. The web app only starts the authorization.
+// The native app manages its push device through the public client. (The
+// Excel pane, a browser bundle scanned below, exchanges its sign-in code and
+// signs out with the same native-app methods.)
 const nativeAppMethods = [
-  "exchangeNativeAppCode",
   "getNativePushDevice",
   "registerNativePushDevice",
-  "signOutNativeApp",
   "unregisterNativePushDevice",
 ];
 
@@ -194,7 +193,9 @@ function browserUnusedMethods(clientSource: string, browserSource: string): stri
 
 async function readBrowserProductionSources(): Promise<string> {
   const glob = new Bun.Glob("**/*.{ts,tsx}");
-  const roots = ["apps/web/src", "packages/react/src"];
+  // apps/web/office/src is the console's Excel task pane, a browser bundle of
+  // the same client (it mints workbook tickets).
+  const roots = ["apps/web/src", "apps/web/office/src", "packages/react/src"];
   const sources: string[] = [];
 
   for (const root of roots) {
