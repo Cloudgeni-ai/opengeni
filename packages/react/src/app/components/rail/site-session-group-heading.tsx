@@ -6,7 +6,7 @@ import { visualTreeDepth } from "../../lib/session-rail";
 import type { RailAggregateStatus } from "../../lib/sessions-group";
 import type { SessionSiteOrigin } from "../../lib/session-site-origin";
 
-/** A Site's row in the rail: open the Site, or disclose its conversations. */
+/** A Site's row in the rail: open the Site view, or disclose its conversations. */
 export function SiteSessionGroupHeading({
   origin,
   workspaceId,
@@ -57,8 +57,10 @@ export function SiteSessionGroupHeading({
         </button>
       </span>
       <Link
-        to="/workspaces/$workspaceId/artifacts/$artifactId"
-        params={{ workspaceId, artifactId: origin.siteId }}
+        to="/workspaces/$workspaceId/sites/$siteId"
+        params={{ workspaceId, siteId: origin.siteId }}
+        // The Site is the open page only while none of its conversations is.
+        activeOptions={{ exact: true, includeSearch: true }}
         aria-current={active ? "page" : undefined}
         aria-label={`Open ${origin.title}. Site, ${conversations}. ${summary.label}`}
         className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"

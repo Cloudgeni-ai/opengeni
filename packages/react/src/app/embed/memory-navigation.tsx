@@ -177,6 +177,7 @@ function createMemoryNavigation(options: MemoryNavigationOptions): NavigationHos
     reloadDocument: _reloadDocument,
     href: hrefOption,
     preload: _preload,
+    activeOptions: _activeOptions,
     disabled,
     children,
     onClick,

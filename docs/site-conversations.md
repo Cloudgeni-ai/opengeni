@@ -39,6 +39,15 @@
   ordinary lists ignore them. A Site row is stable: its conversations stay
   nested under it, collapsed by default, whichever session is open. A Site's
   title in its row refreshes with the next list read.
+- A Site row opens the console's Site view
+  (`/workspaces/:workspaceId/sites/:siteId`): the Site fills the page and its
+  conversations sit beside it, the newest open unless `?conversation=<id>`
+  chooses one. A nested row, and a session's Site origin link, open that view
+  with the conversation selected; opening one also opens its Site row. **New**
+  starts a conversation the way the Site's own chat does, sending the Site and
+  its current version (`x-opengeni-site-id`, `x-opengeni-site-version`) with only
+  the fields a Site may set, so it is private to the viewer and listed under the
+  Site. `/artifacts/:id` (with its tabs) and `/sessions/:id` keep working.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

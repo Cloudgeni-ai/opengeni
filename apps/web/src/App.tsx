@@ -67,6 +67,7 @@ import {
 } from "@opengeni/react/app/lib/session-search-route";
 import {
   artifactReturnSearch,
+  siteViewSearch,
   parseCheckoutOutcome,
   type CheckoutOutcome,
 } from "@opengeni/react/app/lib/routes";
@@ -237,6 +238,10 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
 const LazyArtifactsRoute = lazyRouteComponent(
   () => import("@opengeni/react/app/routes/artifacts"),
   "ArtifactsRoute",
+);
+const LazySiteViewRoute = lazyRouteComponent(
+  () => import("@opengeni/react/app/routes/site-view"),
+  "SiteViewRoute",
 );
 const LazyRetainedArtifactRoute = lazyRouteComponent(
   () => import("@opengeni/react/app/routes/retained-artifact"),
@@ -757,6 +762,13 @@ const workspaceArtifactDetailRoute = createRoute({
   validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
+// A Site with its conversations beside it; the rail's Site rows open it.
+const workspaceSiteViewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sites/$siteId",
+  validateSearch: siteViewSearch,
+  component: SiteViewPage,
+});
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
@@ -919,6 +931,7 @@ const routeTree = rootRoute.addChildren([
     workspaceArtifactsRoute,
     workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
+    workspaceSiteViewRoute,
     workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
@@ -1258,6 +1271,19 @@ function ArtifactDetail() {
   const params = workspaceArtifactDetailRoute.useParams();
   const { fromSession } = workspaceArtifactDetailRoute.useSearch();
   return <LazyArtifactsRoute {...params} fromSession={fromSession} />;
+}
+
+function SiteViewPage() {
+  const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
+  const { conversation } = workspaceSiteViewRoute.useSearch();
+  return (
+    <LazySiteViewRoute
+      key={`${workspaceId}:${siteId}`}
+      workspaceId={workspaceId}
+      siteId={siteId}
+      conversation={conversation}
+    />
+  );
 }
 
 function EditableArtifact() {
