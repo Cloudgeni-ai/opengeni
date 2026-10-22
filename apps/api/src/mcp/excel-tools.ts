@@ -13,7 +13,8 @@ const MAX_RESULT_CHARS = 40_000;
 
 const DESCRIPTION = [
   "Run Office.js code live in an Excel workbook the person has open with the Opengeni add-in (Excel on the web, Windows or Mac).",
-  "`code` is the body of an async function called inside Excel.run with `context` and `Excel`: queue operations on `context.workbook`, `load` what you need and `await context.sync()` before reading it, then `return` a small JSON-serializable result with only what you need. console.log output is returned too.",
+  "`code` is the body of an async function called inside Excel.run with `context` and `Excel`: queue operations on `context.workbook`, `load` every property you will read and `await context.sync()` before reading it, then `return` a small JSON-serializable result with only what you need. console.log output is returned too.",
+  "Each `get…()` call returns a new unloaded object, so keep the one you loaded in a variable; a sheet's `name` must be loaded too, and range properties are plural (`values`, `formulas`).",
   "Changes appear in the person's workbook at once and may not be undoable, so look before you change anything and change only what was asked.",
   "A failure returns Office's error code, message and failing statement; operations synced before the failure stay applied.",
   "Omit `workbook` when one workbook is open; otherwise the error lists the open workbooks to choose from.",
