@@ -5,15 +5,25 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
+  type ConnectionMetadata,
   type Permission,
 } from "@opengeni/contracts";
 import {
+  createConnection,
   createDb,
+  getConnectionMetadata,
   listConnectionsMetadata,
   listScheduledTasks,
   migrate,
+  updateConnection,
   type DbClient,
 } from "@opengeni/db";
+import {
+  GOOGLE_DRIVE_CREDENTIAL_LABEL,
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GOOGLE_DRIVE_READONLY_SCOPE,
+} from "@opengeni/contracts/google-drive";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
@@ -129,6 +139,98 @@ function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Setti
 }
 
 describe("retired native Google Drive setup", () => {
+  test("historical connection removal stays local, idempotent, and stale-replay safe", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await freshWorkspace();
+    const activeMetadata = {
+      credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+      credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+      googlePermissionId: "historical-google-account",
+      googleEmail: "historical@example.test",
+      googleDisplayName: "Historical owner",
+      verifiedAt: new Date().toISOString(),
+      accessMode: "readonly",
+      lifecycle: { state: "active", recoverable: true, observedAt: new Date().toISOString() },
+    };
+    // Seed a historical row directly: retired OAuth must never be needed to remove it.
+    const connection = await createConnection(client.db, {
+      ...workspace,
+      subjectId: "subject-a",
+      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+      kind: "oauth2",
+      status: "active",
+      credentialEncrypted: "historical-ciphertext-must-not-be-read",
+      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
+      metadata: activeMetadata,
+      createdBySubjectId: "subject-a",
+    });
+    let providerRequests = 0;
+    const application = app(async () => {
+      providerRequests += 1;
+      throw new Error("Removing a historical connection must not contact Google");
+    });
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+    ]);
+    const originalKey = `disconnect:${connection.id}:${connection.version}`;
+    const disconnect = (expectedVersion = connection.version, idempotencyKey = originalKey) =>
+      application.request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+        method: "DELETE",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({ expectedVersion, idempotencyKey }),
+      });
+    const [first, duplicate] = await Promise.all([disconnect(), disconnect()]);
+    expect(first.status).toBe(200);
+    expect(duplicate.status).toBe(200);
+    const firstBody = (await first.json()) as { connection: ConnectionMetadata };
+    const duplicateBody = (await duplicate.json()) as { connection: ConnectionMetadata };
+    expect(firstBody.connection).toMatchObject({
+      id: connection.id,
+      version: connection.version + 1,
+      status: "revoked",
+      metadata: { lifecycle: { state: "disconnected", recoverable: true } },
+    });
+    expect(duplicateBody.connection).toEqual(firstBody.connection);
+    expect(providerRequests).toBe(0);
+
+    // Model a later historical credential generation without reviving the retired setup API.
+    const laterGeneration = await updateConnection(client.db, {
+      workspaceId: workspace.workspaceId,
+      connectionId: connection.id,
+      visibleToSubjectId: "subject-a",
+      expectedVersion: firstBody.connection.version,
+      status: "active",
+      credentialEncrypted: "later-historical-ciphertext-must-not-be-read",
+      metadata: activeMetadata,
+      updatedBySubjectId: "subject-a",
+    });
+    expect(laterGeneration).not.toBeNull();
+    expect((await disconnect()).status).toBe(409);
+    expect((await disconnect(laterGeneration!.version, originalKey)).status).toBe(409);
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, connection.id, "subject-a"),
+    ).toMatchObject({
+      id: connection.id,
+      status: "active",
+      version: laterGeneration!.version,
+      metadata: { lifecycle: { state: "active" } },
+    });
+    expect(
+      (
+        await disconnect(
+          laterGeneration!.version,
+          `disconnect:${connection.id}:${laterGeneration!.version}`,
+        )
+      ).status,
+    ).toBe(200);
+    expect(providerRequests).toBe(0);
+  });
+
   test("refuses old source and publishing OAuth before contacting Google or writing credentials", async () => {
     if (!available) throw new Error("PostgreSQL required");
     const workspace = await freshWorkspace();

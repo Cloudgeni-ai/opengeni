@@ -18,6 +18,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import { createApp } from "../src/app";
 import {
+  OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_DRIVE_MCP_SCOPES,
   OFFICIAL_DRIVE_MCP_URL,
 } from "../src/integrations/oauth-profiles";
@@ -226,12 +227,15 @@ test("Drive callback requires an authenticated read and binds one exact personal
   const read = async (id: string) =>
     (await app.request(`${base}/attempts/${id}`, { headers })).json();
   const accounts = async () => (await app.request(`${base}/accounts`, { headers })).json();
-  const begin = async (reconnectAccountId?: string) => {
+  const begin = async (
+    reconnectAccountId?: string,
+    providerId: "google-drive" | "gmail" = "google-drive",
+  ) => {
     const created = await app.request(`${base}/attempts`, {
       method: "POST",
       headers,
       body: JSON.stringify({
-        providerId: "google-drive",
+        providerId,
         ownership: "personal",
         returnUrl,
         ...(reconnectAccountId ? { reconnectAccountId } : {}),
@@ -241,7 +245,7 @@ test("Drive callback requires an authenticated read and binds one exact personal
     expect(created.status).toBe(200);
     const attempt = await created.json();
     expect(attempt).toMatchObject({
-      providerId: "google-drive",
+      providerId,
       ownership: "personal",
       nextAction: { type: "credentials", fields: [] },
     });
@@ -262,7 +266,9 @@ test("Drive callback requires an authenticated read and binds one exact personal
       "https://accounts.google.com/o/oauth2/v2/auth",
     );
     expect(authorize.searchParams.get("scope")?.split(" ").sort()).toEqual(
-      [...OFFICIAL_DRIVE_MCP_SCOPES].sort(),
+      [
+        ...(providerId === "google-drive" ? OFFICIAL_DRIVE_MCP_SCOPES : OFFICIAL_GMAIL_MCP_SCOPES),
+      ].sort(),
     );
     expect(authorize.searchParams.get("access_type")).toBe("offline");
     expect(authorize.searchParams.get("prompt")).toBe("consent");
@@ -408,6 +414,48 @@ test("Drive callback requires an authenticated read and binds one exact personal
     expect(exchanges).toBe(completedExchanges);
     expect(await read(success.attempt.id)).toEqual(completed);
     expect(await accounts()).toHaveLength(1);
+
+    // Operators can close setup after consent begins. Complete the durable
+    // attempt as failed without exchanging its code or touching old credentials.
+    for (const scenario of [
+      { providerId: "google-drive" as const, overrides: { googleDriveMcpEnabled: false } },
+      { providerId: "google-drive" as const, overrides: { googleConnectorSetupEnabled: false } },
+      { providerId: "gmail" as const, overrides: { googleConnectorSetupEnabled: false } },
+    ]) {
+      const pending = await begin(
+        scenario.providerId === "google-drive" ? completed.account.id : undefined,
+        scenario.providerId,
+      );
+      const beforeExchange = exchanges;
+      const beforeRead = authenticatedReads;
+      const gated = configuredApp(scenario.overrides);
+      const path = `/v1/integrations/oauth/callback?${new URLSearchParams({ state: pending.state, code: "synthetic-code" })}`;
+      expect((await gated.request(path)).headers.get("location")).toBe(returnUrl);
+      const failure = await read(pending.attempt.id);
+      expect(failure).toMatchObject({
+        state: "failed",
+        credentialsCommitted: false,
+        nextAction: { type: "none" },
+        error: { code: "setup_unavailable" },
+      });
+      expect(failure.error.message).toContain("currently unavailable");
+      // Both a repeated callback while closed and a replay after reopening
+      // recover the same result instead of leaving setup active or exchanging.
+      await gated.request(path);
+      await callback(pending.state);
+      expect(await read(pending.attempt.id)).toEqual(failure);
+      expect(exchanges).toBe(beforeExchange);
+      expect(authenticatedReads).toBe(beforeRead);
+      expect(
+        await getConnectionMetadata(
+          client.db,
+          identity.personalWorkspaceId,
+          completed.account.id,
+          identity.subjectId,
+        ),
+      ).toEqual(saved);
+      expect(await accounts()).toHaveLength(1);
+    }
 
     readRejected = true;
     const reconnect = await begin(completed.account.id);

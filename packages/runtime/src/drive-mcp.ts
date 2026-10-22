@@ -133,7 +133,7 @@ export const DRIVE_MCP_BRIDGE_DESCRIPTOR = defineLocalMcpBridgeDescriptor({
 });
 export type DriveMcpBridgeConfig = {
   readonly url: string;
-  readonly connectionRef?: McpServerConnectionRef;
+  readonly connectionRef?: McpServerConnectionRef | undefined;
 };
 export type DriveMcpBridgeContext = {
   workspaceId: string;
@@ -388,7 +388,7 @@ export function isOfficialDriveMcpConfig(config: DriveMcpBridgeConfig): boolean 
   );
 }
 
-export function mergeDriveMcpTools(remote: Awaited<ReturnType<MCPServer["listTools"]>>) {
+export function mergeDriveMcpTools<T extends { name: string }>(remote: T[]) {
   // Never shadow a future official tool with different arguments/semantics.
   const collisions = remote.filter((tool) => Object.hasOwn(definitions, tool.name));
   if (collisions.length)

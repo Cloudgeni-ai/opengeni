@@ -855,7 +855,6 @@ async function completeMcpOAuthCallbackWithinDeadline(
   }
   try {
     state = await resolveMcpOAuthState(db, settings, input.state, deadline);
-    assertGoogleMcpSetupEnabled(settings, builtInOAuthProfileFor(state) ?? DEFAULT_OAUTH_PROFILE);
     integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
@@ -989,6 +988,14 @@ async function completeMcpOAuthCallbackWithinDeadline(
 
   const ownerSubjectId = state.ownership === "personal" ? state.subjectId : null;
   try {
+    // A gate can change while the human is at Google. Claim the validated
+    // Connect operation first so this refusal has a durable terminal receipt,
+    // while still stopping before client lookup or any provider request.
+    try {
+      assertGoogleMcpSetupEnabled(settings, builtInOAuthProfileFor(state) ?? DEFAULT_OAUTH_PROFILE);
+    } catch (error) {
+      throw new OAuthCallbackStageError("client_lookup", "setup_unavailable", error);
+    }
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, input.requestUrl);
     const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
     const key = requireEnvironmentEncryption(settings);
@@ -1243,15 +1250,17 @@ async function completeMcpOAuthCallbackWithinDeadline(
               error: {
                 code: staged.reason,
                 message:
-                  staged.reason === "account_mismatch"
-                    ? "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity."
-                    : staged.reason === "account_already_connected"
-                      ? "This Slack account is already connected. Reconnect the existing account instead."
-                      : staged.reason === "offline_access_unavailable"
-                        ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
-                        : staged.reason === "insufficient_scope"
-                          ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
-                          : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+                  staged.reason === "setup_unavailable"
+                    ? "Google connector setup is currently unavailable. Your previous connection is unchanged. Try a new connection attempt after setup is enabled."
+                    : staged.reason === "account_mismatch"
+                      ? "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity."
+                      : staged.reason === "account_already_connected"
+                        ? "This Slack account is already connected. Reconnect the existing account instead."
+                        : staged.reason === "offline_access_unavailable"
+                          ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
+                          : staged.reason === "insufficient_scope"
+                            ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                            : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
                 retryable: true,
               },
             }),

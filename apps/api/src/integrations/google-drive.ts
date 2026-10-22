@@ -184,6 +184,28 @@ export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
   return { enabled: false, triggered: 0 };
 }
 
+type GoogleTokenResponse = {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType: string;
+  expiresAt: Date | null;
+  scopes: string[];
+};
+
+type GoogleDriveConnectionRecord = NonNullable<Awaited<ReturnType<typeof getConnectionMetadata>>>;
+
+type GoogleDriveApiConnection =
+  | {
+      kind: "legacy";
+      connection: GoogleDriveConnectionRecord;
+      metadata: GoogleDriveConnectionMetadata;
+    }
+  | {
+      kind: "integration";
+      connection: GoogleDriveConnectionRecord;
+      metadata: ApiIntegrationOAuthConnectionMetadata;
+    };
+
 export async function startGoogleDriveOAuth(
   deps: ApiRouteDeps,
   input: {
