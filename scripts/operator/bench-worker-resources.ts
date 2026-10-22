@@ -128,6 +128,38 @@ const measure = async <T>(operation: string, run: () => Promise<T>): Promise<T> 
   }
 };
 try {
+  // Production initializes its service graph once per process. Rebuilding it
+  // for every sample would charge startup heap inspection and catalog loading
+  // to each turn. Only the first sample below includes lazy service startup.
+  const model = new ScriptedModel([]);
+  const runtime = createProductionAgentRuntime({ model });
+  let executedTools = 0;
+  if (toolCount) {
+    const buildAgent = runtime.buildAgent.bind(runtime);
+    runtime.buildAgent = (...args) => {
+      const agent = buildAgent(...args);
+      agent.tools.push(
+        tool({
+          name: "local_fixture",
+          description: "Offline benchmark no-op",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          strict: false,
+          execute: async () => {
+            executedTools++;
+            return "local result";
+          },
+        }),
+      );
+      return agent;
+    };
+  }
+  runtime.generateSessionTitle = async () => ({ title: null, usage: null });
+  const activities = createActivityTestHarness({
+    settings: testSettings({ databaseUrl: url.href, sandboxBackend: "none" }),
+    db: client.db,
+    bus: new MemoryEventBus(),
+    runtime,
+  });
   for (let index = 0; index < Number(process.env.OPENGENI_BENCH_WORKER_SAMPLES ?? "5"); index++) {
     const id = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -161,7 +193,7 @@ try {
       tools: [],
       reasoningEffortFallback: "medium",
     });
-    const model = new ScriptedModel([
+    model.steps.push(
       ...(toolCount
         ? [
             {
@@ -175,35 +207,9 @@ try {
         outputText: "Hello from a scripted turn.",
         chunks: ["Hello ", "from ", "a scripted turn."],
       },
-    ]);
-    const runtime = createProductionAgentRuntime({ model });
-    let executedTools = 0;
-    if (toolCount) {
-      const buildAgent = runtime.buildAgent.bind(runtime);
-      runtime.buildAgent = (...args) => {
-        const agent = buildAgent(...args);
-        agent.tools.push(
-          tool({
-            name: "local_fixture",
-            description: "Offline benchmark no-op",
-            parameters: { type: "object", properties: {}, additionalProperties: false },
-            strict: false,
-            execute: async () => {
-              executedTools++;
-              return "local result";
-            },
-          }),
-        );
-        return agent;
-      };
-    }
-    runtime.generateSessionTitle = async () => ({ title: null, usage: null });
-    const activities = createActivityTestHarness({
-      settings: testSettings({ databaseUrl: url.href, sandboxBackend: "none" }),
-      db: client.db,
-      bus: new MemoryEventBus(),
-      runtime,
-    });
+    );
+    const priorModelCalls = model.calls;
+    const priorToolCalls = executedTools;
     const result = await measure(toolCount ? "five-tool-turn" : "scripted-turn", () =>
       activities.runAgentTurn({
         accountId: grant.accountId,
@@ -217,8 +223,8 @@ try {
     );
     if (
       result.status !== "idle" ||
-      model.calls !== (toolCount ? 2 : 1) ||
-      executedTools !== toolCount
+      model.calls - priorModelCalls !== (toolCount ? 2 : 1) ||
+      executedTools - priorToolCalls !== toolCount
     )
       throw new Error(
         `Unexpected turn result: ${JSON.stringify(result)}, calls=${model.calls}, tools=${executedTools}`,
@@ -253,8 +259,16 @@ try {
         }),
       );
     }
+    // The scripted model keeps requests for assertions in tests. This harness
+    // verifies durability instead; do not retain every sample's model input.
+    model.requests.length = 0;
   }
-  const output = { generatedAt: new Date().toISOString(), memory: process.memoryUsage(), samples };
+  const output = {
+    generatedAt: new Date().toISOString(),
+    fixture: { toolCount, serviceLifetime: "process", firstTurnIncludesStartup: true },
+    memory: process.memoryUsage(),
+    samples,
+  };
   if (process.env.OPENGENI_BENCH_OUTPUT)
     await Bun.write(process.env.OPENGENI_BENCH_OUTPUT, JSON.stringify(output, null, 2));
   console.log(
