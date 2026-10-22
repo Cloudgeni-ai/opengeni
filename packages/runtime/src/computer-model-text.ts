@@ -359,11 +359,15 @@ export function computerObservationText(observation: ComputerTextObservation): s
         : `Changed elements since ${semantic.baseObservationId}; elements not listed are unchanged and keep their refs:`,
     );
   } else if (rendered.listed === 0) {
-    lines.push("The accessibility tree has no readable elements; use the screenshot.");
+    lines.push(
+      rendered.omitted
+        ? `No element is listed: the accessibility tree's ${plural(rendered.omitted, "element")} are all hidden, unlabeled or repeated; use the screenshot.`
+        : "The accessibility tree has no readable elements; use the screenshot.",
+    );
   }
   lines.push(...rendered.lines);
   const notes = [
-    rendered.omitted
+    rendered.omitted && rendered.listed > 0
       ? `${plural(rendered.omitted, "hidden, unlabeled or repeated element")} not shown`
       : null,
     semantic.kind === "diff" && semantic.removedRefs.length > 0

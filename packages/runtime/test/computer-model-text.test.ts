@@ -199,6 +199,17 @@ describe("computerObservationText", () => {
     );
   });
 
+  test("says why a tree with only unlabeled elements lists none", () => {
+    const roots = [
+      { ref: "read-only:1", role: "AXGroup", states: [], actions: [] },
+      { ref: "read-only:2", role: "AXGroup", states: [], actions: [] },
+    ];
+    const text = computerObservationText(observation({ kind: "snapshot", roots, nodeCount: 2 }));
+    expect(text.split("\n").slice(3)).toEqual([
+      "No element is listed: the accessibility tree's 2 elements are all hidden, unlabeled or repeated; use the screenshot.",
+    ]);
+  });
+
   test("clips long fields", () => {
     const text = computerObservationText(
       observation({
