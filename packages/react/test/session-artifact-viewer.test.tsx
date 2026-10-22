@@ -118,10 +118,15 @@ function opened(title = "Draft"): OpenedEditableArtifact {
   };
 }
 
-function clientFixture(name: string, config: () => Promise<ClientConfig | Response>) {
+function clientFixture(
+  name: string,
+  config: () => Promise<ClientConfig | Response>,
+  readRetry?: ConstructorParameters<typeof OpenGeniClient>[0]["readRetry"],
+) {
   const requests: { path: string; sessionId: string | null; replicaId: string | null }[] = [];
   const client = new OpenGeniClient({
     baseUrl: "https://host.example/proxy",
+    ...(readRetry !== undefined ? { readRetry } : {}),
     fetch: async (input, init) => {
       const url = new URL(String(input));
       requests.push({
@@ -337,21 +342,29 @@ describe("session artifact viewer", () => {
   });
 
   test("retryable HTTP config errors keep the support reference", async () => {
-    const fixture = clientFixture("A", async () => {
-      return Response.json(
-        {
-          error: {
-            message: "Unavailable",
-            code: "temporary",
-            retryable: true,
-            requestId: "support-reference",
+    const fixture = clientFixture(
+      "A",
+      async () => {
+        return Response.json(
+          {
+            error: {
+              message: "Unavailable",
+              code: "temporary",
+              retryable: true,
+              requestId: "support-reference",
+            },
           },
-        },
-        { status: 503 },
-      );
-    });
+          { status: 503 },
+        );
+      },
+      // The SDK quietly retries a 503 safe read first; keep its backoff short.
+      { initialDelayMs: 1, maxDelayMs: 2 },
+    );
     const rendered = await renderComponent(viewer(fixture.client));
-    await flush();
+    await flush(50);
+    expect(
+      fixture.requests.filter((request) => request.path.endsWith("/config/client")),
+    ).toHaveLength(4);
     expect(rendered.container.textContent).toContain("Try again");
     expect(rendered.container.textContent).toContain("support-reference");
     await rendered.unmount();
