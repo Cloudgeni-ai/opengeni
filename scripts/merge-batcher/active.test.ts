@@ -843,18 +843,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
             1: page(jobs(...Array(45).fill("in_progress"), "waiting", "completed")),
             2: page([]),
             3: page(jobs("queued", "waiting")),
-            4: page(jobs("pending", "completed")),
+            4: page(jobs("queued", "pending", "completed")),
             5: page(jobs("in_progress")),
           },
           budget,
         );
       // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
-      const fits = busy("65");
+      const fits = busy("66");
       expect(await fits.mainBusy()).toBe(false);
-      expect(fits.lastHeadroom).toMatchObject({ occupied: 47, reservedMain: 45 });
-      const tight = busy("64");
+      expect(fits.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
+      const tight = busy("65");
       expect(await tight.mainBusy()).toBe(true);
-      expect(tight.lastHeadroom).toMatchObject({ occupied: 47, reservedMain: 45 });
+      expect(tight.lastHeadroom).toMatchObject({ occupied: 48, reservedMain: 45 });
       // An idle main run never shrinks the configured reserve.
       const quiet = reader(
         [
@@ -869,7 +869,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     test.each([
       ["unknown job status", page(jobs("in_progress", "action_required")), "Unrecognized"],
       ["missing job status", page(jobs("queued", undefined)), "Unrecognized"],
-      ["oversized job page", { total_count: 101, jobs: [] }, "Incomplete"],
+      [
+        "complete job page above the 100-row bound",
+        { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
+        "Incomplete",
+      ],
       ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "Incomplete"],
       ["malformed job page", { total_count: 0 }, "Incomplete"],
     ] as const)("%s holds", async (_name, jobPage, reason) => {
@@ -894,6 +898,12 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       const truncated = reader([], idle, "1000", () => ({ total_count: 1, workflow_runs: [] }));
       expect(await truncated.mainBusy()).toBe(true);
       expect(truncated.lastHeadroom?.reason).toContain("Incomplete");
+      const oversized = reader([], idle, "1000", () => ({
+        total_count: 101,
+        workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
+      }));
+      expect(await oversized.mainBusy()).toBe(true);
+      expect(oversized.lastHeadroom?.reason).toContain("oversized");
       const batch = reader(
         [{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }],
         { 7: page([]) },

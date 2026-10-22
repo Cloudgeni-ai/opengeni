@@ -730,16 +730,17 @@ describe("traffic recovery and bounded reads", () => {
           1: page(jobs(...Array(45).fill("in_progress"), "waiting", "completed")),
           2: page([]),
           3: page(jobs("queued", "waiting")),
-          4: page(jobs("pending", "completed")),
+          4: page(jobs("queued", "pending", "completed")),
           5: page(jobs("in_progress")),
         },
       );
-      expect(await readHeadroom(reader, 65, 40)).toMatchObject({
+      // Main demand 45 exceeds the 40 reserve; production and PR ci.yml runs are other demand.
+      expect(await readHeadroom(reader, 66, 40)).toMatchObject({
         allowed: true,
-        occupied: 47,
+        occupied: 48,
         reservedMain: 45,
       });
-      expect((await readHeadroom(reader, 64, 40)).allowed).toBe(false);
+      expect((await readHeadroom(reader, 65, 40)).allowed).toBe(false);
       const quiet = scan([{ id: 1, status: "queued", ...MAIN }], {
         1: page(jobs("waiting", "waiting")),
       });
@@ -753,7 +754,11 @@ describe("traffic recovery and bounded reads", () => {
     test.each([
       ["unknown job status", page(jobs("in_progress", "action_required")), "Unrecognized"],
       ["missing job status", page(jobs("queued", undefined)), "Unrecognized"],
-      ["oversized job page", { total_count: 101, jobs: [] }, "incomplete"],
+      [
+        "complete job page above the 100-row bound",
+        { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
+        "incomplete",
+      ],
       ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "incomplete"],
       ["malformed job page", { total_count: 0 }, "incomplete"],
       ["array job page", [], "incomplete"],
@@ -784,6 +789,18 @@ describe("traffic recovery and bounded reads", () => {
       expect(truncated).toMatchObject({
         allowed: false,
         reason: expect.stringContaining("incomplete"),
+      });
+      const oversized = await readHeadroom(
+        scan([], idle, () => ({
+          total_count: 101,
+          workflow_runs: Array.from({ length: 101 }, (_, i) => ({ id: i + 1, status: "queued" })),
+        })),
+        1000,
+        40,
+      );
+      expect(oversized).toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining("exceeds bounded scan"),
       });
       const batch = await readHeadroom(
         scan([{ id: 7, status: "waiting", ...OTHER, path: ".github/workflows/batch-ci.yml" }], {

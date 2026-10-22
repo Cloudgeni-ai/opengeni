@@ -184,8 +184,8 @@ export interface Headroom {
   candidateSlots: 18;
 }
 // GitHub job statuses. Only jobs that hold or are about to request a hosted
-// runner are demand: queued and in_progress jobs, plus requested jobs, which
-// become queued without any further gate. Jobs waiting for environment
+// runner are demand: queued and in_progress jobs, plus requested jobs (created
+// but not yet queued), which are counted conservatively. Jobs waiting for environment
 // approval (waiting) or a job concurrency group (pending) and completed jobs
 // hold no runner, and a run without materialized jobs (for example a run held
 // by its concurrency group) is only a placeholder. Any other or missing status
