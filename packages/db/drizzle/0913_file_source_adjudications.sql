@@ -3,7 +3,7 @@
 -- the following maintenance migration. Runtime roles have no table access.
 CREATE TABLE opengeni_private.file_source_adjudications (
   file_id uuid PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
-  decision text NOT NULL CHECK (decision IN ('human_shared', 'owner_only')),
+  decision text NOT NULL CHECK (decision IN ('human_shared', 'owner_only', 'ordinary_upload')),
   owner_subject_id text CHECK (owner_subject_id IS NULL OR length(trim(owner_subject_id)) > 0),
   attested_by text NOT NULL CHECK (length(trim(attested_by)) > 0),
   attested_at timestamptz NOT NULL DEFAULT now()

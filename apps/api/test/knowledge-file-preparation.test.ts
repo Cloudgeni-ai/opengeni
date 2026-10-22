@@ -46,6 +46,7 @@ afterAll(async () => {
 async function fixture(
   mode: "automatic" | "review_first" | "off" = "automatic",
   contentType = "application/pdf",
+  hostDeniesSource = false,
 ) {
   const id = crypto.randomUUID();
   const subjectId = `user:${id}`;
@@ -149,11 +150,24 @@ async function fixture(
     settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
     db: client.db,
     managedAuth: null,
+    ...(hostDeniesSource
+      ? {
+          sessionAuthorization: {
+            authorizeSession: async () => ({ allowed: false, reason: "revoked" }),
+            resolveListScope: async () => ({ kind: "all" }),
+          },
+        }
+      : {}),
     objectStorage: {
       getObjectBytes: async (key: string) => {
         calls.push(`read:${key}`);
         return { bytes };
       },
+      fileExists: async () => true,
+      createGetUrl: async () => ({
+        url: "https://storage.example.test/original",
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
     },
     getDocumentServices: () => ({
       parser: {
@@ -206,6 +220,71 @@ async function fixture(
 }
 
 describe("chat file to retained source through the public API", () => {
+  test("host denial stops source preparation before reading original bytes", async () => {
+    const f = await fixture("automatic", "application/pdf", true);
+    await shared.admin`update files set source_session_id = ${f.session.id},
+      source_session_shared_unrestricted = true where id = ${f.fileId}`;
+    const response = await f.app.request(f.url, {
+      method: "POST",
+      headers: { authorization: await f.authorization() },
+    });
+    expect(response.status).toBe(404);
+    expect(f.calls).toEqual([]);
+  });
+  test("MCP preparation also stops before reading a host-denied original", async () => {
+    const f = await fixture("automatic", "application/pdf", true);
+    await shared.admin`update files set source_session_id = ${f.session.id},
+      source_session_shared_unrestricted = true where id = ${f.fileId}`;
+    const server = new McpServer({ name: "knowledge-file-authorization-test", version: "1" });
+    registerKnowledgeEntryTools(server, f.deps, f.agentGrant, f.session.id);
+    const mcp = new McpClient({ name: "agent", version: "1" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await server.connect(right);
+    await mcp.connect(left);
+    try {
+      const result = await mcp.callTool({
+        name: "knowledge_retain_file",
+        arguments: { fileId: f.fileId },
+      });
+      expect(result.isError).toBe(true);
+      expect(f.calls).toEqual([]);
+    } finally {
+      await mcp.close();
+      await server.close();
+    }
+  });
+  test("Knowledge download denies a private source even when its entry remains shared", async () => {
+    const f = await fixture();
+    await shared.admin`update files set source_session_id = ${f.session.id},
+      source_session_shared_unrestricted = true where id = ${f.fileId}`;
+    const prepared = await f.app.request(f.url, {
+      method: "POST",
+      headers: { authorization: await f.authorization() },
+    });
+    expect(prepared.status).toBe(200);
+    const retained = (await prepared.json()) as KnowledgeFilePreparationResult;
+    if (retained.status !== "retained") throw new Error("Expected retained source");
+    const otherAuthorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      subjectId: `user:${crypto.randomUUID()}`,
+      principalKind: "human_session",
+      permissions: ["files:read", "documents:search"],
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}`;
+    const url = `http://test/v1/workspaces/${f.grant.workspaceId}/knowledge/entries/${retained.receipt.entryId}/file/download-url`;
+    const request = () =>
+      f.app.request(url, {
+        method: "POST",
+        headers: { authorization: otherAuthorization, "content-type": "application/json" },
+        body: "{}",
+      });
+    const before = await request();
+    expect(before.status, await before.clone().text()).toBe(200);
+    await shared.admin`update sessions set memory_scope = 'user',
+      scope_subject_id = ${f.subjectId} where id = ${f.session.id}`;
+    expect((await request()).status).toBe(404);
+  });
   test("uses the existing original, exact parser text and one pending source for repeated requests", async () => {
     const f = await fixture("review_first");
     const headers = { authorization: await f.authorization() };

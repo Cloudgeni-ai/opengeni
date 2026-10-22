@@ -735,6 +735,7 @@ test("migration protects existing output and preserves a verified human share", 
     const sharedFileId = await f.readyFile(null, f.owner.subjectId);
     const orphanFileId = await f.readyFile(null, f.owner.subjectId);
     const oldAgentUploadId = await f.readyFile(null, f.owner.subjectId);
+    const disputedOwnerId = await f.readyFile(null, f.owner.subjectId);
     const humanUploadId = await f.readyFile(null, f.owner.subjectId);
     const oldSpillId = await f.readyFile(null, null);
     const oldSandboxId = await f.readyFile(null, f.owner.subjectId);
@@ -742,6 +743,9 @@ test("migration protects existing output and preserves a verified human share", 
     await legacy.admin`update files set object_key =
       ${`workspaces/${f.workspace.id}/files/${oldAgentUploadId}/original/upload.txt`}
       where id = ${oldAgentUploadId}`;
+    await legacy.admin`update files set object_key =
+      ${`workspaces/${f.workspace.id}/files/${disputedOwnerId}/original/output.txt`}
+      where id = ${disputedOwnerId}`;
     await legacy.admin`update files set object_key =
       ${`workspaces/${f.workspace.id}/files/${humanUploadId}/original/report.txt`}
       where id = ${humanUploadId}`;
@@ -763,7 +767,8 @@ test("migration protects existing output and preserves a verified human share", 
       (${sharedSandboxId}, 'human_shared', 'fixture-operator')`;
     await legacy.admin`insert into opengeni_private.file_source_adjudications
       (file_id, decision, owner_subject_id, attested_by) values
-      (${oldSpillId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator')`;
+      (${oldSpillId}, 'owner_only', ${f.owner.subjectId}, 'fixture-operator'),
+      (${disputedOwnerId}, 'owner_only', ${f.other.subjectId}, 'fixture-operator')`;
     await legacy.admin`
       insert into audit_events (account_id, workspace_id, subject_id, action, target_type, target_id, metadata)
       values (${f.workspace.accountId}, ${f.workspace.id}, 'worker:first-party-mcp',
@@ -845,6 +850,14 @@ test("migration protects existing output and preserves a verified human share", 
     expect((await f.call(f.other, "GET", `/files/${orphanFileId}`)).status).toBe(200);
     expect((await f.call(f.other, "GET", `/files/${oldAgentUploadId}`)).status).toBe(404);
     expect((await f.call(f.owner, "GET", `/files/${oldAgentUploadId}`)).status).toBe(200);
+    expect((await f.call(f.owner, "GET", `/files/${disputedOwnerId}`)).status).toBe(404);
+    expect((await f.call(f.other, "GET", `/files/${disputedOwnerId}`)).status).toBe(200);
+    const [attested] = await legacy.admin`select owner_subject_id as owner,
+      source_session_owner_subject_id as source_owner from files where id = ${disputedOwnerId}`;
+    expect(attested).toMatchObject({
+      owner: f.other.subjectId,
+      source_owner: f.other.subjectId,
+    });
     expect((await f.call(f.other, "GET", `/files/${humanUploadId}`)).status).toBe(200);
     expect((await f.call(f.other, "GET", `/files/${oldSpillId}`)).status).toBe(404);
     expect((await f.call(f.owner, "GET", `/files/${oldSpillId}`)).status).toBe(200);
@@ -868,9 +881,26 @@ test("migration requires decisions for ambiguous shared originals", async () => 
   try {
     const f = await fixture(legacy, legacyDb);
     const fileId = await f.readyFile(null, null);
+    const ordinaryPrivateId = await f.readyFile(f.owner.subjectId);
+    const privateOutputId = await f.readyFile(f.owner.subjectId);
     await legacy.admin`update files set object_key =
       ${`workspaces/${f.workspace.id}/files/${fileId}/original/legacy.txt`}
       where id = ${fileId}`;
+    await legacy.admin`update files set object_key =
+      ${`workspaces/${f.workspace.id}/files/${ordinaryPrivateId}/original/ordinary.txt`}
+      where id = ${ordinaryPrivateId}`;
+    await legacy.admin`update files set object_key =
+      ${`workspaces/${f.workspace.id}/files/${privateOutputId}/original/output.txt`}
+      where id = ${privateOutputId}`;
+    const [base] = await legacy.admin<{ id: string }[]>`
+      insert into document_bases(account_id, workspace_id, name)
+      values (${f.workspace.accountId}, ${f.workspace.id}, 'Example base') returning id`;
+    const [document] = await legacy.admin<{ id: string }[]>`
+      insert into documents(account_id, workspace_id, base_id, file_id, status,
+        title, created_by, authority_kind, authority_workspace_id, visibility)
+      values (${f.workspace.accountId}, ${f.workspace.id}, ${base!.id}, ${ordinaryPrivateId},
+        'ready', 'Ordinary original', ${f.owner.subjectId}, 'workspace',
+        ${f.workspace.id}, 'workspace') returning id`;
     const migration = await readFile(
       new URL(
         "../../../packages/db/drizzle/0914_session_file_source_visibility.sql",
@@ -885,11 +915,31 @@ test("migration requires decisions for ambiguous shared originals", async () => 
       (file_id, decision, attested_by) values
       (${fileId}, 'owner_only', 'fixture-operator')`;
     await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
+      "Ambiguous private legacy uploads require operator adjudication",
+    );
+    await legacy.admin`insert into opengeni_private.file_source_adjudications
+      (file_id, decision, owner_subject_id, attested_by) values
+      (${ordinaryPrivateId}, 'ordinary_upload', null, 'fixture-operator'),
+      (${privateOutputId}, 'owner_only', ${f.other.subjectId}, 'fixture-operator')`;
+    await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
+      "Legacy private file owner conflicts with operator adjudication",
+    );
+    await legacy.admin`update opengeni_private.file_source_adjudications
+      set owner_subject_id = ${f.owner.subjectId} where file_id = ${privateOutputId}`;
+    await expect((async () => await legacy.admin.unsafe(migration))()).rejects.toThrow(
       "Ownerless legacy file provenance requires operator adjudication",
     );
     await legacy.admin`update opengeni_private.file_source_adjudications
       set owner_subject_id = ${f.owner.subjectId} where file_id = ${fileId}`;
     await legacy.admin.unsafe(migration);
+    const [ordinary] = await legacy.admin`select source_session_provenance_missing as missing
+      from files where id = ${ordinaryPrivateId}`;
+    expect(ordinary?.missing).toBe(false);
+    expect((await f.call(f.other, "GET", `/documents/${document!.id}/original-file`)).status).toBe(
+      200,
+    );
+    expect((await f.call(f.other, "GET", `/files/${privateOutputId}`)).status).toBe(404);
+    expect((await f.call(f.owner, "GET", `/files/${privateOutputId}`)).status).toBe(200);
     expect((await f.call(f.other, "GET", `/files/${fileId}`)).status).toBe(404);
     expect((await f.call(f.owner, "GET", `/files/${fileId}`)).status).toBe(200);
     const sharedByOwner = await f.call(f.owner, "PUT", `/files/${fileId}/visibility`, {

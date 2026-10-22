@@ -13,6 +13,7 @@ import {
   withLearningRefusalMeta,
 } from "@opengeni/contracts/learning-refusal";
 import {
+  fileSourceVisibleToHost,
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   retainKnowledgeMessage,
@@ -328,7 +329,18 @@ export function registerKnowledgeEntryTools(
       },
     },
     ({ fileId, purpose }) =>
-      run((context) => prepareKnowledgeFile(deps, context, fileId, purpose), "knowledge", "write"),
+      run(
+        (context) =>
+          prepareKnowledgeFile(
+            deps,
+            context,
+            fileId,
+            (file) => fileSourceVisibleToHost(deps, grant, file.id, file.workspaceId, true),
+            purpose,
+          ),
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_retain_message",

@@ -123,10 +123,11 @@ UPDATE video_generation_operations op SET source_session_id_snapshot = session_r
 -- Historical media receipts survive session deletion, but their session_id
 -- becomes NULL. Never treat those unknown origins as ordinary uploads.
 UPDATE files f SET source_session_provenance_missing = true,
-  source_session_owner_subject_id = coalesce(nullif(trim(f.owner_subject_id), ''),
-    nullif(trim(f.private_owner_subject_ids[1]), ''),
+  source_session_owner_subject_id = coalesce(
     (SELECT a.owner_subject_id FROM opengeni_private.file_source_adjudications a
-      WHERE a.file_id = f.id AND a.decision = 'owner_only'))
+      WHERE a.file_id = f.id AND a.decision = 'owner_only'),
+    nullif(trim(f.private_owner_subject_ids[1]), ''),
+    nullif(trim(f.owner_subject_id), ''))
   WHERE f.source_session_id IS NULL AND EXISTS (
     SELECT 1 FROM generated_image_artifacts a WHERE a.artifact_id = f.id AND a.session_id IS NULL
     UNION ALL
@@ -160,7 +161,7 @@ BEGIN
           AND e.target_type = 'workspace_file' AND e.target_id = f.id::text
           AND e.metadata->>'to' = 'workspace')
       AND NOT EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications a
-        WHERE a.file_id = f.id))
+        WHERE a.file_id = f.id AND a.decision IN ('human_shared', 'owner_only')))
   THEN
     RAISE EXCEPTION 'Legacy file shares require operator adjudication'
       USING ERRCODE='55000';
@@ -178,47 +179,97 @@ BEGIN
       AND NOT f.source_session_audience_explicit
       AND f.object_key ~ '^workspaces/[^/]+/files/[^/]+/original/'
       AND NOT EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications a
-        WHERE a.file_id = f.id))
+        WHERE a.file_id = f.id AND a.decision IN ('human_shared', 'owner_only')))
   THEN
     RAISE EXCEPTION 'Ambiguous shared legacy uploads require operator adjudication'
       USING ERRCODE='55000';
   END IF;
 END $ambiguous_shared_upload_preflight$;
 
--- A verified human upload retains its existing shared audience. Every other
--- unresolved original is narrowed to its recorded owner. Private originals
--- were already owner-only, so this preserves their effective audience.
+-- Private originals can also back shared Documents. Their provenance is
+-- ambiguous: only an attested ordinary upload may keep independent Document
+-- access. An attested session output remains owner-only.
+DO $ambiguous_private_upload_preflight$
+BEGIN
+  IF EXISTS (SELECT 1 FROM files f
+    WHERE f.source_session_id IS NULL AND NOT f.source_session_provenance_missing
+      AND f.private_owner_subject_ids IS NOT NULL
+      AND f.object_key ~ '^workspaces/[^/]+/files/[^/]+/original/'
+      AND NOT EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications a
+        WHERE a.file_id = f.id AND a.decision IN ('ordinary_upload', 'owner_only')))
+  THEN
+    RAISE EXCEPTION 'Ambiguous private legacy uploads require operator adjudication'
+      USING ERRCODE='55000';
+  END IF;
+END $ambiguous_private_upload_preflight$;
+
+-- A contradictory private owner cannot be resolved by selecting either one.
+DO $private_owner_conflict_preflight$
+BEGIN
+  IF EXISTS (SELECT 1 FROM files f JOIN opengeni_private.file_source_adjudications a
+      ON a.file_id = f.id AND a.decision = 'owner_only'
+    WHERE f.source_session_id IS NULL AND f.private_owner_subject_ids IS NOT NULL
+      AND a.owner_subject_id IS NOT NULL
+      AND (cardinality(f.private_owner_subject_ids) <> 1
+        OR f.private_owner_subject_ids[1] IS DISTINCT FROM a.owner_subject_id))
+  THEN
+    RAISE EXCEPTION 'Legacy private file owner conflicts with operator adjudication'
+      USING ERRCODE='55000';
+  END IF;
+END $private_owner_conflict_preflight$;
+
+-- A verified ordinary upload retains its existing audience. Every attested
+-- session-produced original is narrowed to its verified or recorded owner.
 UPDATE files f SET source_session_provenance_missing = true,
-  source_session_owner_subject_id = coalesce(nullif(trim(f.owner_subject_id), ''),
-    nullif(trim(f.private_owner_subject_ids[1]), ''),
+  source_session_owner_subject_id = coalesce(
     (SELECT a.owner_subject_id FROM opengeni_private.file_source_adjudications a
-      WHERE a.file_id = f.id AND a.decision = 'owner_only'))
+      WHERE a.file_id = f.id AND a.decision = 'owner_only'),
+    nullif(trim(f.private_owner_subject_ids[1]), ''),
+    nullif(trim(f.owner_subject_id), ''))
   WHERE f.source_session_id IS NULL AND NOT f.source_session_provenance_missing
     AND NOT f.source_session_audience_explicit
     AND f.object_key ~ '^workspaces/[^/]+/files/[^/]+/original/'
-    AND (f.private_owner_subject_ids IS NOT NULL OR EXISTS (
-      SELECT 1 FROM opengeni_private.file_source_adjudications a
-      WHERE a.file_id = f.id AND a.decision = 'owner_only'));
+    AND EXISTS (SELECT 1 FROM opengeni_private.file_source_adjudications a
+      WHERE a.file_id = f.id AND a.decision = 'owner_only');
 
 -- Old spilled results and partially published generated/sandbox output may
 -- have no durable source receipt. Their object-key class still proves they
 -- were session-produced, so never treat them as ordinary shared uploads.
 UPDATE files f SET source_session_provenance_missing = true,
-  source_session_owner_subject_id = coalesce(nullif(trim(f.owner_subject_id), ''),
-    nullif(trim(f.private_owner_subject_ids[1]), ''),
+  source_session_owner_subject_id = coalesce(
     (SELECT a.owner_subject_id FROM opengeni_private.file_source_adjudications a
-      WHERE a.file_id = f.id AND a.decision = 'owner_only'))
+      WHERE a.file_id = f.id AND a.decision = 'owner_only'),
+    nullif(trim(f.private_owner_subject_ids[1]), ''),
+    nullif(trim(f.owner_subject_id), ''))
   WHERE f.source_session_id IS NULL AND NOT f.source_session_provenance_missing
     AND f.object_key ~ '^workspaces/[^/]+/files/[^/]+/(tool-results|sandbox|generated|retained)/';
 
--- A privately verified owner of an old ownerless File must be able to share a
--- shareable File later. Set the durable owner under the maintenance lock; the
--- runtime trigger intentionally forbids such ownership claims.
+DO $multiple_private_owners_preflight$
+BEGIN
+  IF EXISTS (SELECT 1 FROM files
+    WHERE source_session_provenance_missing
+      AND private_owner_subject_ids IS NOT NULL
+      AND cardinality(private_owner_subject_ids) <> 1)
+  THEN
+    RAISE EXCEPTION 'Legacy private file has ambiguous owners'
+      USING ERRCODE='55000';
+  END IF;
+END $multiple_private_owners_preflight$;
+
+-- The attested owner controls an old shared File even when the legacy stored
+-- owner differs. Set the durable owner under the maintenance lock; the runtime
+-- trigger intentionally forbids such ownership changes.
 ALTER TABLE files DISABLE TRIGGER files_personal_owner_immutable;
+UPDATE files f SET owner_subject_id = f.private_owner_subject_ids[1]
+  WHERE f.source_session_provenance_missing
+    AND f.private_owner_subject_ids IS NOT NULL
+    AND cardinality(f.private_owner_subject_ids) = 1
+    AND f.owner_subject_id IS DISTINCT FROM f.private_owner_subject_ids[1];
 UPDATE files f SET owner_subject_id = a.owner_subject_id
   FROM opengeni_private.file_source_adjudications a
   WHERE a.file_id = f.id AND a.decision = 'owner_only'
-    AND a.owner_subject_id IS NOT NULL AND f.owner_subject_id IS NULL
+    AND a.owner_subject_id IS NOT NULL
+    AND f.owner_subject_id IS DISTINCT FROM a.owner_subject_id
     AND f.private_owner_subject_ids IS NULL
     AND f.source_session_provenance_missing;
 ALTER TABLE files ENABLE TRIGGER files_personal_owner_immutable;

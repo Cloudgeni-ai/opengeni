@@ -1684,10 +1684,11 @@ the chat's live visibility unless the File owner explicitly shares that File;
 after chat deletion, retained output keeps the chat's last audience. Historical
 output whose source chat cannot be recovered is restricted to its recorded owner.
 Migrations 0909–0910 stage private operator decisions for ambiguous historical
-shared originals and legacy shares, then enforce source visibility. Verified
-human-shared files keep their audience; unresolved originals stay owner-only.
-The enforcement migration stops if a shared original has no decision or a
-restricted file has no recoverable owner.
+shared and private originals and legacy shares, then enforce source visibility.
+Verified ordinary uploads keep independent Document access; verified human
+shares keep their audience; attested session output stays owner-only. The
+enforcement migration stops if an original has no decision or a restricted
+file has no recoverable owner.
 Ordinary Document originals without session provenance keep Document access;
 source-bearing or uncertain originals also require the File source policy.
 

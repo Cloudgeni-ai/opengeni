@@ -5,6 +5,8 @@ import {
   type KnowledgeContext,
 } from "@opengeni/db";
 import { retryWhileMissing } from "@opengeni/storage";
+import { HTTPException } from "hono/http-exception";
+import type { FileAsset } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "../dependencies";
 
 /** Existing original -> one source revision, through the ordinary task policy. */
@@ -12,10 +14,13 @@ export async function prepareKnowledgeFile(
   deps: Pick<ApiRouteDeps, "db" | "objectStorage" | "getDocumentServices">,
   context: KnowledgeContext,
   fileId: string,
+  canReadOriginal: (file: FileAsset) => Promise<boolean>,
   purpose: "evidence" | "reference" = "evidence",
 ) {
   const inspected = await inspectKnowledgeFilePreparation(deps.db, context, fileId);
   if (inspected.status !== "prepare") return inspected;
+  if (!(await canReadOriginal(inspected.file)))
+    throw new HTTPException(404, { message: "Original file unavailable" });
   if (!deps.objectStorage) throw new Error("File storage is unavailable");
   const object = await retryWhileMissing(() =>
     deps.objectStorage!.getObjectBytes(inspected.file.objectKey),

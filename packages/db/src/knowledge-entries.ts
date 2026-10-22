@@ -844,22 +844,34 @@ async function knowledgeFilePreparationOperation(
   });
 }
 
-export function knowledgeOriginalFileAsset(raw: Record<string, unknown>): FileAsset {
-  return FileAsset.parse({
-    id: raw.id,
-    workspaceId: raw.workspace_id,
-    status: raw.status,
-    filename: raw.filename,
-    safeFilename: raw.safe_filename,
-    contentType: raw.content_type,
-    sizeBytes: Number(raw.size_bytes),
-    sha256: raw.sha256,
-    bucket: raw.bucket,
-    objectKey: raw.object_key,
-    scope: raw.private_owner_subject_id ? "personal" : "workspace",
-    createdAt: new Date(String(raw.created_at)).toISOString(),
-    updatedAt: new Date(String(raw.updated_at)).toISOString(),
-  });
+export function knowledgeOriginalFileAsset(
+  raw: Record<string, unknown>,
+): FileAsset & { sourceSessionId: string | null; sourceSessionProvenanceMissing: boolean } {
+  const provenance = z
+    .object({
+      source_session_id: z.uuid().nullable(),
+      source_session_provenance_missing: z.boolean(),
+    })
+    .parse(raw);
+  return {
+    ...FileAsset.parse({
+      id: raw.id,
+      workspaceId: raw.workspace_id,
+      status: raw.status,
+      filename: raw.filename,
+      safeFilename: raw.safe_filename,
+      contentType: raw.content_type,
+      sizeBytes: Number(raw.size_bytes),
+      sha256: raw.sha256,
+      bucket: raw.bucket,
+      objectKey: raw.object_key,
+      scope: raw.private_owner_subject_id ? "personal" : "workspace",
+      createdAt: new Date(String(raw.created_at)).toISOString(),
+      updatedAt: new Date(String(raw.updated_at)).toISOString(),
+    }),
+    sourceSessionId: provenance.source_session_id,
+    sourceSessionProvenanceMissing: provenance.source_session_provenance_missing,
+  };
 }
 
 /** Exact entry visibility first; origin workspace metadata is not an access grant. */

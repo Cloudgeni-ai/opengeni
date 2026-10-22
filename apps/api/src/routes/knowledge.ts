@@ -186,8 +186,15 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         .object({ purpose: z.enum(["evidence", "reference"]).default("evidence") })
         .strict()
         .parse(input);
+      const fileId = Id.parse(c.req.param("fileId"));
       return c.json(
-        await prepareKnowledgeFile(deps, context, Id.parse(c.req.param("fileId")), purpose),
+        await prepareKnowledgeFile(
+          deps,
+          context,
+          fileId,
+          (file) => fileSourceVisibleToHost(deps, access.grant, file.id, file.workspaceId, true),
+          purpose,
+        ),
       );
     }),
   );
@@ -205,7 +212,11 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       );
       const entryId = Id.parse(c.req.param("entryId"));
       const file = await getKnowledgeOriginalFile(deps.db, context, entryId, revisionId);
-      if (!file || !(await fileSourceVisibleToHost(deps, access.grant, file.id, file.workspaceId)))
+      if (
+        !file ||
+        ((file.sourceSessionId !== null || file.sourceSessionProvenanceMissing) &&
+          !(await fileSourceVisibleToHost(deps, access.grant, file.id, file.workspaceId, true)))
+      )
         throw new HTTPException(404, { message: "Original file unavailable" });
       if (!deps.objectStorage)
         throw new HTTPException(503, { message: "File storage is unavailable" });

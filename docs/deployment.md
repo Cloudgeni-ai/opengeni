@@ -4,8 +4,8 @@
 
 Apply the rolling `0913_file_source_adjudications.sql` preparation migration.
 Before `0914_session_file_source_visibility.sql`, stop API and worker writers.
-Review shared Files with an `original/` object key whose source cannot be
-reconstructed, plus historical source Files with a `file.visibility.changed`
+Review shared and private Files with an `original/` object key whose source
+cannot be reconstructed, plus historical source Files with a `file.visibility.changed`
 audit to workspace. The old upload and audit records do not prove whether a
 person or an agent made the sharing decision. Keep the evidence in private
 operator storage, outside the repository and deployment logs.
@@ -13,10 +13,13 @@ operator storage, outside the repository and deployment logs.
 For each reviewed File, insert its ID into
 `opengeni_private.file_source_adjudications` as `human_shared` only with
 positive proof of the person's intended workspace audience, otherwise
-`owner_only` when a recorded owner can retain access. Set `attested_by` to a
-private operator identifier. For an ownerless generated File whose owner can
-be verified, record that subject in `owner_subject_id`. An unresolved shared
-original blocks 0914; an ownerless restricted File also blocks. Resolve these privately before
+`owner_only` when a verified owner can retain access. A private original
+verified as an ordinary upload uses `ordinary_upload`, preserving independent
+Document access. Set `attested_by` to a private operator identifier. When the
+owner can be verified, record that subject in `owner_subject_id`; it takes
+precedence over a conflicting legacy stored owner for a shared File. A
+contradictory or multiple private owners, unresolved original of either audience, or
+ownerless restricted File blocks 0914. Resolve these privately before
 retrying. Apply 0914, provision runtime roles, then start only matching API
 and worker images. Do not restart older writers after enforcement activates.
 

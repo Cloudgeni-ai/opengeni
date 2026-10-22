@@ -2098,13 +2098,13 @@ describe("unified Knowledge storage", () => {
       getDocumentServices: () =>
         ({ parser: { name: "real-pdf-parser", parse: parseDocumentBytes } }) as DocumentServices,
     };
-    const prepared = await prepareKnowledgeFile(deps, agent, fileId);
+    const prepared = await prepareKnowledgeFile(deps, agent, fileId, async () => true);
     if (prepared.status !== "retained") throw new Error("Expected a retained source");
     expect(prepared.receipt.outcome).toBe("published");
     const source = await getKnowledgeEntry(client.db, f.human, prepared.receipt.entryId);
     expect(source?.revision.entry.content).toContain("Renewal date: 1 December 2026.");
     expect(source?.revision.entry.source?.fileId).toBe(fileId);
-    const retained = await prepareKnowledgeFile(deps, agent, fileId);
+    const retained = await prepareKnowledgeFile(deps, agent, fileId, async () => true);
     expect(retained.status).toBe("retained");
     expect(reads).toBe(1);
     expect((await listKnowledgeEntries(client.db, f.human)).entries).toEqual([]);
