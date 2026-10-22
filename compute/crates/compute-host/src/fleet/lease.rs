@@ -9,10 +9,11 @@
 //! holds. A registration's rulings are carried out before the deadline it
 //! brings is written: until then the guard keeps the VMs frozen.
 //!
-//! It runs from the moment the agent process starts. A restarted agent
-//! takes back what the previous run left before it answers anything,
-//! which on a host with many sandboxes can take longer than the lease's
-//! term, so until then the lease that run held is renewed without a
+//! It runs from the moment the agent process starts until it exits. A
+//! restarted agent takes back what the previous run left before it
+//! answers anything, which on a host with many sandboxes can take longer
+//! than the lease's term, and a stopping one still has work to finish;
+//! while the agent does not serve, the lease held is renewed without a
 //! capacity (the service keeps the one it last heard), and a registration,
 //! which must list everything the host holds, waits.
 
@@ -127,8 +128,8 @@ impl Running {
         }
         let Some(handle) = handle else {
             // What the host holds is known once the agent has taken it
-            // back.
-            tracing::debug!("registering once the agent has started");
+            // back, and a stopping agent leaves registering to the next.
+            tracing::debug!("registering only while the agent serves");
             self.attempt = None;
             return Ok(());
         };
@@ -270,7 +271,8 @@ impl Running {
             return Ok(());
         }
         let count = rulings.len();
-        // A registration is sent only once the agent has started.
+        // A registration is sent only while the agent serves; one answered
+        // as it stops is left to the next agent.
         let Some(handle) = renewer.agent.handle() else {
             return Ok(());
         };

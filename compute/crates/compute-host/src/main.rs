@@ -16,7 +16,7 @@ use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::cpu_share::ProcessorShare;
-use compute_host::fleet::{FleetConfig, Joined, Leased, Prepared};
+use compute_host::fleet::{FleetConfig, Leased, Prepared};
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::observe::StoreAlarms;
 use compute_host::observe::canary::{self, CanaryConfig};
@@ -875,19 +875,19 @@ async fn run_agent<S: Store>(
 ) -> anyhow::Result<()> {
     let observer = config.observer.clone();
     let links = config.agent_link.clone();
-    let in_fleet = fleet.is_some();
-    // On a host in a fleet the lease a previous run left is renewed while
-    // this one takes its sandboxes back.
-    let ((handle, agent), joined) = if let Some((fleet, prepared)) = fleet {
+    // On a host in a fleet the lease is renewed from before this run takes
+    // back what the previous one left until this one exits.
+    let ((handle, agent), mut joined) = if let Some((fleet, prepared)) = fleet {
         // Boxed: it holds the agent's start, and this future lives long.
-        Box::pin(fleet.start(prepared, HostAgent::start(config, engine, store))).await?
+        let (started, joined) =
+            Box::pin(fleet.start(prepared, HostAgent::start(config, engine, store))).await?;
+        (started, Some(joined))
     } else {
-        let alone: Joined = Box::pin(std::future::pending());
-        (HostAgent::start(config, engine, store).await?, alone)
+        (HostAgent::start(config, engine, store).await?, None)
     };
     // On a host in a fleet only the service creates, adopts and hands off
     // sandboxes; the socket serves the host's own tools the rest.
-    let local = if in_fleet {
+    let local = if joined.is_some() {
         handle.local_to_fleet()
     } else {
         handle.clone()
@@ -895,26 +895,41 @@ async fn run_agent<S: Store>(
     if let Some(canary) = canary {
         tokio::spawn(canary::run(handle.clone(), canary));
     }
+    let in_fleet = async {
+        match &mut joined {
+            Some(joined) => joined.run().await,
+            None => std::future::pending().await,
+        }
+    };
     let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
     let result = tokio::select! {
         result = serve(local, &socket) => result.context("serving"),
         result = tokio::signal::ctrl_c() => result.map_err(Into::into),
         _ = terminate.recv() => Ok(()),
         result = agent => result.map_err(Into::into),
-        result = joined => result.context("in the fleet"),
+        result = in_fleet => result.context("in the fleet"),
     };
-    // Stopped by a signal, the agent did not get to it: the agent links'
-    // sessions are on disk before the next agent reads them.
-    if let Some(links) = links {
-        links.shutdown().await;
-    }
-    // What happened last, often why it stopped, still reaches the
-    // collector; a collector that is away does not hold the stop up long.
-    if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
-        .await
-        .is_err()
-    {
-        tracing::warn!("stopping before every event reached the collector");
+    let stopping = async {
+        // Stopped by a signal, the agent did not get to it: the agent
+        // links' sessions are on disk before the next agent reads them.
+        if let Some(links) = links {
+            links.shutdown().await;
+        }
+        // What happened last, often why it stopped, still reaches the
+        // collector; a collector that is away does not hold the stop up
+        // long.
+        if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
+            .await
+            .is_err()
+        {
+            tracing::warn!("stopping before every event reached the collector");
+        }
+    };
+    // The lease is renewed until the process exits, so the next agent
+    // finds as much of its term left as the restart allows.
+    match joined {
+        Some(joined) => joined.stopping(stopping).await,
+        None => stopping.await,
     }
     result
 }

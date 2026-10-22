@@ -768,10 +768,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   first.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
-  keeps its lease however many sandboxes it has: the new agent renews
-  the lease from the moment it starts, while it takes its sandboxes
-  back, and until it has, it refuses requests as unavailable, so the
-  service places elsewhere meanwhile
+  keeps its lease however many sandboxes it has: the old agent renews
+  the lease until its process exits and the new one from the moment its
+  process starts, while it takes its sandboxes back; until it has, it
+  refuses requests as unavailable, so the service places elsewhere
+  meanwhile
   ([ADR 18](adr/0018-the-control-service-leases-and-fences.md)). Its log
   lines `templates found`, `recovered` and `started` tell how long that
   took and where. Run the new bundle's `install.sh` (without `--config`,

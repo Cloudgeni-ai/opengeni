@@ -34,13 +34,15 @@ can be built and tested.
   memory; placement reads only that view. The host numbers its renewals
   under each registration and keeps its lease (epoch, deadline, last
   number) in a file in `/run`, written before each renewal is sent, so a
-  restarted agent goes on from it. A restarted agent renews the lease it
-  finds from the moment it starts, before it has taken back its
-  sandboxes, however long that takes: those renewals carry no capacity,
-  so the service keeps the last one the host sent, and until the agent
-  has started it refuses every request as unavailable, so the service
-  places elsewhere meanwhile. It registers only once started, since a
-  registration lists everything the host holds.
+  restarted agent goes on from it. An agent renews from the moment its
+  process starts, before it has taken back its sandboxes, however long
+  that takes, until the process exits, after whatever its stop has to
+  finish: so a restart leaves the lease unrenewed only between one
+  process and the next. While it does not serve, its renewals carry no
+  capacity, so the service keeps the last one the host sent, and it
+  refuses every request as unavailable, so the service places elsewhere
+  meanwhile. It registers only while it serves, since a registration
+  lists everything the host holds.
 - **The service gives up on a host by one clock only.** One replica at a
   time, holding a Postgres advisory lock, watches the hosts' renewal
   counts on its own monotonic clock, and a host is lost once its count has

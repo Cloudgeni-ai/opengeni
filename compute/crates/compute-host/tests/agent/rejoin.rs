@@ -1,6 +1,7 @@
 //! A host in a fleet whose agent restarts keeps the lease it holds while
-//! the new agent takes back its sandboxes, however long that takes: the
-//! guard never freezes their VMs and the service never gives the host up.
+//! the old agent stops and the new one takes back its sandboxes, however
+//! long either takes: the guard never freezes their VMs and the service
+//! never gives the host up.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -11,7 +12,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use compute_core::HostPolicy;
 use compute_fleet::LeaseTerms;
-use compute_host::fleet::{FleetConfig, Tls, TlsFiles, hold_lock, ready_lock, wire_terms};
+use compute_host::fleet::{FleetConfig, Joined, Tls, TlsFiles, hold_lock, ready_lock, wire_terms};
 use compute_host::protocol::{ErrorCode, Reply, Request};
 use compute_host::{HostAgent, NoStore};
 use compute_protocol::fleet::{
@@ -231,17 +232,12 @@ async fn ask(
 }
 
 /// Starts an agent on the lab at `root` in `fleet`, as the agent binary
-/// does; returns once it has started, with the task that keeps it in the
-/// fleet.
+/// does; returns once it has started, with the fleet's part.
 async fn join(
     fleet: &FleetConfig,
     root: &Path,
     world: &Arc<World>,
-) -> (
-    compute_host::Handle,
-    tokio::task::JoinHandle<()>,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-) {
+) -> (compute_host::Handle, tokio::task::JoinHandle<()>, Joined) {
     let prepared = fleet.clone().prepare().unwrap();
     let mut config = Lab::config(root, HostPolicy::default());
     config.lease = Some(prepared.gate.clone());
@@ -253,7 +249,7 @@ async fn join(
         .clone()
         .start(prepared, HostAgent::start(config, engine, NoStore));
     let ((handle, agent), joined) = Box::pin(starting).await.unwrap();
-    (handle, agent, tokio::spawn(joined))
+    (handle, agent, joined)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -302,14 +298,65 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
     let _guard = hold_lock(&ready_lock(&fleet.guard_lock)).unwrap();
 
     // The first run registers and renews.
-    let (handle, agent, joined) = join(&fleet, &root, &world).await;
+    let (handle, agent, mut joined) = join(&fleet, &root, &world).await;
     let registered = Instant::now() + Duration::from_secs(10);
-    while service.heard.lock().unwrap().renewals.len() < 3 {
-        assert!(Instant::now() < registered, "the first run never renewed");
-        sleep(Duration::from_millis(20)).await;
+    let renewed = async {
+        while service.heard.lock().unwrap().renewals.len() < 3 {
+            assert!(Instant::now() < registered, "the first run never renewed");
+            sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        result = joined.run() => panic!("left the fleet: {result:?}"),
+        () = renewed => {}
     }
-    joined.abort();
-    let _ = joined.await;
+
+    // It stops, taking longer than the lease runs: the lease is renewed
+    // until it has, and the service's requests are refused meanwhile.
+    let stopped = Instant::now();
+    let asked_while_stopping = joined
+        .stopping(async {
+            sleep(terms.term).await;
+            let answer = ask(
+                service_tls.client.clone(),
+                listen,
+                service.seq(),
+                Request::Status,
+            )
+            .await;
+            sleep(terms.margin).await;
+            answer
+        })
+        .await;
+    assert!(
+        matches!(
+            asked_while_stopping.reply,
+            Reply::Error {
+                code: ErrorCode::Unavailable,
+                ..
+            }
+        ),
+        "{asked_while_stopping:?}"
+    );
+    {
+        let heard = service.heard.lock().unwrap();
+        let during: Vec<&(Instant, Renew)> = heard
+            .renewals
+            .iter()
+            .filter(|(at, _)| *at >= stopped + terms.renew_every)
+            .collect();
+        assert!(
+            during.len() > 5,
+            "{} renewals while it stopped",
+            during.len()
+        );
+        assert!(
+            during
+                .iter()
+                .all(|(_, renew)| renew.epoch == EPOCH && renew.capacity.is_none()),
+            "{during:?}"
+        );
+    }
     drop(handle);
     timeout(Duration::from_secs(5), agent)
         .await
@@ -320,7 +367,11 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
     *world.adopt_delay.lock().unwrap() = terms.term + terms.margin;
     let prepared = fleet.clone().prepare().unwrap();
     let gate = prepared.gate.clone();
-    assert!(gate.is_open(), "the first run's lease still runs");
+    assert!(
+        gate.is_open(),
+        "the first run's lease still runs, {:?} after it began to stop",
+        stopped.elapsed()
+    );
     let mut config = Lab::config(&root, HostPolicy::default());
     config.lease = Some(gate.clone());
     let engine = Fake {
@@ -333,7 +384,7 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
         .start(prepared, HostAgent::start(config, engine, NoStore));
     tokio::pin!(start);
     let mut asked_while_starting = None;
-    let ((handle, _agent), joined) = loop {
+    let ((handle, _agent), mut joined) = loop {
         tokio::select! {
             started = &mut start => break started.unwrap(),
             () = sleep(Duration::from_millis(10)) => {
@@ -353,7 +404,7 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
             }
         }
     };
-    let joined = tokio::spawn(joined);
+    let joined = tokio::spawn(async move { joined.run().await });
     let took = restarted.elapsed();
     assert!(
         took > terms.term + terms.margin,

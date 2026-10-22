@@ -5,9 +5,10 @@
 //!
 //! A request goes through only while the host holds the registration it
 //! names, its lease has not run out, and it is no more than the request
-//! window of renewals old, and only once the agent has taken back what an
-//! earlier run left; anything else is answered `unavailable` or `expired`
-//! without reaching the agent. One that does is served exactly
+//! window of renewals old, and only while the agent serves: from when it
+//! has taken back what an earlier run left until it starts to stop;
+//! anything else is answered `unavailable` or `expired` without reaching
+//! the agent. One that does is served exactly
 //! as on the Unix socket, under the owner epoch it names and the
 //! [`Admission`] it passed, which the agent checks again when it acts,
 //! through a socket pair: its first reply line is wrapped in an [`Answer`]
@@ -137,12 +138,7 @@ impl Listening {
         // Refused before it reaches the agent, so the service places a
         // create elsewhere and its callers try again.
         let Some(handle) = self.agent.handle() else {
-            let reply = refused(
-                ErrorCode::Unavailable,
-                "this host's agent is starting: it is taking back the sandboxes an earlier \
-                 run left"
-                    .to_owned(),
-            );
+            let reply = refused(ErrorCode::Unavailable, self.agent.not_serving().to_owned());
             return answer(&mut caller, reply, admitted).await;
         };
         let owner = OwnerEpoch(envelope.sent.owner_epoch.unwrap_or(OwnerEpoch::FIRST.0));
