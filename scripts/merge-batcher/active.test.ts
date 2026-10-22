@@ -799,23 +799,27 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(1);
   });
   test.each(["red", "unknown", "green"] as const)(
-    "inherited #5243-style failure holds independently of %s full-main status; new base rebuilds",
+    "inherited #5243-style singleton is parked without blame on %s main; new base does not retry it",
     async (status) => {
       const f = await fixture();
       const m = await f.publish();
       f.verdict(m, "code_failure");
       f.api.baseStatus = status;
-      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect((await f.controller().step()).action.kind).toBe("record");
       const held = (await f.state()).ledger;
       expect(held.ejected).toEqual([]);
       expect(held.recovery).toEqual([]);
-      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect(held.parked?.[0]?.baseSha).toBe(f.base);
+      expect((await f.controller().step()).action.kind).toBe("park");
       expect(f.api.calls).toEqual([]);
+      await f.controller().step();
+      expect(f.api.comments).toHaveLength(1);
+      expect(f.api.comments[0]).toContain("not a culprit attribution");
       await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
       f.api.baseStatus = "green";
-      expect((await f.controller().step()).action.kind).toBe("record"); // invalidate old base
-      const replacement = await f.publish();
-      expect(replacement.baseSha).toBe(f.divergent);
+      expect((await f.controller().step()).action.kind).toBe("wait");
+      expect((await f.state()).ledger.parked).toHaveLength(1);
+      expect(f.api.calls).toHaveLength(1);
       expect((await f.state()).ledger.baseHold).toBeUndefined();
       expect((await f.state()).ledger.ejected).toEqual([]);
     },
@@ -824,9 +828,27 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     const f = await fixture(),
       m = await f.publish();
     f.verdict(m, "code_failure");
-    expect((await f.controller().step()).action.kind).toBe("wait");
+    expect((await f.controller().step()).action.kind).toBe("record");
     expect((await f.state()).ledger.ejected).toEqual([]);
+    expect((await f.state()).ledger.parked?.[0]?.pull.headSha).toBe(f.head);
     expect((await f.state()).ledger.retries).toEqual({});
+  });
+  test("parking comment lost response is reconciled after restart, never blindly replayed", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    f.verdict(m, "code_failure");
+    await f.controller().step();
+    expect((await f.controller().step()).action.kind).toBe("park");
+    f.api.response = "lost";
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    f.advance();
+    await f.executor().maintain();
+    const parked = (await f.state()).ledger.parked![0]!;
+    expect(parked.announced).toBe(true);
+    expect((await f.state()).ledger.effects[parked.effectId!]!.status).toBe("done");
+    expect(f.api.comments).toHaveLength(1);
+    expect(f.api.calls).toHaveLength(1);
   });
   test.each(["red", "unknown"] as const)(
     "exact green batch builds and lands on %s full-main CI",

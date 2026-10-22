@@ -8,6 +8,7 @@ import {
   type Ejection,
   type Ledger,
   type Observation,
+  type ParkedPull,
   type Pull,
   type Run,
 } from "./model";
@@ -18,7 +19,8 @@ export type Action =
   | { kind: "build"; spec: BatchSpec; publish: boolean; recoveryIndex: number | null }
   | { kind: "land"; candidate: Candidate }
   | { kind: "retry"; candidate: Candidate; run: Run }
-  | { kind: "announce"; ejection: Ejection };
+  | { kind: "announce"; ejection: Ejection }
+  | { kind: "park"; parked: ParkedPull };
 
 export function latestRun(candidate: Candidate, config: Config): Run | undefined {
   return candidate.runs
@@ -90,6 +92,10 @@ export function plan(o: Observation, c: Config): Action {
   };
   const fresh = new Map(o.ready.map((p) => [p.number, bindingKey(p)]));
   const matches = (p: Pull) => fresh.get(p.number) === bindingKey(p);
+  // Readiness churn and main advancement must not automatically retry code.
+  // A genuinely different head can re-enter; preserve the old base/run evidence.
+  const parked = (p: Pull) =>
+    ledger.parked?.some((item) => item.pull.number === p.number && item.pull.headSha === p.headSha);
   if (o.telemetry?.status === "stop")
     return {
       kind: "wait",
@@ -172,11 +178,39 @@ export function plan(o: Observation, c: Config): Action {
         }
       }
       if (run.trusted && run.outcome === "code_failure") {
-        return {
-          kind: "wait",
-          reason:
-            "base_batch_suite_unknown: code failure held without retry, split or ejection; comparable same-job base evidence is not implemented",
-        };
+        ledger.invalidated = [
+          ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
+        ];
+        const pulls = root.manifest.pulls.map(({ mergeSha, ...p }) => {
+          void mergeSha;
+          return p;
+        });
+        const cohortId = root.manifest.recoveryOf ?? root.manifest.batchId;
+        if (pulls.length === 1) {
+          ledger.parked ??= [];
+          if (!parked(pulls[0]!))
+            ledger.parked.push({
+              pull: pulls[0]!,
+              baseSha: root.manifest.baseSha,
+              batchId: root.manifest.batchId,
+              cohortId,
+              runId: run.id,
+              attempt: run.attempt,
+              parkedAt: o.now,
+              announced: false,
+            });
+        } else {
+          const middle = Math.ceil(pulls.length / 2);
+          ledger.recovery.unshift(
+            { batchId: cohortId, pulls: pulls.slice(0, middle) },
+            { batchId: cohortId, pulls: pulls.slice(middle) },
+          );
+        }
+        return record(
+          pulls.length === 1
+            ? "park exact failed head without blame; same-way fingerprint unavailable"
+            : "split failed cohort without retry or member blame",
+        );
       }
       const intent = ledger.retries[root.manifest.batchId];
       if (intent)
@@ -215,12 +249,30 @@ export function plan(o: Observation, c: Config): Action {
           kind: "wait",
           reason: "legacy code-failure ejection held pending comparable base batch-suite evidence",
         };
-  // Do not replay bisection work persisted by the former full-main-green policy.
+  const pendingPark = ledger.parked?.find((item) => !item.announced && !item.effectId);
+  if (pendingPark) return { kind: "park", parked: pendingPark };
+  // Recovery tests subsets sequentially on the actual current base. No member
+  // is ejected: failed singletons are parked, including legacy recovery groups.
   if (!live.length && ledger.recovery.length) {
-    return {
-      kind: "wait",
-      reason: "legacy bisection held pending comparable base batch-suite evidence",
-    };
+    const group = ledger.recovery[0]!;
+    const pulls = group.pulls.filter(
+      (p) =>
+        matches(p) &&
+        !parked(p) &&
+        !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
+    );
+    if (!pulls.length) {
+      ledger.recovery.shift();
+      return record("discard obsolete or parked recovery bindings");
+    }
+    return makeBuild(
+      o.baseSha,
+      null,
+      pulls,
+      group.batchId,
+      inflight < c.maxInflight && !o.mainBusy,
+      0,
+    );
   }
   if (ledger.recovery.length || live.some((item) => item.manifest.recoveryOf !== null))
     return { kind: "wait", reason: "bisection recovery is sequential; no speculative regrouping" };
@@ -244,6 +296,7 @@ export function plan(o: Observation, c: Config): Action {
   const queued = o.ready.filter(
     (p) =>
       !assigned.has(p.number) &&
+      !parked(p) &&
       !alreadyLanded(p) &&
       !o.candidates.some(
         (candidate) =>

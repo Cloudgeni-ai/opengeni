@@ -205,6 +205,14 @@ export class GitHubActiveExecutor implements Executor {
         lastError: null,
       };
     }
+    if (effect.kind === "park") {
+      const id = addComment(ledger, `parking:${effect.key}`, effect.number, effect.body, now);
+      ledger.parked = (ledger.parked ?? []).map((item) =>
+        item.batchId === effect.key
+          ? { ...item, announced: ledger.effects[id]!.status === "done", effectId: id }
+          : item,
+      );
+    }
     if (effect.kind === "announce") {
       const id = addComment(ledger, `ejection:${effect.key}`, effect.number, effect.body, now);
       ledger.ejected = ledger.ejected.map((item) =>
@@ -320,6 +328,10 @@ export class GitHubActiveExecutor implements Executor {
       ledger.effects[id] = { ...ledger.effects[id]!, ...patch } as DurableEffect;
       if (patch.status === "done")
         ledger.ejected = ledger.ejected.map((item) =>
+          item.effectId === id ? { ...item, announced: true } : item,
+        );
+      if (patch.status === "done" && ledger.parked)
+        ledger.parked = ledger.parked.map((item) =>
           item.effectId === id ? { ...item, announced: true } : item,
         );
     });
@@ -793,6 +805,10 @@ export class GitHubActiveExecutor implements Executor {
       };
       if (observed)
         ledger.ejected = ledger.ejected.map((item) =>
+          item.effectId === id ? { ...item, announced: true } : item,
+        );
+      if (observed && ledger.parked)
+        ledger.parked = ledger.parked.map((item) =>
           item.effectId === id ? { ...item, announced: true } : item,
         );
     });
