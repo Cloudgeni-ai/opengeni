@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "636addb733864531bf474416291c70f83ea27a30981e394ad1d19e94aa5dc2ad"
+      "sha256": "725cc8a51447a01859bab7501ab5d4df2eba6b33c73e65d3a32d6a1468f39894"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -981,6 +981,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "release-image-validation",
+      "step": "Require every non-image CI lane",
+      "sha256": "8923598067fd947eb7285944861701e054227ed53f559c11925ddcbdb79ff40e"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Check committed Site browser runtime before builds",
       "sha256": "05ad79d8a4f14bc9868e1a2863355bc44441eb00c8703163059a287fee4142b0"
@@ -1019,7 +1025,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "test",
       "step": "Require every split CI lane",
-      "sha256": "57b1ee66e433bb459fd19beb94265ac60ee30a007a2f588fc08413615f87739c"
+      "sha256": "cb812b0481fbf00831a18bae0a6e678eb7f357b9496c2ed05561beb6d781af19"
     },
     {
       "workflow": ".github/workflows/ci.yml",
