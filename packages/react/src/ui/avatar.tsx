@@ -80,12 +80,22 @@ function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function AvatarGroupCount({ className, ...props }: React.ComponentProps<"div">) {
+/**
+ * Pass the same `size` as the group's avatars. (It is not inferred with a
+ * `group-has-*` selector: those make the browser restyle the whole page on
+ * every DOM change.)
+ */
+function AvatarGroupCount({
+  className,
+  size = "default",
+  ...props
+}: React.ComponentProps<"div"> & { size?: "default" | "sm" | "lg" | undefined }) {
   return (
     <div
       data-slot="avatar-group-count"
+      data-size={size}
       className={cn(
-        "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground ring-2 ring-background group-has-data-[size=lg]/avatar-group:size-10 group-has-data-[size=sm]/avatar-group:size-6 [&>svg]:size-4 group-has-data-[size=lg]/avatar-group:[&>svg]:size-5 group-has-data-[size=sm]/avatar-group:[&>svg]:size-3",
+        "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground ring-2 ring-background data-[size=lg]:size-10 data-[size=sm]:size-6 [&>svg]:size-4 data-[size=lg]:[&>svg]:size-5 data-[size=sm]:[&>svg]:size-3",
         className,
       )}
       {...props}

@@ -678,28 +678,28 @@
    Send controls. While voice input owns the microphone, reserve the row for its
    Cancel/Stop actions so unrelated Pause chrome cannot masquerade as Stop. */
 @media (max-width: 39.999rem) {
-  .og-composer-footer:has([data-transcription-capturing])
+  .og-composer-footer[data-footer-transcription-capturing]
     .og-composer-controls
     > :not([data-transcription-capturing]) {
     display: none;
   }
 
-  .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
+  .og-composer-footer[data-footer-transcription-capturing] .og-composer-actions {
     display: none;
   }
 
   /* A saved recording or voice error needs its explanation to be readable:
      give it the controls row (Send stays) instead of an ellipsis. */
-  .og-composer-footer:has([data-transcription-attention])
+  .og-composer-footer[data-footer-transcription-attention]
     .og-composer-controls
     > :not([data-transcription-attention]) {
     display: none;
   }
 
   /* Host extras (live voice, custom actions) step aside too; Pause/Stop/Send stay. */
-  .og-composer-footer:has([data-transcription-attention])
+  .og-composer-footer[data-footer-transcription-attention]
     .og-composer-actions
-    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    > :not([data-analytics-action]) {
     display: none;
   }
 
@@ -715,20 +715,20 @@
   }
 
   /* A failed live-voice start explains itself in the row until dismissed. */
-  .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+  .og-composer-footer[data-footer-realtime-attention] .og-composer-controls {
     display: none;
   }
 
-  .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,
-  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),
+  .og-composer-footer[data-footer-realtime-attention] .og-composer-actions,
+  .og-composer-footer[data-footer-realtime-attention] .og-realtime-control,
   .og-composer-footer [data-realtime-attention] {
     flex: 1 1 auto;
     min-width: 0;
   }
 
-  .og-composer-footer:has([data-realtime-attention])
+  .og-composer-footer[data-footer-realtime-attention]
     .og-composer-actions
-    > :not(:has([data-realtime-attention])) {
+    > :not(.og-realtime-control) {
     flex-shrink: 0;
   }
 

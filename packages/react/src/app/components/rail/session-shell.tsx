@@ -343,7 +343,12 @@ function SessionShellFrame({ children }: { children: ReactNode }) {
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
+      <div
+        className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
+        // Lets page chrome (the desktop title bar) follow the rail without a
+        // document-wide `:has()` selector.
+        data-rail-collapsed={chatList && !rail.isMobile && rail.collapsed ? "true" : undefined}
+      >
         {/* Fixed desktop rail — user-resizable when expanded. */}
         {chatList && !rail.isMobile ? (
           <nav

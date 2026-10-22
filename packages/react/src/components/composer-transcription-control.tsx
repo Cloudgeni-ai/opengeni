@@ -20,6 +20,7 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type MouseEvent, type ReactElement } from "react";
 import { cn } from "../lib/cn";
+import { useComposerFooterSignal } from "../lib/composer-footer-signals";
 import { useVoiceInput } from "../hooks/use-voice-input";
 import type { VoiceRecordingStore } from "../voice-recording-store";
 import { useChatComposer } from "./composer";
@@ -233,6 +234,10 @@ export function ComposerTranscriptionControl({
     void transcription.start();
   }
 
+  const needsAttention = !capturing && (recoverable || (status === "error" && !!errorMessage));
+  useComposerFooterSignal("transcription-capturing", !suppressed && capturing);
+  useComposerFooterSignal("transcription-attention", !suppressed && needsAttention);
+
   return (
     <AnimatePresence initial={false}>
       {suppressed ? null : (
@@ -251,9 +256,7 @@ export function ComposerTranscriptionControl({
           )}
           data-transcription-status={status}
           data-transcription-capturing={capturing ? "" : undefined}
-          data-transcription-attention={
-            !capturing && (recoverable || (status === "error" && errorMessage)) ? "" : undefined
-          }
+          data-transcription-attention={needsAttention ? "" : undefined}
         >
           <span className="inline-flex min-w-0 items-center gap-1.5">
             <AnimatePresence mode="popLayout" initial={false}>

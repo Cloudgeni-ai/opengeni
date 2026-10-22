@@ -21,7 +21,7 @@
 .og-connect fieldset { border: 0; padding: 0; margin: 0; }
 .og-connect legend { font-weight: 600; padding-block-end: .5rem; }
 .og-connect label { display: grid; gap: .375rem; }
-.og-session-capability-setup .og-connect label:not(:has(input[type="checkbox"], input[type="radio"])) { display:grid; gap:.375rem; }
+.og-session-capability-setup .og-connect label { display:grid; gap:.375rem; }
 .og-session-capability-setup .og-connect label > input:not([type="checkbox"]):not([type="radio"]) { width:100%; margin-top:0; }
 .og-connect label:has(input[type="checkbox"], input[type="radio"]) { display: flex; align-items: center; gap: .75rem; min-height: 2.75rem; }
 .og-connect :where(button, select, input:not([type="checkbox"]):not([type="radio"])) {
@@ -102,10 +102,6 @@
 .og-connection-option .og-capability-catalog-copy strong { font-size:13px; }
 .og-connection-option .og-connection-catalog-status { font-size:11px; }
 .og-connection-option-action { display:grid; place-items:center; width:32px; flex-shrink:0; }
-.og-connection-option-chevron { opacity:.5; font-size:20px; pointer-events:none; }
-.og-connection-option:has(.og-connection-option-chevron) { position:relative; }
-.og-connection-option:has(.og-connection-option-chevron) > button { padding-right:32px; }
-.og-connection-option:has(.og-connection-option-chevron) > .og-connection-option-action { position:absolute; right:0; pointer-events:none; }
 @media (max-width: 480px) { .og-connection-catalog-row { flex-wrap: wrap; } .og-connection-catalog-status { margin-left: auto; } }
 .og-connection-installed { margin-block: 16px; color: inherit; font-family: var(--og-font-sans, system-ui, sans-serif); }
 .og-connection-installed h2 { font-size: 13px; font-weight: 500; margin: 0 0 8px; }
