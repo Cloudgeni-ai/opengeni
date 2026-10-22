@@ -8,6 +8,8 @@ import {
   prepare,
   verify,
   writable,
+  validatePlan,
+  mergeMode,
   type Plan,
   type RuleSet,
   type Snapshot,
@@ -131,16 +133,113 @@ describe("offline batcher administration contract", () => {
       },
     });
   });
-  test("namespace creation/update is dedicated; no production/tag/shadow overlap", () => {
+  test("main and live namespace creation/update are App-only; no production/tag/shadow overlap", () => {
     const plan = prepare(fixture(), 501, 999);
     expect(plan.namespace.conditions).toEqual({
-      ref_name: { include: ["refs/heads/queue/live/**", "refs/heads/batcher-state"], exclude: [] },
+      ref_name: {
+        include: ["refs/heads/main", "refs/heads/queue/live/**", "refs/heads/batcher-state"],
+        exclude: [],
+      },
     });
     expect(plan.namespace.rules).toEqual([
       { type: "creation" },
       { type: "update", parameters: { update_allows_fetch_and_merge: false } },
     ]);
     expect(plan.namespace.bypass_actors).toEqual(plan.admission.bypass_actors);
+  });
+
+  test("old/manual-path or tampered plans are never silently activated", () => {
+    const plan = prepare(fixture(), 501, 999);
+    expect(plan.schemaVersion).toBe(2);
+    expect(() => validatePlan({ ...plan, schemaVersion: 1 } as unknown as Plan)).toThrow(
+      "version 2",
+    );
+    const weakened = structuredClone(plan);
+    weakened.namespace.conditions = {
+      ref_name: { include: ["refs/heads/queue/live/**", "refs/heads/batcher-state"], exclude: [] },
+    };
+    expect(() => validatePlan(weakened)).toThrow("drift");
+    const adminBypass = structuredClone(plan);
+    (adminBypass.namespace.bypass_actors as unknown[]).push({
+      actor_type: "RepositoryRole",
+      actor_id: 5,
+      bypass_mode: "always",
+    });
+    expect(() => validatePlan(adminBypass)).toThrow("drift");
+  });
+
+  test("agent merge mode follows whole verified policy, not merely controller STOP", () => {
+    expect(mergeMode("original")).toBe("manual");
+    expect(mergeMode("guard")).toBe("hold");
+    expect(mergeMode("namespace")).toBe("hold");
+    expect(mergeMode("applied")).toBe("queue-only");
+    expect(mergeMode("restored")).toBe("manual");
+  });
+
+  test("agent instructions pair queue-only activation with verified OFF manual restoration", async () => {
+    const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
+    expect(agents).toContain("only normal path to main");
+    expect(agents).toContain("manually rerun/cancel Batch CI");
+    expect(agents).toContain("create/update/delete queue or batcher-state refs");
+    expect(agents).toContain("Stopping the controller alone does **not** restore");
+    expect(agents).toContain("complete verified OFF restoration");
+    expect(agents).toContain("gh api repos/Cloudgeni-ai/opengeni/rules/branches/main");
+    expect(agents).toContain("A private receipt is not a");
+    expect(agents).toContain("A ruleset name alone is never");
+    expect(agents).not.toContain("current verified ruleset receipt");
+    const readback = await readFile(
+      new URL("../docs/merge-batcher-admin/README.md", import.meta.url),
+      "utf8",
+    );
+    const section = readback.split("### Agent-readable merge mode")[1]!.split("For a timeout")[0]!;
+    for (const required of [
+      "includes_parents=true&per_page=100",
+      "orgs/ORG/rulesets/ID",
+      "hasNextPage",
+      "**Manual:**",
+      "**Queue-only:**",
+      "**Hold:**",
+      "no bypass actors",
+      "update_allows_fetch_and_merge=false",
+      "owner-local",
+      "not an atomic fence",
+    ])
+      expect(section).toContain(required);
+    expect(section).not.toMatch(/gh api[^\n]*(?:--method|-X)\s+(?:POST|PUT|DELETE|PATCH)/);
+  });
+  test("ordinary-reader bypass omission preserves visible manual/queue policy decisions", async () => {
+    const agents = await readFile(new URL("../AGENTS.md", import.meta.url), "utf8");
+    const readback = await readFile(
+      new URL("../docs/merge-batcher-admin/README.md", import.meta.url),
+      "utf8",
+    );
+    expect(agents).toContain("that expected omission is");
+    expect(agents).toContain("not malformed policy and does not by itself force hold");
+    expect(agents).not.toContain("including inherited rules and bypass actors");
+    const rows = readback
+      .split("\n")
+      .filter(
+        (line) =>
+          line.startsWith("| Original squash") ||
+          line.startsWith("| Complete intended") ||
+          line.startsWith("| Mixed or inaccessible"),
+      );
+    const decisions = rows.map((row) =>
+      row
+        .split("|")
+        .slice(1, -1)
+        .map((cell) => cell.trim()),
+    );
+    expect(decisions).toHaveLength(5);
+    expect(decisions.map((row) => [row[1], row[2]])).toEqual([
+      ["omitted", "manual"],
+      ["visible and expected", "manual"],
+      ["omitted", "queue-only"],
+      ["visible and expected", "queue-only"],
+      ["omitted", "hold"],
+    ]);
+    expect(readback).toContain("Those exact identity/bypass checks are activation gates");
+    expect(readback).toContain("not prerequisites for an ordinary agent to choose queue-only");
   });
   test("restore preserves exact original writable fields, not API metadata", () => {
     const before = fixture();

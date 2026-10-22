@@ -11,7 +11,7 @@ export type Snapshot = {
   classic: { nodes: Json[]; pageInfo: { hasNextPage: boolean } };
 };
 export type Plan = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   appId: number;
   installationId: number;
   before: Snapshot;
@@ -121,14 +121,14 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
     target: "branch",
     enforcement: "active",
     bypass_actors: bypass,
-    conditions: { ref_name: { include: refs, exclude: [] } },
+    conditions: { ref_name: { include: ["refs/heads/main", ...refs], exclude: [] } },
     rules: [
       { type: "creation" },
       { type: "update", parameters: { update_allows_fetch_and_merge: false } },
     ],
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     appId,
     installationId,
     before,
@@ -147,6 +147,7 @@ export function verify(
   phase: Phase,
   receipts: { guard?: RuleSet; namespace?: RuleSet } = {},
 ): void {
+  validatePlan(plan);
   equal(current.repository, plan.before.repository, "Repository configuration");
   equal(current.classic, plan.before.classic, "Classic protection");
   const expected = index(plan.before.rulesets);
@@ -165,6 +166,22 @@ export function verify(
   const actual = index(current.rulesets);
   equal([...actual.keys()], [...expected.keys()], "Full ruleset inventory");
   for (const [id, payload] of expected) equal(actual.get(id)!, payload, `Ruleset ${id}`);
+}
+
+/** Version 1 allowed normal manual merges; never silently activate that plan. */
+export function validatePlan(plan: Plan): void {
+  if (plan.schemaVersion !== 2)
+    throw new Error("Exclusive-main rollout requires a newly reviewed version 2 plan");
+  const expected = prepare(plan.before, plan.appId, plan.installationId);
+  equal(plan as unknown as Json, expected as unknown as Json, "Prepared exclusive-main plan");
+}
+
+export function mergeMode(phase: Phase): "manual" | "queue-only" | "hold" {
+  return phase === "original" || phase === "restored"
+    ? "manual"
+    : phase === "applied"
+      ? "queue-only"
+      : "hold";
 }
 
 async function json<T>(path: string): Promise<T> {
@@ -235,7 +252,9 @@ export async function cli(args: string[]): Promise<void> {
       phase as Phase,
       receipts,
     );
-    console.log(`Verified complete ${phase} inventory.`);
+    console.log(
+      `Verified complete ${phase} inventory. Agent merge mode: ${mergeMode(phase as Phase)}.`,
+    );
     return;
   }
   throw new Error(

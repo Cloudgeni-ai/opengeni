@@ -5,8 +5,75 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { cli, type Snapshot } from "../docs/merge-batcher-admin/bundle";
 import manifest from "../docs/merge-batcher-admin/app-manifest.json";
+import { bindStop, verifyStop } from "../docs/merge-batcher-admin/off";
 
 const directory = resolve(import.meta.dir, "../docs/merge-batcher-admin");
+const stopped = {
+  command: "stop",
+  disabled: true,
+  manualZero: true,
+  taggedRevisionsMayRemain: false,
+  stopPersisted: true,
+  drainProven: true,
+  forced: false,
+  priorDrainProof: false,
+  outcome: "drained-state-observed",
+  stateBefore: "a".repeat(40),
+  stateAfter: "a".repeat(40),
+  writer: {
+    state: "stopped",
+    writerActive: false,
+    writerPid: null,
+    uncertainOutcome: false,
+    reconciliationRequired: false,
+  },
+};
+const deployment = {
+  uid: "fixture-uid",
+  image: `example.test/image@sha256:${"b".repeat(64)}`,
+  uri: "https://fixture.test",
+  stopProof: { uid: "fixture-uid", stateSha: "a".repeat(40), outcome: "drained-state-observed" },
+};
+
+async function offHarness(h: Awaited<ReturnType<typeof harness>>) {
+  const runtime = join(h.root, "runtime");
+  await mkdir(runtime);
+  await writeFile(join(runtime, "deployment-receipt.json"), JSON.stringify(deployment));
+  for (const file of [
+    "cloud-auth.ts",
+    "service-config.ts",
+    "service-limits.ts",
+    "stopped-reconciliation.ts",
+  ])
+    await writeFile(join(runtime, file), "export {};\n");
+  await writeFile(
+    join(runtime, "control.ts"),
+    `
+if(process.argv[2]!=='stop')throw Error('stop only');
+await Bun.write(process.env.FIXTURE_LOG,await Bun.file(process.env.FIXTURE_LOG).text()+JSON.stringify({endpoint:'runtime-stop',method:'STOP'})+'\\n');
+const result={...${JSON.stringify(stopped)},...JSON.parse(process.env.STOP_OVERRIDE||'{}')};
+console.log(JSON.stringify(result));
+if(process.env.STOP_FAILURE)process.exitCode=2;
+`,
+  );
+  await bindStop(h.root, runtime);
+  return {
+    runtime,
+    async run(extra: Record<string, string> = {}, flag = "--apply-after-go") {
+      const child = Bun.spawn(["bun", join(directory, "off.ts"), "run", h.root, flag], {
+        env: { ...h.fixtureEnv, ...extra },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      return { code, stdout, stderr };
+    },
+  };
+}
 // Fake provider only: requests are logged without credentials, all remote state
 // is a test-owned JSON file. No invocation can reach the real gh executable.
 const fakeProvider = `#!/usr/bin/env bun
@@ -627,5 +694,280 @@ test("observed applied forward PUT can be reconciled before reverse restoration"
       expect((await h.run(action, "--apply-after-go")).code).toBe(0);
   } finally {
     await h.close();
+  }
+});
+
+test("one-command OFF stops first, reconciles ambiguous admit, restores exact original and is reentrant", async () => {
+  const h = await harness();
+  try {
+    const original = await readFile(h.state, "utf8");
+    for (const action of ["create-guard", "create-namespace"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    expect((await h.run("admit", "--apply-after-go", { FAIL_WRITE: "after" })).code).not.toBe(0);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    const operator = await offHarness(h);
+    const result = await operator.run();
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("normal reviewed squash path restored");
+    expect((await h.events())[0]?.method).toBe("STOP");
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(JSON.parse(original));
+    const writes = (await h.events()).filter((e) => ["PUT", "DELETE", "POST"].includes(e.method));
+    expect(writes.map((e) => e.method)).toEqual(["PUT", "DELETE", "DELETE"]);
+    expect(await Bun.file(join(h.root, "plan", "admit-attempt", "verified")).exists()).toBe(true);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect((await operator.run()).code).toBe(0);
+    expect((await h.events()).some((e) => ["PUT", "DELETE", "POST"].includes(e.method))).toBe(
+      false,
+    );
+    const receipts = (await readdir(h.root)).filter((name) => name.startsWith("off."));
+    expect(receipts.length).toBe(2);
+    expect(await Bun.file(join(h.root, receipts[0]!, "off-verified.json")).exists()).toBe(true);
+  } finally {
+    await h.close();
+  }
+});
+
+for (const failure of ["before", "after", "422"] as const)
+  test(`OFF reverse failure ${failure} retains evidence and resumes safely`, async () => {
+    const h = await harness();
+    try {
+      const original = JSON.parse(await readFile(h.state, "utf8"));
+      for (const action of ["create-guard", "create-namespace", "admit"])
+        expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+      const operator = await offHarness(h);
+      expect((await operator.run({ FAIL_WRITE: failure })).code).not.toBe(0);
+      expect(
+        await Bun.file(join(h.root, "plan", "restore-admission-attempt", "response.json")).exists(),
+      ).toBe(true);
+      // Provider problem is resolved, with no payload change. Reverse-only retry.
+      expect((await operator.run()).code).toBe(0);
+      expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+      const archives = (await readdir(join(h.root, "plan"))).filter((name) =>
+        name.startsWith("restore-admission-archive."),
+      );
+      expect(archives.length).toBe(failure === "after" ? 0 : 1);
+    } finally {
+      await h.close();
+    }
+  });
+
+test("OFF refuses forced/unknown STOP, drift, unresolved forward intent and unapproved invocation", async () => {
+  const h = await harness();
+  try {
+    for (const action of ["create-guard", "create-namespace"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect((await operator.run({}, "not-authorized")).code).not.toBe(0);
+    expect(await h.events()).toEqual([]);
+    for (const override of [
+      { forced: true },
+      { outcome: "unknown" },
+      { stopPersisted: false },
+      { stateAfter: "c".repeat(40) },
+    ]) {
+      expect((await operator.run({ STOP_OVERRIDE: JSON.stringify(override) })).code).not.toBe(0);
+    }
+    expect((await h.events()).every((e) => e.method === "STOP")).toBe(true);
+    expect((await h.run("admit", "--apply-after-go", { FAIL_WRITE: "before" })).code).not.toBe(0);
+    expect((await operator.run()).code).not.toBe(0);
+    expect((await h.events()).some((e) => e.method === "DELETE")).toBe(false);
+    const snapshot = JSON.parse(await readFile(h.state, "utf8"));
+    snapshot.repository.allow_squash_merge = false;
+    await writeFile(h.state, JSON.stringify(snapshot));
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    expect((await operator.run()).code).not.toBe(0);
+    expect(
+      (await h.events()).filter((e) => e.method !== "STOP").every((e) => e.method === "GET"),
+    ).toBe(true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF binds exact STOP dependency bytes and runtime UID; old plans require fresh review", async () => {
+  const h = await harness();
+  try {
+    const operator = await offHarness(h);
+    await writeFile(join(operator.runtime, "service-config.ts"), "export const changed = true;\n");
+    expect((await operator.run()).code).not.toBe(0);
+    expect(await h.events()).toEqual([]);
+    await writeFile(join(operator.runtime, "service-config.ts"), "export {};\n");
+    await writeFile(
+      join(operator.runtime, "stopped-reconciliation.ts"),
+      "export const weakened = true;\n",
+    );
+    expect((await operator.run()).code).not.toBe(0);
+    expect(await h.events()).toEqual([]);
+    await writeFile(join(operator.runtime, "stopped-reconciliation.ts"), "export {};\n");
+    await writeFile(
+      join(operator.runtime, "deployment-receipt.json"),
+      JSON.stringify({ ...deployment, uid: "other" }),
+    );
+    expect((await operator.run()).code).not.toBe(0);
+    expect(await h.events()).toEqual([]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("STOP proof verifier rejects partial/stale evidence and accepts reviewed already-disabled proof", () => {
+  expect(() => verifyStop(stopped, deployment, deployment)).not.toThrow();
+  expect(() =>
+    verifyStop(
+      {
+        ...stopped,
+        outcome: "verified-disabled",
+        drainProven: false,
+        priorDrainProof: true,
+        writer: null,
+      },
+      deployment,
+      deployment,
+    ),
+  ).not.toThrow();
+  for (const patch of [
+    { command: "start" },
+    { disabled: false },
+    { manualZero: false },
+    { taggedRevisionsMayRemain: true },
+    { stopPersisted: false },
+    { drainProven: false },
+    { forced: true },
+    { stateBefore: null },
+    { stateAfter: "c".repeat(40) },
+    { outcome: "unknown" },
+  ]) {
+    expect(() => verifyStop({ ...stopped, ...patch }, deployment, deployment)).toThrow();
+  }
+  for (const patch of [
+    { writerActive: true },
+    { writerPid: 12 },
+    { unprovenWriterPid: 12 },
+    { uncertainOutcome: true },
+    { reconciliationRequired: true },
+    { state: "running" },
+  ]) {
+    expect(() =>
+      verifyStop({ ...stopped, writer: { ...stopped.writer, ...patch } }, deployment, deployment),
+    ).toThrow();
+  }
+  expect(() =>
+    verifyStop(
+      stopped,
+      { ...deployment, stopProof: { ...deployment.stopProof, stateSha: "d".repeat(40) } },
+      deployment,
+    ),
+  ).toThrow();
+  expect(() => verifyStop(stopped, { ...deployment, uid: "wrong" }, deployment)).toThrow();
+});
+
+test("reconciled-disabled requires complete matching exit and ledger witnesses, not a status string", () => {
+  const witness = {
+    uid: deployment.uid,
+    generation: 8,
+    mode: "active",
+    instance: "instance-1",
+    controlGeneration: "stop-12345678-1234-4234-8234-123456789abc",
+  };
+  const proof = {
+    outcome: "stable-state-observed",
+    stateSha: "a".repeat(40),
+    mainSha: "b".repeat(40),
+    candidateRefs: [{ ref: `refs/heads/queue/live/${"c".repeat(64)}`, sha: "d".repeat(40) }],
+    effects: 1,
+  };
+  const result = {
+    ...stopped,
+    outcome: "reconciled-disabled",
+    drainProven: false,
+    writer: null,
+    idempotent: true,
+    drainWitness: witness,
+    stoppedReconciliation: proof,
+  };
+  const receipt = {
+    ...deployment,
+    drainWitness: witness,
+    stoppedReconciliation: { uid: deployment.uid, generation: 8, mode: "active", proof },
+  };
+  expect(() => verifyStop(result, receipt, deployment)).not.toThrow();
+  expect(() =>
+    verifyStop(
+      {
+        ...result,
+        writer: {
+          ...stopped.writer,
+          instance: witness.instance,
+          control: { generation: witness.controlGeneration },
+          uncertainOutcome: true,
+          reconciliationRequired: true,
+        },
+        drainProven: true,
+        idempotent: false,
+      },
+      receipt,
+      deployment,
+    ),
+  ).not.toThrow();
+  for (const patch of [
+    { drainWitness: null },
+    { stoppedReconciliation: null },
+    { priorDrainProof: true },
+    { idempotent: false },
+    { drainProven: true },
+    { forced: true },
+    { stateAfter: "e".repeat(40) },
+    { writer: { ...stopped.writer, writerActive: true }, drainProven: true },
+    {
+      writer: {
+        ...stopped.writer,
+        instance: "forged",
+        control: { generation: witness.controlGeneration },
+      },
+      drainProven: true,
+    },
+    {
+      writer: { ...stopped.writer, instance: witness.instance, control: { generation: "stale" } },
+      drainProven: true,
+    },
+    { writer: { ...stopped.writer, unprovenWriterPid: 42 }, drainProven: true },
+  ])
+    expect(() => verifyStop({ ...result, ...patch }, receipt, deployment)).toThrow();
+  for (const patch of [
+    { uid: "forged" },
+    { generation: 7 },
+    { mode: "ci-shadow" },
+    { instance: "" },
+    { controlGeneration: "invented" },
+  ])
+    expect(() =>
+      verifyStop(result, { ...receipt, drainWitness: { ...witness, ...patch } }, deployment),
+    ).toThrow();
+  for (const patch of [{ uid: "other" }, { generation: 7 }, { mode: "read-only" }])
+    expect(() =>
+      verifyStop(
+        result,
+        { ...receipt, stoppedReconciliation: { ...receipt.stoppedReconciliation, ...patch } },
+        deployment,
+      ),
+    ).toThrow();
+  for (const patch of [
+    { outcome: "unknown" },
+    { effects: -1 },
+    { effects: 0.5 },
+    { stateSha: "b".repeat(40) },
+    { mainSha: "bad" },
+    { candidateRefs: [...proof.candidateRefs, ...proof.candidateRefs] },
+    { candidateRefs: [{ ref: "refs/heads/main", sha: "d".repeat(40) }] },
+  ]) {
+    const altered = { ...proof, ...patch };
+    expect(() =>
+      verifyStop(
+        { ...result, stoppedReconciliation: altered },
+        { ...receipt, stoppedReconciliation: { ...receipt.stoppedReconciliation, proof: altered } },
+        deployment,
+      ),
+    ).toThrow();
   }
 });

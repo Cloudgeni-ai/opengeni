@@ -70,6 +70,11 @@ rollout owner explicitly authorizes it; candidate-only CI shadow does not lift
 that hold. The tested-descendant release-lane ops change also has its own held
 merge/rollout decision. Preserve the existing manual squash and full-main release
 proof paths until those coordinated decisions are made.
+The version 2 admin plan makes the App the only normal main writer while active,
+including PR merges; administrators have no standing writer bypass. The same
+verified activation receipt selects AGENTS' queue-only instructions. Partial
+transitions hold merges. Emergency OFF must prove runtime stop **and** exact
+original ruleset restoration before instructions return to normal manual squash.
 
 ## Commands
 
@@ -609,12 +614,16 @@ Portable placement options, without deployment by this task:
   continuous background CPU, runtime secrets and equivalent probes. Keep the
   same Git-backed state protocol; do not introduce Azure-only state authority.
 
-One-step rollback is `BATCHER_MODE=shadow` followed by the platform's normal
-restart/revision replacement. Default configuration is still shadow. An active
-rollout must ensure old active instances have stopped or
-their provider authority is fenced before declaring rollback complete. Leave
-running CI untouched, retain state/queue/result evidence, and inspect main's
-exact landed SHA. Do not delete refs, force-reset main or rotate credentials.
+With exclusive main policy enabled, changing `BATCHER_MODE=shadow` or stopping a
+service alone is **not** complete rollback: it leaves normal manual merges blocked.
+Use the administration bundle's reviewed one-command OFF, which first proves
+runtime STOP and then restores the exact original policy and emits a verified
+manual-mode receipt. Unknown or forced STOP and unresolved REST outcomes remain
+explicit holds. Default configuration is still shadow; optional shadow image/
+credential restoration and restart are separately owned deployment actions after
+the active writer is proven stopped. Leave running CI untouched, retain state/
+queue/result evidence, and inspect main's exact landed SHA. Do not delete refs,
+force-reset main or rotate credentials.
 
 Full VM/monorepo testing, exact-head independent agent review and the repository's
 evidence comment remain required before this batcher itself lands. Focused core
