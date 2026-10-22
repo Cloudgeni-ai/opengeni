@@ -45,6 +45,10 @@ import {
   SessionAdmissionNotice,
 } from "../components/session/session-admission-notice";
 import {
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionReason,
+} from "../../session-admission-model";
+import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
   sessionConnectorPolicyIsCustomized,
@@ -3790,10 +3794,9 @@ function SessionChatPane(props: {
                   creditRefusalNotice ||
                   (machineAccess && !machineAccess.isOwner) ? (
                     <>
-                      {!(
-                        props.session.admissionBlock?.reason === "database_claim_rejected" &&
-                        props.session.admissionBlock.sqlState === "42501" &&
-                        machineAccess?.queuedTurnBlocked
+                      {!sessionAdmissionNeedsDifferentMachine(
+                        sessionAdmissionReason(props.session),
+                        machineAccess,
                       ) ? (
                         <SessionMachineAccessNotice
                           access={machineAccess}

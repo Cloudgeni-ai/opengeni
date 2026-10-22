@@ -1029,6 +1029,9 @@
 :where(.og-root).z-\[2147483647\],:where(.og-root) .z-\[2147483647\] {
     z-index: 2147483647;
   }
+:where(.og-root).order-last,:where(.og-root) .order-last {
+    order: 9999;
+  }
 :where(.og-root).col-span-2,:where(.og-root) .col-span-2 {
     grid-column: span 2 / span 2;
   }
