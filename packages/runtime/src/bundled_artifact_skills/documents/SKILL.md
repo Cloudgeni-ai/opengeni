@@ -47,12 +47,14 @@ Skill was installed or explicitly checked out to the filesystem.
 ## Requested Word or PDF files
 
 When the user sends a Word or PDF file to be changed and returned, or asks for a
-new Word or PDF file while `opengeni__editable_artifact_export` is unavailable
-or does not list that format, the file itself is the deliverable:
+new Word or PDF file, the file itself is the deliverable. Document artifacts are
+not exported to DOCX or PDF (unless an export tool already in your context lists
+that format), so do not load artifact tools just to check:
 
 1. Make or edit it in the sandbox with ordinary tools (`python-docx` for Word;
    `pandoc` or LibreOffice (`soffice --headless --convert-to pdf`) for PDF).
-   Install a missing package with `pip install <package>` if needed.
+   Managed sandboxes already include them, so do not check first; run
+   `pip install <package>` only if an import fails.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content.
