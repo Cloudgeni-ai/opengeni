@@ -171,6 +171,13 @@ h1{font-size:20px;font-weight:600;margin:0 0 4px}p{margin:0;color:var(--muted)}
 <div class="card"><span class="label">Spend</span><b>$18,240</b><div class="bars">${[42, 40, 46, 49, 55, 53, 58, 63, 60, 67, 71, 73].map((h) => `<i style="height:${h}%"></i>`).join("")}</div></div>
 </div></main></body></html>`;
 
+/** The same sample layout under another Site's own heading. */
+const siteHtml = (title: string, subtitle: string) =>
+  usageSiteHtml.replace(
+    "<h1>Opengeni usage</h1><p>Workspace activity across the organization</p>",
+    `<h1>${title}</h1><p>${subtitle}</p>`,
+  );
+
 /** Conversations that run inside a Site; ordinary pages leave them out. */
 const siteConversationIds = new Set<string>();
 export const usageSiteId = "00000000-0000-4000-a000-000000000001";
@@ -664,8 +671,16 @@ if (previewParameters.get("scenario") === "sites") {
       sites: [
         { id: usageSiteId, title: "Opengeni usage", html: usageSiteHtml },
         { id: ipoSiteId, title: "IPO research dashboard", html: usageSiteHtml },
-        { id: pricingSiteId, title: "Pricing calculator", html: usageSiteHtml },
-        { id: checklistSiteId, title: "Launch checklist", html: usageSiteHtml },
+        {
+          id: pricingSiteId,
+          title: "Pricing calculator",
+          html: siteHtml("Pricing calculator", "Plans, seats and annual pricing"),
+        },
+        {
+          id: checklistSiteId,
+          title: "Launch checklist",
+          html: siteHtml("Launch checklist", "Readiness across teams for the next release"),
+        },
       ],
       history: new Map([
         [
