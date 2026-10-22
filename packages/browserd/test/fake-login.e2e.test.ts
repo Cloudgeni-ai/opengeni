@@ -21,16 +21,21 @@ const enabled = process.env.OPENGENI_BROWSERD_E2E === "1" || headed;
 const e2e = enabled ? test : test.skip;
 const mode = headed ? "headed" : "headless";
 const evidenceDirectory = process.env.OPENGENI_BROWSERD_EVIDENCE_DIR ?? null;
-const sitePort = Number(process.env.FAKE_LOGIN_PORT ?? (headed ? 47432 : 47430));
+// The OS picks free ports unless FAKE_LOGIN_PORT pins them. A fixed default
+// sits in Linux's ephemeral range (32768-60999), where any concurrent client
+// socket can already hold it.
+const sitePort = Number(process.env.FAKE_LOGIN_PORT ?? 0);
 
 let site: FakeLoginServer;
 const siteLog: string[] = [];
 const evidence: Record<string, unknown> = { mode };
 
 beforeAll(async () => {
+  // A skipped suite (every unit-shard run) starts no server.
+  if (!enabled) return;
   site = await startFakeLoginServer({
     port: sitePort,
-    iframePort: sitePort + 1,
+    iframePort: sitePort ? sitePort + 1 : 0,
     log: (line) => siteLog.push(line),
   });
   if (evidenceDirectory) await mkdir(evidenceDirectory, { recursive: true });
@@ -414,7 +419,7 @@ async function shot(driver: AgentBrowserDriver, targetId: string, name: string):
 }
 
 function crossOrigin(): string {
-  return `http://127.0.0.1:${sitePort + 1}`;
+  return site.crossOriginUrl;
 }
 
 function nodes(observation: BrowserObservation): InteractionSemanticNodeValue[] {
