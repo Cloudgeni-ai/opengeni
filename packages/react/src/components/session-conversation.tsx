@@ -710,6 +710,11 @@ function ConversationView({
                   )
                 }
                 transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
+                // While the host creates the session there is no draft to keep
+                // typing into; the field stays as it looks, read-only.
+                {...(sessionId === null
+                  ? { inputProps: { ...composerProps?.inputProps, readOnly: true } }
+                  : {})}
                 composer={composer}
                 attachments={uploadsEnabled ? files : undefined}
                 disabled={terminal || composerProps?.disabled}

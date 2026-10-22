@@ -240,3 +240,85 @@ test("SessionConversation stays mounted when the host's session id arrives", asy
     await view.unmount();
   }
 });
+
+test("the first prompt stays with its own session when the controller moves to another", async () => {
+  const OTHER = "44444444-4444-4444-8444-444444444444";
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  // Neither history loads before the switch.
+  const fixture = client({ session: () => session("queued"), history: () => [accepted], gate });
+  const other = fakeClient({
+    getSession: async () => ({ ...session("idle"), id: OTHER }) as never,
+    listEvents: async () => {
+      await gate;
+      return [] as never;
+    },
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  const routed = fakeClient({
+    ...Object.fromEntries(
+      ["getSession", "listEvents", "getQueue", "listHumanInputRequests", "streamEvents"].map(
+        (name) => [
+          name,
+          (...args: unknown[]) =>
+            ((args[1] === OTHER ? other : fixture.client) as any)[name](...args),
+        ],
+      ),
+    ),
+  });
+  const prompt = { text: "Prompt for A", sentAt: SENT_AT };
+  const view = await renderHook(
+    (sessionId: string | null) =>
+      useSessionConversation(sessionId, {
+        client: routed,
+        workspaceId: WORKSPACE_ID,
+        pendingPrompt: prompt,
+      }),
+    null as string | null,
+  );
+  try {
+    await flush(30);
+    expect(JSON.stringify(view.result.current.timeline)).toContain("Prompt for A");
+    await view.rerender(SESSION_ID);
+    await flush(80);
+    // Another chat opens in the same controller while its history loads.
+    await view.rerender(OTHER);
+    await flush(30);
+    expect(JSON.stringify(view.result.current.timeline)).not.toContain("Prompt for A");
+    expect(startupRows(view.result.current.timeline)).toHaveLength(0);
+    release();
+    await flush(50);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the composer is read-only until the host's session exists", async () => {
+  const fixture = client({ session: () => session("queued"), history: () => [accepted] });
+  const render = (sessionId: string | null) => (
+    <SessionConversation
+      client={fixture.client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={sessionId}
+      pendingPrompt={{ text: "Explain my network", sentAt: SENT_AT }}
+    />
+  );
+  const view = await renderComponent(render(null));
+  try {
+    await flush(50);
+    const field = view.container.querySelector("textarea");
+    expect(field?.readOnly).toBe(true);
+    await view.rerender(render(SESSION_ID));
+    await flush(80);
+    expect(view.container.querySelector("textarea")?.readOnly).toBe(false);
+  } finally {
+    await view.unmount();
+  }
+});

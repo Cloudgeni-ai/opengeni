@@ -70,14 +70,16 @@ export function useSessionConversation(
   sessionId: string | null,
   options: UseSessionConversationOptions = {},
 ) {
-  // Captured once: hosts often drop the prompt after the first render.
-  const [pendingPrompt] = useState(() => options.pendingPrompt ?? null);
+  // Captured once: hosts often drop the prompt after the first render. It
+  // belongs to the first conversation only (see `usePendingPrompt`).
+  const [initialPrompt] = useState(() => options.pendingPrompt ?? null);
   const context = useOpenGeni(options);
   const scope = { client: context.client, workspaceId: context.workspaceId };
   const config = useClientConfigFlags(context.client);
   const showModelPicker = options.modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({ ...scope, enabled: showModelPicker });
   const feed = useSessionEvents(sessionId, scope);
+  const pendingPrompt = usePendingPrompt(initialPrompt, sessionId, feed.initialHistoryReady);
   const eventOptions = { ...scope, events: feed.events };
   const detail = useSession(sessionId, eventOptions);
   const queue = useTurnQueue(sessionId, eventOptions);
@@ -213,4 +215,28 @@ export function useSessionConversation(
     loadFailed,
     retry,
   };
+}
+
+/**
+ * The first prompt belongs to the conversation it was sent in: the session
+ * that is still being created (`null`) and the id it then gets. It retires
+ * once that session's history is readable, or when the conversation moves to
+ * any other session, so no later session can show it.
+ */
+function usePendingPrompt(
+  prompt: PendingPrompt | null,
+  sessionId: string | null,
+  historyReady: boolean,
+): PendingPrompt | null {
+  const owner = useRef<{ sessionId: string | null; retired: boolean }>({
+    sessionId,
+    retired: prompt === null,
+  });
+  const current = owner.current;
+  if (!current.retired && current.sessionId !== sessionId) {
+    if (current.sessionId === null) current.sessionId = sessionId;
+    else current.retired = true;
+  }
+  if (!current.retired && sessionId !== null && historyReady) current.retired = true;
+  return current.retired ? null : prompt;
 }
