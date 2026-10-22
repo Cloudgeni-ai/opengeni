@@ -18,6 +18,7 @@ import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@ope
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
   resolveRealtimeVoiceSettings,
+  resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
@@ -1364,7 +1365,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       })),
     ];
     // Each model lists the voice settings its provider offers, with the
-    // workspace's saved values for it and the organization's default.
+    // workspace's saved values for it and the organization's default, and
+    // which model each of them chose to start voice conversations with.
+    const workspaceDefaultModel = resolveWorkspaceRealtimeDefaultModel(workspaceSettings);
+    const organizationDefaultModel = organizationDefaults.realtimeDefaultModel;
     const withVoiceSettings = models.map((model) => {
       const saved = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model.id);
       const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
@@ -1373,6 +1377,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...realtimeVoiceOptions(model.id),
         ...(saved ? { workspaceVoiceSettings: saved } : {}),
         ...(inherited ? { organizationVoiceSettings: inherited } : {}),
+        ...(model.id === workspaceDefaultModel ? { workspaceDefault: true } : {}),
+        ...(model.id === organizationDefaultModel ? { organizationDefault: true } : {}),
       };
     });
     c.header("cache-control", "private, no-store");

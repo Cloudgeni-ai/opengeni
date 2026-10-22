@@ -9,7 +9,8 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: /^@\/context$/,
+        // Components read the app context from either module.
+        find: /^(?:@\/context|@opengeni\/react\/app\/app-context)$/,
         replacement: path.resolve(
           import.meta.dirname,
           "fixtures/model-defaults-preview/context.ts",

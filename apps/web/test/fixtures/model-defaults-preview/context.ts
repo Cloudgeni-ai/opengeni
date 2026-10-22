@@ -3,10 +3,12 @@
 // otherwise it follows Acme's defaults.
 // Voice: `orgKey=1` gives Acme an ElevenLabs key, `wsKey=1` gives the
 // workspace its own, and `own=1` gives the workspace its own voice settings.
+// `orgVoice=1` makes Eleven Realtime Acme's default voice model.
 const params = new URLSearchParams(window.location.search);
 const own = params.get("own") === "1";
 const organizationKey = params.get("orgKey") === "1";
 const workspaceKey = params.get("wsKey") === "1";
+const organizationVoiceDefault = params.get("orgVoice") === "1";
 
 const definitions = [
   ["claude-sub/haiku", "Claude Haiku 5.5", "Claude subscription", 95_000],
@@ -16,11 +18,15 @@ const definitions = [
 ] as const;
 
 type Defaults = {
-  sessionDefaults: { model: string; reasoningEffort: "high" | "medium" | "low" } | null;
+  sessionDefaults: {
+    model: string;
+    reasoningEffort: "high" | "medium" | "low";
+  } | null;
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
   modelCompactionThresholds: Record<string, number>;
   realtimeVoice: Record<string, Record<string, string>>;
+  realtimeDefaultModel: string | null;
   updatedAt: string | null;
 };
 const organization: Defaults = {
@@ -28,22 +34,35 @@ const organization: Defaults = {
   allowedProviders: null,
   allowedModels: ["claude-sub/haiku", "claude-sub/opus", "claude-sub/sonnet"],
   modelCompactionThresholds: { "claude-sub/sonnet": 400_000 },
-  realtimeVoice: { "workspace-elevenlabs/eleven_realtime_v1_max": { voice: "aria", language: "no" } },
+  realtimeVoice: {
+    "workspace-elevenlabs/eleven_realtime_v1_max": {
+      voice: "aria",
+      language: "no",
+    },
+  },
+  realtimeDefaultModel: organizationVoiceDefault
+    ? "workspace-elevenlabs/eleven_realtime_v1_max"
+    : null,
   updatedAt: "2026-10-09T12:00:00.000Z",
 };
-const workspacePolicy = own ? { allowedProviders: null, allowedModels: null } : null;
-const workspaceLimits: Record<string, number> = own ? { "claude-sub/haiku": 60_000 } : {};
+const workspacePolicy = own
+  ? { allowedProviders: null, allowedModels: null }
+  : null;
+const workspaceLimits: Record<string, number> = own
+  ? { "claude-sub/haiku": 60_000 }
+  : {};
 const workspaceSettings: Record<string, unknown> = own
   ? { sessionDefaults: { model: "codex/sol", reasoningEffort: "medium" } }
   : {};
 const workspaceVoice: Record<string, Record<string, string>> = own
   ? { "workspace-elevenlabs/eleven_realtime_v1_max": { voice: "roger" } }
   : {};
+let workspaceDefaultModel: string | null = null;
 
 const ELEVEN = "workspace-elevenlabs/eleven_realtime_v1_max";
 function realtimeCatalog() {
   const elevenAvailable = organizationKey || workspaceKey;
-  return [
+  const models = [
     {
       id: "openai/gpt-realtime",
       label: "GPT Realtime",
@@ -58,7 +77,8 @@ function realtimeCatalog() {
       ],
       voiceDefaults: { voice: "marin" },
       workspaceVoiceSettings: undefined,
-      organizationVoiceSettings: organization.realtimeVoice["openai/gpt-realtime"],
+      organizationVoiceSettings:
+        organization.realtimeVoice["openai/gpt-realtime"],
     },
     {
       id: ELEVEN,
@@ -80,6 +100,13 @@ function realtimeCatalog() {
       organizationVoiceSettings: organization.realtimeVoice[ELEVEN],
     },
   ];
+  return models.map((model) => ({
+    ...model,
+    ...(model.id === workspaceDefaultModel ? { workspaceDefault: true } : {}),
+    ...(model.id === organization.realtimeDefaultModel
+      ? { organizationDefault: true }
+      : {}),
+  }));
 }
 const organizationElevenLabs = organizationKey
   ? { providerKind: "elevenlabs", status: "active", version: 1 }
@@ -93,14 +120,18 @@ const workspaceConnections = workspaceKey
         kind: "api_key",
         status: "active",
         providerDomain: "api.elevenlabs.io",
-        metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+        metadata: {
+          credentialRole: "elevenlabs",
+          credentialLabel: "ElevenLabs",
+        },
       },
     ]
   : [];
 
 function catalog() {
   return definitions.map(([id, label, providerLabel, threshold]) => {
-    const organizationTokens = organization.modelCompactionThresholds[id] ?? null;
+    const organizationTokens =
+      organization.modelCompactionThresholds[id] ?? null;
     const overrideTokens = workspaceLimits[id] ?? null;
     return {
       id,
@@ -113,8 +144,18 @@ function catalog() {
       hostedWebSearch: false,
       cost: "subscription",
       billing: { upstreamPayer: "workspace", metering: "external" },
-      credentialReadiness: { status: "ready", reason: null, basis: "connection", checkedAt: null },
-      availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+      credentialReadiness: {
+        status: "ready",
+        reason: null,
+        basis: "connection",
+        checkedAt: null,
+      },
+      availability: {
+        status: "available",
+        selectable: true,
+        reason: null,
+        checkedAt: null,
+      },
       policyAllowed: true,
       compactionPolicy: {
         defaultTokens: threshold,
@@ -135,7 +176,11 @@ const client = {
     models: catalog(),
     defaultSelection: own
       ? { model: "codex/sol", reasoningEffort: "medium", source: "workspace" }
-      : { model: "claude-sub/opus", reasoningEffort: "high", source: "organization" },
+      : {
+          model: "claude-sub/opus",
+          reasoningEffort: "high",
+          source: "organization",
+        },
   }),
   getWorkspaceModelAccessPolicy: async () => {
     const organizationPolicy = {
@@ -158,10 +203,14 @@ const client = {
     return {};
   },
   getOrganizationModelDefaults: async () => organization,
-  updateOrganizationModelDefaults: async (_id: string, request: Record<string, unknown>) => {
+  updateOrganizationModelDefaults: async (
+    _id: string,
+    request: Record<string, unknown>,
+  ) => {
     receipts.push({ organization: request });
     if (request.sessionDefaults !== undefined)
-      organization.sessionDefaults = request.sessionDefaults as Defaults["sessionDefaults"];
+      organization.sessionDefaults =
+        request.sessionDefaults as Defaults["sessionDefaults"];
     if (request.realtimeVoice !== undefined) {
       for (const [model, settings] of Object.entries(
         request.realtimeVoice as Record<string, Record<string, string> | null>,
@@ -170,21 +219,37 @@ const client = {
         else delete organization.realtimeVoice[model];
       }
     }
+    if (request.realtimeDefaultModel !== undefined)
+      organization.realtimeDefaultModel = request.realtimeDefaultModel as
+        string | null;
     organization.updatedAt = new Date().toISOString();
     return { ...organization };
   },
   getWorkspaceRealtimeModelCatalog: async () => ({ models: realtimeCatalog() }),
   updateWorkspaceSettings: async (_id: string, patch: unknown) => {
     receipts.push({ workspace: patch });
+    const choice = (patch as { realtimeDefaultModel?: string | null })
+      .realtimeDefaultModel;
+    if (choice !== undefined) workspaceDefaultModel = choice;
     return { settings: patch };
   },
   listConnections: async () => workspaceConnections,
   getOrganizationModelProviderConnection: async () => organizationElevenLabs,
-  upsertOrganizationModelProviderConnection: async (_id: string, kind: string, request: unknown) => {
-    receipts.push({ upsert: kind, request: { ...(request as object), apiKey: "redacted" } });
+  upsertOrganizationModelProviderConnection: async (
+    _id: string,
+    kind: string,
+    request: unknown,
+  ) => {
+    receipts.push({
+      upsert: kind,
+      request: { ...(request as object), apiKey: "redacted" },
+    });
     return { providerKind: kind, status: "active", version: 1 };
   },
-  revokeOrganizationModelProviderConnection: async (_id: string, kind: string) => {
+  revokeOrganizationModelProviderConnection: async (
+    _id: string,
+    kind: string,
+  ) => {
     receipts.push({ revoke: kind });
     return { providerKind: kind, status: "revoked", version: 2 };
   },
@@ -193,7 +258,10 @@ const client = {
 export function useAppContext() {
   return {
     client,
-    clientConfig: { defaultModel: "codex/sol", defaultReasoningEffort: "medium" },
+    clientConfig: {
+      defaultModel: "codex/sol",
+      defaultReasoningEffort: "medium",
+    },
     workspaces: [{ id: "sample", name: "Design", settings: workspaceSettings }],
     captureWorkspaceInvocation: () => "sample-transition",
     ownsWorkspaceInvocation: () => true,

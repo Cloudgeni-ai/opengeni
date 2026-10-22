@@ -21081,6 +21081,7 @@
         "$.allowedProviders[]": "string",
         "$.modelCompactionThresholds": "object!",
         "$.modelCompactionThresholds{}": "integer",
+        "$.realtimeDefaultModel": "string! null",
         "$.realtimeVoice": "object!",
         "$.realtimeVoice{}": "ref(RealtimeVoiceSettings)",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)! null",
@@ -28054,6 +28055,7 @@
         "$": "object",
         "$.modelCompactionThresholds": "unknown?",
         "$.modelPolicy": "ref(UpdateWorkspaceModelPolicyRequest)? null",
+        "$.realtimeDefaultModel": "ref(SessionRealtimeModel)? null",
         "$.realtimeVoice": "object?",
         "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)? null"
@@ -28548,6 +28550,7 @@
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
         "$.modelCompactionThresholds": "unknown?",
+        "$.realtimeDefaultModel": "ref(SessionRealtimeModel)? null",
         "$.realtimeVoice": "object?",
         "$.realtimeVoice{}": "ref(RealtimeVoiceSettings) null",
         "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
@@ -30425,6 +30428,7 @@
         "$.label": "string!",
         "$.languages": "array?",
         "$.languages[]": "string",
+        "$.organizationDefault": "boolean?",
         "$.organizationVoiceSettings": "ref(RealtimeVoiceSettings)?",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your ElevenLabs\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
@@ -30437,6 +30441,7 @@
         "$.voices[]": "object",
         "$.voices[].id": "string!",
         "$.voices[].label": "string!",
+        "$.workspaceDefault": "boolean?",
         "$.workspaceVoiceSettings": "ref(RealtimeVoiceSettings)?"
       }
     },

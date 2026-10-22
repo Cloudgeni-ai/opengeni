@@ -421,6 +421,10 @@ export type WorkspaceRealtimeModelCatalogItem = {
   workspaceVoiceSettings?: RealtimeVoiceSettings | undefined;
   /** The organization's default voice settings for this model, used while the workspace has none. */
   organizationVoiceSettings?: RealtimeVoiceSettings | undefined;
+  /** True on the model this workspace chose to start voice conversations with. */
+  workspaceDefault?: boolean | undefined;
+  /** True on the model the organization chose to start voice conversations with; a workspace's own choice wins. */
+  organizationDefault?: boolean | undefined;
 };
 
 /** How readily a realtime voice model decides the speaker is done and answers. */
@@ -4490,12 +4494,18 @@ export type OrganizationModelDefaults = {
   modelCompactionThresholds: Record<string, number>;
   /** Voice settings by realtime model id, for workspaces without their own. */
   realtimeVoice: Record<string, RealtimeVoiceSettings>;
+  /**
+   * The voice model new voice conversations start with in workspaces without
+   * their own choice, until the person picks one; null leaves it automatic.
+   */
+  realtimeDefaultModel: string | null;
   updatedAt: string | null;
 };
 
 /**
  * Field-by-field update; compaction and voice settings merge by model id and
- * null resets one model.
+ * null resets one model. `realtimeDefaultModel: null` makes the voice model
+ * automatic again.
  */
 export type UpdateOrganizationModelDefaultsRequest = {
   sessionDefaults?: { model: string; reasoningEffort: ReasoningEffort } | null | undefined;
@@ -4505,6 +4515,7 @@ export type UpdateOrganizationModelDefaultsRequest = {
     | undefined;
   modelCompactionThresholds?: Record<string, number | null> | undefined;
   realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
 };
 
 /** A model-account setting an organization sets, and may lock for every workspace. */
@@ -6045,6 +6056,8 @@ export type WorkspaceSettings = {
    * from the realtime model catalog's `workspaceVoiceSettings`.
    */
   realtimeVoice?: Record<string, unknown> | undefined;
+  /** The workspace's default realtime voice model; null or absent follows the organization. */
+  realtimeDefaultModel?: string | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -6151,6 +6164,11 @@ export type UpdateWorkspaceSettingsRequest = {
    * settings; models not listed keep theirs.
    */
   realtimeVoice?: Record<string, RealtimeVoiceSettings | null> | undefined;
+  /**
+   * The voice model new voice conversations in this workspace start with
+   * until the person picks one; null follows the organization again.
+   */
+  realtimeDefaultModel?: SessionRealtimeModel | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
