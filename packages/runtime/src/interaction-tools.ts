@@ -2557,10 +2557,10 @@ export function createInteractionAttemptToolDefinitions(
       definitions.push({
         identity: { serverId: "interaction", toolName: "cua_" + tool.name },
         modelName: "interaction__cua_" + tool.name,
-        codemodePath: ["computer", tool.name],
+        codemodePath: ["interaction", "cua", tool.name],
         title: tool.name,
         description:
-          "Native CUA computer tool; requires a CUA-backed computer_open session. " +
+          "Native CUA computer tool; requires a CUA-backed computer_open session. Other CUA tools it names are interaction__cua_<name> (in Code Mode interaction.cua.<name>); steps inside run_steps keep the plain name. " +
           tool.description,
         inputSchema,
         ...(outputSchema ? { outputSchema } : {}),

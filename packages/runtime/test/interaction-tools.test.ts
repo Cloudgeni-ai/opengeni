@@ -55,6 +55,11 @@ describe("interaction attempt tools", () => {
       expect(tool.inputSchema.oneOf).toBeUndefined();
       expect(tool.inputSchema.required).toContain("computerSessionId");
       expect((tool.inputSchema.properties as Record<string, unknown>).session).toBeUndefined();
+      // Found under "cua" in Code Mode, next to its model name interaction__cua_<name>.
+      expect(tool.codemodePath).toEqual(["interaction", "cua", tool.identity.toolName.slice(4)]);
+      expect(tool.description).toContain(
+        "interaction__cua_<name> (in Code Mode interaction.cua.<name>)",
+      );
     }
   });
   test("platform CUA schemas merge by property and keep real constraint differences", () => {
